@@ -2200,22 +2200,33 @@ function tmuxWindow(session, key, label) {
 }
 
 async function ensureTerminalRunning(session) {
-  const item = terminals.get(session);
-  const readyState = item?.socket?.readyState;
-  const container = document.getElementById(terminalDomId(session));
-  const boundToCurrentContainer = Boolean(item?.term && container?.isConnected && item.container === container);
-  if (item && boundToCurrentContainer && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
-  if (readOnlyMode) {
-    startTerminal(session);
-    return;
-  }
-  const ensured = await ensureSession(session);
-  if (!ensured) {
+  const key = String(session || '');
+  const existing = terminalStartupPromises.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    const item = terminals.get(session);
+    const readyState = item?.socket?.readyState;
     const container = document.getElementById(terminalDomId(session));
-    if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
-    return;
+    const boundToCurrentContainer = Boolean(item?.term && container?.isConnected && item.container === container);
+    if (item && boundToCurrentContainer && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
+    if (readOnlyMode) {
+      startTerminal(session);
+      return;
+    }
+    const ensured = await ensureSession(session);
+    if (!ensured) {
+      const container = document.getElementById(terminalDomId(session));
+      if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
+      return;
+    }
+    startTerminal(session);
+  })();
+  terminalStartupPromises.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (terminalStartupPromises.get(key) === promise) terminalStartupPromises.delete(key);
   }
-  startTerminal(session);
 }
 
 function connectTerminalSocket(session, item) {

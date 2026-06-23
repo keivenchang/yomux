@@ -687,6 +687,8 @@ fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
 fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
 let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
+const ensureSessionPromises = new Map();
+const terminalStartupPromises = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
 const transcriptStreams = new Map();
@@ -21594,19 +21596,30 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 
 async function ensureSession(session) {
   if (readOnlyMode) return true;
-  try {
-    const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    statusEl.innerHTML = payload.created
-      ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
-      : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
-    return true;
-  } catch (error) {
-    if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+  const key = String(session || '');
+  const existing = ensureSessionPromises.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
+      statusEl.innerHTML = payload.created
+        ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
+        : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
+      return true;
+    } catch (error) {
+      if (error?.status) {
+        statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+        return false;
+      }
+      statusErr(localizedHtml('status.sessionCheckFailed', {error}));
       return false;
     }
-    statusErr(localizedHtml('status.sessionCheckFailed', {error}));
-    return false;
+  })();
+  ensureSessionPromises.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (ensureSessionPromises.get(key) === promise) ensureSessionPromises.delete(key);
   }
 }
 
@@ -45650,22 +45663,33 @@ function tmuxWindow(session, key, label) {
 }
 
 async function ensureTerminalRunning(session) {
-  const item = terminals.get(session);
-  const readyState = item?.socket?.readyState;
-  const container = document.getElementById(terminalDomId(session));
-  const boundToCurrentContainer = Boolean(item?.term && container?.isConnected && item.container === container);
-  if (item && boundToCurrentContainer && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
-  if (readOnlyMode) {
-    startTerminal(session);
-    return;
-  }
-  const ensured = await ensureSession(session);
-  if (!ensured) {
+  const key = String(session || '');
+  const existing = terminalStartupPromises.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    const item = terminals.get(session);
+    const readyState = item?.socket?.readyState;
     const container = document.getElementById(terminalDomId(session));
-    if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
-    return;
+    const boundToCurrentContainer = Boolean(item?.term && container?.isConnected && item.container === container);
+    if (item && boundToCurrentContainer && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
+    if (readOnlyMode) {
+      startTerminal(session);
+      return;
+    }
+    const ensured = await ensureSession(session);
+    if (!ensured) {
+      const container = document.getElementById(terminalDomId(session));
+      if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
+      return;
+    }
+    startTerminal(session);
+  })();
+  terminalStartupPromises.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (terminalStartupPromises.get(key) === promise) terminalStartupPromises.delete(key);
   }
-  startTerminal(session);
 }
 
 function connectTerminalSocket(session, item) {

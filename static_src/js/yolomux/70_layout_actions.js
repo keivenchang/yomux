@@ -1298,19 +1298,30 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 
 async function ensureSession(session) {
   if (readOnlyMode) return true;
-  try {
-    const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    statusEl.innerHTML = payload.created
-      ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
-      : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
-    return true;
-  } catch (error) {
-    if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+  const key = String(session || '');
+  const existing = ensureSessionPromises.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
+      statusEl.innerHTML = payload.created
+        ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
+        : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
+      return true;
+    } catch (error) {
+      if (error?.status) {
+        statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+        return false;
+      }
+      statusErr(localizedHtml('status.sessionCheckFailed', {error}));
       return false;
     }
-    statusErr(localizedHtml('status.sessionCheckFailed', {error}));
-    return false;
+  })();
+  ensureSessionPromises.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (ensureSessionPromises.get(key) === promise) ensureSessionPromises.delete(key);
   }
 }
 
