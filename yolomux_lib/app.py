@@ -93,6 +93,7 @@ from .metadata import candidate_session_cwds
 from .metadata import focus_root_for_session
 from .metadata import github_checks_unknown
 from .metadata import git_inventory
+from .metadata import metadata_build_cache
 from .metadata import project_inventory
 from .metadata import pull_request_number_from_subject
 from .metadata import session_git_inventory
@@ -643,12 +644,12 @@ def compact_pull_request_for_history(value: Any) -> dict[str, Any] | None:
     return result or None
 
 
-def requires_known_session(refresh: bool = False) -> Callable[[Callable[..., tuple[Any, HTTPStatus]]], Callable[..., tuple[Any, HTTPStatus]]]:
+def requires_known_session(refresh: bool = False, maintenance: bool = True) -> Callable[[Callable[..., tuple[Any, HTTPStatus]]], Callable[..., tuple[Any, HTTPStatus]]]:
     def decorator(func: Callable[..., tuple[Any, HTTPStatus]]) -> Callable[..., tuple[Any, HTTPStatus]]:
         @wraps(func)
         def wrapper(self: Any, session: str, *args: Any, **kwargs: Any) -> tuple[Any, HTTPStatus]:
             if refresh:
-                self.refresh_sessions()
+                self.refresh_sessions(maintenance=maintenance)
             unknown = self.require_known_session(session)
             if unknown:
                 return unknown
@@ -827,10 +828,12 @@ class TmuxWebtermApp:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         return None
 
-    def refresh_sessions(self) -> list[str]:
+    def refresh_sessions(self, maintenance: bool = True) -> list[str]:
         sessions, error = list_tmux_session_names()
         if error is None:
             self.sessions = sessions
+            if not maintenance:
+                return []
             self.prune_yoagent_session_summaries(set(sessions))
             self.activity_ledger.prune(set(sessions))
             self.rotate_activity_heartbeats_if_due()
@@ -3181,18 +3184,33 @@ class TmuxWebtermApp:
         with self.transcripts_payload_cache_lock:
             self.transcripts_payload_cache = (time.monotonic(), copy.deepcopy(payload))
 
-    def start_transcripts_payload_refresh(self) -> bool:
+    def start_transcripts_payload_refresh(self, publish: bool = False, defer: bool = False) -> bool:
         with self.transcripts_payload_cache_lock:
             if self.transcripts_payload_refreshing:
                 return False
             self.transcripts_payload_refreshing = True
-        worker = threading.Thread(target=self.refresh_transcripts_payload_cache, daemon=True)
+        if defer:
+            worker = threading.Timer(0.05, self.refresh_transcripts_payload_cache, args=(publish,))
+            worker.daemon = True
+        else:
+            worker = threading.Thread(target=self.refresh_transcripts_payload_cache, args=(publish,), daemon=True)
         worker.start()
         return True
 
-    def refresh_transcripts_payload_cache(self) -> None:
+    def refresh_transcripts_payload_cache(self, publish: bool = False) -> None:
         try:
-            self.set_transcripts_payload_cache(self.build_transcripts_payload())
+            payload = self.build_transcripts_payload()
+            self.set_transcripts_payload_cache(payload)
+            if publish:
+                payload_signature = self.client_event_payload_signature(payload)
+                with self.client_watch_lock:
+                    self.client_watch_transcripts_payload_signature = payload_signature
+                self.publish_client_event(
+                    "transcripts_changed",
+                    {"data": payload},
+                    trigger="transcripts_refresh",
+                    cache="ready",
+                )
         finally:
             with self.transcripts_payload_cache_lock:
                 self.transcripts_payload_refreshing = False
@@ -4431,14 +4449,15 @@ class TmuxWebtermApp:
         self.log_event(session, "yolo_released", "YOLO released for another server", {"requester": requester})
         return {"ok": True, "session": session, "enabled": False}
 
-    def build_transcripts_payload(self) -> dict[str, Any]:
-        refresh_errors = self.refresh_sessions()
+    def build_transcripts_payload(self, lightweight: bool = False) -> dict[str, Any]:
+        refresh_errors = self.refresh_sessions(maintenance=not lightweight)
         sessions, errors = discover_sessions(self.sessions)
-        session_payloads = {
-            name: session_to_json(info, self.metadata_cache, allow_network=False)
-            for name, info in sessions.items()
-        }
-        agent_payload = self.agent_auth_payload()
+        with metadata_build_cache():
+            session_payloads = {
+                name: session_to_json(info, self.metadata_cache, allow_network=False, include_metadata=not lightweight)
+                for name, info in sessions.items()
+            }
+        agent_payload = {"agentAuth": {}, "availableAgents": available_agent_commands()} if lightweight else self.agent_auth_payload()
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "server_version": YOLOMUX_VERSION,
@@ -4451,9 +4470,11 @@ class TmuxWebtermApp:
             "agentAuth": agent_payload["agentAuth"],
             "availableAgents": agent_payload["availableAgents"],
             "errors": [*refresh_errors, *errors],
+            "metadata_loading": lightweight,
         }
-        self.apply_metadata_badge_pulses(session_payloads)
-        self.warm_metadata_cache_async(sessions)
+        if not lightweight:
+            self.apply_metadata_badge_pulses(session_payloads)
+            self.warm_metadata_cache_async(sessions)
         return payload
 
     def agent_auth_payload(self, force: bool = False) -> dict[str, Any]:
@@ -4475,6 +4496,17 @@ class TmuxWebtermApp:
             }
             if not fresh:
                 payload["cache"]["refreshing"] = self.start_transcripts_payload_refresh()
+            return payload
+        if not force:
+            payload = self.build_transcripts_payload(lightweight=True)
+            payload["cache"] = {
+                "hit": False,
+                "stale": True,
+                "age_seconds": 0,
+                "refresh_seconds": max_age,
+                "refreshing": self.start_transcripts_payload_refresh(publish=True, defer=True),
+                "lightweight": True,
+            }
             return payload
         payload = self.build_transcripts_payload()
         self.set_transcripts_payload_cache(payload)
@@ -4675,8 +4707,9 @@ class TmuxWebtermApp:
 
     def warm_metadata_cache(self, sessions: dict[str, SessionInfo]) -> None:
         try:
-            for info in sessions.values():
-                session_project_metadata(info, self.metadata_cache, allow_network=True)
+            with metadata_build_cache():
+                for info in sessions.values():
+                    session_project_metadata(info, self.metadata_cache, allow_network=True)
         finally:
             with self.metadata_warm_lock:
                 self.metadata_warm_running = False
@@ -5082,7 +5115,7 @@ class TmuxWebtermApp:
             "errors": errors,
         }, HTTPStatus.OK
 
-    @requires_known_session(refresh=True)
+    @requires_known_session(refresh=True, maintenance=False)
     def ensure_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         if tmux_has_exact_session(session):
             return {"session": session, "created": False, "ok": True}, HTTPStatus.OK
@@ -5963,7 +5996,7 @@ class TmuxWebtermApp:
         return payload
 
     def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
-        refresh_errors = self.refresh_sessions()
+        refresh_errors = self.refresh_sessions(maintenance=False)
         if session is not None and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         removed = False

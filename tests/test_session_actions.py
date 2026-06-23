@@ -28,7 +28,7 @@ def make_app(sessions: list[str]) -> TmuxWebtermApp:
     app.auto_workers_lock = threading.RLock()
     app.share_tokens = {}
     app.share_tokens_lock = threading.RLock()
-    app.refresh_sessions = lambda: []
+    app.refresh_sessions = lambda *args, **kwargs: []
     app.set_persisted_auto_session = lambda _session, _enabled: None
     app.log_event = lambda session, event_type, message, details=None: {
         "session": session,

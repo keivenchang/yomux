@@ -282,6 +282,7 @@ class TmuxSignalEventWatcher:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 bufsize=1,
                 preexec_fn=set_control_client_parent_death_signal,
             )

@@ -11217,6 +11217,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       if (!changed) return false;
       if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
+    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
     if (rememberedExpandedPaths.length) {
       changed = await restoreFileExplorerExpandedPaths(rememberedExpandedPaths, plan.root) || changed;
@@ -11231,7 +11232,6 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       }
     }
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
     markFileExplorerSyncPlanApplied(plan);
     updateFileExplorerSessionHighlightRows(preferredItem);
@@ -32410,6 +32410,7 @@ const differTreeInteractionController = createSharedTreeInteractionController({
 
 const originalFileExplorerArrowNavForSharedTree = handleFileExplorerArrowNav;
 handleFileExplorerArrowNav = event => {
+  if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target)) return false;
   const panel = event?.target?.closest?.('.file-explorer-panel')
     || event?.target?.closest?.('.file-explorer-changes-panel')
     || document.querySelector('.file-explorer-panel')
@@ -45676,7 +45677,8 @@ async function ensureTerminalRunning(session) {
       startTerminal(session);
       return;
     }
-    const ensured = await ensureSession(session);
+    const knownFromTranscriptPayload = Boolean(transcriptMetaLoaded && transcriptMeta.sessions?.[session]);
+    const ensured = knownFromTranscriptPayload || await ensureSession(session);
     if (!ensured) {
       const container = document.getElementById(terminalDomId(session));
       if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
@@ -46734,9 +46736,8 @@ async function boot() {
     applyShareAppearanceState(bootstrapUiState.appearance || shareBootstrap?.appearance || {});
     applyShareMirrorTransform();
   }
-  await waitForYolomuxFontsReady({timeoutMs: 0});
+  waitForYolomuxFontsReady({timeoutMs: 0}).catch(() => {});
   syncAppViewportBreakpointClasses();
-  if (!shareViewMode) installClientEventStream();
   // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
   // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
@@ -46753,9 +46754,17 @@ async function boot() {
   bindTopbarMetrics();
   syncInitialLayoutUrl();
   statusEl.textContent = t('status.yoloLoading');
+  let initialAutoStatusesPromise = Promise.resolve(false);
   if (!shareViewMode) {
-    await loadNotifyStatus();
-    await loadAutoStatuses();
+    loadNotifyStatus().catch(error => {
+      console.warn('initial notify-status refresh failed', error);
+      renderNotifyToggle();
+      return false;
+    });
+    initialAutoStatusesPromise = loadAutoStatuses().catch(error => {
+      console.warn('initial auto-status refresh failed', error);
+      return false;
+    });
   }
   bindClipboardPaste();
   if (!shareViewMode) {
@@ -46779,6 +46788,15 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
+  if (!shareViewMode) installClientEventStream();
+  if (!shareViewMode) {
+    initialAutoStatusesPromise.then(() => {
+      renderAutoApproveButtons();
+      updateSessionButtonStates();
+      refreshActivePanelHeaders();
+      trackSessionStateChanges();
+    });
+  }
   if (!shareViewMode) refreshWatchedPrs();
   renderAutoApproveButtons();
   updateLatency();
@@ -47112,10 +47130,13 @@ async function showContext(session) {
 }
 
 function globalShortcutTargetAllowsAppAction(target) {
-  const node = typeof Element !== 'undefined' && target instanceof Element ? target : document.activeElement;
-  if (!node) return true;
+  const nodes = [
+    typeof Element !== 'undefined' && target instanceof Element ? target : null,
+    document.activeElement,
+  ].filter(Boolean);
+  if (!nodes.length) return true;
   const blocked = ['.xterm', '.terminal-pane', '.cm-editor', 'input', 'textarea', 'select', '[contenteditable="true"]'];
-  return !blocked.some(selector => node.closest?.(selector));
+  return !nodes.some(node => blocked.some(selector => node.closest?.(selector)));
 }
 
 function globalShortcutTargetAllowsPlatformAction(target) {
@@ -47198,6 +47219,7 @@ function toggleFileExplorerShortcut() {
 }
 
 function handleFocusedTerminalCopyShortcut(event) {
+  if (!globalShortcutTargetIsTerminalSurface(event.target) && !globalShortcutTargetAllowsAppAction(event.target)) return false;
   const session = focusedTerminal;
   if (!session) return false;
   const item = terminals.get(session);

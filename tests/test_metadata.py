@@ -96,6 +96,32 @@ def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
     assert roots == {root}
 
 
+def test_session_repo_summaries_dedupes_same_repo_candidates_before_summary(monkeypatch):
+    info = SessionInfo(session="s9", panes=[], selected_pane=None, agents=[])
+    calls = []
+    candidates = [
+        ("/repo/src", 0),
+        ("/repo/tests", 0),
+        ("/repo", 10),
+        ("/other", 10),
+    ]
+
+    monkeypatch.setattr(metadata, "candidate_session_cwd_entries", lambda _info: candidates)
+    monkeypatch.setattr(metadata, "git_root_for_cwd", lambda cwd: "/repo" if str(cwd).startswith("/repo") else str(cwd))
+
+    def fake_repo_summary(cwd):
+        calls.append(cwd)
+        root = "/repo" if str(cwd).startswith("/repo") else str(cwd)
+        return {"root": root, "cwd": cwd, "activity_ts": 1, "activity_source": "dirty"}
+
+    monkeypatch.setattr(metadata, "repo_summary", fake_repo_summary)
+
+    summaries = session_repo_summaries(info, "/repo")
+
+    assert [summary["root"] for summary in summaries] == ["/repo", "/other"]
+    assert calls == ["/repo/src", "/other"]
+
+
 def test_session_to_json_includes_window_metadata(tmp_path):
     repo_a = tmp_path / "repo-a"
     repo_b = tmp_path / "repo-b"

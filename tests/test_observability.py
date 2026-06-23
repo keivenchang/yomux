@@ -22,7 +22,7 @@ def make_app(tmp_path, sessions=("s1",)):
     app.metadata_warm_running = False
     app.yoagent_session_summary_lock = threading.RLock()
     app.yoagent_session_summaries = {}
-    app.refresh_sessions = lambda: []
+    app.refresh_sessions = lambda *args, **kwargs: []
     return app
 
 

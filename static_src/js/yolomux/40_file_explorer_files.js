@@ -1451,6 +1451,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       if (!changed) return false;
       if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
+    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
     if (rememberedExpandedPaths.length) {
       changed = await restoreFileExplorerExpandedPaths(rememberedExpandedPaths, plan.root) || changed;
@@ -1465,7 +1466,6 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       }
     }
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
     markFileExplorerSyncPlanApplied(plan);
     updateFileExplorerSessionHighlightRows(preferredItem);

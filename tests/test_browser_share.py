@@ -4402,7 +4402,8 @@ def test_share_geometry_digest_resyncs_slot_drift_in_browser(browser, tmp_path):
           applyShareGeometryDigest(host);
           const statusDuringRepair = document.querySelector('.share-viewer-mirror-status')?.textContent || '';
           releaseShareFetch?.();
-          const cleared = await waitFor(() => shareGeometryFirstDifference(host, shareGeometryDigestFrame()) === '');
+          const cleared = await waitFor(() => shareGeometryFirstDifference(host, shareGeometryDigestFrame()) === ''
+            && document.querySelector('.share-viewer-mirror-status')?.classList.contains('match'));
           window.fetch = originalFetch;
           const localAfter = shareGeometryDigestFrame();
           const textWrapDiffs = (host.snapshot.textWraps || []).map(hostMetric => {

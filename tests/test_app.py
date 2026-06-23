@@ -1389,8 +1389,9 @@ def test_tmux_snapshot_bounds_and_skips_unchanged_history(monkeypatch):
 def test_transcripts_payload_exposes_server_version(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp([])
-    monkeypatch.setattr(webapp, "refresh_sessions", lambda: [])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda *args, **kwargs: False)
     try:
         payload = webapp.transcripts_payload()
     finally:
@@ -1410,15 +1411,15 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
         return {"5": info}, []
 
     monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
-    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False: {"session": info.session, "call": calls[-1]})
+    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False, include_metadata=True: {"session": info.session, "call": calls[-1], "metadata": include_metadata})
     monkeypatch.setattr(app_module, "agent_auth_status", lambda: {})
     webapp = app_module.TmuxWebtermApp(["5"])
     calls.clear()
-    monkeypatch.setattr(webapp, "refresh_sessions", lambda: [])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
     webapp.start_transcripts_payload_refresh = lambda: (webapp.refresh_transcripts_payload_cache() or True)
     try:
-        first = webapp.transcripts_payload()
+        first = webapp.transcripts_payload(force=True)
         with webapp.transcripts_payload_cache_lock:
             stored_at, value = webapp.transcripts_payload_cache
             webapp.transcripts_payload_cache = (stored_at - app_module.TRANSCRIPTS_PAYLOAD_CACHE_SECONDS - 1.0, value)
@@ -1433,6 +1434,58 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     assert second["cache"]["stale"] is True
     assert third["sessions"]["5"]["call"] == 2
     assert calls == [1, 2]
+
+
+def test_transcripts_payload_cold_returns_lightweight_and_starts_full_refresh(monkeypatch):
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    include_metadata_values = []
+    refresh_calls = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fake_session_to_json(info, cache, allow_network=False, include_metadata=True):
+        include_metadata_values.append(include_metadata)
+        return {"session": info.session, "metadata_loading": not include_metadata}
+
+    monkeypatch.setattr(app_module, "session_to_json", fake_session_to_json)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refresh_calls.append((publish, defer)) or True)
+    try:
+        payload = webapp.transcripts_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["metadata_loading"] is True
+    assert payload["sessions"]["5"]["metadata_loading"] is True
+    assert payload["cache"]["stale"] is True
+    assert payload["cache"]["lightweight"] is True
+    assert payload["cache"]["refreshing"] is True
+    assert include_metadata_values == [False]
+    assert refresh_calls == [(True, True)]
+
+
+def test_refresh_transcripts_payload_cache_publishes_full_payload_when_requested(monkeypatch):
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    events = []
+    include_metadata_values = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "agent_auth_status", lambda: {})
+    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False, include_metadata=True: include_metadata_values.append(include_metadata) or {"session": info.session, "metadata_loading": not include_metadata})
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
+    monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
+    try:
+        webapp.refresh_transcripts_payload_cache(publish=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert include_metadata_values == [True]
+    assert events and events[0][0] == "transcripts_changed"
+    assert events[0][1]["data"]["metadata_loading"] is False
+    assert events[0][2]["trigger"] == "transcripts_refresh"
 
 
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
@@ -1955,7 +2008,7 @@ def test_session_files_payload_reuses_short_cache(monkeypatch):
 
     monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5"])
-    webapp.refresh_sessions = lambda: []
+    webapp.refresh_sessions = lambda *args, **kwargs: []
     try:
         first, first_status = webapp.session_files_payload("5")
         second, second_status = webapp.session_files_payload("5")
@@ -1985,8 +2038,8 @@ def test_session_files_payload_reuses_shared_disk_cache_between_apps(monkeypatch
     monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     first_app = app_module.TmuxWebtermApp(["5"])
     second_app = app_module.TmuxWebtermApp(["5"])
-    first_app.refresh_sessions = lambda: []
-    second_app.refresh_sessions = lambda: []
+    first_app.refresh_sessions = lambda *args, **kwargs: []
+    second_app.refresh_sessions = lambda *args, **kwargs: []
     try:
         first, first_status = first_app.session_files_payload("5")
         second, second_status = second_app.session_files_payload("5")
@@ -2033,7 +2086,7 @@ def test_activity_warmup_populates_session_files_payload_cache(monkeypatch, tmp_
     monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: calls.append("info") or files_payload)
     monkeypatch.setattr(app_module.session_files, "session_files_payload", lambda *_args, **_kwargs: calls.append("payload") or {"files": [], "repos": [], "errors": []})
     webapp = app_module.TmuxWebtermApp(["5"])
-    webapp.refresh_sessions = lambda: []
+    webapp.refresh_sessions = lambda *args, **kwargs: []
     try:
         payload, status = webapp.session_files_payload("5")
     finally:
@@ -2063,7 +2116,7 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
     monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
     monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
-    webapp.refresh_sessions = lambda: []
+    webapp.refresh_sessions = lambda *args, **kwargs: []
     discover_calls.clear()
     payload_calls.clear()
     try:
@@ -2099,7 +2152,7 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
 
     monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5"])
-    webapp.refresh_sessions = lambda: []
+    webapp.refresh_sessions = lambda *args, **kwargs: []
     webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (target(cache_key, *args) or True)
     try:
         first, first_status = webapp.session_files_payload("5")

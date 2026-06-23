@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import re
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,56 @@ from .session_files import session_touched_dirs
 from .settings import settings_payload
 from .workdir import numbered_session_workdir
 from .workdir import session_workdir
+
+
+_METADATA_BUILD_LOCAL = threading.local()
+
+
+@contextmanager
+def metadata_build_cache() -> Any:
+    previous = getattr(_METADATA_BUILD_LOCAL, "cache", None)
+    if previous is not None:
+        yield previous
+        return
+    cache: dict[str, dict[str, Any]] = {}
+    _METADATA_BUILD_LOCAL.cache = cache
+    try:
+        yield cache
+    finally:
+        if getattr(_METADATA_BUILD_LOCAL, "cache", None) is cache:
+            delattr(_METADATA_BUILD_LOCAL, "cache")
+
+
+def cached_build_value(bucket: str, key: str, compute: Any, *, copy_value: bool = False) -> Any:
+    cache = getattr(_METADATA_BUILD_LOCAL, "cache", None)
+    if cache is None:
+        return compute()
+    values = cache.setdefault(bucket, {})
+    if key in values:
+        value = values[key]
+    else:
+        value = compute()
+        values[key] = copy.deepcopy(value) if copy_value else value
+    return copy.deepcopy(value) if copy_value else value
+
+
+def resolved_path_text(path: str | Path) -> str:
+    try:
+        return str(Path(path).expanduser().resolve(strict=False))
+    except OSError:
+        return str(Path(path).expanduser())
+
+
+def git_root_for_cwd(cwd: str | None) -> str | None:
+    if not cwd:
+        return None
+    cwd_text = resolved_path_text(cwd)
+
+    def compute() -> str | None:
+        root = git(["rev-parse", "--show-toplevel"], cwd_text)
+        return root.stdout.strip() if root.returncode == 0 else None
+
+    return cached_build_value("git_root_by_cwd", cwd_text, compute)
 
 
 def project_inventory(sessions: dict[str, SessionInfo], current_session: str) -> tuple[str | None, list[dict[str, Any]]]:
@@ -142,43 +194,62 @@ def linked_worktree_branch_names(cwd: str, toplevel: str) -> set[str]:
     return branches
 
 
+def git_metadata_base(root_text: str) -> dict[str, Any] | None:
+    def compute() -> dict[str, Any] | None:
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], root_text)
+        head_sha = git(["rev-parse", "HEAD"], root_text)
+        head = git(["log", "-1", "--pretty=%h %s"], root_text)
+        upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root_text)
+        status = git(["status", "--short"], root_text)
+        origin_url = git(["config", "--get", "remote.origin.url"], root_text)
+        upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
+        branch_name = branch.stdout.strip() if branch.returncode == 0 else None
+        ahead, behind = git_ahead_behind(root_text, upstream_name)
+        status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
+        worktree = git_worktree_identity(root_text, root_text)
+        linked_branches = set() if worktree is not None else linked_worktree_branch_names(root_text, root_text)
+        return {
+            "root": root_text,
+            "branch": branch_name,
+            "upstream": upstream_name,
+            "head": head.stdout.strip() if head.returncode == 0 else None,
+            "head_sha": head_sha.stdout.strip() if head_sha.returncode == 0 else None,
+            "ahead": ahead,
+            "behind": behind,
+            "status_lines": status_lines,
+            "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
+            "other_branches": local_branch_inventory(
+                root_text,
+                branch_name,
+                worktree=worktree,
+                linked_worktree_branches=linked_branches,
+            ),
+            "worktree": worktree,
+        }
+
+    return cached_build_value("git_metadata_by_root", root_text, compute, copy_value=True)
+
+
 def git_inventory(cwd: str | None) -> dict[str, Any] | None:
-    if not cwd:
+    root_text = git_root_for_cwd(cwd)
+    if root_text is None:
         return None
-    root = git(["rev-parse", "--show-toplevel"], cwd)
-    if root.returncode != 0:
+    base = git_metadata_base(root_text)
+    if base is None:
         return None
-    branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-    head_sha = git(["rev-parse", "HEAD"], cwd)
-    head = git(["log", "-1", "--pretty=%h %s"], cwd)
-    upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
-    status = git(["status", "--short"], cwd)
-    origin_url = git(["config", "--get", "remote.origin.url"], cwd)
-    upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
-    branch_name = branch.stdout.strip() if branch.returncode == 0 else None
-    ahead, behind = git_ahead_behind(cwd, upstream_name)
-    status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
-    root_text = root.stdout.strip()
-    worktree = git_worktree_identity(cwd, root_text)
-    linked_branches = set() if worktree is not None else linked_worktree_branch_names(cwd, root_text)
     return {
-        "root": root_text,
-        "branch": branch_name,
-        "upstream": upstream_name,
-        "head": head.stdout.strip() if head.returncode == 0 else None,
-        "head_sha": head_sha.stdout.strip() if head_sha.returncode == 0 else None,
-        "ahead": ahead,
-        "behind": behind,
-        "dirty_count": len(status_lines),
-        "status": status_lines[:30],
-        "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
-        "other_branches": local_branch_inventory(
-            cwd,
-            branch_name,
-            worktree=worktree,
-            linked_worktree_branches=linked_branches,
-        ),
-        "worktree": worktree,
+        "root": base["root"],
+        "branch": base["branch"],
+        "upstream": base["upstream"],
+        "head": base["head"],
+        "head_sha": base["head_sha"],
+        "ahead": base["ahead"],
+        "behind": base["behind"],
+        "dirty_count": len(base["status_lines"]),
+        "status": base["status_lines"][:30],
+        "github_repo": base["github_repo"],
+        "other_branches": base["other_branches"],
+        "worktree": base["worktree"],
     }
 
 def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | None]:
@@ -564,43 +635,67 @@ def repo_commit_activity_ts(cwd: str) -> float:
 def repo_summary(cwd: str | None) -> dict[str, Any] | None:
     # C9: a per-repo local summary. It stays network-free, but includes branch inventory so YO!info can
     # show every branch in every repo a session touches; only the primary repo's PRs are enriched eagerly.
-    if not cwd:
+    root_text = git_root_for_cwd(cwd)
+    if root_text is None:
         return None
-    root = git(["rev-parse", "--show-toplevel"], cwd)
-    if root.returncode != 0:
+    base = git_metadata_base(root_text)
+    if base is None:
         return None
-    branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-    upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
-    status = git(["status", "--short"], cwd)
-    origin_url = git(["config", "--get", "remote.origin.url"], cwd)
-    upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
-    branch_name = branch.stdout.strip() if branch.returncode == 0 else None
-    ahead, behind = git_ahead_behind(cwd, upstream_name)
-    status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
-    root_text = root.stdout.strip()
+    status_lines = base["status_lines"]
     dirty_activity_ts = repo_dirty_activity_ts(root_text, status_lines)
-    commit_activity_ts = repo_commit_activity_ts(cwd)
+    commit_activity_ts = repo_commit_activity_ts(root_text)
     activity_ts = max(dirty_activity_ts, commit_activity_ts)
-    worktree = git_worktree_identity(cwd, root_text)
-    linked_branches = set() if worktree is not None else linked_worktree_branch_names(cwd, root_text)
     return {
         "root": root_text,
-        "cwd": str(Path(cwd).expanduser().resolve()),
-        "branch": branch_name,
-        "ahead": ahead,
-        "behind": behind,
+        "cwd": resolved_path_text(cwd),
+        "branch": base["branch"],
+        "ahead": base["ahead"],
+        "behind": base["behind"],
         "dirty_count": len(status_lines),
         "activity_ts": activity_ts,
         "activity_source": "dirty" if dirty_activity_ts >= commit_activity_ts and dirty_activity_ts > 0 else ("commit" if commit_activity_ts > 0 else ""),
-        "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
-        "other_branches": local_branch_inventory(
-            cwd,
-            branch_name,
-            worktree=worktree,
-            linked_worktree_branches=linked_branches,
-        ),
-        "worktree": worktree,
+        "github_repo": base["github_repo"],
+        "other_branches": base["other_branches"],
+        "worktree": base["worktree"],
     }
+
+
+def agent_signature(agent: AgentInfo) -> tuple[Any, ...]:
+    transcript_signature: tuple[Any, ...] = ("", 0, 0)
+    if agent.transcript:
+        try:
+            stat = Path(agent.transcript).stat()
+            transcript_signature = (str(agent.transcript), stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            transcript_signature = (str(agent.transcript), 0, 0)
+    return (
+        agent.kind or "",
+        agent.cwd or "",
+        agent.pane_target or "",
+        agent.session_id or "",
+        transcript_signature,
+    )
+
+
+def pane_signature(pane: PaneInfo) -> tuple[Any, ...]:
+    return (
+        pane.target or "",
+        pane.current_path or "",
+        pane.window or "",
+        pane.pane or "",
+        pane.active,
+        pane.window_active,
+    )
+
+
+def candidate_cwd_cache_signature(info: SessionInfo) -> str:
+    value = (
+        info.session,
+        pane_signature(info.selected_pane) if info.selected_pane else None,
+        tuple(pane_signature(pane) for pane in info.panes),
+        tuple(agent_signature(agent) for agent in info.agents),
+    )
+    return repr(value)
 
 
 def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[dict[str, Any]]:
@@ -609,12 +704,18 @@ def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[
     # inside the same signal tier.
     summaries: list[tuple[int, dict[str, Any]]] = []
     seen: set[str] = set()
+    candidates: list[tuple[str, str, int]] = []
     for cwd, priority in candidate_session_cwd_entries(info):
-        summary = repo_summary(cwd)
-        if not summary or not summary["root"] or summary["root"] in seen:
+        root = git_root_for_cwd(cwd)
+        if not root or root in seen:
             continue
-        seen.add(summary["root"])
-        summary["primary"] = summary["root"] == primary_root
+        seen.add(root)
+        candidates.append((root, cwd, priority))
+    for root, cwd, priority in candidates:
+        summary = repo_summary(cwd)
+        if not summary or not summary["root"]:
+            continue
+        summary["primary"] = root == primary_root
         summaries.append((priority, summary))
     return [
         summary for _index, (priority, summary) in sorted(
@@ -623,7 +724,7 @@ def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[
         )
     ]
 
-def window_metadata(info: SessionInfo) -> list[dict[str, Any]]:
+def window_metadata(info: SessionInfo, include_git: bool = True) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     panes_by_window: dict[str, list[Any]] = {}
     for pane in info.panes:
@@ -635,7 +736,7 @@ def window_metadata(info: SessionInfo) -> list[dict[str, Any]]:
         if chosen is None:
             continue
         cwd = str(chosen.current_path or "")
-        git_data = git_inventory(cwd) if cwd else None
+        git_data = git_inventory(cwd) if include_git and cwd else None
         if git_data is not None:
             git_data["cwd"] = cwd
         try:
@@ -657,6 +758,10 @@ def candidate_session_cwds(info: SessionInfo) -> list[str]:
     return [path for path, _priority in candidate_session_cwd_entries(info)]
 
 def candidate_session_cwd_entries(info: SessionInfo) -> list[tuple[str, int]]:
+    return cached_build_value("candidate_session_cwd_entries", candidate_cwd_cache_signature(info), lambda: compute_candidate_session_cwd_entries(info), copy_value=True)
+
+
+def compute_candidate_session_cwd_entries(info: SessionInfo) -> list[tuple[str, int]]:
     # Edited files in transcripts are stronger than cwd because they prove where work actually happened.
     # Live/launch/pane cwd signals share a tier so git activity can still pick the active repo among them.
     paths: list[tuple[str, int]] = []
@@ -784,7 +889,7 @@ def fallback_pull_request(repo: dict[str, str], number: int, source: str, title:
         "source": source,
     }
 
-def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
+def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_network: bool = True, include_metadata: bool = True) -> dict[str, Any]:
     transcript_mtime = 0.0
     for agent in info.agents:
         if not agent.transcript:
@@ -798,7 +903,8 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_netw
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
         "agents": [asdict(agent) for agent in info.agents],
-        "window_metadata": window_metadata(info),
+        "window_metadata": window_metadata(info, include_git=include_metadata),
         "transcript_mtime": transcript_mtime,
-        "project": session_project_metadata(info, metadata_cache, allow_network=allow_network),
+        "project": session_project_metadata(info, metadata_cache, allow_network=allow_network) if include_metadata else {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": True},
+        "metadata_loading": not include_metadata,
     }
