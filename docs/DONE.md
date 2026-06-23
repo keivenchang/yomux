@@ -6,9 +6,9 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-22
 
-### Wrapped ASK?/QUES? question highlight
+### Wrapped ASK? question highlight
 
-- Completed and removed `DOIT.question-highlight-wrap.md`. ASK?/QUES? question highlighting now matches the triggering question sentence across wrapped terminal rows, paints one overlay segment per visual row, stops before unrelated text such as the explanatory parenthetical after `Want me ... chat?`, and uses a slightly stronger red fill/ring without adding a heavy left-edge block. Regression coverage now includes the existing single-line prompt, an explicit wrapped `Want me to draft...?` payload, a generic fallback wrapped prompt, and nearby non-question rows. Verification: `node tests/editor_preview.test.js` (`96 passed`), `python3 tools/static_build.py --check`, and full `python3 tools/check.py` (`CHECK PASSED in 54.94s`).
+- Completed and removed `DOIT.question-highlight-wrap.md`. ASK? question highlighting now matches the triggering question sentence across wrapped terminal rows, paints one overlay segment per visual row, stops before unrelated text such as the explanatory parenthetical after `Want me ... chat?`, and uses a slightly stronger red fill/ring without adding a heavy left-edge block. Regression coverage now includes the existing single-line prompt, an explicit wrapped `Want me to draft...?` payload, a generic fallback wrapped prompt, and nearby non-question rows. Verification: `node tests/editor_preview.test.js` (`96 passed`), `python3 tools/static_build.py --check`, and full `python3 tools/check.py` (`CHECK PASSED in 54.94s`).
 
 ### Browser reload on client/server mismatch
 
@@ -1011,7 +1011,7 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 - `cd`-ing a tmux pane into a different repo didn't change the displayed project — `candidate_session_cwds` listed the static session-number default workdir (session "1" → `~/dynamo/dynamo1`) FIRST, so `session_git_inventory` returned it before ever reaching the pane's live `cd`'d path. Reordered so the focused pane's live cwd (then agent/other-pane cwds) wins, and `session_workdir`/`numbered_session_workdir` are FALLBACKS used only when no pane/agent sits in a repo (a fresh shell in home still shows the dynamoN convenience default). Now the project/branch/PR follow the pane within one metadata poll. pytest covers the live-cwd-wins ordering + the fallback.
 
 #### Dark terminal: light-on-white agent composer forced readable (DOIT.30)
-- The Codex composer (light text on an ANSI-white input box) was white-on-white in the DARK terminal theme because `terminalMinimumContrastRatio` returned 1 (no adjustment) for dark — so xterm left the ~1:1 cell alone. (Light already used 4.5, which is why a light terminal auto-darkened it.) Confirmed the white box is real Codex's own composer, not the mock (no white-bg escapes in `mock/*.py`). Fix: dark now returns a moderate 3:1 floor — enough to force the composer to a readable foreground, low enough that intentionally-dim dark-palette text (already ≥3:1) is mostly untouched; light stays at the stricter 4.5. Node guard updated (dark 1→3).
+- The Codex composer (light text on an ANSI-white input box) was white-on-white in the DARK terminal theme because `terminalMinimumContrastRatio` returned 1 (no adjustment) for dark — so xterm left the ~1:1 cell alone. (Light already used 4.5, which is why a light terminal auto-darkened it.) Confirmed the white box is real Codex's own composer, not the local mock renderer. Fix: dark now returns a moderate 3:1 floor — enough to force the composer to a readable foreground, low enough that intentionally-dim dark-palette text (already ≥3:1) is mostly untouched; light stays at the stricter 4.5. Node guard updated (dark 1→3).
 
 ### Editor, Finder, Differ, and Files
 

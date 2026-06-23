@@ -2765,7 +2765,7 @@ async function runEditorPreviewSuite() {
     assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), true, 'fallback chooses the newest visible question-looking row');
   });
 
-  test('ASK?/QUES? prompt question highlights wrapped sentence spans only', () => {
+  test('ASK? prompt question highlights wrapped sentence spans only', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -2819,7 +2819,7 @@ async function runEditorPreviewSuite() {
     assert.equal(container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]').length, 0, 'all wrapped overlay segments are removed');
   });
 
-  test('ASK?/QUES? fallback highlights wrapped question without swallowing nearby text', () => {
+  test('ASK? fallback highlights wrapped question without swallowing nearby text', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -2857,7 +2857,7 @@ async function runEditorPreviewSuite() {
     assert.equal(overlays[1].style.width, `${'is in chat?'.length * 10}px`, 'fallback highlight stops before explanatory parenthetical text');
   });
 
-  test('ASK?/QUES? prompt fragment expands to the full visible question sentence', () => {
+  test('ASK? prompt fragment expands to the full visible question sentence', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
