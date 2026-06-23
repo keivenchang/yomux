@@ -3814,6 +3814,9 @@ class TmuxWebtermApp:
     def yoagent_visible_composer_text(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.yoagent_visible_composer_text(*args, **kwargs)
 
+    def yoagent_visible_composer_source(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_visible_composer_source(*args, **kwargs)
+
     def yoagent_text_still_in_composer(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.yoagent_text_still_in_composer(*args, **kwargs)
 

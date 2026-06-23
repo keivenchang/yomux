@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
+import mock_agent_common
 from text_client_common import (
     CLAUDE_CONFIG_KEYS,
     CLAUDE_OUTPUT_TERMS,
@@ -63,6 +64,15 @@ EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 DEFAULT_CLAUDE_MODEL = "haiku"
 DEFAULT_CLAUDE_EFFORT = "medium"
 CLAUDE_MODEL_CHOICES = ("haiku", "sonnet", "opus", "fable", "claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8")
+CLAUDE_MODEL_OPTION_DESCRIPTIONS = {
+    "haiku": "Haiku 4.5 - fastest for quick answers",
+    "sonnet": "Sonnet 4.6 - efficient for routine tasks",
+    "opus": "Opus 4.8 - best for complex tasks",
+    "fable": "Fable - unavailable in most accounts",
+    "claude-haiku-4-5": "Haiku 4.5 explicit model family",
+    "claude-sonnet-4-6": "Sonnet 4.6 explicit model family",
+    "claude-opus-4-8": "Opus 4.8 explicit model family",
+}
 PERMISSION_MODES = {"acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"}
 KNOWN_CONFIG_KEYS = {
     CLAUDE_CONFIG_KEYS.effort,
@@ -693,14 +703,19 @@ class ClaudeTextClient(TextClientBase):
     def handle_model_command(self, rest: str) -> None:
         parts = shlex.split(rest)
         if not parts:
-            print(f"Model: {self.effective_model()}")
+            print("Select model")
+            print(f"  Current:    {self.effective_model()}")
             if self.init_model and self.args.model and self.init_model != self.args.model:
-                print(f"Configured: {self.args.model}")
-            print(f"Available: {', '.join(CLAUDE_MODEL_CHOICES)}")
+                print(f"  Configured: {self.args.model}")
+            print("  Available:")
+            for model in CLAUDE_MODEL_CHOICES:
+                marker = "*" if model == self.args.model else " "
+                description = CLAUDE_MODEL_OPTION_DESCRIPTIONS.get(model, "")
+                print(f"   {marker} {model:<20} {description}")
             print("Usage: /model <name>")
             return
         self.print_compat_note("model", "Claude", "Implemented here to match Codex-style runtime model switching.")
-        self.args.model = parts[0]
+        self.args.model = DEFAULT_CLAUDE_MODEL if parts[0].strip().lower() in {"default", "recommended"} else parts[0]
         self.init_model = ""
         print(f"model changed: {self.args.model}")
 
@@ -872,8 +887,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hide-metrics", dest="show_metrics", action="store_false", help="Hide turn metrics.")
     parser.add_argument("--raw-json", action="store_true", help="Echo raw stream-json events to stderr.")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-turn timeout in seconds.")
+    parser.add_argument("--mock", action="store_true", help="Run the built-in Claude TUI mock and prompt-corpus fixture replay.")
     parser.add_argument("-V", "--version", action="version", version=f"claude-text-client {CLIENT_VERSION}")
-    parser.set_defaults(show_tool_output=True, show_thinking=False, show_metrics=False)
+    parser.set_defaults(show_tool_output=True, show_thinking=True, show_metrics=False)
     args = parser.parse_args()
     if args.dangerously_skip_permissions:
         args.permission_mode = DEFAULT_PERMISSION_MODE
@@ -883,18 +899,35 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    mock_agent_common.configure_claude_mock(display_cwd_override=args.cwd)
+    if args.mock:
+        mock_agent_common.main()
+        return 0
     client = ClaudeTextClient(args)
+    use_mock_tui = False
     try:
         initial_prompt = " ".join(args.prompt).strip()
         if initial_prompt:
             client.send_turn(initial_prompt)
             return 0
-        configure_readline(REPL_COMMANDS)
+        use_mock_tui = sys.stdin.isatty() and sys.stdout.isatty()
+        if use_mock_tui:
+            mock_agent_common.setup_history()
+            mock_agent_common.print_startup()
+        else:
+            configure_readline(REPL_COMMANDS)
         prompt_session = PromptInputSession(REPL_COMMANDS)
-        print(f"Claude text client. Type /quit to exit.\n  session: {client.session_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
+        if not use_mock_tui:
+            print(f"Claude text client. Type /quit to exit.\n  session: {client.session_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
+        composer_state: dict[str, str] = {}
         while True:
             try:
-                text = prompt_session.read(client.prompt_text())
+                if use_mock_tui:
+                    text = mock_agent_common.read_live_composer(composer_state)
+                    if text.strip():
+                        mock_agent_common.print_user_header(text)
+                else:
+                    text = prompt_session.read(client.prompt_text())
             except EOFError:
                 print("", file=sys.stderr)
                 return 0
@@ -911,6 +944,8 @@ def main() -> int:
         client.print_aux_stderr("\ninterrupted")
         return 130
     finally:
+        if use_mock_tui:
+            mock_agent_common.reset_terminal_scroll_region()
         client.print_exit_hint()
 
 

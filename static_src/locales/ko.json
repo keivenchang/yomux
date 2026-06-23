@@ -932,7 +932,7 @@
   "state.reason.testsActive": "테스트 명령이 활성 상태",
   "state.reason.yoloBlockedApproval": "YOLO가 승인 프롬프트를 차단함",
   "state.reason.yoloWillPressEnter": "YOLO가 프롬프트를 보고 Enter를 누를 예정",
-  "state.short.blocked": "BLK",
+  "state.short.blocked": "Blocked",
   "state.short.disconnected": "OFF",
   "state.short.done": "DONE",
   "state.short.idle": "IDLE",

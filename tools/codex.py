@@ -12,7 +12,7 @@ approval prompts.
 Usage:
   python3 tools/codex.py
   python3 tools/codex.py -C . "summarize this repo"
-  python3 tools/codex.py -m gpt-5.4-mini -c model_reasoning_effort=\"low\"
+  python3 tools/codex.py -m gpt-5.4-mini -c model_reasoning_effort=\"medium\"
 """
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ from yolomux_lib.agent_comms.json_rpc import json_rpc_notification
 from yolomux_lib.agent_comms.json_rpc import json_rpc_request
 from yolomux_lib.agent_comms.json_rpc import json_rpc_response
 from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message
+import mock_agent_common
 from text_client_common import (
     CODEX_CONFIG_KEYS,
     CODEX_OUTPUT_TERMS,
@@ -115,6 +116,7 @@ REASONING_SUMMARY_ALIASES = {"summary": "concise"}
 DEFAULT_CODEX_MODEL = "gpt-5.4-mini"
 DEFAULT_CODEX_EFFORT = "medium"
 CODEX_MODELS_WITHOUT_REASONING_SUMMARY = {"gpt-5.3-codex-spark"}
+CODEX_SHOW_THINKING_CONFIG_ALIAS = "text_client.show_thinking"
 KNOWN_CONFIG_KEYS = {
     "approval_policy",
     "bypass_hook_trust",
@@ -131,11 +133,18 @@ KNOWN_CONFIG_KEYS = {
     CODEX_CONFIG_KEYS.metrics,
     CODEX_CONFIG_KEYS.hidden_work_raw,
     CODEX_CONFIG_KEYS.hidden_work_summary,
+    CODEX_SHOW_THINKING_CONFIG_ALIAS,
     CODEX_CONFIG_KEYS.tool_output,
     CODEX_CONFIG_KEYS.session,
     CODEX_CONFIG_KEYS.timeout,
     "web_search",
 }
+
+
+def canonical_config_key(key: str) -> str:
+    if key == CODEX_SHOW_THINKING_CONFIG_ALIAS:
+        return CODEX_CONFIG_KEYS.hidden_work_summary
+    return key
 
 
 def initialize_params() -> dict[str, Any]:
@@ -355,13 +364,17 @@ def build_config_help(model_rows: list[dict[str, Any]] | None = None, catalog_er
         lines.append("  Run /model inside the REPL to query the same catalog manually.")
     lines.extend(
         [
+            f"  Default model: {DEFAULT_CODEX_MODEL}",
+            f"  Default {reasoning_label} effort: {DEFAULT_CODEX_EFFORT}",
             f"  Client accepted {reasoning_label} effort values: {accepted_efforts}",
-            "  Select one with: -m gpt-5.5",
-            f"  Select {reasoning_label} effort with: -c {CODEX_CONFIG_KEYS.effort}=\"low\"",
-            "  Inside the REPL, use: /model gpt-5.5 low",
+            f"  Change model at launch: -m <model> (default: {DEFAULT_CODEX_MODEL})",
+            f"  Change model via config: -c {CODEX_CONFIG_KEYS.model}=\"<model>\"",
+            f"  Change {reasoning_label} effort: -c {CODEX_CONFIG_KEYS.effort}=\"{DEFAULT_CODEX_EFFORT}\" (default: {DEFAULT_CODEX_EFFORT})",
+            f"  Inside the REPL, use: /model <model> [effort], for example /model {DEFAULT_CODEX_MODEL} {DEFAULT_CODEX_EFFORT}",
             "",
             "Common -c settings:",
-            f"  -c {CODEX_CONFIG_KEYS.effort}=\"low\"       {reasoning_label} effort values: {accepted_efforts}",
+            f"  -c {CODEX_CONFIG_KEYS.model}=\"{DEFAULT_CODEX_MODEL}\"      model id; default: {DEFAULT_CODEX_MODEL}",
+            f"  -c {CODEX_CONFIG_KEYS.effort}=\"{DEFAULT_CODEX_EFFORT}\"    {reasoning_label} effort values: {accepted_efforts}; default: {DEFAULT_CODEX_EFFORT}",
             f"  -c model_reasoning_summary=\"concise\"  {reasoning_label} summary values: none, auto, concise, detailed; summary aliases to concise; default: concise",
             "  -c service_tier=\"fast\"                enable Fast mode",
             f"  -c approval_policy=\"{DEFAULT_APPROVAL_POLICY}\"            values: untrusted, on-failure, on-request, never; default: {DEFAULT_APPROVAL_POLICY}",
@@ -509,6 +522,7 @@ class CodexTextClient(TextClientBase):
         self.app_server_protocol = CodexAppServerProtocol()
         self.turn_error_message = ""
         self.turn_error_printed = False
+        self.tui_mode = False
         self.reasoning_summary_unsupported_models = {normalized_model_id(item) for item in CODEX_MODELS_WITHOUT_REASONING_SUMMARY}
 
     def next_id(self, prefix: str) -> str:
@@ -586,11 +600,16 @@ class CodexTextClient(TextClientBase):
             self.print_aux_stderr("restarted codex app-server; next turn will resume the current thread")
 
     def print_exit_hint(self) -> None:
-        if self.exit_hint_printed or not self.thread_id:
+        if self.exit_hint_printed or not self.thread_id or self.tui_mode:
             return
         self.exit_hint_printed = True
-        self.print_aux_stderr(f"[thread] {self.thread_id}")
+        self.print_thread_banner()
         self.print_aux_stderr(f"[resume] {self.resume_command()}")
+
+    def print_thread_banner(self) -> None:
+        if self.tui_mode:
+            return
+        self.print_aux_stderr(f"[thread] {self.thread_id}")
 
     def resume_command(self) -> str:
         command = ["python3", str(Path(__file__).resolve())]
@@ -798,6 +817,25 @@ class CodexTextClient(TextClientBase):
         for line in format_model_catalog_lines(rows):
             print(line)
 
+    def print_model_options(self) -> None:
+        print("Select model")
+        print(f"  Current: {display_value(self.args.model)}")
+        print(f"  {CODEX_OUTPUT_TERMS.title_label} effort: {display_value(self.args.effort)}")
+        print(f"  Default: {DEFAULT_CODEX_MODEL} ({DEFAULT_CODEX_EFFORT})")
+        print("  Usage: /model <model> [effort]")
+        print(f"         /effort [{'|'.join(ordered_reasoning_efforts(REASONING_EFFORTS))}]")
+        try:
+            rows = self.model_catalog_rows(include_hidden=True)
+        except (TimeoutError, RuntimeError, OSError) as exc:
+            print(f"  Available models: unavailable ({exc})")
+            return
+        if not rows:
+            print("  Available models: none returned by codex app-server")
+            return
+        print("  Available models:")
+        for line in format_model_catalog_lines(rows):
+            print(f"  {line}")
+
     def handle_repl_command(self, text: str) -> str:
         body = text[1:].strip()
         command, _, rest = body.partition(" ")
@@ -938,11 +976,11 @@ class CodexTextClient(TextClientBase):
             print(f"    {line}")
 
     def handle_model_command(self, rest: str) -> None:
-        self.print_compat_note("model", "Codex", "Implemented here to match the Claude-style runtime model switch.")
         parts = shlex.split(rest)
         if not parts:
-            self.list_models()
+            self.print_model_options()
             return
+        self.print_compat_note("model", "Codex", "Implemented here to match the Claude-style runtime model switch.")
         model = parts[0]
         effort = parts[1] if len(parts) > 1 else self.args.effort
         if effort and effort not in REASONING_EFFORTS:
@@ -1088,20 +1126,21 @@ class CodexTextClient(TextClientBase):
                 print(f"unrecognized config key: {key}")
                 return
             value = parse_config_value(raw_value)
+            config_key = canonical_config_key(key)
             try:
-                set_config_override(self.args, key, value)
+                set_config_override(self.args, config_key, value)
             except ValueError as exc:
                 print(str(exc))
                 return
-            self.args.config_values[key] = normalized_config_value(key, value)
-            if key == CODEX_CONFIG_KEYS.session:
+            self.args.config_values[config_key] = normalized_config_value(config_key, value)
+            if config_key == CODEX_CONFIG_KEYS.session:
                 self.thread_id = self.args.thread_id
-            runtime_settings = self.thread_settings_for_config_key(key)
+            runtime_settings = self.thread_settings_for_config_key(config_key)
             if runtime_settings:
                 self.update_thread_settings(**runtime_settings)
-            elif self.thread_id and not key.startswith("text_client."):
-                print(f"{key} stored locally; existing thread settings were not changed")
-            print(f"{key} = {config_value_text(self.args.config_values[key])}")
+            elif self.thread_id and not config_key.startswith("text_client."):
+                print(f"{config_key} stored locally; existing thread settings were not changed")
+            print(f"{key} = {config_value_text(self.args.config_values[config_key])}")
 
     def print_config_settings(self) -> None:
         rows = {
@@ -1276,7 +1315,7 @@ class CodexTextClient(TextClientBase):
         self.thread_id = str(thread.get("id") or self.thread_id).strip()
         if not self.thread_id:
             raise RuntimeError("codex app-server did not return a thread id")
-        self.print_aux_stderr(f"[thread] {self.thread_id}")
+        self.print_thread_banner()
         return self.thread_id
 
     def thread_params(self) -> dict[str, Any]:
@@ -1644,7 +1683,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--remote-auth-token-env", default="", metavar="TOKEN_VAR", help="Accepted for Codex CLI compatibility.")
     parser.add_argument("--strict-config", action="store_true", help="Error out when config contains fields not recognized by this prototype.")
     parser.add_argument("-i", "--image", action="append", default=[], metavar="FILE", help="Accepted for Codex CLI compatibility; image input is not implemented by this prototype.")
-    parser.add_argument("-m", "--model", default="", metavar="MODEL", help="Model the agent should use.")
+    parser.add_argument("-m", "--model", default=DEFAULT_CODEX_MODEL, metavar="MODEL", help=f"Model the agent should use. Default: {DEFAULT_CODEX_MODEL}.")
     parser.add_argument("--oss", action="store_true", help="Accepted for Codex CLI compatibility; local OSS provider mode is not implemented by this prototype.")
     parser.add_argument("--local-provider", default="", metavar="OSS_PROVIDER", help="Accepted for Codex CLI compatibility.")
     parser.add_argument("-p", "--profile", default="", metavar="CONFIG_PROFILE_V2", help="Accepted for Codex CLI compatibility.")
@@ -1656,11 +1695,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-a", "--ask-for-approval", dest="approval_policy", choices=sorted(APPROVAL_POLICIES), default=DEFAULT_APPROVAL_POLICY, metavar="APPROVAL_POLICY", help=f"Configure when Codex requires human approval. Default: {DEFAULT_APPROVAL_POLICY}.")
     parser.add_argument("--search", action="store_true", help="Enable live web search.")
     parser.add_argument("--no-alt-screen", action="store_true", help="Accepted for Codex CLI compatibility.")
+    parser.add_argument("--mock", action="store_true", help="Run the built-in Codex TUI mock and prompt-corpus fixture replay.")
     parser.add_argument("-V", "--version", action="version", version=f"codex-text-client {CLIENT_VERSION}")
     args = parser.parse_args()
     args.approval_mode = DEFAULT_TEXT_CLIENT_APPROVAL_MODE
     args.debug_json = False
-    args.effort = ""
+    args.effort = DEFAULT_CODEX_EFFORT
     args.ephemeral = False
     args.include_hidden_models = False
     args.interactive = False
@@ -1687,8 +1727,9 @@ def parse_args() -> argparse.Namespace:
         if args.strict_config and key not in KNOWN_CONFIG_KEYS and not key.startswith("features."):
             parser.error(f"unrecognized config key: {key}")
         value = parse_config_value(raw_value)
-        apply_config_override(args, key, value, parser)
-        args.config_values[key] = normalized_config_value(key, value)
+        config_key = canonical_config_key(key)
+        apply_config_override(args, config_key, value, parser)
+        args.config_values[config_key] = normalized_config_value(config_key, value)
     if args.dangerously_bypass_approvals_and_sandbox:
         args.sandbox = DEFAULT_SANDBOX
         args.approval_policy = DEFAULT_APPROVAL_POLICY
@@ -1810,25 +1851,57 @@ def apply_config_override(args: argparse.Namespace, key: str, value: Any, parser
         parser.error(str(exc))
 
 
+def configure_codex_tui(args: argparse.Namespace) -> None:
+    mock_agent_common.configure_codex_mock(
+        display_cwd_override=args.cwd,
+        codex_bypass_hook_trust=args.dangerously_bypass_hook_trust,
+        codex_danger_full_access=args.dangerously_bypass_approvals_and_sandbox,
+        model=args.model,
+        effort=args.effort,
+    )
+
+
 def main() -> int:
     args = parse_args()
+    configure_codex_tui(args)
+    if args.mock:
+        mock_agent_common.main()
+        return 0
     client = CodexTextClient(args)
+    use_mock_tui = False
     try:
         client.start()
+        configure_codex_tui(args)
         if args.list_models:
             client.list_models()
             return 0
+        use_mock_tui = sys.stdin.isatty() and sys.stdout.isatty()
+        client.tui_mode = use_mock_tui
         initial_prompt = " ".join(args.prompt).strip()
         if initial_prompt:
             ok = client.send_turn(initial_prompt)
             if not args.interactive:
                 return 0 if ok else 1
-        configure_readline(REPL_COMMANDS)
+        if use_mock_tui:
+            mock_agent_common.setup_history()
+            mock_agent_common.print_startup()
+        else:
+            configure_readline(REPL_COMMANDS)
         prompt_session = PromptInputSession(REPL_COMMANDS)
-        print(f"Codex text client. Type /quit to exit.\n  session: {client.thread_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
+        if not use_mock_tui:
+            print(f"Codex text client. Type /quit to exit.\n  session: {client.thread_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
+        composer_state: dict[str, str] = {}
+        def request_prompt_spacer() -> None:
+            if use_mock_tui:
+                composer_state["codex_prompt_spacer"] = "1"
+
         while True:
             try:
-                text = prompt_session.read(client.prompt_text())
+                if use_mock_tui:
+                    configure_codex_tui(args)
+                    text = mock_agent_common.read_live_composer(composer_state)
+                else:
+                    text = prompt_session.read(client.prompt_text())
             except EOFError:
                 print("", file=sys.stderr)
                 return 0
@@ -1839,11 +1912,15 @@ def main() -> int:
                     result = client.handle_repl_command(text.strip())
                 except TimeoutError as exc:
                     client.restart_after_timeout(exc)
+                    request_prompt_spacer()
                     continue
                 if result == "quit":
                     return 0
+                if text.strip() not in {"/cls"}:
+                    request_prompt_spacer()
                 continue
             client.send_turn(text)
+            request_prompt_spacer()
     except TimeoutError as exc:
         client.print_aux_stderr(f"codex app-server timeout: {exc}")
         return 1
@@ -1854,7 +1931,10 @@ def main() -> int:
         client.print_aux_stderr("\ninterrupted")
         return 130
     finally:
-        client.print_exit_hint()
+        if use_mock_tui:
+            mock_agent_common.reset_terminal_scroll_region()
+        else:
+            client.print_exit_hint()
         client.close()
 
 

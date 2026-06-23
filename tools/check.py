@@ -116,7 +116,7 @@ def lanes() -> list[Lane]:
         Lane(
             "pytest-e2e",
             "pytest e2e",
-            # End-to-end auto-approve etc.: real tmux + mock_*.py + AutoApproveWorker. Keep this pool
+            # End-to-end auto-approve etc.: real tmux + claude.py/codex.py --mock + AutoApproveWorker. Keep this pool
             # bounded: `-n auto` can launch dozens of tmux/mock-agent subprocesses while the browser and
             # unit pools are also running, which slows the whole default gate down and makes flakes harder
             # to diagnose.

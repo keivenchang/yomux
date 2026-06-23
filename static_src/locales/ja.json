@@ -932,7 +932,7 @@
   "state.reason.testsActive": "テストコマンドが実行中です",
   "state.reason.yoloBlockedApproval": "YOLO が承認プロンプトをブロックしました",
   "state.reason.yoloWillPressEnter": "YOLO がプロンプトを検出し、Enter を押します",
-  "state.short.blocked": "BLK",
+  "state.short.blocked": "Blocked",
   "state.short.disconnected": "OFF",
   "state.short.done": "DONE",
   "state.short.idle": "IDLE",

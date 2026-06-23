@@ -932,7 +932,7 @@
   "state.reason.testsActive": "comando de teste ativo",
   "state.reason.yoloBlockedApproval": "YOLO bloqueou um prompt de aprovação",
   "state.reason.yoloWillPressEnter": "YOLO vê o prompt e pressionará Enter",
-  "state.short.blocked": "BLK",
+  "state.short.blocked": "Blocked",
   "state.short.disconnected": "OFF",
   "state.short.done": "DONE",
   "state.short.idle": "IDLE",

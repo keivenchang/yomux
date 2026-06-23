@@ -1277,27 +1277,27 @@ async function runLayoutRestoreSuite() {
   });
 
   test('t@2114', () => {
-    // GLOBAL activity status line: cross-session YOLO-screen RUN / ASK? / BLK / idle rollup.
+    // GLOBAL activity status line: cross-session YOLO-screen RUN / ASK? / blocked / idle rollup.
     const api = loadYolomux('', ['1', '2', '3', '4']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle'}});
     api.setAutoApproveStateForTest('2', {enabled: true});
     const idleEnabledCounts = api.globalActivityCounts();
     assert.equal(idleEnabledCounts.running, 0, 'YOLO enabled but idle does not count as running');
-    assert.equal(idleEnabledCounts.questions, 0, 'YOLO enabled but idle does not count as ASK?');
-    assert.equal(idleEnabledCounts.blocked, 0, 'YOLO enabled but idle does not count as BLK');
+    assert.equal(idleEnabledCounts.ask, 0, 'YOLO enabled but idle does not count as ASK?');
+    assert.equal(idleEnabledCounts.blocked, 0, 'YOLO enabled but idle does not count as blocked');
     assert.equal(api.browserFaviconBadgeCount(idleEnabledCounts), 0, 'favicon badge is 0 when enabled sessions are idle');
     const idleHtml = api.globalActivityStatusLineHtml();
-    assert.ok(/0 RUN/.test(idleHtml) && /0 ASK\?/.test(idleHtml) && /0 BLK/.test(idleHtml), 'status line shows explicit zero RUN / ASK? / BLK counts');
+    assert.ok(/0 RUN/.test(idleHtml) && /0 ASK\?/.test(idleHtml) && /0 blocked/.test(idleHtml), 'status line shows explicit zero RUN / ASK? / blocked counts');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     api.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'needs-input'}});
     api.setAutoApproveStateForTest('3', {enabled: true, screen: {key: 'blocked'}});
     api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'idle'}});
     const counts = api.globalActivityCounts();
     assert.equal(counts.running, 1, 'one working session counts as running');
-    assert.equal(counts.questions, 1, 'one needs-input session counts as ASK?');
-    assert.equal(counts.blocked, 1, 'one blocked session counts as BLK');
-    assert.equal(counts.attention, 2, 'attention is ASK? plus BLK');
+    assert.equal(counts.ask, 1, 'one needs-input session counts as ASK?');
+    assert.equal(counts.blocked, 1, 'one blocked session counts as blocked');
+    assert.equal(counts.attention, 2, 'attention is ASK? plus blocked');
     assert.equal(counts.idle, 1, 'the remaining session is idle');
     assert.equal(counts.total, 4, 'all tmux sessions are counted');
     assert.equal(api.browserFaviconBadgeCount(counts), 1, 'favicon badge counts actively running sessions only');
@@ -1327,7 +1327,7 @@ async function runLayoutRestoreSuite() {
       ],
     });
     const bellCounts = signalApi.globalActivityCounts();
-    assert.equal(bellCounts.questions, 1, 'tmux bell windows count as ASK? attention');
+    assert.equal(bellCounts.ask, 1, 'tmux bell windows count as ASK? attention');
     assert.equal(bellCounts.attention, 2, 'tmux bell attention combines with YO blocked attention');
     signalApi.setTmuxSignalStateForTest({
       windows: [{
@@ -1347,7 +1347,7 @@ async function runLayoutRestoreSuite() {
       }],
     });
     const actionRequiredCounts = signalApi.globalActivityCounts();
-    assert.equal(actionRequiredCounts.questions, 1, 'Codex action-required pane titles count as ASK? attention');
+    assert.equal(actionRequiredCounts.ask, 1, 'Codex action-required pane titles count as ASK? attention');
     assert.equal(actionRequiredCounts.attention, 2, 'Codex action-required attention combines with YO blocked attention');
     const signalClearApi = loadYolomux('', ['1']);
     signalClearApi.setAutoApproveStateForTest('1', {
@@ -1372,9 +1372,9 @@ async function runLayoutRestoreSuite() {
         }],
       }],
     });
-    assert.equal(signalClearApi.globalActivityCounts().questions, 1, 'tmux title and prompt payload for the same session count once');
+    assert.equal(signalClearApi.globalActivityCounts().ask, 1, 'tmux title and prompt payload for the same session count once');
     assert.equal(signalClearApi.clearPromptAttentionForSessionForTest('1'), true, 'manual clear records the signal-backed prompt signature');
-    assert.equal(signalClearApi.globalActivityCounts().questions, 0, 'manual clear suppresses signal-backed prompt attention');
+    assert.equal(signalClearApi.globalActivityCounts().ask, 0, 'manual clear suppresses signal-backed prompt attention');
     const approvalApi = loadYolomux('', ['1', '2', '3']);
     approvalApi.setAutoApproveStateForTest('1', {
       enabled: true,
@@ -1391,7 +1391,7 @@ async function runLayoutRestoreSuite() {
       screen: {key: 'approval', text: 'Do you want to proceed?', signature: 'screen-approval'},
     });
     const approvalCounts = approvalApi.globalActivityCounts();
-    assert.equal(approvalCounts.questions, 3, 'visible approval prompts and questions all count as ASK?');
+    assert.equal(approvalCounts.ask, 3, 'visible approval prompts and questions all count as ASK?');
     approvalApi.setTmuxSignalStateForTest({
       windows: [{
         key: '1:0',
@@ -1410,7 +1410,7 @@ async function runLayoutRestoreSuite() {
       }],
     });
     const dedupedApprovalCounts = approvalApi.globalActivityCounts();
-    assert.equal(dedupedApprovalCounts.questions, 3, 'tmux action-required title and prompt payload for the same session count once');
+    assert.equal(dedupedApprovalCounts.ask, 3, 'tmux action-required title and prompt payload for the same session count once');
     approvalApi.setTmuxSignalStateForTest({windows: []});
     const approvalState = approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
     assert.equal(approvalState.key, 'needs-approval', 'auto-enabled visible approval still surfaces attention until it is handled');
@@ -1422,7 +1422,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/needs-input-pane', state\.key === 'needs-input' && state\.attention === true/.test(attentionSource), 'pane input ring only appears for uncleared ASK? attention');
     assert.ok(/needs-exec-pane', state\.key === 'needs-approval' && state\.attention === true/.test(attentionSource), 'pane approval ring only appears for uncleared ASK? attention');
     assert.equal(approvalApi.clearPromptAttentionForSessionForTest('1'), true, 'manual clear records the current prompt signature');
-    assert.equal(approvalApi.globalActivityCounts().questions, 2, 'manual clear removes only the acknowledged prompt from ASK? count');
+    assert.equal(approvalApi.globalActivityCounts().ask, 2, 'manual clear removes only the acknowledged prompt from ASK? count');
     const clearedState = approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
     assert.equal(clearedState.attention, false, 'manual clear suppresses the current attention signal');
     assert.equal(approvalApi.sessionStateHtml(clearedState), '', 'manual clear hides the current ASK? badge');
@@ -1431,10 +1431,10 @@ async function runLayoutRestoreSuite() {
       prompt: {visible: true, yes_selected: true, text: 'Would you like to run pwd?', signature: 'codex-pwd'},
       screen: {key: 'idle'},
     });
-    assert.equal(approvalApi.globalActivityCounts().questions, 3, 'changed prompt signature re-arms ASK?');
+    assert.equal(approvalApi.globalActivityCounts().ask, 3, 'changed prompt signature re-arms ASK?');
     assert.ok(approvalApi.sessionStateHtml(approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []})).includes('ASK?'), 'changed prompt shows the ASK? badge again');
     assert.equal(approvalApi.clearPromptAttentionForSessionForTest('1'), true, 'manual ASK? clear handles the re-armed prompt');
-    assert.equal(approvalApi.globalActivityCounts().questions, 2, 'manual ASK? clear removes the re-armed prompt attention');
+    assert.equal(approvalApi.globalActivityCounts().ask, 2, 'manual ASK? clear removes the re-armed prompt attention');
     const promptClearHandlerStart = attentionSource.indexOf('function handlePromptAttentionClearEvent(event)');
     const promptClearHandlerEnd = attentionSource.indexOf("document.addEventListener('click', handlePromptAttentionClearEvent)", promptClearHandlerStart);
     assert.ok(promptClearHandlerStart > 0 && promptClearHandlerEnd > promptClearHandlerStart, 'manual ASK? clear handler is present in the boot bundle');
@@ -1456,10 +1456,10 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes("ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif'") && source.includes("ctx.strokeText(label, 62, 50)") && source.includes("ctx.fillText(label, 62, 50)"), 'favicon overlays a prominent active count at the bottom-right');
     const html = api.globalActivityStatusLineHtml();
     assert.ok(/1 RUN/.test(html) && /topbar-activity-run active/.test(html), 'status line shows running count');
-    assert.ok(/1 ASK\?/.test(html) && /topbar-activity-ques topbar-activity-attn/.test(html), 'status line shows ASK? count');
-    assert.ok(/1 BLK/.test(html) && /topbar-activity-blk topbar-activity-attn/.test(html), 'status line shows BLK count');
-    assert.ok(/status-indicator[^"]*topbar-activity-ques[^"]*attention-pulse/.test(html), 'topbar ASK? inherits the shared status indicator pulse parent');
-    assert.ok(/status-indicator[^"]*topbar-activity-blk[^"]*attention-pulse/.test(html), 'topbar BLK inherits the shared status indicator pulse parent');
+    assert.ok(/1 ASK\?/.test(html) && /topbar-activity-ask topbar-activity-attn/.test(html), 'status line shows ASK? count');
+    assert.ok(/1 blocked/.test(html) && /topbar-activity-blocked topbar-activity-attn/.test(html), 'status line shows blocked count');
+    assert.ok(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), 'topbar ASK? inherits the shared status indicator pulse parent');
+    assert.ok(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), 'topbar blocked inherits the shared status indicator pulse parent');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
     assert.ok(/\.topbar-activity-run\.active/.test(css), 'RUN only turns green when nonzero');

@@ -93,6 +93,12 @@ class PasteRange:
     def label(self) -> str:
         return f"{PASTE_PLACEHOLDER_PREFIX}{self.length}{PASTE_PLACEHOLDER_SUFFIX}"
 
+    def rendered_text(self, source: str) -> str:
+        value = source[self.start : self.end]
+        if "\n" in value or "\r" in value:
+            return self.label
+        return value
+
 
 def strip_readline_markers(text: str) -> str:
     return text.replace(READLINE_START_IGNORE, "").replace(READLINE_END_IGNORE, "")
@@ -458,12 +464,12 @@ class PromptLineEditor:
                 if self.cursor >= index:
                     display_cursor += max(0, min(self.cursor, item.start) - index)
                 parts.append(chunk)
-            label = item.label
+            rendered = item.rendered_text(self.text)
             if self.cursor >= item.end:
-                display_cursor += len(label)
+                display_cursor += len(rendered)
             elif self.cursor >= item.start:
-                display_cursor += len(label)
-            parts.append(label)
+                display_cursor += min(max(self.cursor - item.start, 0), len(rendered))
+            parts.append(rendered)
             index = item.end
         if index < len(self.text):
             chunk = self.text[index:]
@@ -773,7 +779,7 @@ SLASH_COMMAND_SPECS = (
     SlashCommandSpec("context", "shared", codex_help="/context                      show session context known to this client", claude_help="/context                        show session context known to this client"),
     SlashCommandSpec("usage", "shared", codex_help="/usage                        show last-turn token usage when available", claude_help="/usage                          show last-turn cost and token usage"),
     SlashCommandSpec("metrics", "shared", codex_help="/metrics [on|off|last]        show TTFT, ISL/OSL, token rate, and tool timing", claude_help="/metrics [on|off|last]          show TTFT, ISL/OSL, token rate, and tool timing"),
-    SlashCommandSpec("model", "shared", codex_help=f"/model [model] [effort]       choose model and {CODEX_OUTPUT_TERMS.lower_label} effort", claude_help="/model [model]                  show or change model", codex_compat="Implemented here to match the Claude-style runtime model switch.", claude_compat="Implemented here to match Codex-style runtime model switching."),
+    SlashCommandSpec("model", "shared", codex_help=f"/model [model] [effort]       show/change model and {CODEX_OUTPUT_TERMS.lower_label} effort", claude_help="/model [model]                  show/change model and list options", codex_compat="Implemented here to match the Claude-style runtime model switch.", claude_compat="Implemented here to match Codex-style runtime model switching."),
     SlashCommandSpec("effort", "shared", codex_help=f"/effort [level]               choose {CODEX_OUTPUT_TERMS.lower_label} effort", claude_help="/effort [level]                 show or change effort: low, medium, high, xhigh, max", codex_compat=f"Claude has a native /effort command; codex.py maps it to Codex {CODEX_OUTPUT_TERMS.lower_label} effort."),
     SlashCommandSpec("permission", "compat", codex_help="/permission [mode]            alias for /permissions", claude_help="/permission [mode]              alias for /permission-mode", codex_compat="Implemented by codex.py for Claude permission-command muscle memory."),
     SlashCommandSpec("permission-mode", "compat", codex_help="/permission-mode [mode]       alias for /permissions", claude_help="/permission-mode [mode]         show or change Claude permission mode", codex_compat="Implemented by codex.py for Claude permission-command muscle memory.", claude_compat="Implemented here as a runtime wrapper around Claude's --permission-mode flag."),

@@ -1,4 +1,4 @@
-agent: unknown
+agent: claude
 capture_date: '2026-06-20'
 capture_date_position: end
 capture_mode: converted_text_fixture
@@ -12,7 +12,7 @@ codex_version: ''
 cursor: {}
 expected:
   action: null
-  agent: unknown
+  agent: claude
   approval_visible: false
   ask: true
   command: null

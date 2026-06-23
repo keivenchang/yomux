@@ -126,13 +126,13 @@ async function runEditorPreviewSuite() {
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const fileTreeSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
-    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === 'working'[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === 'idle'[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/QUES?/activity-dot status tones are centralized in one shared parent helper');
-    assert.ok(/statusIndicatorInlineClasses\(questionTone,\s*'topbar-activity-ques'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
+    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === 'working'[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === 'idle'[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/activity-dot status tones are centralized in one shared parent helper');
+    assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK? badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'ASK? status labels inherit shared status-indicator tone behavior without badge text-transform');
     assert.ok(/const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,\s*'agent-window-activity-icon'/.test(fileTreeSource), 'tmux window activity circles inherit shared dot status behavior through the shared activity-tone helper');
     assert.ok(/statusIndicatorDotClasses\(\s*dotTone,\s*'session-agent-dot'/.test(popoverSource), 'session popover activity circles inherit shared dot status behavior');
-    assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK?/QUES?/activity-dot markers share the status-indicator parent');
+    assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK?/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
     assert.ok(/\.status-indicator--dot\s*\{[^}]*color:\s*var\(--muted\)/.test(sessionsCss), 'circle status markers inherit dot color/shape from the shared parent modifier');
     assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'heartbeat indicators share one pulse timing parent');
@@ -145,8 +145,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.status-indicator--working\s*\{[^}]*--attention-ring-rgb:\s*82 210 115/.test(sessionsCss), 'working dot glow is green');
     assert.ok(/\.status-indicator--cooldown\s*\{[^}]*color:\s*var\(--accent-gold\)/.test(sessionsCss), 'cooldown dot is static yellow');
     assert.ok(/\.status-indicator--active\s*\{[^}]*color:\s*var\(--file-tree-recency-max-contrast, var\(--text\)\)/.test(sessionsCss), 'active labels use the same max-contrast token as plain hot recency');
-    assert.ok(/\.status-indicator--attention\s*\{[^}]*--attention-ring-rgb:\s*255 51 71/.test(sessionsCss), 'ASK?/QUES? dot glow is red');
-    assert.ok(/\.status-indicator--dot\.status-indicator--attention\s*\{[^}]*color:\s*var\(--bad\)/.test(sessionsCss), 'ASK?/QUES? dot glyphs use saturated red instead of pale danger text');
+    assert.ok(/\.status-indicator--attention\s*\{[^}]*--attention-ring-rgb:\s*255 51 71/.test(sessionsCss), 'ASK? dot glow is red');
+    assert.ok(/\.status-indicator--dot\.status-indicator--attention\s*\{[^}]*color:\s*var\(--bad\)/.test(sessionsCss), 'ASK? dot glyphs use saturated red instead of pale danger text');
     assert.equal(/status-indicator--idle[\s\S]{0,160}animation/.test(sessionsCss), false, 'idle circle markers stay static');
     assert.ok(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.heartbeat-pulse[\s\S]*animation:\s*none/.test(sessionsCss), 'working/attention pulses are disabled under reduced motion by the shared parent');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-name:\s*attention-ring-fade/.test(sessionsCss), 'recency and attention share the attention-ring-fade animation parent');
@@ -1473,7 +1473,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/popover-chip-link[\s\S]*pr-number-chip[^>]*>#10075<\/span>[\s\S]*meta-pr-status pr-status-passing[^>]*>PASSING/.test(branchList), 'popover branch list shows non-current PR numbers as chips while keeping meaningful status text');
     assert.ok(branchList.includes('<div class="branch-subject">feat: add InternLM tool parser parity</div>'), 'popover branch list keeps non-current branch subjects because they add detail');
 
-    const blockedHtml = api.tmuxPaneTabHtml('4', info, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'blocked command'}, false);
+    const blockedHtml = api.tmuxPaneTabHtml('4', info, {key: 'blocked', short: 'Blocked', label: 'Blocked', reason: 'blocked command'}, false);
     assert.ok(blockedHtml.includes('--attention-animation-delay:'), 'red attention badges carry a synchronized animation delay');
 
     const genericWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'working'}, true);
@@ -2712,7 +2712,7 @@ async function runEditorPreviewSuite() {
     assert.equal(row2[0].range.start.y, 2, 'fresh-next-url row 2 starts on row 2');
   });
 
-  test('ASK?/QUES? prompt question highlights the visible terminal row', () => {
+  test('ASK? prompt question highlights the visible terminal row', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -2743,7 +2743,7 @@ async function runEditorPreviewSuite() {
       prompt: {visible: false},
     });
 
-    assert.deepStrictEqual(canonical(api.terminalAttentionQuestionTextsForTest('1')), [questionText], 'question text comes from the same payload that drives ASK?/QUES?');
+    assert.deepStrictEqual(canonical(api.terminalAttentionQuestionTextsForTest('1')), [questionText], 'question text comes from the same payload that drives ASK?');
     assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'attention state paints a question row');
     assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'the exact visible question row is marked');
     const overlay = container.querySelector('.terminal-attention-question-overlay[data-session="1"]');

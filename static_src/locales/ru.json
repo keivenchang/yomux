@@ -932,7 +932,7 @@
   "state.reason.testsActive": "команда тестов активна",
   "state.reason.yoloBlockedApproval": "YOLO заблокировал запрос подтверждения",
   "state.reason.yoloWillPressEnter": "YOLO видит запрос и нажмёт Enter",
-  "state.short.blocked": "BLK",
+  "state.short.blocked": "Blocked",
   "state.short.disconnected": "OFF",
   "state.short.done": "DONE",
   "state.short.idle": "IDLE",

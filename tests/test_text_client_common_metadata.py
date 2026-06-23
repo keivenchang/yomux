@@ -128,6 +128,52 @@ def test_codex_bypass_hook_trust_requires_explicit_flag(monkeypatch):
     assert codex.parse_args().dangerously_bypass_hook_trust is True
 
 
+def test_codex_parser_defaults_to_mini_model_and_medium_effort(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex.py"])
+    args = codex.parse_args()
+
+    assert args.model == "gpt-5.4-mini"
+    assert args.effort == "medium"
+
+
+def test_codex_tui_configuration_uses_parser_model_and_effort(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex.py"])
+    args = codex.parse_args()
+    try:
+        codex.configure_codex_tui(args)
+
+        assert codex.mock_agent_common.MODEL == "gpt-5.4-mini"
+        assert codex.mock_agent_common.EFFORT == "medium"
+        assert codex.mock_agent_common.live_composer_status_line().startswith("  gpt-5.4-mini medium · ")
+    finally:
+        codex.mock_agent_common.configure_codex_mock()
+
+
+def test_text_clients_accept_mock_mode(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex.py", "--mock"])
+    assert codex.parse_args().mock is True
+
+    monkeypatch.setattr(sys, "argv", ["claude.py", "--mock"])
+    assert claude.parse_args().mock is True
+
+
+def test_claude_thinking_defaults_on(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["claude.py"])
+    assert claude.parse_args().show_thinking is True
+
+    monkeypatch.setattr(sys, "argv", ["claude.py", "--hide-thinking"])
+    assert claude.parse_args().show_thinking is False
+
+
+def test_codex_accepts_thinking_config_alias(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex.py", "--strict-config", "-c", "text_client.show_thinking=false"])
+    args = codex.parse_args()
+
+    assert args.show_reasoning_summary is False
+    assert args.config_values[CODEX_CONFIG_KEYS.hidden_work_summary] is False
+    assert codex.CODEX_SHOW_THINKING_CONFIG_ALIAS not in args.config_values
+
+
 def test_shared_config_keys_map_same_intent_names():
     assert CLIENT_SHARED_CONFIG_KEYS.model == "model"
     assert CODEX_CONFIG_KEYS.model == CLIENT_SHARED_CONFIG_KEYS.model
@@ -160,6 +206,16 @@ def test_codex_resolves_prompt_defaults_from_model_catalog():
     assert client.args.effort == "medium"
     assert client.args.config_values[CODEX_CONFIG_KEYS.effort] == "medium"
     assert client.prompt_text().startswith("gpt-5.4-mini[medium] ")
+
+
+def test_codex_help_explains_model_and_effort_defaults():
+    help_text = codex.build_config_help([])
+
+    assert "Default model: gpt-5.4-mini" in help_text
+    assert "Default reasoning (aka thinking) effort: medium" in help_text
+    assert "Change model at launch: -m <model> (default: gpt-5.4-mini)" in help_text
+    assert 'Change model via config: -c model="<model>"' in help_text
+    assert "Inside the REPL, use: /model <model> [effort], for example /model gpt-5.4-mini medium" in help_text
 
 
 def test_codex_human_error_message_extracts_json_detail():
@@ -211,6 +267,22 @@ def test_codex_reconnect_error_event_is_nonterminal(capsys):
     assert "Reconnecting... 1/5" in capsys.readouterr().err
 
 
+def test_codex_tui_mode_suppresses_internal_thread_banners(capsys):
+    client = CodexTextClient(codex_args())
+    client.thread_id = "thread-1"
+    client.print_thread_banner()
+    assert "[thread] thread-1" in capsys.readouterr().err
+
+    client = CodexTextClient(codex_args())
+    client.tui_mode = True
+    client.request = lambda _method, _params: {"thread": {"id": "thread-2"}}
+    assert client.ensure_thread() == "thread-2"
+    client.print_exit_hint()
+    output = capsys.readouterr()
+    assert "[thread]" not in output.err
+    assert "[resume]" not in output.err
+
+
 def test_claude_command_json_is_valid_for_all_client_models():
     for model in claude.CLAUDE_MODEL_CHOICES:
         client = ClaudeTextClient(claude_args(model=model, effort="medium"))
@@ -231,6 +303,21 @@ def test_prompt_editor_renders_paste_as_placeholder():
     assert editor.text == "ask line1\nline2"
     editor.backspace()
     assert editor.text == "ask "
+
+
+def test_prompt_editor_shows_single_line_paste():
+    editor = PromptLineEditor(PromptInputSession(["help", "status"]), "P> ")
+    editor.insert_text("ask ")
+    editor.insert_paste("status --verbose")
+    rendered, cursor = editor.rendered_text_and_cursor()
+    assert rendered == "ask status --verbose"
+    assert cursor == len(rendered)
+    assert editor.text == "ask status --verbose"
+
+    editor.cursor = 4
+    rendered, cursor = editor.rendered_text_and_cursor()
+    assert rendered == "ask status --verbose"
+    assert cursor == len("ask ")
 
 
 def test_prefixed_output_labels_share_common_tool_and_metrics_labels():
@@ -354,7 +441,7 @@ def codex_args(**overrides):
         "cwd": str(ROOT),
         "thread_id": "",
         "model": "gpt-5.4-mini",
-        "effort": "low",
+        "effort": "medium",
         "reasoning_summary": "concise",
         "sandbox": "danger-full-access",
         "approval_policy": "never",
@@ -372,6 +459,7 @@ def codex_args(**overrides):
         "include_hidden_models": False,
         "timeout": APP_SERVER_TIMEOUT_SECONDS,
         "dangerously_bypass_hook_trust": False,
+        "strict_config": False,
         "ephemeral": False,
         "base_instructions": "",
     }
@@ -397,7 +485,7 @@ def claude_args(**overrides):
         "max_budget_usd": "",
         "show_status": False,
         "show_tool_output": True,
-        "show_thinking": False,
+        "show_thinking": True,
         "raw_json": False,
         "show_metrics": False,
         "timeout": 900.0,
@@ -463,6 +551,37 @@ def test_codex_model_command_does_not_exit_when_resume_thread_is_not_loaded(caps
     assert client.args.effort == "medium"
 
 
+def test_codex_model_command_shows_current_model_and_available_options(capsys):
+    rows = [
+        {"model": "gpt-5.4-mini", "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "medium"}], "hidden": False, "displayName": "GPT-5.4-Mini"},
+        {"model": "gpt-5.5", "defaultReasoningEffort": "xhigh", "supportedReasoningEfforts": [{"reasoningEffort": "medium"}, {"reasoningEffort": "xhigh"}], "hidden": False, "displayName": "GPT-5.5"},
+    ]
+    client = CodexTextClient(codex_args(model="gpt-5.4-mini", effort="medium"))
+    client.model_catalog_rows = lambda include_hidden=True: rows
+
+    assert client.handle_repl_command("/model") == "handled"
+
+    output = capsys.readouterr()
+    assert "compatibility command" not in output.err
+    assert "Select model" in output.out
+    assert "Current: gpt-5.4-mini" in output.out
+    assert "Reasoning (aka Thinking) effort: medium" in output.out
+    assert "Usage: /model <model> [effort]" in output.out
+    assert "gpt-5.5" in output.out
+    assert "GPT-5.4-Mini" in output.out
+
+
+def test_codex_model_command_rejects_invalid_effort(capsys):
+    client = CodexTextClient(codex_args(model="gpt-5.4-mini", effort="medium"))
+
+    assert client.handle_repl_command("/model gpt-5.5 ultra") == "handled"
+
+    output = capsys.readouterr()
+    assert "effort must be one of" in output.out
+    assert client.args.model == "gpt-5.4-mini"
+    assert client.args.effort == "medium"
+
+
 def test_codex_reasoning_and_thinking_aliases_update_config(capsys):
     client = CodexTextClient(codex_args(show_reasoning_summary=False, show_raw_reasoning=False))
     assert client.handle_repl_command("/thinking raw") == "handled"
@@ -475,6 +594,13 @@ def test_codex_reasoning_and_thinking_aliases_update_config(capsys):
     assert client.args.reasoning_summary == "none"
     assert client.args.show_reasoning_summary is False
     assert client.args.show_raw_reasoning is False
+
+    assert client.handle_repl_command("/config text_client.show_thinking=true") == "handled"
+    output = capsys.readouterr()
+    assert "text_client.show_thinking = true" in output.out
+    assert client.args.show_reasoning_summary is True
+    assert client.args.config_values[CODEX_CONFIG_KEYS.hidden_work_summary] is True
+    assert codex.CODEX_SHOW_THINKING_CONFIG_ALIAS not in client.args.config_values
 
 
 def test_claude_reasoning_alias_toggles_thinking(capsys):
@@ -491,13 +617,17 @@ def test_claude_model_command_reports_effective_runtime_model(capsys):
     assert client.prompt_text().startswith("claude-haiku-4-5-20251001[medium] ")
     assert client.handle_repl_command("/model") == "handled"
     output = capsys.readouterr()
-    assert "Model: claude-haiku-4-5-20251001" in output.out
+    assert "Select model" in output.out
+    assert "Current:    claude-haiku-4-5-20251001" in output.out
     assert "Configured: haiku" in output.out
     assert "claude-haiku-4-5" in output.out
 
     assert client.handle_repl_command("/model sonnet") == "handled"
     assert client.init_model == ""
     assert client.prompt_text().startswith("sonnet[medium] ")
+
+    assert client.handle_repl_command("/model default") == "handled"
+    assert client.args.model == claude.DEFAULT_CLAUDE_MODEL
 
 
 def test_clear_resets_conversation_and_cls_is_terminal_only(capsys):

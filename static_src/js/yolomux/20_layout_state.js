@@ -1142,7 +1142,7 @@ const stateDefs = {
   'needs-approval': {label: 'Needs approval', short: 'ASK?', priority: 0, attention: true},
   'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
   'needs-input': {label: 'Needs input', short: 'ASK?', priority: 1, attention: true},
-  blocked: {label: 'Blocked', short: 'BLK', priority: 2, attention: true},
+  blocked: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
   'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
@@ -1655,11 +1655,11 @@ function updateDocumentTitle() {
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
-// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/QUES/BLK.
+// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/ASK?/blocked.
 function globalActivityCounts() {
   const signalWindows = tmuxSignalWindows();
   let running = 0;
-  let questions = 0;
+  let ask = 0;
   let blocked = 0;
   const signalSessions = new Set(signalWindows.map(tmuxSignalWindowSession).filter(Boolean));
   const runningSignalSessions = new Set();
@@ -1684,7 +1684,7 @@ function globalActivityCounts() {
     running += 1;
     if (signalSession) runningSignalSessions.add(signalSession);
   }
-  questions += new Set([...bellSignalWindows, ...actionRequiredSignalWindows]).size;
+  ask += new Set([...bellSignalWindows, ...actionRequiredSignalWindows]).size;
   const countedSessions = new Set([...sessions, ...autoApproveStates.keys()].map(value => String(value || '')).filter(Boolean));
   for (const session of countedSessions) {
     if (!isTmuxSession(session)) continue;
@@ -1697,15 +1697,15 @@ function globalActivityCounts() {
     const promptSignature = promptAttentionPayloadSignature(payload);
     const promptCleared = promptAttentionIsCleared(session, promptSignature);
     if (key === 'working' && !runningSignalSessions.has(session)) running += 1;
-    else if (['approval', 'needs-approval', 'needs-input'].includes(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) questions += 1;
+    else if (['approval', 'needs-approval', 'needs-input'].includes(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
     else if (key === 'blocked') blocked += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
   const total = signalWindows.length
     ? signalWindows.length + [...countedSessions].filter(session => isTmuxSession(session) && !signalSessions.has(session)).length
     : fallbackTotal;
-  const attention = questions + blocked;
-  return {running, questions, blocked, attention, idle: Math.max(0, total - running - attention), total};
+  const attention = ask + blocked;
+  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
 }
 
 function globalActivityStatusLineHtml() {
@@ -1713,11 +1713,11 @@ function globalActivityStatusLineHtml() {
   if (!counts.total) return '';
   const parts = [];
   const runTone = counts.running ? 'positive' : '';
-  const questionTone = counts.questions ? 'attention' : '';
+  const askTone = counts.ask ? 'attention' : '';
   const blockedTone = counts.blocked ? 'attention' : '';
   parts.push(`<span class="${esc(statusIndicatorInlineClasses(runTone, 'topbar-activity-run', counts.running ? 'active' : ''))}">${counts.running} RUN</span>`);
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses(questionTone, 'topbar-activity-ques', counts.questions ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(questionTone)}>${counts.questions} ASK?</span>`);
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses(blockedTone, 'topbar-activity-blk', counts.blocked ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(blockedTone)}>${counts.blocked} BLK</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(askTone, 'topbar-activity-ask', counts.ask ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(askTone)}>${counts.ask} ASK?</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(blockedTone, 'topbar-activity-blocked', counts.blocked ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(blockedTone)}>${counts.blocked} blocked</span>`);
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }

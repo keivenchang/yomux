@@ -1124,6 +1124,30 @@ def test_approval_prompt_ignores_codex_bottom_chrome_after_footer():
     assert prompt_detector.approval_prompt_has_later_activity(visible_text) is False
 
 
+def test_approval_prompt_ignores_codex_reserved_composer_footer():
+    visible_text = "\n".join([
+        "  Would you like to run the following command?",
+        "",
+        "  $ touch /tmp/yolomux-mock-approval",
+        "",
+        "› 1. Yes, proceed (y)",
+        "  2. Yes, and don't ask again for commands that start with `touch /tmp/yolomux-mock-approval` (p)",
+        "  3. No, and tell Codex what to do differently (esc)",
+        "",
+        "  Press enter to confirm or esc to cancel",
+        "",
+        "› Explain this codebase",
+        "",
+        "  gpt-5.5 xhigh · ~/yolomux.dev8002",
+    ])
+
+    state = prompt_detector.approval_prompt_state(visible_text, visible_text)
+    assert prompt_detector.approval_prompt_has_later_activity(visible_text) is False
+    assert state["visible"] is True
+    assert state["type"] == "bash"
+    assert state["command"] == "touch /tmp/yolomux-mock-approval"
+
+
 def test_detect_prompt_real_prompt_shapes_and_bottom_most_prompt_wins():
     codex_pane = "\n".join([
         "◦ Running gh api repos/ai-project/project/pulls/9579/comments",

@@ -203,14 +203,10 @@ def classify_agent(command: str) -> str | None:
     base = command_basename(command)
     if base in AGENT_COMMANDS:
         return base
-    if base == "mock_claude.py":
-        return "claude"
-    if base == "mock_codex.py":
-        return "codex"
     lowered = command.lower()
-    if re.search(r"(^|[/\s])mock_claude\.py(\s|$)", lowered):
+    if re.search(r"(^|[/\s])claude\.py\s+--mock(\s|$)", lowered):
         return "claude"
-    if re.search(r"(^|[/\s])mock_codex\.py(\s|$)", lowered):
+    if re.search(r"(^|[/\s])codex\.py\s+--mock(\s|$)", lowered):
         return "codex"
     if re.search(r"(^|\s)(claude|codex)(\s|$)", lowered):
         match = re.search(r"(^|\s)(claude|codex)(\s|$)", lowered)

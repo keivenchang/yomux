@@ -50,13 +50,13 @@ def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_
 
 
 @pytest.mark.parametrize(
-    "mock_name,user_input,agent",
+    "agent,user_input",
     [
-        ("mock_codex.py", "sleep 10", "codex"),
-        ("mock_claude.py", "sleep 10", "claude"),
+        ("codex", "touch /tmp/yolomux-mock-approval"),
+        ("claude", "sleep 10"),
     ],
 )
-def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path, mock_name, user_input, agent):
+def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path, agent, user_input):
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
@@ -94,14 +94,14 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
     try:
         created = tmux_cmd(
             "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 tools/{mock_name}",
+            f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
         )
         assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
         booted, pane = wait_until(lambda text: "❯" in text or "›" in text)
-        assert booted, f"{mock_name} did not boot to an input prompt:\n{pane}"
+        assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
         tmux_cmd("send-keys", "-t", f"{session}:", user_input, "Enter")
         prompted, pane = wait_until(lambda text: user_input in text and ("Would you like to run the following command?" in text or "Do you want to proceed?" in text))
-        assert prompted, f"{mock_name} did not render an approval prompt after `{user_input}`:\n{pane}"
+        assert prompted, f"{agent}.py --mock did not render an approval prompt after `{user_input}`:\n{pane}"
 
         app = TmuxWebtermApp([session], dangerously_yolo=False)
         payload = app.auto_approve_session_status(session, capture_bare_session_when_roster=True)
@@ -151,9 +151,9 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
               tabAttention: tab?.classList.contains('needs-attention') || false,
               panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
               topbarText: topbar?.textContent || '',
-              topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ques')?.classList.contains('status-indicator') || false,
-              topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ques')?.classList.contains('status-indicator--attention') || false,
-              topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ques')?.classList.contains('attention-pulse') || false,
+              topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('status-indicator') || false,
+              topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('status-indicator--attention') || false,
+              topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('attention-pulse') || false,
             };
             badge?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
@@ -312,7 +312,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                 const sessions = arguments[0];
                 return sessions.every(session => document.getElementById(`panel-tab-${session}`))
                   && typeof globalActivityCounts === 'function'
-                  && globalActivityCounts().questions === 0;
+                  && globalActivityCounts().ask === 0;
                 """,
                 list(sessions.values()),
             )
@@ -321,14 +321,14 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             """
             const sessions = arguments[0];
             return {
-              questions: globalActivityCounts().questions,
+              ask: globalActivityCounts().ask,
               badges: sessions.map(session => document.getElementById(`panel-tab-${session}`)?.querySelector('[data-prompt-attention-clear]')?.textContent || ''),
               topbar: document.getElementById('topbarActivity')?.textContent || '',
             };
             """,
             list(sessions.values()),
         )
-        assert initial_ui["questions"] == 0, initial_ui
+        assert initial_ui["ask"] == 0, initial_ui
         assert initial_ui["badges"] == ["", ""], initial_ui
 
         tmux_cmd("send-keys", "-t", f"{sessions['codex']}:", "Run sleep 10", "Enter")
@@ -365,7 +365,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                   updateTopbarActivityStatus();
                   const counts = globalActivityCounts();
                   done({
-                    ok: counts.questions === sessions.length,
+                    ok: counts.ask === sessions.length,
                     counts,
                     topbar: document.getElementById('topbarActivity')?.textContent || '',
                     states: sessions.map(session => {
@@ -416,7 +416,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             const sessions = arguments[0];
             function snapshot() {
               return {
-                questions: globalActivityCounts().questions,
+                ask: globalActivityCounts().ask,
                 topbar: document.getElementById('topbarActivity')?.textContent || '',
                 sessions: sessions.map(session => {
                   const tab = document.getElementById(`panel-tab-${session}`);
@@ -440,12 +440,12 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             """,
             list(sessions.values()),
         )
-        assert metrics["before"]["questions"] == 2, metrics
+        assert metrics["before"]["ask"] == 2, metrics
         assert "2 ASK?" in metrics["before"]["topbar"], metrics
         assert [item["badge"] for item in metrics["before"]["sessions"]] == ["ASK?", "ASK?"], metrics
         assert [item["tabAttention"] for item in metrics["before"]["sessions"]] == [True, True], metrics
         assert [item["panelNeedsApproval"] for item in metrics["before"]["sessions"]] == [True, True], metrics
-        assert metrics["after"]["questions"] == 0, metrics
+        assert metrics["after"]["ask"] == 0, metrics
         assert "0 ASK?" in metrics["after"]["topbar"], metrics
         assert [item["badge"] for item in metrics["after"]["sessions"]] == ["", ""], metrics
         assert [item["tabAttention"] for item in metrics["after"]["sessions"]] == [False, False], metrics

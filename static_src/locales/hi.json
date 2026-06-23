@@ -932,7 +932,7 @@
   "state.reason.testsActive": "टेस्ट कमांड सक्रिय है",
   "state.reason.yoloBlockedApproval": "YOLO ने अनुमोदन प्रॉम्प्ट ब्लॉक किया",
   "state.reason.yoloWillPressEnter": "YOLO प्रॉम्प्ट देख रहा है और Enter दबाएगा",
-  "state.short.blocked": "BLK",
+  "state.short.blocked": "Blocked",
   "state.short.disconnected": "OFF",
   "state.short.done": "DONE",
   "state.short.idle": "IDLE",

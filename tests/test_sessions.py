@@ -247,6 +247,28 @@ def test_pane_process_label_returns_displayed_process_pid():
     assert pid == 321
 
 
+def test_pane_process_label_recognizes_merged_mock_entrypoints():
+    label, pid = pane_process_label(
+        _pane(100),
+        [
+            ProcessInfo(pid=100, ppid=1, command="bash"),
+            ProcessInfo(pid=321, ppid=100, command="python3 tools/codex.py --mock"),
+        ],
+    )
+    assert label == "codex"
+    assert pid == 321
+
+    label, pid = pane_process_label(
+        _pane(100),
+        [
+            ProcessInfo(pid=100, ppid=1, command="bash"),
+            ProcessInfo(pid=654, ppid=100, command="python3 tools/claude.py --mock"),
+        ],
+    )
+    assert label == "claude"
+    assert pid == 654
+
+
 def test_pane_process_label_falls_back_to_pane_pid_for_shell():
     label, pid = pane_process_label(_pane(100), [ProcessInfo(pid=100, ppid=1, command="bash")])
 

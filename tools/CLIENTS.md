@@ -41,11 +41,12 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/claude.py -C .
 
 ## Mock Agent Fixture Replay
 
-`tools/mock_claude.py` and `tools/mock_codex.py` are TUI mocks for detector, auto-approve, and browser tests. They replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
+`tools/claude.py --mock` and `tools/codex.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
 
 - `mockcase list`: print every replayable prompt-corpus case with the owning agent and fixture file.
 - `mockcase <case>`: clear the pane, render that fixture, bottom-align short captures in the current tmux pane, and freeze the process so `tmux capture-pane` sees the prompt exactly as a live client would.
 - Case names accept the fixture scenario, fixture id, inventory id, file stem, and agent-prefixed forms such as `claude_ask_user_question` or `codex_shell_sleep_10_3_option`.
+- Plain `mock <case>` returns to the live composer for idle/history fixtures, but active working fixtures such as Codex `goal_active` occupy and freeze the whole pane so a second live composer is not appended below the captured status row.
 - `yesno [N]`, `ask N`, `sleep N`, and shell commands still drive interactive permission prompts; use `mockcase` for corpus parity and the older commands for auto-approve flow tests that need keyboard interaction.
 
 ## Terminology Map
@@ -73,7 +74,7 @@ Both clients support these prototype commands:
 - `/status`: show active model, effort, directory, session/thread id, output toggles, metrics toggle, and terminal background detection.
 - `/help`: show client-supported slash commands and key settings.
 - `/config key=value`: show or change runtime settings inside the REPL.
-- `/model [model]`: show or change model.
+- `/model [model]`: with no argument, show the current model and available model options; with an argument, change model. Codex also accepts `/model <model> <effort>`.
 - `/effort [level]`: show or change effort.
 - `/resume <id>`: continue a Codex thread id or Claude session id.
 - `/usage`: show token/cost/metrics information from the last turn when available.
@@ -138,10 +139,12 @@ Recommended implementation order if more parity is needed: first add Ctrl-C guar
 - `-a, --ask-for-approval untrusted|on-failure|on-request|never` (default: `never`)
 - `--search`
 - `--no-alt-screen`
+- `--mock`
 
 Useful Codex `-c` keys:
 
-- `model_reasoning_effort=minimal|low|medium|high|xhigh` for codex.py reasoning (aka thinking) effort.
+- `model=<model>` to change the model; launch shortcut: `-m <model>`. Default: `gpt-5.4-mini`.
+- `model_reasoning_effort=minimal|low|medium|high|xhigh` for codex.py reasoning (aka thinking) effort. Default: `medium`.
 - `model_reasoning_summary=none|auto|concise|detailed` for codex.py reasoning (aka thinking) summaries; `summary` aliases to `concise`.
 - `service_tier=fast`
 - `approval_policy=untrusted|on-failure|on-request|never` (default: `never`)
@@ -188,6 +191,7 @@ Codex reasoning controls are available as `/reasoning [on|off|summary|raw|none|a
 - `--hide-metrics`
 - `--raw-json`
 - `--timeout SECONDS`
+- `--mock`
 
 Useful Claude `/config` keys:
 
@@ -212,4 +216,4 @@ codex.py uses `reasoning| ...` for Codex reasoning (aka thinking), plus `tool| .
 
 ## Resume Commands
 
-Both clients print a shell-safe resume command on exit when a thread/session id exists. The resume command preserves current settings such as model, effort, working directory, output toggles, metrics toggles, timeout, and backend-specific config where possible.
+Outside Codex TTY mode, both clients print a shell-safe resume command on exit when a thread/session id exists. Codex TTY mode follows the native terminal surface and suppresses internal `[thread]`/`[resume]` diagnostics. The resume command preserves current settings such as model, effort, working directory, output toggles, metrics toggles, timeout, and backend-specific config where possible.

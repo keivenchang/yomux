@@ -157,7 +157,9 @@ def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text
         return changes
     if cache_key is not None:
         if len(_CODEX_TRANSCRIPT_SCAN_CACHE) >= _CODEX_TRANSCRIPT_SCAN_CACHE_MAX:
-            _CODEX_TRANSCRIPT_SCAN_CACHE.pop(next(iter(_CODEX_TRANSCRIPT_SCAN_CACHE)))
+            oldest_key = next(iter(_CODEX_TRANSCRIPT_SCAN_CACHE), None)
+            if oldest_key is not None:
+                _CODEX_TRANSCRIPT_SCAN_CACHE.pop(oldest_key, None)
         _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_change_set(changes)
     return changes
 

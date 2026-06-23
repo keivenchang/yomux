@@ -29,6 +29,7 @@ from .transcripts import session_transcript_activity_state
 ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 DEFAULT_IDLE_SUGGESTION_TEXTS = {
     "commit the DYN_PARSER_DEBUG change",
+    "Explain this codebase",
     "Summarize recent commits",
 }
 CLIENT_FILENAME_BASES = {
@@ -374,10 +375,10 @@ def read_composer_state(capture_or_text: AgentTuiCapture | str) -> AgentComposer
     candidate, prompt_suggestion, raw_candidate, text_start_col = _composer_candidate(visible_text)
     if not candidate:
         return AgentComposerState(key="empty")
-    if prompt_suggestion and isinstance(capture_or_text, AgentTuiCapture) and _cursor_is_after_candidate(capture_or_text, candidate, text_start_col):
-        return AgentComposerState(key="draft", text=candidate, detected_text=candidate, prompt_suggestion=False, evidence="cursor-after-suggestion-text")
     if composer_text_is_idle_placeholder(candidate, prompt_suggestion=prompt_suggestion):
         return AgentComposerState(key="ghost", text=raw_candidate, detected_text="", prompt_suggestion=prompt_suggestion, evidence="idle-placeholder")
+    if prompt_suggestion and isinstance(capture_or_text, AgentTuiCapture) and _cursor_is_after_candidate(capture_or_text, candidate, text_start_col):
+        return AgentComposerState(key="draft", text=candidate, detected_text=candidate, prompt_suggestion=False, evidence="cursor-after-suggestion-text")
     if prompt_suggestion:
         return AgentComposerState(key="ghost", text=raw_candidate, detected_text="", prompt_suggestion=True, evidence="suggestion-style")
     return AgentComposerState(key="draft", text=candidate, detected_text=candidate, prompt_suggestion=False)

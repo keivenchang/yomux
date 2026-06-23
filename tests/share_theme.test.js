@@ -4958,7 +4958,7 @@ async function runShareThemeSuite() {
     });
     api.setPanelDetailsCollapsedForTest(detailsPanel, false);
     assert.ok(fits.length >= 1, 'hiding or showing the detail row schedules a visible tmux terminal fit');
-    assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
+    assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'Blocked', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
     assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
     assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
     assert.equal(api.tmuxSessionNameError('bad/name').includes('letters'), true);

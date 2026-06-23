@@ -932,7 +932,7 @@
   "state.reason.testsActive": "أمر الاختبار نشط",
   "state.reason.yoloBlockedApproval": "حظر YOLO موجه موافقة",
   "state.reason.yoloWillPressEnter": "يرى YOLO الموجه وسيضغط Enter",
-  "state.short.blocked": "BLK",
+  "state.short.blocked": "Blocked",
   "state.short.disconnected": "OFF",
   "state.short.done": "DONE",
   "state.short.idle": "IDLE",

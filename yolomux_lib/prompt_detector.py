@@ -613,6 +613,8 @@ def _infer_agent(visible_text: str, prompt_type: str | None = None) -> str:
         or "do you want to allow" in lowered
         or prompt_type in {"file", "tool", "plan"}
         or _is_ask_user_question_footer(text)
+        or "esc to cancel" in lowered
+        or (re.search(r"^\s*●\s+\S", text, re.MULTILINE) and not re.search(r"\(\s*y\s*/\s*n\s*\)|\by/n\b", lowered))
     ):
         return "claude"
     return "unknown"
@@ -986,14 +988,17 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
         if selected_index < 0:
             return False
 
+    composer_index = _current_input_prompt_index(lines)
     start = footer_index + 1 if footer_index >= 0 else selected_index + 1
-    for line in lines[start:]:
+    for index, line in enumerate(lines[start:], start=start):
         stripped = line.strip()
         # The Ctrl-T task overlay is a bounded block under a LIVE prompt: once its header appears,
         # the rest of the pane is overlay chrome, not newer output. break (not return False) so any
         # genuine output ABOVE the header is still evaluated below and still flags a dismissed prompt.
         if _TASK_LIST_HEADER_RE.match(stripped):
             break
+        if index == composer_index:
+            continue
         if (
             _is_separator_or_footer(line)
             or _CHOICE_LINE_RE.search(line)

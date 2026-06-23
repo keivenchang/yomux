@@ -594,7 +594,7 @@ fixtures:
 - case_name: free_text_question
   expected:
     action: null
-    agent: unknown
+    agent: claude
     approval_visible: false
     ask: true
     command: null
@@ -634,7 +634,7 @@ fixtures:
 - case_name: partial_choice_only
   expected:
     action: null
-    agent: unknown
+    agent: claude
     approval_visible: false
     ask: true
     command: null

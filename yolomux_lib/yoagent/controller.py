@@ -1508,7 +1508,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             visible_text = self.deps.tmux_capture_pane(pane_target, visible_only=True)
         except (OSError, subprocess.SubprocessError):
             return ""
-        if self.deps.yoagent_visible_composer_text(str(visible_text or "")):
+        composer_source = self.deps.yoagent_visible_composer_source(pane_target, str(visible_text or ""))
+        if self.deps.yoagent_visible_composer_text(composer_source):
             return ""
         lines = [line.rstrip() for line in str(visible_text or "").splitlines() if line.strip()]
         return truncate_text("\n".join(lines[-40:]), YOAGENT_ACTION_RESULT_MAX_CHARS)

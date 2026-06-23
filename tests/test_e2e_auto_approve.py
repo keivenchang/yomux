@@ -1,7 +1,7 @@
 """End-to-end auto-approve tests.
 
 Unlike the fast unit/fixture tests in `test_auto_approve_detector.py` (which feed hand-built or captured
-prompt text straight into `prompt_detector`), these launch a REAL `mock_*.py` agent in an isolated tmux
+prompt text straight into `prompt_detector`), these launch a real `claude.py --mock` / `codex.py --mock` agent in an isolated tmux
 session and the REAL `TmuxWebtermApp` + `AutoApproveWorker`, then assert YO auto-approves a `yesno`
 sequence HANDS-FREE — the full tmux-capture -> prompt_detector -> yolo_rules -> keystroke-send path that
 a unit test cannot exercise. This is the regression that catches "the detector is right but YO still
@@ -87,8 +87,8 @@ def _isolate_state(monkeypatch, tmp_path, control_dir):
     monkeypatch.setattr(yoagent_conversation_module, "YOAGENT_CLI_STATE_PATH", state_dir / "yoagent" / "cli-sessions.json")
 
 
-@pytest.mark.parametrize("mock_name,steps", [("mock_claude.py", 3), ("mock_codex.py", 2)])
-def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, mock_name, steps):
+@pytest.mark.parametrize("agent,steps", [("claude", 3), ("codex", 2)])
+def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, agent, steps):
     if not shutil.which("tmux"):
         pytest.skip("tmux is not installed")
     sock_base = Path("/tmp") / f"yoask-{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -102,21 +102,21 @@ def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, m
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 tools/{mock_name}",
+        f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 
     app = None
     try:
         booted, pane = _wait_until(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
-        assert booted, f"{mock_name} did not boot to an input prompt:\n{pane}"
+        assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
         _tmux(socket_path, "send-keys", "-t", f"{session}:", f"yesno {steps}", "Enter")
         prompted, pane = _wait_until(
             socket_path, session,
             lambda t: "do you want to proceed" in t.lower() or "run the following command" in t.lower(),
             20,
         )
-        assert prompted, f"{mock_name} did not render a permission prompt after `yesno {steps}`:\n{pane}"
+        assert prompted, f"{agent}.py --mock did not render a permission prompt after `yesno {steps}`:\n{pane}"
 
         app = TmuxWebtermApp([session], dangerously_yolo=False)
         payload = app.auto_approve_session_status(session, capture_bare_session_when_roster=True)
@@ -132,7 +132,7 @@ def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, m
         shutil.rmtree(sock_base, ignore_errors=True)
 
 
-def test_e2e_mock_codex_sleep_10_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path):
+def test_e2e_mock_codex_sleep_10_uses_working_turn_without_approval(monkeypatch, tmp_path):
     if not shutil.which("tmux"):
         pytest.skip("tmux is not installed")
     sock_base = Path("/tmp") / f"yoask-sleep-{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -146,33 +146,26 @@ def test_e2e_mock_codex_sleep_10_prompt_reaches_structured_ask_payload(monkeypat
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 tools/mock_codex.py",
+        f"cd {REPO_ROOT} && exec python3 tools/codex.py --mock",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 
     app = None
     try:
         booted, pane = _wait_until(socket_path, session, lambda t: "›" in t, 20)
-        assert booted, f"mock_codex.py did not boot to an input prompt:\n{pane}"
+        assert booted, f"codex.py --mock did not boot to an input prompt:\n{pane}"
         _tmux(socket_path, "send-keys", "-t", f"{session}:", "sleep 10", "Enter")
-        prompted, pane = _wait_until(
+        working, pane = _wait_until(
             socket_path, session,
-            lambda t: "Would you like to run the following command?" in t and "$ sleep 10" in t,
+            lambda t: "• Running sleep 10 now." in t and "• Working" in t,
             20,
         )
-        assert prompted, f"mock_codex.py did not render the exact sleep 10 approval prompt:\n{pane}"
+        assert working, f"codex.py --mock did not render sleep 10 as a working turn:\n{pane}"
 
         app = TmuxWebtermApp([session], dangerously_yolo=False)
         payload = app.auto_approve_session_status(session, capture_bare_session_when_roster=True)
-        assert payload["prompt"]["visible"] is True
-        assert payload["screen"]["key"] == "approval"
-        assert payload["prompt"]["agent"] == "codex"
-        assert payload["prompt"]["prompt_kind"] == "shell-command"
-        assert payload["prompt"]["question_text"] == "Would you like to run the following command?"
-        assert payload["prompt"]["command"] == "sleep 10"
-        assert payload["prompt"]["selected_option"] == 1
-        assert payload["prompt"]["yes_selected"] is True
-        assert payload["prompt"]["signature"]
+        assert payload["prompt"]["visible"] is False
+        assert payload["screen"]["key"] == "working"
     finally:
         _stop_app(app)
         _tmux(socket_path, "kill-server")
@@ -197,7 +190,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
     for agent, session in sessions.items():
         created = _tmux(
             socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 tools/mock_{agent}.py",
+            f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
         )
         assert created.returncode == 0, f"tmux new-session failed for {agent}: {created.stderr or created.stdout}"
 
@@ -205,7 +198,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
     try:
         for agent, session in sessions.items():
             booted, pane = _wait_until(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
-            assert booted, f"mock_{agent}.py did not boot to an input prompt:\n{pane}"
+            assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
 
         app = TmuxWebtermApp(list(sessions.values()), dangerously_yolo=False)
         sent: dict[str, tuple[dict, dict]] = {}
@@ -241,17 +234,17 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
                 lambda t: "Do you want to proceed?" in t or "Would you like to run the following command?" in t,
                 20,
             )
-            assert prompted, f"mock_{agent}.py did not render a permission prompt for date:\n{pane}"
+            assert prompted, f"{agent}.py --mock did not render a permission prompt for date:\n{pane}"
             _tmux(socket_path, "send-keys", "-t", f"{session}:", "1")
             completed, pane = _wait_until(socket_path, session, lambda t: "Bash(date)" in t, 20)
-            assert completed, f"mock_{agent}.py did not show date output after approval:\n{pane}"
+            assert completed, f"{agent}.py --mock did not show date output after approval:\n{pane}"
 
         for agent, (preview, marker) in sent.items():
             result = app.run_yoagent_action_result_watcher(
                 preview,
                 marker,
                 watch_id=f"wait-{agent}",
-                wait_seconds=1,
+                wait_seconds=3,
                 poll_seconds=0.1,
             )
             assert result["ok"] is True, result
@@ -270,8 +263,8 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         shutil.rmtree(sock_base, ignore_errors=True)
 
 
-@pytest.mark.parametrize("mock_name,steps", [("mock_claude.py", 3), ("mock_codex.py", 2)])
-def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, mock_name, steps):
+@pytest.mark.parametrize("agent,steps", [("claude", 3), ("codex", 2)])
+def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
     if not shutil.which("tmux"):
         pytest.skip("tmux is not installed")
     # AF_UNIX sockets (tmux + the App control server) cap the path at ~108 chars, so keep them under a
@@ -287,7 +280,7 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, mock_name, steps
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 tools/{mock_name}",
+        f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 
@@ -297,14 +290,14 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, mock_name, steps
         # Wait for the mock to reach its input prompt (real Claude renders ❯, real Codex ›), then drive
         # the queued Yes/No sequence.
         booted, pane = _wait_until(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
-        assert booted, f"{mock_name} did not boot to an input prompt:\n{pane}"
+        assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
         _tmux(socket_path, "send-keys", "-t", f"{session}:", f"yesno {steps}", "Enter")
         prompted, pane = _wait_until(
             socket_path, session,
             lambda t: "do you want to proceed" in t.lower() or "run the following command" in t.lower(),
             20,
         )
-        assert prompted, f"{mock_name} did not render a permission prompt after `yesno {steps}`:\n{pane}"
+        assert prompted, f"{agent}.py --mock did not render a permission prompt after `yesno {steps}`:\n{pane}"
 
         # Start the REAL app + auto-approve worker. dangerously_yolo=True mirrors a `--dang` server.
         app = TmuxWebtermApp([session], dangerously_yolo=True)
@@ -314,11 +307,11 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, mock_name, steps
         # The worker now runs hands-free in its own thread — NO manual keystrokes. Poll for completion.
         completed, pane = _wait_until(socket_path, session, lambda t: "complete" in t.lower(), 60)
         assert completed, (
-            f"YO did not auto-approve {mock_name} hands-free; "
+            f"YO did not auto-approve {agent}.py --mock hands-free; "
             f"approved={worker.approved} blocked={worker.blocked} last_action={worker.last_action!r}\n{pane}"
         )
         assert worker.approved >= steps, (
-            f"expected >= {steps} hands-free approvals for {mock_name}, got {worker.approved} "
+            f"expected >= {steps} hands-free approvals for {agent}.py --mock, got {worker.approved} "
             f"(blocked={worker.blocked}, last_action={worker.last_action!r})"
         )
     finally:

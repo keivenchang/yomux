@@ -9,7 +9,11 @@ client_name: Codex CLI
 client_version: synthetic Codex CLI fixture
 client_version_slug: codex-cli-synthetic
 codex_version: ''
-cursor: {}
+cursor:
+  character: '›'
+  synthesized: true
+  x: 0
+  y: 3
 expected:
   action: null
   agent: codex
