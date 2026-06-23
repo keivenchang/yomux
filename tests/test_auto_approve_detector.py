@@ -477,6 +477,25 @@ def test_prompt_corpus_inventory_declares_required_families():
     assert (PROMPT_CORPUS_DIR / PROMPT_CORPUS_INVENTORY["capture_harness"]).exists()
 
 
+def test_prompt_corpus_live_capture_targets_are_actionable():
+    fixtures_by_family: dict[str, list[dict[str, object]]] = {}
+    for fixture in PROMPT_CORPUS_INVENTORY["fixtures"]:
+        fixtures_by_family.setdefault(fixture["family"], []).append(fixture)
+
+    targets = PROMPT_CORPUS_INVENTORY["live_capture_targets"]
+    assert targets
+    for target in targets:
+        family = target["family"]
+        current_fixture = target["current_fixture"]
+        assert target["agent"] in {"claude", "codex"}
+        assert family in fixtures_by_family
+        assert str(current_fixture).startswith("synthetic/")
+        assert (PROMPT_CORPUS_DIR / current_fixture).exists()
+        assert any(fixture["file"] == current_fixture for fixture in fixtures_by_family[family])
+        assert target["why_currently_synthetic"]
+        assert target["capture_when"]
+
+
 def test_prompt_corpus_parity_groups_reference_existing_fixtures():
     groups = PROMPT_CORPUS_INVENTORY["parity_groups"]
     assert groups

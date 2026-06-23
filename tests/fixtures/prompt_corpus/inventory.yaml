@@ -802,6 +802,67 @@ gaps:
 - family: bell-only-signal
   reason: A bell-only state needs tmux signal capture metadata, not only visible pane text.
   source: uncaptured live signal
+live_capture_targets:
+- agent: codex
+  capture_when: Capture a real Codex two-option command approval after a CLI upgrade or live pane exposes this exact reduced option set.
+  current_fixture: synthetic/shell_pytest_2_option__codex-cli-synthetic_20260620.yaml
+  family: codex-shell-approval-2-option
+  why_currently_synthetic: Real Codex command approvals are already covered by three-option and reject-selected captures; this reduced two-option layout is a Codex-only variant, not a Claude counterpart.
+- agent: codex
+  capture_when: Capture a real Codex prefix-rule approval when a command offers a durable allow rule for a command prefix.
+  current_fixture: synthetic/prefix_rule_gh_api__codex-cli-synthetic_20260620.yaml
+  family: codex-prefix-rule
+  why_currently_synthetic: Codex exposes command-prefix allow rules; Claude permission prompts use different product wording and should not be forced into a same-name pair.
+- agent: codex
+  capture_when: Capture a real Codex network escalation prompt when a live command requests network access outside the current policy.
+  current_fixture: synthetic/network_escalation__codex-cli-synthetic_20260620.yaml
+  family: codex-network-escalation
+  why_currently_synthetic: Network escalation is a Codex sandbox/approval surface. Claude has web/tool permission prompts instead, so the gap is a live Codex capture, not a Claude capture.
+- agent: codex
+  capture_when: Capture a real Codex sandbox escalation prompt when a live command requests filesystem or sandbox access outside the current policy.
+  current_fixture: synthetic/sandbox_escalation__codex-cli-synthetic_20260620.yaml
+  family: codex-sandbox-escalation
+  why_currently_synthetic: Sandbox escalation is specific to Codex's approval model. Claude permission prompts are grouped under Claude tool/file/Bash permissions.
+- agent: codex
+  capture_when: Capture a real Codex MCP/tool approval when a configured MCP server requests user approval in the TUI.
+  current_fixture: synthetic/mcp_tool_approval__codex-cli-synthetic_20260620.yaml
+  family: codex-mcp-tool-approval
+  why_currently_synthetic: MCP approval is a Codex tool-approval shape in this corpus. It should be replaced by a live Codex capture when an MCP prompt is available.
+- agent: codex
+  capture_when: Capture a real Codex redraw where an approval prompt reappears below completed tool output.
+  current_fixture: synthetic/reappeared_prompt_after_tool__codex-cli-synthetic_20260620.yaml
+  family: reappeared-prompt-after-tool
+  why_currently_synthetic: This guards redraw ordering after tool output. The equivalent Claude risk is covered by other visible prompt boundaries, not a same-name capture.
+- agent: codex
+  capture_when: Capture a minimal live Codex working block if the current CLI exposes one without old transcript rows.
+  current_fixture: synthetic/working_spinner__codex-cli-synthetic_20260620.yaml
+  family: working-spinner
+  why_currently_synthetic: Real working state is already covered by Codex `working_command_counter` and Claude `working_visible_counter`; this is a compact Codex layout target, not a missing Claude case.
+- agent: claude
+  capture_when: Capture a real Claude Bash permission prompt when a live pane is stopped on a Bash command approval.
+  current_fixture: synthetic/bash_step_marker__claude-code-synthetic_20260620.yaml
+  family: claude-bash-permission
+  why_currently_synthetic: Claude Bash permission is product-specific. Codex command approvals are already captured separately as Codex shell approvals.
+- agent: claude
+  capture_when: Capture a real Claude Bash permission redraw where no selector highlight is visible.
+  current_fixture: synthetic/bash_no_selector__claude-code-synthetic_20260620.yaml
+  family: claude-bash-no-selector
+  why_currently_synthetic: This is a Claude redraw/accessibility variant. It should be replaced by live Claude evidence when it appears, not paired with Codex.
+- agent: claude
+  capture_when: Capture a real Claude file-edit permission prompt when Claude is awaiting edit approval.
+  current_fixture: synthetic/file_edit__claude-code-synthetic_20260620.yaml
+  family: claude-file-permission
+  why_currently_synthetic: File-edit permission is a Claude product surface. Codex approvals are grouped by command/escalation/MCP surfaces instead.
+- agent: claude
+  capture_when: Capture a real Claude tool permission prompt such as WebFetch when the TUI is waiting for approval.
+  current_fixture: synthetic/tool_allow_webfetch__claude-code-synthetic_20260620.yaml
+  family: claude-tool-permission
+  why_currently_synthetic: Claude tool permission prompts are not one-to-one with Codex MCP or sandbox approvals; they need live Claude captures.
+- agent: claude
+  capture_when: Capture a real Claude free-text AskUserQuestion with no numbered options if a live pane exposes that prompt shape.
+  current_fixture: synthetic/free_text_question__claude-code-synthetic_20260620.yaml
+  family: claude-free-text-question
+  why_currently_synthetic: Real Claude AskUserQuestion captures cover selector/accessibility variants, but not a free-text-only shape.
 purpose: 'Corpus inventory for YOLOmux prompt detection: agent_tui capture JSON fixtures for visible approval/question panes
   that should raise ASK? and negative panes that must stay quiet.'
 required_families:
