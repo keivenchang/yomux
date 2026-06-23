@@ -287,10 +287,10 @@ async function runTabberSuite() {
     api.setTranscriptInfoForTest('8', {project: {git: {root: '/home/test'}}, panes: agentPane('/home/test')});
     api.setTranscriptInfoForTest('9', {project: {git: {root: '/etc/yolo'}}, panes: agentPane('/etc/yolo')});
     api.setTranscriptInfoForTest('10', {project: {git: {root: '~/already'}}, panes: agentPane('~/already')});
-    api.setAutoApproveStateForTest('7', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '/home/test/project', mtime: 7000}]}]});
-    api.setAutoApproveStateForTest('8', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '/home/test', mtime: 6000}]}]});
-    api.setAutoApproveStateForTest('9', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '/etc/yolo', mtime: 5000}]}]});
-    api.setAutoApproveStateForTest('10', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '~/already', mtime: 4000}]}]});
+    api.setAutoApproveStateForTest('7', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', current: true, window_active: true, path_entries: [{path: '/home/test/project', mtime: 7000}]}]});
+    api.setAutoApproveStateForTest('8', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', current: true, window_active: true, path_entries: [{path: '/home/test', mtime: 6000}]}]});
+    api.setAutoApproveStateForTest('9', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', current: true, window_active: true, path_entries: [{path: '/etc/yolo', mtime: 5000}]}]});
+    api.setAutoApproveStateForTest('10', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', current: true, window_active: true, path_entries: [{path: '~/already', mtime: 4000}]}]});
 
     const tree = api.buildTabberTree();
     const sessionSeven = tree.entries.find(entry => entry.tabber?.session === '7');
@@ -1194,7 +1194,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('function setTreeItemAria(row') && (source.match(/setTreeItemAria\(row/g) || []).length >= 2, 'DOIT.61 B5: treeitem aria is shared');
     assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
     assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
-    assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})"), 'DOIT.61 B7/PD: active window state, activity icons, and pid are passed as data');
+    assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})") && source.includes('function agentWindowPayloadCurrent(agent)'), 'DOIT.61 B7/PD: current window state, activity icons, and pid are passed as separate data');
     assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux window record source as Tabber');
     assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux window pid formatter');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');

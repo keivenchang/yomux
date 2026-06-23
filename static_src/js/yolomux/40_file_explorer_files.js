@@ -3562,6 +3562,39 @@ function agentWindowPayloadKey(agent) {
   return index !== null && kind ? `${index}:${kind}` : '';
 }
 
+const AGENT_WINDOW_ATTENTION_STATES = new Set(['approval', 'needs-approval', 'needs-input', 'interrupted']);
+
+function agentWindowStateKey(state) {
+  return String(state || '').trim();
+}
+
+function agentWindowIsWorkingState(state) {
+  return agentWindowStateKey(state) === 'working';
+}
+
+function agentWindowIsAttentionState(state) {
+  return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
+}
+
+function agentWindowRawStateTone(state) {
+  if (agentWindowIsWorkingState(state)) return 'working';
+  if (agentWindowIsAttentionState(state)) return 'attention';
+  return 'idle';
+}
+
+function agentWindowActivityTone(state) {
+  const key = agentWindowStateKey(state);
+  if (key === 'working') return 'working';
+  if (key === 'cooldown') return 'cooldown';
+  if (key === 'attention') return 'attention';
+  if (key === 'settled') return 'settled';
+  return 'idle';
+}
+
+function agentWindowStateRank(state) {
+  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[agentWindowStateKey(state)] ?? 9;
+}
+
 function normalizedAgentWindowPayload(agent) {
   const kind = agentWindowKind(agent?.kind);
   const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
@@ -3569,7 +3602,7 @@ function normalizedAgentWindowPayload(agent) {
   const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || agent?.label || kind);
   const pathEntries = agentWindowPathEntries(agent);
   const git = agentWindowPrimaryGit(agent);
-  return {
+  const normalized = {
     ...agent,
     kind,
     window: windowText,
@@ -3577,12 +3610,15 @@ function normalizedAgentWindowPayload(agent) {
     label: String(agent?.label || canonical),
     window_label: canonical,
     pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
-    active: typeof agent?.active === 'boolean' ? agent.active : agent?.active,
+    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : agent?.current,
+    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : agent?.window_active,
     path: pathEntries[0]?.path || String(agent?.path || ''),
     paths: pathEntries.map(item => item.path),
     path_entries: pathEntries,
     git,
   };
+  delete normalized.active;
+  return normalized;
 }
 
 function agentWindowPayloadRows(value) {
@@ -3602,9 +3638,16 @@ function mergeAgentWindowPayload(base, candidates) {
     merged.git = enrich.git;
   }
   if (!(merged.git && typeof merged.git === 'object') && enrich.git && typeof enrich.git === 'object') merged.git = enrich.git;
-  if (typeof merged.active !== 'boolean' && typeof enrich.active === 'boolean') merged.active = enrich.active;
+  if (typeof merged.current !== 'boolean' && typeof enrich.current === 'boolean') merged.current = enrich.current;
+  if (typeof merged.window_active !== 'boolean' && typeof enrich.window_active === 'boolean') merged.window_active = enrich.window_active;
   if ((!Number.isFinite(Number(merged.pid)) || Number(merged.pid) <= 0) && Number.isFinite(Number(enrich.pid)) && Number(enrich.pid) > 0) merged.pid = enrich.pid;
   return normalizedAgentWindowPayload(merged);
+}
+
+function agentWindowPayloadCurrent(agent) {
+  if (typeof agent?.current === 'boolean') return agent.current;
+  if (typeof agent?.window_active === 'boolean') return agent.window_active;
+  return null;
 }
 
 function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
@@ -3724,15 +3767,15 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
   const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
-  const stateKey = String(state || '').trim();
-  if (['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(stateKey)) {
+  const stateKey = agentWindowStateKey(state);
+  if (agentWindowIsAttentionState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {state: stateKey, seenWorking: previous.seenWorking === true, stoppedAt: Number(previous.stoppedAt) || 0});
     }
     return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`};
   }
-  if (stateKey === 'working') {
+  if (agentWindowIsWorkingState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
@@ -3763,7 +3806,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
   if (!item) return '';
-  const tone = item.state === 'working' ? 'working' : item.state === 'cooldown' ? 'cooldown' : item.state === 'attention' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
+  const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -3833,13 +3876,14 @@ function buildTabberTree() {
       const windowMtime = isAgent
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
-      const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active === true;
+      const agentCurrent = agentWindowPayloadCurrent(agentStatus);
+      const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
       const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
       const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
-      const dateHtml = agentStatusForDisplay && (agentStatusIsAttentionState(agentStatusForDisplay.state) || agentStatusForDisplay.current === true)
+      const dateHtml = agentStatusForDisplay && agentWindowIsAttentionState(agentStatusForDisplay.state)
         ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
         : '';
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);

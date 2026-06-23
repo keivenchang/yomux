@@ -643,11 +643,11 @@ function gitHeadValueHtml(git) {
 }
 
 function sessionPopoverAgentStateRank(state) {
-  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[String(state || '')] ?? 9;
+  return typeof agentWindowStateRank === 'function' ? agentWindowStateRank(state) : 9;
 }
 
 function agentStatusIsAttentionState(state) {
-  return ['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(String(state || '').trim());
+  return typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state);
 }
 
 function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, options = {}) {
@@ -659,20 +659,18 @@ function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, o
 
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
   const state = String(agent?.state || 'idle');
-  if (state === 'working') {
+  if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
   }
-  if (agentStatusIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
-  if (agent?.current === true) return t('branch.current');
+  if (agentWindowIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : 'idle';
 }
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
   const text = sessionPopoverAgentStateText(agent, nowSeconds);
-  if (agentStatusIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
-  if (agent?.current === true) return statusIndicatorLabelHtml(text, 'active', className, 'agent-status-active');
+  if (agentWindowIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
   return `<span class="${esc(className)}">${esc(text)}</span>`;
 }
 
@@ -721,8 +719,8 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
       state: String(agent?.state || 'idle'),
-      current: typeof agent?.active === 'boolean'
-        ? agent.active === true
+      current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
+        ? agentWindowPayloadCurrent(agent) === true
         : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
@@ -733,8 +731,8 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
 }
 
 function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000) {
-  const working = agent.state === 'working';
-  const attention = agentStatusIsAttentionState(agent.state);
+  const working = agentWindowIsWorkingState(agent.state);
+  const attention = agentWindowIsAttentionState(agent.state);
   const dot = working || attention ? '●' : '○';
   const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
   const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
@@ -742,7 +740,7 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
-  const dotTone = working ? 'working' : attention ? 'attention' : 'idle';
+  const dotTone = agentWindowRawStateTone(agent.state);
   const dotClasses = statusIndicatorDotClasses(
     dotTone,
     'session-agent-dot',

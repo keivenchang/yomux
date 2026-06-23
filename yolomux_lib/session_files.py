@@ -465,6 +465,7 @@ def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
     if result.returncode != 0:
         return refs
     seen = {"current", "HEAD"}
+    head_commit_seen = False
     for line in result.stdout.splitlines():
         parts = line.split("\x1f", 4)
         if len(parts) < 3 or not parts[0] or parts[0] in seen:
@@ -473,6 +474,17 @@ def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
         if len(parts) >= 5:
             entry["date"] = parts[3]
             entry["author"] = parts[4]
+        if not head_commit_seen:
+            refs[0] = {
+                **refs[0],
+                "short": f"{parts[1]}/HEAD",
+                "subject": parts[2],
+                "commit": parts[0],
+            }
+            if len(parts) >= 5:
+                refs[0]["date"] = parts[3]
+                refs[0]["author"] = parts[4]
+            head_commit_seen = True
         refs.append(entry)
         seen.add(parts[0])
     return refs

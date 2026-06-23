@@ -1696,7 +1696,8 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
     const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
-    const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active;
+    const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
+    const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
     const pressed = active ? 'true' : 'false';
     const activeClass = active ? ' active' : '';

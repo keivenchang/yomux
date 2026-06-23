@@ -16,6 +16,10 @@ from .exceptions import TransportInterrupted
 from .stream_events import ClaudeStreamJsonNormalizer
 
 
+CLAUDE_STREAM_JSON_DEFAULT_TOOLS = "default"
+CLAUDE_STREAM_JSON_PERMISSION_MODE = "bypassPermissions"
+
+
 def claude_stream_json_env() -> dict[str, str]:
     return {**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"}
 

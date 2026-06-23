@@ -130,7 +130,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/statusIndicatorInlineClasses\(questionTone,\s*'topbar-activity-ques'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK? badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'ASK? status labels inherit shared status-indicator tone behavior without badge text-transform');
-    assert.ok(/const tone = item\.state === 'working'[\s\S]*statusIndicatorDotClasses\(\s*tone,\s*'agent-window-activity-icon'/.test(fileTreeSource), 'tmux window activity circles inherit shared dot status behavior');
+    assert.ok(/const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,\s*'agent-window-activity-icon'/.test(fileTreeSource), 'tmux window activity circles inherit shared dot status behavior through the shared activity-tone helper');
     assert.ok(/statusIndicatorDotClasses\(\s*dotTone,\s*'session-agent-dot'/.test(popoverSource), 'session popover activity circles inherit shared dot status behavior');
     assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK?/QUES?/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
@@ -776,7 +776,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(yoloCss), 'active tmux window activity dots inherit the shared brightness pulse in the built CSS');
     assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux window buttons have no per-agent tint CSS');
     assert.ok(source.includes('const AGENT_WINDOW_COOLDOWN_SECONDS = 60'), 'agent window cooldown has its own 60-second owner, separate from file-recency timing');
-    assert.ok(source.includes("item.state === 'cooldown' ? 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
+    assert.ok(source.includes("if (key === 'cooldown') return 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
     assert.ok(yoloCss.includes('.status-indicator--cooldown') && yoloCss.includes('var(--accent-gold)'), 'cooldown dot uses the shared theme-aware yellow/gold token');
     assert.ok(/status-indicator--dot\.status-indicator--working\.heartbeat-pulse[\s\S]*animation-delay:\s*var\(--attention-animation-delay/.test(yoloCss), 'working dots use the shared ASK? animation phase');
     assert.equal(source.includes("status-indicator--cooldown', 'heartbeat-pulse"), false, 'cooldown tone does not inherit heartbeat in the built source');
@@ -1667,14 +1667,14 @@ async function runEditorPreviewSuite() {
     assert.ok(recentIdleText.includes('0:codex — &lt;15 sec ago') || recentIdleText.includes('0:codex — <15 sec ago'), 'sub-15-second idle agents use the shared Ago recency label');
 
     api.setAutoApproveStateForTest('4', {
-      agent_windows: [{kind: 'codex', state: 'idle', idle_since: now - 900, last_active_ts: now - 900, window_index: 1, window_name: 'codex', window_label: '1:codex', active: true}],
+      agent_windows: [{kind: 'codex', state: 'idle', idle_since: now - 900, last_active_ts: now - 900, window_index: 1, window_name: 'codex', window_label: '1:codex', current: true, window_active: true}],
     });
     const currentIdleHtml = api.sessionPopoverHtml('4', {selected_pane: {current_path: '/repo', window_index: '1'}, project: {git: {root: '/repo'}}, agents: [{kind: 'codex'}]}, 'codex', false);
     const currentIdleText = currentIdleHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(currentIdleText.includes('1:codex — active'), 'focused/current agent window display state is active, not transcript-idle');
-    assert.equal(currentIdleText.includes('idle 15m'), false, 'focused/current agent window is not falsely labeled idle from transcript recency');
+    assert.ok(currentIdleText.includes('1:codex — 15 min ago'), 'focused/current idle agent window displays transcript recency, not tmux selection');
+    assert.equal(currentIdleText.includes('1:codex — active'), false, 'tmux selection is not treated as recent agent activity');
     assert.ok(/session-agent-row[^"]*state-idle[^"]*current/.test(currentIdleHtml), 'focused/current agent window row carries the current class for header styling');
-    assert.ok(/agent-status-active[^"]*status-indicator--active/.test(currentIdleHtml), 'focused/current agent window label uses the shared active/max-contrast status class');
+    assert.equal(/agent-status-active[^"]*status-indicator--active/.test(currentIdleHtml), false, 'focused/current idle agent window does not render an active status pill');
 
     const parityInfo = {
       selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/repo/codex-root/src'},
@@ -1710,7 +1710,7 @@ async function runEditorPreviewSuite() {
     });
     const parityPopoverHtml = api.sessionPopoverHtml('5', parityInfo, 'claude', false);
     const parityPopoverText = parityPopoverHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(parityPopoverText.includes('1:claude (pid=222) — active'), 'popover marks tmux window_active=1 as active even when selected_pane still points at window 0');
+    assert.ok(parityPopoverText.includes('1:claude (pid=222) — 1 hr ago'), 'popover keeps tmux window_active row current while showing idle transcript recency');
     assert.ok(parityPopoverText.includes('0:codex (pid=111) — working for 1m 5s'), 'non-focused window keeps its own working state');
     assert.equal((parityPopoverHtml.match(/session-agent-row[^"]*current/g) || []).length, 1, 'popover marks exactly one agent window current');
     assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('5', parityInfo)), ['1'], 'window bar marks the tmux window_active window');
@@ -1718,7 +1718,7 @@ async function runEditorPreviewSuite() {
     const parityClaudeRow = parityRows.find(row => row.type === 'window' && /^1:claude/.test(row.name));
     const parityCodexRow = parityRows.find(row => row.type === 'window' && /^0:codex/.test(row.name));
     assert.equal(parityClaudeRow?.classes.includes('tabber-active-window'), true, 'Tabber marks the same active tmux window as the popover and window bar');
-    assert.equal(parityClaudeRow?.date, 'active', 'Tabber active window displays active instead of stale transcript recency');
+    assert.equal(parityClaudeRow?.date, '1 hr ago', 'Tabber current window displays idle transcript recency instead of tmux selection as activity');
     assert.ok((parityCodexRow?.nameHtml || '').includes('agent-window-activity-icon--working'), 'Tabber working dot uses the same working state as the popover');
     const parityTree = api.buildTabberTree();
     const paritySession = parityTree.entries.find(entry => entry.tabber?.session === '5');

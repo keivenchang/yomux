@@ -1025,6 +1025,8 @@ def test_git_recent_refs_exposes_more_than_twenty_commits(tmp_path):
     refs = session_files.git_recent_refs(repo)
 
     assert refs[0]["ref"] == "HEAD"
+    assert refs[0]["commit"] == git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert refs[0]["short"].endswith("/HEAD")
     assert refs[1]["ref"] == "current"
     assert len(refs) >= 27
     assert any(item["subject"] == "commit 0" for item in refs)

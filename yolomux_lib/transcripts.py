@@ -22,7 +22,7 @@ from .yolo_rules import hard_floor_decision
 
 
 TERMINAL_ACTIVITY_REPORT_RE = re.compile(
-    r"(?:\x1b\[[0-9;]*R|\x1b\[(?:I|O)|\x1b\[[0-9;]*t|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))"
+    r"(?:\x1b\[[0-9;]*R|\x1b\[(?:I|O)|\x1b\[[0-9;]*t|\x1b\[[<][0-9;]*[mM]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))"
 )
 
 

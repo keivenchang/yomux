@@ -17,6 +17,8 @@ from typing import Any
 from ..activity_summary import build_yoagent_chat_prompt
 from ..activity_summary import build_yoagent_resume_prompt
 from ..activity_summary import yoagent_question_requests_session_list
+from ..agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+from ..agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_PERMISSION_MODE
 from ..common import PROJECT_ROOT
 from ..common import SUMMARY_CODEX_SERVICE_TIER
 from ..common import YOAGENT_CLAUDE_SUMMARY_MODEL
@@ -292,11 +294,14 @@ class YoagentBackendsMixin:
             claude_model = str(current_settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
             claude_effort = str(current_settings.get("claude_effort") or "").strip()
             answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model, effort=claude_effort)
+            tools = CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+            permission_mode = CLAUDE_STREAM_JSON_PERMISSION_MODE
         return answer, self.deps.yoagent_cli_fallback_reason(backend, error), {
             "backend": backend,
             "prompt_chars": len(prompt),
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "direct": True,
+            **({"tools": tools, "permission_mode": permission_mode, "external_tools_enabled": True} if backend == "claude" else {}),
         }
 
 
@@ -376,9 +381,10 @@ class YoagentBackendsMixin:
             claude_effort = str(settings.get("claude_effort") or "").strip()
             stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
             cancel_event = self.deps.yoagent_chat_request_cancel_event(request_id) if request_id else None
-            tools = "default" if require_external_tools else ""
-            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event, tools=tools)
-            backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None, "external_tools_enabled": bool(tools), "tools": tools or None}
+            tools = CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+            permission_mode = CLAUDE_STREAM_JSON_PERMISSION_MODE
+            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event, tools=tools, permission_mode=permission_mode)
+            backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None, "external_tools_enabled": True, "tools": tools, "permission_mode": permission_mode}
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = self.deps.yoagent_cli_fallback_reason(backend, error)
         status = {
@@ -473,7 +479,8 @@ class YoagentBackendsMixin:
         stream_callback: Any | None = None,
         request_id: str = "",
         cancel_event: threading.Event | None = None,
-        tools: str = "",
+        tools: str = CLAUDE_STREAM_JSON_DEFAULT_TOOLS,
+        permission_mode: str = CLAUDE_STREAM_JSON_PERMISSION_MODE,
     ) -> tuple[str, str]:
         if not shutil.which("claude"):
             return "", "claude CLI not found"
@@ -492,6 +499,8 @@ class YoagentBackendsMixin:
             target["agent_effort"] = effort
         if tools:
             target["tools"] = tools
+        if permission_mode:
+            target["permission_mode"] = permission_mode
         result = ClaudeStreamJsonTransport().send(
             target,
             prompt,

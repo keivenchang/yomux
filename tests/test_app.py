@@ -919,17 +919,60 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
     assert by_kind["claude"]["state"] == "working"
     assert by_kind["claude"]["working_elapsed_seconds"] == 3720.0
     assert by_kind["claude"]["pid"] == 10
-    assert by_kind["claude"]["active"] is True
+    assert "active" not in by_kind["claude"]
+    assert by_kind["claude"]["current"] is True
+    assert by_kind["claude"]["window_active"] is True
     assert by_kind["claude"]["paths"] == ["/repo/claude-touched"]
     assert by_kind["claude"]["path_entries"][0]["path"] == "/repo/claude-touched"
     assert by_kind["claude"]["git"]["branch"] == "claude-touched-branch"
     assert by_kind["codex"]["state"] == "idle"
     assert by_kind["codex"]["idle_since"] == 1010.0
     assert by_kind["codex"]["pid"] == 11
-    assert by_kind["codex"]["active"] is False
+    assert "active" not in by_kind["codex"]
+    assert by_kind["codex"]["current"] is False
+    assert by_kind["codex"]["window_active"] is False
     assert by_kind["codex"]["paths"] == ["/repo/codex-touched"]
     assert by_kind["codex"]["git"]["branch"] == "codex-touched-branch"
     assert capture_calls == [("%10", True), ("%11", True)]
+
+
+def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
+    pane = PaneInfo(
+        session="2",
+        window="0",
+        window_name="claude",
+        pane="0",
+        pane_id="%20",
+        target="%20",
+        current_path="/repo/idle",
+        command="claude",
+        active=True,
+        window_active=True,
+        title="claude",
+        pid=20,
+        process_label="claude",
+        process_label_pid=20,
+    )
+    info = SessionInfo(
+        session="2",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[AgentInfo("2", "claude", 20, "%20", "claude", "/repo/idle", "idle", "claude-id", str(tmp_path / "claude.jsonl"), None)],
+    )
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, **_kwargs: "idle prompt")
+    monkeypatch.setattr(app_module, "agent_screen_state", lambda _text, **_kwargs: {"key": "idle", "text": ""})
+
+    webapp = app_module.TmuxWebtermApp(["2"])
+    try:
+        rows = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})
+    finally:
+        webapp.control_server.stop()
+
+    assert len(rows) == 1
+    assert rows[0]["state"] == "idle"
+    assert "active" not in rows[0]
+    assert rows[0]["current"] is True
+    assert rows[0]["window_active"] is True
 
 
 def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
@@ -1745,7 +1788,8 @@ def test_activity_recency_ignores_terminal_report_heartbeats(monkeypatch):
         webapp.activity_ledger.heartbeat("6", "1", ts=1000.0, byte_count=1)
         monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 1065.0)
 
-        webapp.record_user_input("6", len("\x1b[12;40R"), data="\x1b[12;40R")
+        for control_report in ("\x1b[12;40R", "\x1b[<0;12;34M", "\x1b[<0;12;34m", "\x1b[<64;80;24M"):
+            webapp.record_user_input("6", len(control_report), data=control_report)
         activity = webapp.activity_snapshot_with_recency()
 
         assert 1065.0 - activity["6"]["active_recency_ts"] >= 60.0
@@ -6240,8 +6284,15 @@ def test_yoagent_cli_backend_resumes_and_trims_context(monkeypatch):
     assert calls[0]["session_id"] == calls[1]["session_id"]
     assert calls[0]["model"] == "claude-haiku-4-5"
     assert calls[0]["effort"] == "low"
+    assert calls[0]["tools"] == "default"
+    assert calls[0]["permission_mode"] == "bypassPermissions"
+    assert calls[1]["tools"] == "default"
+    assert calls[1]["permission_mode"] == "bypassPermissions"
     assert calls[1]["effort"] == "low"
     assert first_status["seeded"] is True
+    assert first_status["external_tools_enabled"] is True
+    assert first_status["tools"] == "default"
+    assert first_status["permission_mode"] == "bypassPermissions"
     assert second_status["resumed"] is True
     assert second_status["activity_context_forced"] is True
     assert second_status["activity_context_sent"] is True
@@ -6332,6 +6383,9 @@ def test_yoagent_cli_backend_does_not_hold_state_lock_during_cli(monkeypatch):
     assert reason == ""
     assert observed == [True]
     assert status["backend"] == "claude"
+    assert status["external_tools_enabled"] is True
+    assert status["tools"] == "default"
+    assert status["permission_mode"] == "bypassPermissions"
 
 
 def test_codex_event_session_id_extracts_common_shapes():

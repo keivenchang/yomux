@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import yolomux_lib.yoagent.transports as transport_module
 from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_argv
+from yolomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+from yolomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_PERMISSION_MODE
 from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_result
 from yolomux_lib.common import codex_exec_argv
 from yolomux_lib.yoagent.transports import ClaudeChannelsTransport
@@ -52,11 +54,12 @@ def test_codex_exec_search_is_top_level_and_not_used_for_resume():
 
 
 def test_claude_stream_json_argv_includes_partials_and_optional_tools():
-    args = claude_stream_json_argv({"agent_model": "claude-haiku-4-5", "agent_effort": "high", "tools": "default"})
+    args = claude_stream_json_argv({"agent_model": "claude-haiku-4-5", "agent_effort": "high", "tools": CLAUDE_STREAM_JSON_DEFAULT_TOOLS, "permission_mode": CLAUDE_STREAM_JSON_PERMISSION_MODE})
 
     assert "--include-partial-messages" in args
     assert "--show-thinking" not in args
-    assert args[args.index("--tools") + 1] == "default"
+    assert args[args.index("--tools") + 1] == CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+    assert args[args.index("--permission-mode") + 1] == CLAUDE_STREAM_JSON_PERMISSION_MODE
 
 
 def test_claude_stream_json_result_falls_back_to_wrapped_text_deltas():

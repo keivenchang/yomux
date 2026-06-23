@@ -281,6 +281,38 @@ async function runShareThemeSuite() {
     const duplicateShaOptions = api.diffRefSelectOptionsHtml('abc123def4567890', {suggestions: [{ref: 'abc123d', short: 'abc123d', subject: 'same commit'}]});
     assert.equal((duplicateShaOptions.match(/<option/g) || []).length, 1, 'diff ref picker dedupes full SHA and short SHA for the same commit');
     assert.equal(duplicateShaOptions.includes('selected ref'), false, 'diff ref picker does not add a synthetic duplicate for a selected SHA already in suggestions');
+    api.setDiffRefsByRepoForTest('/repo/app', null);
+    api.setSessionFilesPayloadForTest({
+      session: '1',
+      loaded: true,
+      errors: [],
+      refs_by_repo: {'/repo/app': [
+        {ref: 'HEAD', short: 'abc123d/HEAD', subject: 'current head commit', commit: 'abc123def4567890'},
+        {ref: 'abc123def4567890', short: 'abc123d', subject: 'current head commit'},
+        {ref: '9876543210000000', short: '9876543', subject: 'older commit'},
+      ]},
+      repos: [{repo: '/repo/app', count: 0, touched_count: 0, added: 0, removed: 0, from_ref: 'HEAD', to_ref: 'current'}],
+      files: [],
+    });
+    const collapsedHeadRefs = api.diffRefFromSuggestions('/repo/app');
+    assert.deepEqual(collapsedHeadRefs.map(item => item.short), ['abc123d/HEAD', '9876543'], 'Differ FROM refs collapse duplicate HEAD and head-SHA entries into one labeled ref');
+    assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: collapsedHeadRefs, showAll: true}).some(item => item.short === 'abc123d'), false, 'Differ ref popup does not keep the duplicate short-SHA row for HEAD');
+    const collapsedDifferHtml = api.fileExplorerChangesPanelHtml();
+    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD")[^>]*>/.test(collapsedDifferHtml), 'Differ comparison row shows the collapsed short-SHA/HEAD label');
+    const historyHeadPath = '/repo/app/src/history-head.md';
+    api.setOpenFileStateForTest(historyHeadPath, {
+      kind: 'text',
+      gitTracked: true,
+      gitHasHistory: true,
+      gitHistory: [
+        {ref: 'HEAD', short: 'abc123d/HEAD', subject: 'current head commit', commit: 'abc123def4567890'},
+        {ref: 'abc123def4567890', short: 'abc123d', subject: 'current head commit'},
+        {ref: '9876543210000000', short: '9876543', subject: 'older commit'},
+      ],
+    });
+    const collapsedEditorRefs = api.diffRefControlsHtml({compact: true, repo: '/repo/app', path: historyHeadPath});
+    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD")[^>]*>/.test(collapsedEditorRefs), 'Diff Editor ref toolbar shows the same collapsed short-SHA/HEAD label');
+    assert.equal((collapsedEditorRefs.match(/abc123d(?!\/HEAD)/g) || []).length, 0, 'Diff Editor ref toolbar does not show a separate duplicate short-SHA label for HEAD');
     const manyDiffRefs = Array.from({length: 120}, (_, index) => ({ref: `${String(index).padStart(7, 'a')}abcdef`, short: `r${index}`, subject: `commit ${index}`}));
     const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));

@@ -13326,6 +13326,39 @@ function agentWindowPayloadKey(agent) {
   return index !== null && kind ? `${index}:${kind}` : '';
 }
 
+const AGENT_WINDOW_ATTENTION_STATES = new Set(['approval', 'needs-approval', 'needs-input', 'interrupted']);
+
+function agentWindowStateKey(state) {
+  return String(state || '').trim();
+}
+
+function agentWindowIsWorkingState(state) {
+  return agentWindowStateKey(state) === 'working';
+}
+
+function agentWindowIsAttentionState(state) {
+  return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
+}
+
+function agentWindowRawStateTone(state) {
+  if (agentWindowIsWorkingState(state)) return 'working';
+  if (agentWindowIsAttentionState(state)) return 'attention';
+  return 'idle';
+}
+
+function agentWindowActivityTone(state) {
+  const key = agentWindowStateKey(state);
+  if (key === 'working') return 'working';
+  if (key === 'cooldown') return 'cooldown';
+  if (key === 'attention') return 'attention';
+  if (key === 'settled') return 'settled';
+  return 'idle';
+}
+
+function agentWindowStateRank(state) {
+  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[agentWindowStateKey(state)] ?? 9;
+}
+
 function normalizedAgentWindowPayload(agent) {
   const kind = agentWindowKind(agent?.kind);
   const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
@@ -13333,7 +13366,7 @@ function normalizedAgentWindowPayload(agent) {
   const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || agent?.label || kind);
   const pathEntries = agentWindowPathEntries(agent);
   const git = agentWindowPrimaryGit(agent);
-  return {
+  const normalized = {
     ...agent,
     kind,
     window: windowText,
@@ -13341,12 +13374,15 @@ function normalizedAgentWindowPayload(agent) {
     label: String(agent?.label || canonical),
     window_label: canonical,
     pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
-    active: typeof agent?.active === 'boolean' ? agent.active : agent?.active,
+    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : agent?.current,
+    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : agent?.window_active,
     path: pathEntries[0]?.path || String(agent?.path || ''),
     paths: pathEntries.map(item => item.path),
     path_entries: pathEntries,
     git,
   };
+  delete normalized.active;
+  return normalized;
 }
 
 function agentWindowPayloadRows(value) {
@@ -13366,9 +13402,16 @@ function mergeAgentWindowPayload(base, candidates) {
     merged.git = enrich.git;
   }
   if (!(merged.git && typeof merged.git === 'object') && enrich.git && typeof enrich.git === 'object') merged.git = enrich.git;
-  if (typeof merged.active !== 'boolean' && typeof enrich.active === 'boolean') merged.active = enrich.active;
+  if (typeof merged.current !== 'boolean' && typeof enrich.current === 'boolean') merged.current = enrich.current;
+  if (typeof merged.window_active !== 'boolean' && typeof enrich.window_active === 'boolean') merged.window_active = enrich.window_active;
   if ((!Number.isFinite(Number(merged.pid)) || Number(merged.pid) <= 0) && Number.isFinite(Number(enrich.pid)) && Number(enrich.pid) > 0) merged.pid = enrich.pid;
   return normalizedAgentWindowPayload(merged);
+}
+
+function agentWindowPayloadCurrent(agent) {
+  if (typeof agent?.current === 'boolean') return agent.current;
+  if (typeof agent?.window_active === 'boolean') return agent.window_active;
+  return null;
 }
 
 function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
@@ -13488,15 +13531,15 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
   const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
-  const stateKey = String(state || '').trim();
-  if (['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(stateKey)) {
+  const stateKey = agentWindowStateKey(state);
+  if (agentWindowIsAttentionState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {state: stateKey, seenWorking: previous.seenWorking === true, stoppedAt: Number(previous.stoppedAt) || 0});
     }
     return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`};
   }
-  if (stateKey === 'working') {
+  if (agentWindowIsWorkingState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
@@ -13527,7 +13570,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
   if (!item) return '';
-  const tone = item.state === 'working' ? 'working' : item.state === 'cooldown' ? 'cooldown' : item.state === 'attention' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
+  const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -13597,13 +13640,14 @@ function buildTabberTree() {
       const windowMtime = isAgent
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
-      const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active === true;
+      const agentCurrent = agentWindowPayloadCurrent(agentStatus);
+      const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
       const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
       const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
-      const dateHtml = agentStatusForDisplay && (agentStatusIsAttentionState(agentStatusForDisplay.state) || agentStatusForDisplay.current === true)
+      const dateHtml = agentStatusForDisplay && agentWindowIsAttentionState(agentStatusForDisplay.state)
         ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
         : '';
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
@@ -19430,11 +19474,11 @@ function gitHeadValueHtml(git) {
 }
 
 function sessionPopoverAgentStateRank(state) {
-  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[String(state || '')] ?? 9;
+  return typeof agentWindowStateRank === 'function' ? agentWindowStateRank(state) : 9;
 }
 
 function agentStatusIsAttentionState(state) {
-  return ['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(String(state || '').trim());
+  return typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state);
 }
 
 function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, options = {}) {
@@ -19446,20 +19490,18 @@ function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, o
 
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
   const state = String(agent?.state || 'idle');
-  if (state === 'working') {
+  if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
   }
-  if (agentStatusIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
-  if (agent?.current === true) return t('branch.current');
+  if (agentWindowIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : 'idle';
 }
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
   const text = sessionPopoverAgentStateText(agent, nowSeconds);
-  if (agentStatusIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
-  if (agent?.current === true) return statusIndicatorLabelHtml(text, 'active', className, 'agent-status-active');
+  if (agentWindowIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
   return `<span class="${esc(className)}">${esc(text)}</span>`;
 }
 
@@ -19508,8 +19550,8 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
       state: String(agent?.state || 'idle'),
-      current: typeof agent?.active === 'boolean'
-        ? agent.active === true
+      current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
+        ? agentWindowPayloadCurrent(agent) === true
         : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
@@ -19520,8 +19562,8 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
 }
 
 function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000) {
-  const working = agent.state === 'working';
-  const attention = agentStatusIsAttentionState(agent.state);
+  const working = agentWindowIsWorkingState(agent.state);
+  const attention = agentWindowIsAttentionState(agent.state);
   const dot = working || attention ? '●' : '○';
   const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
   const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
@@ -19529,7 +19571,7 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
-  const dotTone = working ? 'working' : attention ? 'attention' : 'idle';
+  const dotTone = agentWindowRawStateTone(agent.state);
   const dotClasses = statusIndicatorDotClasses(
     dotTone,
     'session-agent-dot',
@@ -26738,7 +26780,8 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
     const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
-    const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active;
+    const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
+    const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
     const pressed = active ? 'true' : 'false';
     const activeClass = active ? ' active' : '';
@@ -30439,8 +30482,19 @@ function diffRefSuggestions(repo) {
     if (!Array.isArray(refs)) return;
     for (const item of refs) {
       const ref = cleanDiffRef(item?.ref || '', '');
-      if (!ref || seen.has(ref)) continue;
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || ''});
+      if (!ref) continue;
+      if (seen.has(ref)) {
+        const existing = suggestions.find(candidate => candidate.ref === ref);
+        if (existing) {
+          if (item?.short) existing.short = item.short;
+          if (item?.subject) existing.subject = item.subject;
+          if (item?.date) existing.date = item.date;
+          if (item?.author) existing.author = item.author;
+          if (item?.commit) existing.commit = item.commit;
+        }
+        continue;
+      }
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
       seen.add(ref);
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
@@ -30453,7 +30507,7 @@ function diffRefSuggestions(repo) {
   } else {
     for (const refs of Object.values(refsByRepo)) addRefs(refs);
   }
-  return suggestions;
+  return coalescedDiffRefSuggestions(suggestions);
 }
 
 function fileDiffRefHistoryItems(path) {
@@ -30466,12 +30520,23 @@ function fileDiffRefHistoryItems(path) {
   const seen = new Set(suggestions.map(item => item.ref));
   for (const item of state.gitHistory) {
     const ref = cleanDiffRef(item?.ref || '', '');
-    if (!ref || seen.has(ref)) continue;
-    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || ''});
+    if (!ref) continue;
+    if (seen.has(ref)) {
+      const existing = suggestions.find(candidate => candidate.ref === ref);
+      if (existing) {
+        if (item?.short) existing.short = item.short;
+        if (item?.subject) existing.subject = item.subject;
+        if (item?.date) existing.date = item.date;
+        if (item?.author) existing.author = item.author;
+        if (item?.commit) existing.commit = item.commit;
+      }
+      continue;
+    }
+    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
     seen.add(ref);
     if (suggestions.length >= diffRefSuggestionLimit) break;
   }
-  return suggestions;
+  return coalescedDiffRefSuggestions(suggestions);
 }
 
 function scopedDiffRefSuggestions(repo, path) {
@@ -30502,6 +30567,54 @@ function diffRefShaLike(value) {
   return /^[0-9a-f]{7,40}$/i.test(String(value || '').trim());
 }
 
+function diffRefItemCommitId(item) {
+  const commit = cleanDiffRef(item?.commit || item?.sha || '', '');
+  if (diffRefShaLike(commit)) return commit.toLowerCase();
+  const ref = cleanDiffRef(item?.ref || '', '');
+  return diffRefShaLike(ref) ? ref.toLowerCase() : '';
+}
+
+function mergeDiffRefSameCommitAlias(primary, duplicate) {
+  const aliases = new Set(Array.isArray(primary.aliases) ? primary.aliases : []);
+  for (const value of [duplicate?.ref, duplicate?.short, ...(Array.isArray(duplicate?.aliases) ? duplicate.aliases : [])]) {
+    const alias = cleanDiffRef(value, '');
+    if (alias && alias !== primary.ref && alias !== primary.short) aliases.add(alias);
+  }
+  const primaryShort = cleanDiffRef(primary.short, '');
+  const duplicateShort = cleanDiffRef(duplicate?.short, '');
+  if (primary.ref === 'HEAD' && duplicateShort && !primaryShort.includes('/HEAD')) {
+    primary.short = `${duplicateShort}/HEAD`;
+  }
+  if ((!primary.subject || primary.subject === 'base commit') && duplicate?.subject) primary.subject = duplicate.subject;
+  if (!primary.date && duplicate?.date) primary.date = duplicate.date;
+  if (!primary.author && duplicate?.author) primary.author = duplicate.author;
+  if (!primary.commit) primary.commit = diffRefItemCommitId(primary) || diffRefItemCommitId(duplicate);
+  primary.aliases = Array.from(aliases);
+  return primary;
+}
+
+function coalescedDiffRefSuggestions(items) {
+  const out = [];
+  const commitIndexes = new Map();
+  for (const rawItem of Array.isArray(items) ? items : []) {
+    const item = {...rawItem};
+    const commit = diffRefItemCommitId(item);
+    const existingIndex = commit ? commitIndexes.get(commit) : undefined;
+    if (existingIndex !== undefined) {
+      const existing = out[existingIndex];
+      if (item.ref === 'HEAD' && existing.ref !== 'HEAD') {
+        out[existingIndex] = mergeDiffRefSameCommitAlias(item, existing);
+      } else {
+        mergeDiffRefSameCommitAlias(existing, item);
+      }
+      continue;
+    }
+    if (commit) commitIndexes.set(commit, out.length);
+    out.push(item);
+  }
+  return out;
+}
+
 function diffRefSameCommit(value, candidate) {
   const left = cleanDiffRef(value, '');
   const right = cleanDiffRef(candidate, '');
@@ -30512,8 +30625,12 @@ function diffRefSameCommit(value, candidate) {
 
 function diffRefOptionMatches(value, item) {
   const normalized = cleanDiffRef(value, '');
+  const short = cleanDiffRef(item?.short, '');
+  const aliases = Array.isArray(item?.aliases) ? item.aliases : [];
   return diffRefSameCommit(normalized, item?.ref)
     || diffRefSameCommit(normalized, item?.short)
+    || normalized === short
+    || aliases.some(alias => diffRefSameCommit(normalized, alias) || normalized === cleanDiffRef(alias, ''))
     || normalized === diffRefOptionLabel(item)
     || normalized === diffRefOptionLabel(item, ' ');
 }

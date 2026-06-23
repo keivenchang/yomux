@@ -5793,17 +5793,17 @@ class TmuxWebtermApp:
 
     @staticmethod
     def agent_window_pane_maps(info: SessionInfo) -> tuple[dict[str, bool], dict[str, PaneInfo]]:
-        active_by_window: dict[str, bool] = {}
+        current_by_window: dict[str, bool] = {}
         pane_by_window: dict[str, PaneInfo] = {}
         for pane in info.panes:
             window = TmuxWebtermApp.agent_window_index_key(pane.window)
             if not window:
                 continue
-            active_by_window[window] = active_by_window.get(window, False) or pane.window_active is True
+            current_by_window[window] = current_by_window.get(window, False) or pane.window_active is True
             current = pane_by_window.get(window)
             if current is None or (pane.active and not current.active) or (pane.window_active and not current.window_active):
                 pane_by_window[window] = pane
-        return active_by_window, pane_by_window
+        return current_by_window, pane_by_window
 
     def agent_window_fallback_path_record(self, pane: PaneInfo | None, git_cache: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
         path = self.normalized_agent_window_repo_path(pane.current_path if pane else "")
@@ -5837,7 +5837,7 @@ class TmuxWebtermApp:
         rows: list[dict[str, Any]] = []
         window_names = {str(pane.window or ""): str(pane.window_name or "") for pane in info.panes}
         path_records = self.agent_window_path_records(info, files_payload=files_payload)
-        active_by_window, pane_by_window = self.agent_window_pane_maps(info)
+        current_by_window, pane_by_window = self.agent_window_pane_maps(info)
         fallback_git_cache: dict[str, dict[str, Any] | None] = {}
         for agent_index, agent in enumerate(info.agents):
             kind = str(agent.kind or "").lower()
@@ -5857,6 +5857,7 @@ class TmuxWebtermApp:
             window_label = f"{window}:{kind}" if window else kind
             pane_record = pane_by_window.get(self.agent_window_index_key(window))
             pid = int(pane_record.process_label_pid or pane_record.pid) if pane_record and (pane_record.process_label_pid or pane_record.pid) else int(agent.pid or 0)
+            window_is_current = current_by_window.get(self.agent_window_index_key(window), False)
             path_record = path_records.get((self.agent_window_index_key(window), kind))
             if not path_record:
                 path_record = self.agent_window_fallback_path_record(pane_record, fallback_git_cache)
@@ -5874,7 +5875,8 @@ class TmuxWebtermApp:
                 "pane": pane,
                 "pane_target": str(agent.pane_target or ""),
                 "pid": pid if pid > 0 else None,
-                "active": active_by_window.get(self.agent_window_index_key(window), False),
+                "current": window_is_current,
+                "window_active": window_is_current,
                 "path": paths[0] if paths else fallback_path,
                 "paths": paths,
                 "path_entries": path_entries,

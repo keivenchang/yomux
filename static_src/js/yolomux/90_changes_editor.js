@@ -198,8 +198,19 @@ function diffRefSuggestions(repo) {
     if (!Array.isArray(refs)) return;
     for (const item of refs) {
       const ref = cleanDiffRef(item?.ref || '', '');
-      if (!ref || seen.has(ref)) continue;
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || ''});
+      if (!ref) continue;
+      if (seen.has(ref)) {
+        const existing = suggestions.find(candidate => candidate.ref === ref);
+        if (existing) {
+          if (item?.short) existing.short = item.short;
+          if (item?.subject) existing.subject = item.subject;
+          if (item?.date) existing.date = item.date;
+          if (item?.author) existing.author = item.author;
+          if (item?.commit) existing.commit = item.commit;
+        }
+        continue;
+      }
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
       seen.add(ref);
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
@@ -212,7 +223,7 @@ function diffRefSuggestions(repo) {
   } else {
     for (const refs of Object.values(refsByRepo)) addRefs(refs);
   }
-  return suggestions;
+  return coalescedDiffRefSuggestions(suggestions);
 }
 
 function fileDiffRefHistoryItems(path) {
@@ -225,12 +236,23 @@ function fileDiffRefHistoryItems(path) {
   const seen = new Set(suggestions.map(item => item.ref));
   for (const item of state.gitHistory) {
     const ref = cleanDiffRef(item?.ref || '', '');
-    if (!ref || seen.has(ref)) continue;
-    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || ''});
+    if (!ref) continue;
+    if (seen.has(ref)) {
+      const existing = suggestions.find(candidate => candidate.ref === ref);
+      if (existing) {
+        if (item?.short) existing.short = item.short;
+        if (item?.subject) existing.subject = item.subject;
+        if (item?.date) existing.date = item.date;
+        if (item?.author) existing.author = item.author;
+        if (item?.commit) existing.commit = item.commit;
+      }
+      continue;
+    }
+    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
     seen.add(ref);
     if (suggestions.length >= diffRefSuggestionLimit) break;
   }
-  return suggestions;
+  return coalescedDiffRefSuggestions(suggestions);
 }
 
 function scopedDiffRefSuggestions(repo, path) {
@@ -261,6 +283,54 @@ function diffRefShaLike(value) {
   return /^[0-9a-f]{7,40}$/i.test(String(value || '').trim());
 }
 
+function diffRefItemCommitId(item) {
+  const commit = cleanDiffRef(item?.commit || item?.sha || '', '');
+  if (diffRefShaLike(commit)) return commit.toLowerCase();
+  const ref = cleanDiffRef(item?.ref || '', '');
+  return diffRefShaLike(ref) ? ref.toLowerCase() : '';
+}
+
+function mergeDiffRefSameCommitAlias(primary, duplicate) {
+  const aliases = new Set(Array.isArray(primary.aliases) ? primary.aliases : []);
+  for (const value of [duplicate?.ref, duplicate?.short, ...(Array.isArray(duplicate?.aliases) ? duplicate.aliases : [])]) {
+    const alias = cleanDiffRef(value, '');
+    if (alias && alias !== primary.ref && alias !== primary.short) aliases.add(alias);
+  }
+  const primaryShort = cleanDiffRef(primary.short, '');
+  const duplicateShort = cleanDiffRef(duplicate?.short, '');
+  if (primary.ref === 'HEAD' && duplicateShort && !primaryShort.includes('/HEAD')) {
+    primary.short = `${duplicateShort}/HEAD`;
+  }
+  if ((!primary.subject || primary.subject === 'base commit') && duplicate?.subject) primary.subject = duplicate.subject;
+  if (!primary.date && duplicate?.date) primary.date = duplicate.date;
+  if (!primary.author && duplicate?.author) primary.author = duplicate.author;
+  if (!primary.commit) primary.commit = diffRefItemCommitId(primary) || diffRefItemCommitId(duplicate);
+  primary.aliases = Array.from(aliases);
+  return primary;
+}
+
+function coalescedDiffRefSuggestions(items) {
+  const out = [];
+  const commitIndexes = new Map();
+  for (const rawItem of Array.isArray(items) ? items : []) {
+    const item = {...rawItem};
+    const commit = diffRefItemCommitId(item);
+    const existingIndex = commit ? commitIndexes.get(commit) : undefined;
+    if (existingIndex !== undefined) {
+      const existing = out[existingIndex];
+      if (item.ref === 'HEAD' && existing.ref !== 'HEAD') {
+        out[existingIndex] = mergeDiffRefSameCommitAlias(item, existing);
+      } else {
+        mergeDiffRefSameCommitAlias(existing, item);
+      }
+      continue;
+    }
+    if (commit) commitIndexes.set(commit, out.length);
+    out.push(item);
+  }
+  return out;
+}
+
 function diffRefSameCommit(value, candidate) {
   const left = cleanDiffRef(value, '');
   const right = cleanDiffRef(candidate, '');
@@ -271,8 +341,12 @@ function diffRefSameCommit(value, candidate) {
 
 function diffRefOptionMatches(value, item) {
   const normalized = cleanDiffRef(value, '');
+  const short = cleanDiffRef(item?.short, '');
+  const aliases = Array.isArray(item?.aliases) ? item.aliases : [];
   return diffRefSameCommit(normalized, item?.ref)
     || diffRefSameCommit(normalized, item?.short)
+    || normalized === short
+    || aliases.some(alias => diffRefSameCommit(normalized, alias) || normalized === cleanDiffRef(alias, ''))
     || normalized === diffRefOptionLabel(item)
     || normalized === diffRefOptionLabel(item, ' ');
 }
