@@ -888,6 +888,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-json", action="store_true", help="Echo raw stream-json events to stderr.")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-turn timeout in seconds.")
     parser.add_argument("--mock", action="store_true", help="Run the built-in Claude TUI mock and prompt-corpus fixture replay.")
+    parser.add_argument("--dump-fixtures", action="store_true", help="Dump this agent's prompt-corpus fixtures to stdout and exit.")
     parser.add_argument("-V", "--version", action="version", version=f"claude-text-client {CLIENT_VERSION}")
     parser.set_defaults(show_tool_output=True, show_thinking=True, show_metrics=False)
     args = parser.parse_args()
@@ -900,11 +901,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     mock_agent_common.configure_claude_mock(display_cwd_override=args.cwd)
+    if args.dump_fixtures:
+        mock_agent_common.print_mock_fixture_dump()
+        return 0
     if args.mock:
         mock_agent_common.main()
         return 0
     client = ClaudeTextClient(args)
     use_mock_tui = False
+    composer_state: dict[str, str] = {}
+    exit_notice = ""
     try:
         initial_prompt = " ".join(args.prompt).strip()
         if initial_prompt:
@@ -913,13 +919,12 @@ def main() -> int:
         use_mock_tui = sys.stdin.isatty() and sys.stdout.isatty()
         if use_mock_tui:
             mock_agent_common.setup_history()
-            mock_agent_common.print_startup()
+            mock_agent_common.print_startup(composer_state)
         else:
             configure_readline(REPL_COMMANDS)
         prompt_session = PromptInputSession(REPL_COMMANDS)
         if not use_mock_tui:
             print(f"Claude text client. Type /quit to exit.\n  session: {client.session_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
-        composer_state: dict[str, str] = {}
         while True:
             try:
                 if use_mock_tui:
@@ -932,6 +937,8 @@ def main() -> int:
                 print("", file=sys.stderr)
                 return 0
             stripped = text.strip()
+            if not stripped:
+                continue
             if stripped in {"/q", "/quit", "quit", "exit"}:
                 return 0
             if stripped.startswith("/"):
@@ -941,11 +948,20 @@ def main() -> int:
                 continue
             client.send_turn(text)
     except KeyboardInterrupt:
-        client.print_aux_stderr("\ninterrupted")
+        if use_mock_tui:
+            exit_notice = "interrupted"
+        else:
+            client.print_aux_stderr("\ninterrupted")
         return 130
     finally:
         if use_mock_tui:
-            mock_agent_common.reset_terminal_scroll_region()
+            exit_lines = [exit_notice] if exit_notice else []
+            if client.session_id and not client.exit_hint_printed:
+                exit_lines.extend([f"[session] {client.session_id}", f"[resume] {client.resume_command()}"])
+            line_count = mock_agent_common.terminal_display_line_count(exit_lines) if exit_lines else 0
+            mock_agent_common.prepare_terminal_for_shell(line_count, composer_state)
+            if exit_notice:
+                print(exit_notice, file=sys.stderr)
         client.print_exit_hint()
 
 

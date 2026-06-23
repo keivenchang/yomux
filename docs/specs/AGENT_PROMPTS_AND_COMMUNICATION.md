@@ -213,6 +213,8 @@ Codex can show a working row above an input-looking composer and model line. The
 gpt-5.5 xhigh   ~/yolomux.dev8002
 ```
 
+The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
+
 Codex working examples embedded in explanatory text are not live state when a bottom composer follows them as part of an old response.
 
 ```text
@@ -224,7 +226,7 @@ Codex working examples embedded in explanatory text are not live state when a bo
 
 › Explain this codebase
 
-  gpt-5.5 xhigh · ~
+  gpt-5.4-mini medium · ~
 ```
 
 ## Codex Done And Typeable Signals
@@ -234,7 +236,7 @@ Codex is typeable when the bottom composer prompt is visible and there is no cur
 ```text
 › Explain this codebase
 
-  gpt-5.5 xhigh · ~
+  gpt-5.4-mini medium · ~
 ```
 
 A real shell prompt below a Codex working line makes the working line stale.

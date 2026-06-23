@@ -157,6 +157,14 @@ def test_text_clients_accept_mock_mode(monkeypatch):
     assert claude.parse_args().mock is True
 
 
+def test_text_clients_accept_dump_fixtures(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex.py", "--dump-fixtures"])
+    assert codex.parse_args().dump_fixtures is True
+
+    monkeypatch.setattr(sys, "argv", ["claude.py", "--dump-fixtures"])
+    assert claude.parse_args().dump_fixtures is True
+
+
 def test_claude_thinking_defaults_on(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["claude.py"])
     assert claude.parse_args().show_thinking is True

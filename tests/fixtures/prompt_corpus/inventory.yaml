@@ -699,6 +699,28 @@ fixtures:
   fixture_id: working_spinner__codex-cli-synthetic_20260620
   id: working-spinner
   provenance: synthetic current Codex working layout
+- case_name: working_visible_counter
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/working_visible_counter__claude-code-2.1.183_20260620.yaml
+  fixture_id: working_visible_counter__claude-code-2.1.183_20260620
+  id: claude-visible-working-counter-real
+  provenance: real Claude Code 2.1.183 `Clauding...` visible counter capture
+- case_name: working_command_counter
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml
+  fixture_id: working_command_counter__codex-cli-0.141.0_20260620
+  id: codex-visible-working-counter-real
+  provenance: real Codex CLI 0.141.0 command-working visible counter capture
 - case_name: command_output_question
   expected:
     approval_visible: false
@@ -807,6 +829,7 @@ required_families:
 - suggestion-not-question
 - typed-draft
 - working-spinner
+- visible-working-counter
 - command-output-question
 - shell-program-prompt
 - completed-prompt
@@ -814,6 +837,102 @@ required_families:
 - scrollback-old-question
 - bypass-mode-no-approval
 - generic-warning
+parity_groups:
+- id: visible-working-counter
+  status: covered-by-both
+  contract: Both clients are working/busy and must render as RUN without raising ASK? or YOLO?.
+  why_names_differ: The Claude capture name came from the visible `Clauding...` status counter; the Codex capture name came from the command-send scenario that produced the visible working counter. They are the same detector state, not missing counterparts.
+  fixtures:
+  - agent: claude
+    case_name: working_visible_counter
+    file: captures/working_visible_counter__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: working_command_counter
+    file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml
+- id: normal-choice-question
+  status: covered-by-both
+  contract: Both clients can ask non-permission user questions that should show ASK?.
+  why_names_differ: Claude calls this AskUserQuestion and its fixtures preserve selector/accessibility variants; Codex fixtures use choice/non-permission wording from its numbered prompt layout.
+  fixtures:
+  - agent: claude
+    case_name: ask_user_question
+    file: captures/ask_user_question__claude-code-2.1.183_20260620.yaml
+  - agent: claude
+    case_name: ask_user_question_no_selector_accessible
+    file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml
+  - agent: claude
+    case_name: parser_dependency_choice_question
+    file: captures/parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml
+  - agent: codex
+    case_name: choice_question
+    file: captures/choice_question__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: choice_question_real
+    file: captures/choice_question_real__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: question_with_answer_draft
+    file: captures/question_with_answer_draft__codex-cli-0.141.0_20260620.yaml
+- id: typed-draft
+  status: covered-by-both
+  contract: Both clients can have clearable composer drafts that must not be mistaken for submitted transcript text.
+  why_names_differ: The Claude real capture specifically guards NBSP cursor/composer behavior, while the Codex capture is a normal typed draft.
+  fixtures:
+  - agent: claude
+    case_name: typed_nbsp_draft
+    file: captures/typed_nbsp_draft__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: typed_draft
+    file: captures/typed_draft__codex-cli-0.141.0_20260620.yaml
+- id: idle-ghost-prompt
+  status: covered-by-both
+  contract: Both clients can show an idle composer with ghost/suggestion text and must not trigger attention.
+  why_names_differ: Claude names this ghost suggestion after the suggested text in its composer; Codex names the same detector state after the dim ghost prompt style in its TUI.
+  fixtures:
+  - agent: claude
+    case_name: idle_ghost_suggestion
+    file: captures/idle_ghost_suggestion__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: idle_dim_ghost_prompt
+    file: captures/idle_dim_ghost_prompt__codex-cli-0.141.0_20260620.yaml
+- id: idle-empty-prompt
+  status: covered-by-both
+  contract: Both clients can be idle at an empty composer and must not trigger attention.
+  why_names_differ: This is the only exact shared real-capture case name because both products had the same simple detector scenario.
+  fixtures:
+  - agent: claude
+    case_name: idle_empty_prompt
+    file: captures/idle_empty_prompt__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: idle_empty_prompt
+    file: captures/idle_empty_prompt__codex-cli-0.141.0_20260620.yaml
+- id: product-specific-approval-prompts
+  status: intentionally-not-one-to-one
+  contract: Approval prompts should be captured per product feature, not forced into fake cross-product pairs.
+  why_names_differ: Claude has plan, Bash, file-edit, and tool permission prompts; Codex has shell command, sandbox/network escalation, prefix-rule, and MCP approval prompts. The detector contract is shared, but the product surfaces are not equivalent enough to require a same-named capture for every case.
+  fixtures:
+  - agent: claude
+    case_name: plan_approval_real
+    file: captures/plan_approval_real__claude-code-2.1.183_20260619.yaml
+  - agent: claude
+    case_name: plan_approval_selected_option
+    file: captures/plan_approval_selected_option__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: shell_approval_touch_command
+    file: captures/shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: shell_sleep_10_3_option
+    file: captures/shell_sleep_10_3_option__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: shell_no_selected_option
+    file: captures/shell_no_selected_option__codex-cli-0.141.0_20260620.yaml
+- id: product-specific-idle-negative-chrome
+  status: intentionally-not-one-to-one
+  contract: Product-specific idle chrome that looks question-like must stay quiet, but it should not be forced into a fake counterpart when the other client does not expose the same chrome.
+  why_names_differ: Claude has a composing Tip capture that guards against treating helper chrome as a question; Codex does not have an equivalent real capture in this corpus.
+  fixtures:
+  - agent: claude
+    case_name: composing_tip_not_question
+    file: captures/composing_tip_not_question__claude-code-2.1.183_20260620.yaml
 research_notes:
 - expected_inputs:
   - shell command approval prompts

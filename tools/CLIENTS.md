@@ -41,13 +41,16 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/claude.py -C .
 
 ## Mock Agent Fixture Replay
 
-`tools/claude.py --mock` and `tools/codex.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
+`tools/claude.py --mock` and `tools/codex.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mock implementations live in the real client entry points plus shared code in `tools/mock_agent_common.py`; the old top-level `mock/` package is intentionally gone. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
 
 - `mockcase list`: print every replayable prompt-corpus case with the owning agent and fixture file.
 - `mockcase <case>`: clear the pane, render that fixture, bottom-align short captures in the current tmux pane, and freeze the process so `tmux capture-pane` sees the prompt exactly as a live client would.
 - Case names accept the fixture scenario, fixture id, inventory id, file stem, and agent-prefixed forms such as `claude_ask_user_question` or `codex_shell_sleep_10_3_option`.
 - Plain `mock <case>` returns to the live composer for idle/history fixtures, but active working fixtures such as Codex `goal_active` occupy and freeze the whole pane so a second live composer is not appended below the captured status row.
 - `yesno [N]`, `ask N`, `sleep N`, and shell commands still drive interactive permission prompts; use `mockcase` for corpus parity and the older commands for auto-approve flow tests that need keyboard interaction.
+- `--dump-fixtures` dumps this client's parser-relevant fixture corpus to stdout and exits without starting a real upstream agent. Each block has `===== BEGIN FIXTURE N/T: <filename> =====`, `agent`, `case`, `outcome`, `path`, a `----- capture -----` separator, the captured terminal text, and a matching `===== END FIXTURE: <filename> =====`. Codex dumps Codex-owned fixtures plus shared `generic`/`unknown` detector fixtures; Claude dumps Claude-owned fixtures plus shared `generic`/`unknown` detector fixtures. Idle negative fixtures are included because the dump is meant to show everything that can flow through the parser, even cases that should not trigger ASK/YOLO/RUN.
+
+Some prompt-corpus case names are intentionally product-specific. The corpus records semantic parity groups in `tests/fixtures/prompt_corpus/inventory.yaml`, and every promoted real capture must be in one of those groups. For example, Claude `working_visible_counter` and Codex `working_command_counter` are both the `visible-working-counter` group and both must classify as `RUN`, even though their capture names came from different live repros. Same-name parity is required only when the product state is actually the same, such as `idle_empty_prompt`; approval prompts are grouped by detector contract because Claude plan/file/tool permissions and Codex shell/escalation/MCP approvals are different product surfaces.
 
 ## Terminology Map
 
@@ -140,6 +143,7 @@ Recommended implementation order if more parity is needed: first add Ctrl-C guar
 - `--search`
 - `--no-alt-screen`
 - `--mock`
+- `--dump-fixtures`
 
 Useful Codex `-c` keys:
 
@@ -192,6 +196,7 @@ Codex reasoning controls are available as `/reasoning [on|off|summary|raw|none|a
 - `--raw-json`
 - `--timeout SECONDS`
 - `--mock`
+- `--dump-fixtures`
 
 Useful Claude `/config` keys:
 

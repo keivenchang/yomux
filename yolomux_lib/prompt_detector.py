@@ -1066,6 +1066,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if re.match(r"^(?:[⎿└]\s*)?Tip:", stripped, re.IGNORECASE):
         return True
+    if re.match(r"^tmux\s+focus-events\s+off\b", stripped, re.IGNORECASE):
+        return True
     if re.match(r"^(?:gpt|claude|opus|sonnet)[A-Za-z0-9_.-]*\s+.+\s·\s", stripped, re.IGNORECASE):
         return True
     if _TASK_LIST_HEADER_RE.match(stripped):
@@ -1085,6 +1087,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if stripped.startswith(("◼", "◻", "☑", "☒", "□", "✓", "✔", "✗", "✘", "◯")):
         return True
     if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
+        return True
+    if re.fullmatch(r'[❯›>]\s+Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', stripped):
         return True
     if re.search(r"\b(?:bypass\s+permissions|esc\s+to\s+interrupt|\d+\s+shells?\b)", stripped, re.IGNORECASE):
         return True
@@ -1235,9 +1239,12 @@ def _current_input_prompt_index(lines: list[str]) -> int:
 
 def _choice_prompt_has_later_activity(lines: list[str], end_index: int) -> bool:
     """Return True when a choice prompt is followed by newer output in the same capture."""
-    for line in lines[end_index + 1:]:
+    composer_index = _current_input_prompt_index(lines)
+    for index, line in enumerate(lines[end_index + 1:], start=end_index + 1):
         stripped = line.strip()
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
+            continue
+        if index == composer_index:
             continue
         if re.match(r"^[❯›>][\s█▉▊▋▌▍▎▏]*$", stripped):
             continue

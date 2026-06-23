@@ -477,6 +477,30 @@ def test_prompt_corpus_inventory_declares_required_families():
     assert (PROMPT_CORPUS_DIR / PROMPT_CORPUS_INVENTORY["capture_harness"]).exists()
 
 
+def test_prompt_corpus_parity_groups_reference_existing_fixtures():
+    groups = PROMPT_CORPUS_INVENTORY["parity_groups"]
+    assert groups
+    grouped_capture_files = set()
+    for group in groups:
+        fixtures = group["fixtures"]
+        assert fixtures
+        agents = {fixture["agent"] for fixture in fixtures}
+        if group["status"] == "covered-by-both":
+            assert {"claude", "codex"} <= agents
+        for fixture in fixtures:
+            path = PROMPT_CORPUS_DIR / fixture["file"]
+            assert path.exists()
+            data = load_structured_fixture(path)
+            assert data["agent"] == fixture["agent"]
+            assert (data.get("case_name") or data.get("fixture_scenario")) == fixture["case_name"]
+            if fixture["file"].startswith("captures/"):
+                grouped_capture_files.add(fixture["file"].removeprefix("captures/"))
+
+    capture_inventory = load_structured_fixture(PROMPT_CORPUS_DIR / "captures" / "inventory.yaml")
+    promoted_capture_files = {fixture["file"] for fixture in capture_inventory["fixtures"]}
+    assert promoted_capture_files <= grouped_capture_files
+
+
 @pytest.mark.parametrize("case", PROMPT_CORPUS_CASES, ids=lambda case: case["id"])
 def test_prompt_corpus_cases_classify_with_structured_evidence(case):
     text = case["text"]
@@ -1438,6 +1462,38 @@ def test_ask_user_question_selected_with_chat_separator_keeps_all_options():
     assert prompt_detector.yes_is_selected(visible_text) is True
 
 
+def test_ask_user_question_survives_claude_focus_warning_and_bottom_composer():
+    visible_text = "\n".join([
+        "● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PDT.",
+        "─────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "☐ Time +5min",
+        "",
+        "Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?",
+        "",
+        "❯ 1. Yes, 09:45 is right",
+        "     Confirm 09:45:05 PDT is the intended time.",
+        "  2. No, that's wrong",
+        "     The computed time is not what you wanted.",
+        "  3. Type something.",
+        "─────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  4. Chat about this",
+        "",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        "  tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking",
+        "─────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯ Try \"fix typecheck errors\"",
+        "─────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ? for shortcuts · ← for agents",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?"
+    assert state["selected_option"] == 1
+    assert option_labels(state["options"]) == ["Yes, 09:45 is right", "No, that's wrong", "Type something.", "Chat about this"]
+
+
 def test_ask_user_question_accessible_menu_no_selector_is_needs_input():
     visible_text = fixture_visible_text(PROMPT_CORPUS_DIR / "captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml")
 
@@ -1448,6 +1504,29 @@ def test_ask_user_question_accessible_menu_no_selector_is_needs_input():
     assert state["selected_option"] == 0
     assert option_labels(state["options"]) == ["Pane capture", "Transcript capture", "Other", "Chat about this"]
     assert prompt_detector.visible_choice_prompt_text(visible_text) == "Which verifier mode should we use?"
+    assert prompt_detector.detect_prompt(visible_text) is None
+
+
+def test_codex_numbered_question_survives_fixed_bottom_composer_footer():
+    visible_text = "\n".join([
+        "Need one detail before I continue.",
+        "",
+        "Which package manager should I use?",
+        "› 1. npm",
+        "  2. pnpm",
+        "",
+        "› Explain this codebase",
+        "",
+        "  gpt-5.4-mini medium · ~/yolomux.dev8002",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Which package manager should I use?\n1. npm\n2. pnpm"
+    assert state["selected_option"] == 1
+    assert option_labels(state["options"]) == ["npm", "pnpm"]
+    assert prompt_detector.visible_choice_prompt_text(visible_text) == "Which package manager should I use?\n1. npm\n2. pnpm"
     assert prompt_detector.detect_prompt(visible_text) is None
 
 

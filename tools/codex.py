@@ -32,13 +32,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import mock_agent_common
+
+if "--dump-fixtures" in sys.argv[1:]:
+    mock_agent_common.configure_codex_mock(
+        display_cwd_override=os.getcwd(),
+        model="gpt-5.4-mini",
+        effort="medium",
+    )
+    mock_agent_common.print_mock_fixture_dump()
+    raise SystemExit(0)
+
 from yolomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol
 from yolomux_lib.agent_comms.json_rpc import json_rpc_error
 from yolomux_lib.agent_comms.json_rpc import json_rpc_notification
 from yolomux_lib.agent_comms.json_rpc import json_rpc_request
 from yolomux_lib.agent_comms.json_rpc import json_rpc_response
 from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message
-import mock_agent_common
 from text_client_common import (
     CODEX_CONFIG_KEYS,
     CODEX_OUTPUT_TERMS,
@@ -1696,6 +1706,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search", action="store_true", help="Enable live web search.")
     parser.add_argument("--no-alt-screen", action="store_true", help="Accepted for Codex CLI compatibility.")
     parser.add_argument("--mock", action="store_true", help="Run the built-in Codex TUI mock and prompt-corpus fixture replay.")
+    parser.add_argument("--dump-fixtures", action="store_true", help="Dump this agent's prompt-corpus fixtures to stdout and exit.")
     parser.add_argument("-V", "--version", action="version", version=f"codex-text-client {CLIENT_VERSION}")
     args = parser.parse_args()
     args.approval_mode = DEFAULT_TEXT_CLIENT_APPROVAL_MODE
@@ -1864,11 +1875,16 @@ def configure_codex_tui(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     configure_codex_tui(args)
+    if args.dump_fixtures:
+        mock_agent_common.print_mock_fixture_dump()
+        return 0
     if args.mock:
         mock_agent_common.main()
         return 0
     client = CodexTextClient(args)
     use_mock_tui = False
+    composer_state: dict[str, str] = {}
+    exit_notice = ""
     try:
         client.start()
         configure_codex_tui(args)
@@ -1884,17 +1900,12 @@ def main() -> int:
                 return 0 if ok else 1
         if use_mock_tui:
             mock_agent_common.setup_history()
-            mock_agent_common.print_startup()
+            mock_agent_common.print_startup(composer_state)
         else:
             configure_readline(REPL_COMMANDS)
         prompt_session = PromptInputSession(REPL_COMMANDS)
         if not use_mock_tui:
             print(f"Codex text client. Type /quit to exit.\n  session: {client.thread_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
-        composer_state: dict[str, str] = {}
-        def request_prompt_spacer() -> None:
-            if use_mock_tui:
-                composer_state["codex_prompt_spacer"] = "1"
-
         while True:
             try:
                 if use_mock_tui:
@@ -1905,22 +1916,21 @@ def main() -> int:
             except EOFError:
                 print("", file=sys.stderr)
                 return 0
-            if text.strip() in {"/q", "/quit", "quit", "exit"}:
+            stripped = text.strip()
+            if not stripped:
+                continue
+            if stripped in {"/q", "/quit", "quit", "exit"}:
                 return 0
-            if text.strip().startswith("/"):
+            if stripped.startswith("/"):
                 try:
-                    result = client.handle_repl_command(text.strip())
+                    result = client.handle_repl_command(stripped)
                 except TimeoutError as exc:
                     client.restart_after_timeout(exc)
-                    request_prompt_spacer()
                     continue
                 if result == "quit":
                     return 0
-                if text.strip() not in {"/cls"}:
-                    request_prompt_spacer()
                 continue
             client.send_turn(text)
-            request_prompt_spacer()
     except TimeoutError as exc:
         client.print_aux_stderr(f"codex app-server timeout: {exc}")
         return 1
@@ -1928,11 +1938,17 @@ def main() -> int:
         client.print_aux_stderr(f"codex app-server error: {exc}")
         return 1
     except KeyboardInterrupt:
-        client.print_aux_stderr("\ninterrupted")
+        if use_mock_tui:
+            exit_notice = "interrupted"
+        else:
+            client.print_aux_stderr("\ninterrupted")
         return 130
     finally:
         if use_mock_tui:
-            mock_agent_common.reset_terminal_scroll_region()
+            line_count = mock_agent_common.terminal_display_line_count([exit_notice]) if exit_notice else 0
+            mock_agent_common.prepare_terminal_for_shell(line_count, composer_state)
+            if exit_notice:
+                print(exit_notice, file=sys.stderr)
         else:
             client.print_exit_hint()
         client.close()

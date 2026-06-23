@@ -50,7 +50,6 @@ CLAUDE_MODE_STATUS_LINES = [
     "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
 ]
 CLAUDE_DEFAULT_STATUS_LINE = "  ? for shortcuts · ← for agents"
-CLAUDE_TMUX_NOTICE_LINE = "  tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking"
 CLAUDE_SHORTCUT_LINES = [
     "  ! for shell mode        double tap esc to clear input      ctrl + shift + _ to undo",
     "  / for commands          shift + tab to auto-accept edits   ctrl + z to suspend",
@@ -331,9 +330,9 @@ def display_cwd() -> str:
     return cwd
 
 
-def print_startup() -> None:
+def print_startup(state: dict[str, str] | None = None) -> None:
     if STARTUP_STYLE == "codex":
-        print_codex_startup()
+        print_codex_startup(state)
         return
     width = terminal_width()
     if sys.stdout.isatty():
@@ -369,9 +368,22 @@ ANSI_DIM = "\x1b[2m"
 ANSI_ITALIC = "\x1b[3m"
 ANSI_RESET = "\x1b[0m"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+CODEX_CAPTURED_STATUS_RE = re.compile(
+    r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+·\s+\S.*$",
+    re.IGNORECASE,
+)
+CODEX_CAPTURED_PROMPT_RE = re.compile(r"^\s*[›>]\s+(?!\d+[.:]\s+)\S.*$")
+CLAUDE_CAPTURED_WORKING_RE = re.compile(
+    r"^(?P<marker>\S)\s+(?P<verb>[^…]+)…\s+\((?P<elapsed>[^)]*?)\s+·\s+↓\s+(?P<tokens>\d+)\s+tokens\)",
+    re.IGNORECASE,
+)
 # Enterprise identity lines shown under the robot in the real welcome box.
 WELCOME_ORG_LINE = "· Acme Corp - Power Users"
 WELCOME_PLAN_LABEL = "Claude Enterprise"
+
+
+def plain_capture_line(text: str) -> str:
+    return ANSI_RE.sub("", str(text or "")).replace("\xa0", " ").rstrip()
 
 
 def visible_len(text: str) -> int:
@@ -463,27 +475,36 @@ def print_welcome_box() -> None:
     print("╰" + ("─" * inner) + "╯")
 
 
-def print_codex_startup() -> None:
+def print_codex_startup(state: dict[str, str] | None = None) -> None:
     inner = 47
 
     def box_line(text: str = "") -> str:
         return "│" + clipped(text, inner) + "│"
 
     box_line_count = 6 + (1 if CODEX_DANGER_FULL_ACCESS else 0)
-    composer_line_count = 3
+    footer_line_count = len(codex_composer_footer_lines())
+    launch_context_line_count = 1
     include_box = True
     include_tip = True
     include_warnings = CODEX_BYPASS_HOOK_TRUST
+    if state is not None:
+        state.pop("codex_clear_startup_on_first_submit", None)
     if sys.stdout.isatty():
-        # The real Codex prompt/status appears immediately after startup chrome. In
-        # short panes, printing the full box + tip before the prompt scrolls the top
-        # of the box away, which looks broken. Drop lower-priority startup chrome
-        # before allowing the prompt/status rows to overflow the pane.
+        # The wrapper owns a fixed footer even when launched from a shell prompt.
+        # Short-pane budgeting must leave room for both that footer and the command
+        # line already visible above the startup chrome; otherwise the footer lands
+        # on the box's bottom border.
         height = terminal_height()
-        include_box = height > box_line_count + composer_line_count
-        include_tip = height > box_line_count + 3 + composer_line_count
+        available_startup_rows = max(0, height - footer_line_count - launch_context_line_count)
+        include_box = available_startup_rows >= box_line_count + 1
+        include_tip = available_startup_rows >= box_line_count + 3
         warning_line_count = 6 if CODEX_BYPASS_HOOK_TRUST else 0
-        include_warnings = CODEX_BYPASS_HOOK_TRUST and height > warning_line_count + box_line_count + 3 + composer_line_count
+        include_warnings = (
+            CODEX_BYPASS_HOOK_TRUST
+            and available_startup_rows >= warning_line_count + box_line_count + 3
+        )
+        if state is not None and include_box and not include_tip:
+            state["codex_clear_startup_on_first_submit"] = "1"
         reset_terminal_scroll_region(preserve_cursor=True)
 
     if include_warnings:
@@ -542,7 +563,7 @@ def print_thinking(seconds: float = 0.5, tokens: int = 39) -> None:
 
 
 def format_working_elapsed(seconds: float) -> str:
-    total = max(1, int(seconds))
+    total = max(0, int(seconds))
     minutes, remaining = divmod(total, 60)
     if minutes:
         return f"{minutes}m {remaining}s"
@@ -773,31 +794,272 @@ def mock_fixture_is_codex_goal_active(case: dict[str, object]) -> bool:
     return isinstance(keys, set) and "goal_active" in keys
 
 
-def start_codex_goal_active_mock(state: dict[str, str], case: dict[str, object]) -> None:
-    state["pending"] = "codex-goal-active"
-    state["fixture_case"] = str(case.get("case_name") or "goal_active")
-    state["codex_goal_active_started_at"] = f"{time.time():.6f}"
-    state["codex_goal_active_base_seconds"] = "190"
-    state["codex_goal_active_text"] = ""
-    state["codex_goal_active_cursor"] = "0"
-    state["codex_goal_active_queued"] = ""
+def mock_fixture_is_codex_live_working(case: dict[str, object]) -> bool:
+    if PERMISSION_STYLE != "codex" or str(case.get("agent") or "") != "codex":
+        return False
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    screen_key = str(expected.get("screen_key") or "").strip()
+    reason_code = str(expected.get("reason_code") or "").strip()
+    return screen_key == "working" or reason_code == "busy"
+
+
+def mock_fixture_is_codex_draft_only(case: dict[str, object]) -> bool:
+    if PERMISSION_STYLE != "codex" or str(case.get("agent") or "") != "codex":
+        return False
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    screen_key = str(expected.get("screen_key") or "").strip()
+    composer_key = str(expected.get("composer_key") or "").strip()
+    return screen_key == "input-draft" or (
+        composer_key == "draft"
+        and expected.get("ask") is not True
+        and expected.get("approval_visible") is not True
+        and screen_key not in {"approval", "needs-input"}
+    )
+
+
+def mock_fixture_is_claude_live_working(case: dict[str, object]) -> bool:
+    if PERMISSION_STYLE == "codex" or str(case.get("agent") or "") != "claude":
+        return False
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    screen_key = str(expected.get("screen_key") or "").strip()
+    reason_code = str(expected.get("reason_code") or "").strip()
+    return screen_key == "working" or reason_code == "busy"
+
+
+def codex_fixture_draft_text(case: dict[str, object]) -> str:
+    capture = str(case.get("styled_capture") or case.get("raw_capture") or "")
+    for line in reversed(capture.splitlines()):
+        plain = plain_capture_line(line).strip()
+        if not CODEX_CAPTURED_PROMPT_RE.match(plain):
+            continue
+        text = re.sub(r"^\s*[›>]\s+", "", plain).strip()
+        if text and text != live_composer_suggestion():
+            return text
+    return ""
+
+
+def start_codex_draft_mock(state: dict[str, str], case: dict[str, object]) -> None:
+    draft = codex_fixture_draft_text(case)
+    state["fixture_case"] = str(case.get("case_name") or "typed_draft")
+    if draft:
+        state["composer_prefill"] = draft
     if sys.stdout.isatty():
-        write_codex_working_block(190)
+        render_live_composer(draft, len(draft), state=state)
+        reserve_output_region_above_live_composer(state)
+
+
+def parse_working_elapsed_seconds(value: str) -> int:
+    total = 0.0
+    for amount, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", value, flags=re.IGNORECASE):
+        factor = {"h": 3600, "m": 60, "s": 1}[unit.lower()]
+        total += float(amount) * factor
+    return max(0, int(total))
+
+
+CODEX_WORKING_ELAPSED_RE = re.compile(r"[•◦]\s+Working\s+\((?P<elapsed>[^()]*?)\s+•\s+esc to interrupt\)", re.IGNORECASE)
+
+
+def codex_live_working_base_seconds(case: dict[str, object]) -> int:
+    if mock_fixture_is_codex_goal_active(case):
+        return 190
+    capture = str(case.get("styled_capture") or case.get("raw_capture") or "")
+    match = CODEX_WORKING_ELAPSED_RE.search(plain_capture_line(capture))
+    if not match:
+        return 1
+    return parse_working_elapsed_seconds(match.group("elapsed"))
+
+
+def start_codex_live_working_mock(state: dict[str, str], case: dict[str, object]) -> None:
+    state["pending"] = "codex-working"
+    state["fixture_case"] = str(case.get("case_name") or "working")
+    state["codex_working_started_at"] = f"{time.time():.6f}"
+    state["codex_working_base_seconds"] = str(codex_live_working_base_seconds(case))
+    state["codex_working_text"] = ""
+    state["codex_working_cursor"] = "0"
+    state["codex_working_queued"] = ""
+    if sys.stdout.isatty():
+        write_codex_working_block(float(state["codex_working_base_seconds"]))
         sys.stdout.flush()
 
 
-def handle_codex_goal_active_tty(state: dict[str, str]) -> None:
+def start_codex_goal_active_mock(state: dict[str, str], case: dict[str, object]) -> None:
+    start_codex_live_working_mock(state, case)
+    state["pending"] = "codex-goal-active"
+
+
+def claude_fixture_working_fields(case: dict[str, object]) -> dict[str, str]:
+    capture = str(case.get("styled_capture") or case.get("raw_capture") or "")
+    fields = {
+        "marker": "·",
+        "verb": "Clauding",
+        "base_seconds": "1",
+        "base_tokens": "1",
+        "footer_status": "  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt",
+    }
+    for line in capture.splitlines():
+        match = CLAUDE_CAPTURED_WORKING_RE.match(plain_capture_line(line).strip())
+        if not match:
+            continue
+        fields["marker"] = match.group("marker")
+        fields["verb"] = match.group("verb").strip() or fields["verb"]
+        fields["base_seconds"] = str(parse_working_elapsed_seconds(match.group("elapsed")))
+        fields["base_tokens"] = match.group("tokens")
+    for line in reversed(capture.splitlines()):
+        plain = plain_capture_line(line).strip()
+        if "shift+tab to cycle" in plain and "esc to interrupt" in plain:
+            fields["footer_status"] = plain_capture_line(line)
+            break
+    return fields
+
+
+def strip_claude_captured_working_footer(lines: list[str]) -> list[str]:
+    if PERMISSION_STYLE == "codex":
+        return lines
+    for index in range(len(lines) - 1, -1, -1):
+        if CLAUDE_CAPTURED_WORKING_RE.match(plain_capture_line(lines[index]).strip()):
+            stripped = lines[:index]
+            while stripped and not plain_capture_line(stripped[-1]).strip():
+                stripped.pop()
+            return stripped
+    return lines
+
+
+def claude_working_line(seconds: float, state: dict[str, str]) -> str:
+    base_tokens = int(state.get("claude_working_base_tokens", "1") or 1)
+    base_seconds = float(state.get("claude_working_base_seconds", "1") or 1)
+    elapsed = max(0.0, seconds)
+    token_delta = max(0, int((elapsed - base_seconds) * 24))
+    marker = state.get("claude_working_marker", "·") or "·"
+    verb = state.get("claude_working_verb", "Clauding") or "Clauding"
+    return f"{marker} {verb}… ({format_working_elapsed(elapsed)} · ↓ {base_tokens + token_delta} tokens)"
+
+
+def render_lines_above_row(lines: list[str], bottom_row: int) -> None:
+    bottom_row = max(1, bottom_row)
+    for row in range(1, bottom_row + 1):
+        sys.stdout.write(f"\x1b[{row};1H\x1b[2K")
+    if not lines:
+        return
+    visible_lines = lines[-bottom_row:]
+    start_row = max(1, bottom_row - len(visible_lines) + 1)
+    for offset, line in enumerate(visible_lines):
+        row = start_row + offset
+        if row <= bottom_row:
+            sys.stdout.write(f"\x1b[{row};1H{line}")
+
+
+def write_claude_working_block(seconds: float, state: dict[str, str]) -> int:
+    state["claude_working"] = "1"
+    text = state.get("claude_working_text", "")
+    cursor = max(0, min(len(text), int(state.get("claude_working_cursor", "0") or 0)))
+    render_live_composer(text, cursor, state=state)
+    working_row = max(1, live_composer_footer_top(text, False, state) - 1)
+    line = clipped(claude_working_line(seconds, state), terminal_width())
+    sys.stdout.write(f"\x1b7\x1b[{working_row};1H\x1b[2K{line}\x1b8")
+    bottom = max(1, working_row - 1)
+    sys.stdout.write(f"\x1b7\x1b[1;{bottom}r\x1b8")
+    sys.stdout.flush()
+    return working_row
+
+
+def clear_claude_working_block(state: dict[str, str], working_row: int | None = None) -> None:
+    if working_row is None:
+        working_row = max(1, live_composer_footer_top(state=state) - 1)
+    if 1 <= working_row <= terminal_height():
+        sys.stdout.write(f"\x1b[{working_row};1H\x1b[2K")
+    state.pop("claude_working", None)
+    render_live_composer(state.get("composer_prefill", ""), len(state.get("composer_prefill", "")), state=state)
+    reserve_output_region_above_live_composer(state)
+    sys.stdout.flush()
+
+
+def apply_claude_working_key(text: str, cursor: int, key: str) -> tuple[str, int, str]:
+    if key in {"\x1b", "\x03"}:
+        return text, cursor, "interrupt"
+    if key in {"\x7f", "\b"}:
+        if cursor > 0:
+            text = text[:cursor - 1] + text[cursor:]
+            cursor -= 1
+        return text, cursor, ""
+    if key in {"\x1b[D", "\x1bOD", "\x02"}:
+        return text, max(0, cursor - 1), ""
+    if key in {"\x1b[C", "\x1bOC", "\x06"}:
+        return text, min(len(text), cursor + 1), ""
+    if key == "\x01":
+        return text, 0, ""
+    if key == "\x05":
+        return text, len(text), ""
+    if key == "\x15":
+        return "", 0, ""
+    if len(key) == 1 and key >= " ":
+        text = text[:cursor] + key + text[cursor:]
+        cursor += len(key)
+    return text, cursor, ""
+
+
+def start_claude_live_working_mock(state: dict[str, str], case: dict[str, object], lines: list[str] | None = None) -> None:
+    fields = claude_fixture_working_fields(case)
+    state["pending"] = "claude-working"
+    state["fixture_case"] = str(case.get("case_name") or "working")
+    state["claude_working_started_at"] = f"{time.time():.6f}"
+    state["claude_working_base_seconds"] = fields["base_seconds"]
+    state["claude_working_base_tokens"] = fields["base_tokens"]
+    state["claude_working_marker"] = fields["marker"]
+    state["claude_working_verb"] = fields["verb"]
+    state["claude_working_footer_status"] = fields["footer_status"]
+    state["claude_working_text"] = ""
+    state["claude_working_cursor"] = "0"
+    if sys.stdout.isatty():
+        source_lines = lines if lines is not None else str(case.get("styled_capture") or "").splitlines()
+        clipped_source_lines = [clip_display_width(line, terminal_width()) for line in source_lines]
+        body_lines = strip_claude_captured_working_footer(clipped_source_lines)
+        footer_top = live_composer_footer_top("", False, {**state, "claude_working": "1"})
+        render_lines_above_row(body_lines, max(1, footer_top - 2))
+        write_claude_working_block(float(state["claude_working_base_seconds"]), state)
+
+
+def handle_claude_live_working_tty(state: dict[str, str]) -> None:
+    old_settings = termios.tcgetattr(sys.stdin.fileno())
+    working_row = None
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while state.get("pending") == "claude-working":
+            started_at = float(state.get("claude_working_started_at", str(time.time())) or time.time())
+            base_seconds = float(state.get("claude_working_base_seconds", "1") or 1)
+            elapsed = base_seconds + max(0, time.time() - started_at)
+            working_row = write_claude_working_block(elapsed, state)
+            ready, _write, _error = select.select([sys.stdin.fileno()], [], [], 0.12)
+            if not ready:
+                continue
+            key = read_key()
+            text = state.get("claude_working_text", "")
+            cursor = max(0, min(len(text), int(state.get("claude_working_cursor", "0") or 0)))
+            text, cursor, action = apply_claude_working_key(text, cursor, key)
+            state["claude_working_text"] = text
+            state["claude_working_cursor"] = str(cursor)
+            if action == "interrupt":
+                clear_pending(state)
+                if text:
+                    state["composer_prefill"] = text
+                break
+    finally:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+        clear_claude_working_block(state, working_row)
+
+
+def handle_codex_live_working_tty(state: dict[str, str]) -> None:
     old_settings = termios.tcgetattr(sys.stdin.fileno())
     start_row = None
     line_count = 7
     try:
         tty.setraw(sys.stdin.fileno())
-        while state.get("pending") == "codex-goal-active":
-            started_at = float(state.get("codex_goal_active_started_at", str(time.time())) or time.time())
-            base_seconds = float(state.get("codex_goal_active_base_seconds", "190") or 190)
-            text = state.get("codex_goal_active_text", "")
-            cursor = max(0, min(len(text), int(state.get("codex_goal_active_cursor", "0") or 0)))
-            queued_messages = [message for message in state.get("codex_goal_active_queued", "").split("\n") if message]
+        while state.get("pending") in {"codex-working", "codex-goal-active"}:
+            started_at = float(state.get("codex_working_started_at", state.get("codex_goal_active_started_at", str(time.time()))) or time.time())
+            base_seconds = float(state.get("codex_working_base_seconds", state.get("codex_goal_active_base_seconds", "1")) or 1)
+            text = state.get("codex_working_text", state.get("codex_goal_active_text", ""))
+            cursor = max(0, min(len(text), int(state.get("codex_working_cursor", state.get("codex_goal_active_cursor", "0")) or 0)))
+            queued_raw = state.get("codex_working_queued", state.get("codex_goal_active_queued", ""))
+            queued_messages = [message for message in queued_raw.split("\n") if message]
             elapsed = base_seconds + max(0, time.time() - started_at)
             start_row, line_count = write_codex_working_block(elapsed, text, cursor, queued_messages=queued_messages)
             ready, _write, _error = select.select([sys.stdin.fileno()], [], [], 0.12)
@@ -810,9 +1072,9 @@ def handle_codex_goal_active_tty(state: dict[str, str]) -> None:
                     queued_messages.append(text)
                 text = ""
                 cursor = 0
-            state["codex_goal_active_text"] = text
-            state["codex_goal_active_cursor"] = str(cursor)
-            state["codex_goal_active_queued"] = "\n".join(queued_messages)
+            state["codex_working_text"] = text
+            state["codex_working_cursor"] = str(cursor)
+            state["codex_working_queued"] = "\n".join(queued_messages)
             if action == "interrupt":
                 clear_pending(state)
                 if text:
@@ -821,6 +1083,10 @@ def handle_codex_goal_active_tty(state: dict[str, str]) -> None:
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
         clear_codex_working_block(start_row, line_count)
+
+
+def handle_codex_goal_active_tty(state: dict[str, str]) -> None:
+    handle_codex_live_working_tty(state)
 
 
 def claude_working_status_lines(frame: int, started_at: float, verb: str, tip: str) -> list[str]:
@@ -1441,6 +1707,8 @@ def live_composer_status_lines(armed_exit: bool = False, state: dict[str, str] |
     if armed_exit:
         return ["Press Ctrl-C again to exit"]
     if PERMISSION_STYLE != "codex":
+        if state and state.get("claude_working") == "1":
+            return [state.get("claude_working_footer_status") or "  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt"]
         return claude_status_lines(state)
     return [f"  {MODEL} {EFFORT} · {display_cwd()}"]
 
@@ -1475,9 +1743,8 @@ def live_composer_layout(armed_exit: bool = False, state: dict[str, str] | None 
     if height <= 1:
         return 1, 1, status_lines[:1]
     if PERMISSION_STYLE == "codex":
-        # Approval and working states render Codex's active composer as a bottom
-        # footer. The idle startup composer is flow-rendered by render_inline_composer,
-        # matching real Codex launched from a normal shell.
+        # Codex owns the active composer as a bottom footer in both idle and working
+        # states so transcript output cannot scroll over the model/status rows.
         footer_top = max(1, height - len(codex_composer_footer_lines()) + 1)
         prompt_row = min(height, footer_top + 1)
         status_start = min(height, footer_top + 3)
@@ -1512,16 +1779,6 @@ def live_composer_separator_line() -> str:
     return ANSI_DIM + ("─" * terminal_width()) + ANSI_RESET
 
 
-def claude_default_notice_visible(text: str, state: dict[str, str] | None) -> bool:
-    return bool(
-        PERMISSION_STYLE != "codex"
-        and not text
-        and state is not None
-        and "claude_mode_index" not in state
-        and state.get("claude_shortcuts_visible") != "1"
-    )
-
-
 def live_composer_footer_top(text: str = "", armed_exit: bool = False, state: dict[str, str] | None = None) -> int:
     if PERMISSION_STYLE == "codex":
         return max(1, terminal_height() - len(codex_composer_footer_lines(text, 0, armed_exit, state)) + 1)
@@ -1530,8 +1787,6 @@ def live_composer_footer_top(text: str = "", armed_exit: bool = False, state: di
     rows.extend(status_start + index for index in range(len(status_lines)))
     separator_rows = live_composer_separator_rows(armed_exit, state)
     rows.extend(separator_rows)
-    if claude_default_notice_visible(text, state) and separator_rows:
-        rows.append(max(1, separator_rows[0] - 1))
     return max(1, min(rows))
 
 
@@ -1592,14 +1847,6 @@ def render_live_composer(text: str, cursor: int, armed_exit: bool = False, state
     clear_live_composer_footer(text, armed_exit, state)
     separator = live_composer_separator_line()
     separator_rows = live_composer_separator_rows(armed_exit, state)
-    if (
-        PERMISSION_STYLE != "codex"
-        and claude_default_notice_visible(text, state)
-        and separator_rows
-    ):
-        notice_row = separator_rows[0] - 1
-        if notice_row > 0:
-            sys.stdout.write(f"\x1b[{notice_row};1H\x1b[2K{clipped(CLAUDE_TMUX_NOTICE_LINE, terminal_width())}")
     for row in separator_rows:
         sys.stdout.write(f"\x1b[{row};1H\x1b[2K{separator}")
     sys.stdout.write(f"\x1b[{prompt_row};1H\x1b[2K{prompt_display}")
@@ -1635,6 +1882,39 @@ def reset_terminal_scroll_region(preserve_cursor: bool = False) -> None:
     sys.stdout.flush()
 
 
+def terminal_display_line_count(lines: list[str]) -> int:
+    width = max(1, terminal_width())
+    count = 0
+    for line in lines:
+        length = visible_len(line)
+        count += max(1, ((max(1, length) - 1) // width) + 1)
+    return max(0, count)
+
+
+def terminal_owned_clear_top(
+    state: dict[str, str] | None = None,
+    next_output_line_count: int = 0,
+) -> int:
+    next_output_row = max(1, terminal_height() - max(0, next_output_line_count))
+    clear_top = min(next_output_row, live_composer_footer_top("", False, state))
+    if state is not None and "prompt_top_row" in state:
+        try:
+            clear_top = min(clear_top, int(state.get("prompt_top_row", str(clear_top)) or clear_top))
+        except ValueError:
+            pass
+    return max(1, min(terminal_height(), clear_top))
+
+
+def prepare_terminal_for_shell(
+    next_output_line_count: int = 0,
+    state: dict[str, str] | None = None,
+) -> None:
+    next_output_row = max(1, terminal_height() - max(0, next_output_line_count))
+    clear_top = terminal_owned_clear_top(state, next_output_line_count)
+    sys.stdout.write(f"\x1b[r\x1b[{clear_top};1H\x1b[J\x1b[{next_output_row};1H")
+    sys.stdout.flush()
+
+
 def live_composer_output_bottom(
     text: str = "",
     armed_exit: bool = False,
@@ -1666,6 +1946,15 @@ def reserve_output_region_above_live_composer(state: dict[str, str] | None = Non
     sys.stdout.flush()
 
 
+def clear_output_region_above_live_composer(state: dict[str, str] | None = None) -> int:
+    bottom = set_output_region_above_live_composer("", False, state, preserve_cursor=False)
+    for row in range(1, bottom + 1):
+        sys.stdout.write(f"\x1b[{row};1H\x1b[2K")
+    sys.stdout.write(f"\x1b[{bottom};1H")
+    sys.stdout.flush()
+    return bottom
+
+
 def prepare_output_above_live_composer_footer(state: dict[str, str] | None = None) -> None:
     if not sys.stdout.isatty():
         return
@@ -1676,6 +1965,8 @@ def prepare_output_above_live_composer_footer(state: dict[str, str] | None = Non
 def commit_live_composer_text(text: str, state: dict[str, str] | None = None) -> None:
     if not text.strip():
         return
+    if PERMISSION_STYLE == "codex" and state is not None and state.pop("codex_clear_startup_on_first_submit", "") == "1":
+        clear_output_region_above_live_composer(state)
     bottom = set_output_region_above_live_composer("", False, state, preserve_cursor=False)
     prompt_display, _status_display, _cursor_col = composer_render_parts(text, len(text), state=state)
     sys.stdout.write(f"\x1b[{bottom};1H\x1b[2K{prompt_display}\n")
@@ -1721,22 +2012,12 @@ def finish_inline_composer(text: str, state: dict[str, str] | None = None) -> No
     sys.stdout.flush()
 
 
-def emit_codex_prompt_leading_blank(state: dict[str, str] | None = None) -> None:
-    if PERMISSION_STYLE != "codex" or state is None:
-        return
-    if state.pop("codex_prompt_spacer", "") != "1":
-        return
-    sys.stdout.write("\n")
-    sys.stdout.flush()
-
-
 def history_item(index: int) -> str:
     return readline.get_history_item(index) or ""
 
 
 def read_live_composer(state: dict[str, str] | None = None) -> str:
     set_output_region_above_live_composer(state=state, preserve_cursor=True)
-    emit_codex_prompt_leading_blank(state)
     text = ""
     if state is not None:
         text = state.pop("composer_prefill", "")
@@ -1957,9 +2238,20 @@ def codex_token_usage_line(state: dict[str, str]) -> str:
     )
 
 
+def codex_exit_footer_lines(state: dict[str, str]) -> list[str]:
+    return [
+        codex_token_usage_line(state),
+        f"To continue this session, run codex resume {codex_session_id(state)}",
+    ]
+
+
+def codex_exit_footer_display_line_count(state: dict[str, str]) -> int:
+    return terminal_display_line_count(codex_exit_footer_lines(state))
+
+
 def print_codex_exit_footer(state: dict[str, str]) -> None:
-    print(codex_token_usage_line(state))
-    print(f"To continue this session, run codex resume {codex_session_id(state)}")
+    for line in codex_exit_footer_lines(state):
+        print(line)
 
 
 def print_exit_message(state: dict[str, str]) -> None:
@@ -2164,12 +2456,7 @@ def mock_fixture_allows_choice_interaction(case: dict[str, object]) -> bool:
 
 
 def mock_fixture_occupies_screen(case: dict[str, object], group: dict[str, object] | None, freeze_static: bool) -> bool:
-    if group or freeze_static:
-        return True
-    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
-    screen_key = str(expected.get("screen_key") or "").strip()
-    reason_code = str(expected.get("reason_code") or "").strip()
-    return screen_key == "working" or reason_code == "busy"
+    return mock_fixture_requires_screen(case, group, freeze_static)
 
 
 def mock_fixture_list_cases(
@@ -2212,6 +2499,30 @@ def print_mock_fixture_list(
         line = f"  ⎿  {agent}: [{outcome}] {case['case_name']} ({Path(case['path']).name}) {mock_fixture_cursor_label(cursor)}"
         print(clipped(line, width))
     print()
+
+
+def print_mock_fixture_dump() -> None:
+    cases = mock_fixture_list_cases(include_shared=True, include_idle=True)
+    total = len(cases)
+    for index, case in enumerate(cases, start=1):
+        path = Path(case.get("path") or "")
+        agent = str(case.get("agent") or "generic")
+        outcome = mock_fixture_outcome_label(case)
+        case_name = str(case.get("case_name") or path.stem)
+        print(f"===== BEGIN FIXTURE {index}/{total}: {path.name} =====")
+        print(f"agent: {agent}")
+        print(f"case: {case_name}")
+        print(f"outcome: {outcome}")
+        print(f"path: {path}")
+        print("----- capture -----")
+        capture = str(case.get("styled_capture") or case.get("raw_capture") or "")
+        if capture:
+            sys.stdout.write(capture)
+            if not capture.endswith("\n"):
+                print()
+        print("===== END FIXTURE: " + path.name + " =====")
+        if index != total:
+            print()
 
 
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -2268,14 +2579,47 @@ def render_plain_fixture_lines(lines: list[str], state: dict[str, str]) -> None:
         sys.stdout.write(f"\x1b[{start_row + offset};1H{line}")
 
 
-def fixture_reserves_footer(occupies_screen: bool, freeze_static: bool) -> bool:
-    return occupies_screen and not freeze_static and PERMISSION_STYLE != "codex"
+def mock_fixture_requires_screen(case: dict[str, object], group: dict[str, object] | None, freeze_static: bool) -> bool:
+    if group or freeze_static:
+        return True
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    screen_key = str(expected.get("screen_key") or "").strip()
+    reason_code = str(expected.get("reason_code") or "").strip()
+    return bool(expected.get("ask") is True or expected.get("approval_visible") is True or screen_key in {"approval", "needs-input", "working"} or reason_code == "busy")
 
 
-def fixture_render_height(state: dict[str, str], occupies_screen: bool, freeze_static: bool) -> int:
-    if fixture_reserves_footer(occupies_screen, freeze_static):
+def fixture_reserves_footer(case: dict[str, object], occupies_screen: bool, group: dict[str, object] | None, freeze_static: bool) -> bool:
+    if not occupies_screen or freeze_static:
+        return False
+    if PERMISSION_STYLE != "codex":
+        return True
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    screen_key = str(expected.get("screen_key") or "").strip()
+    return bool(group or expected.get("ask") is True or expected.get("approval_visible") is True or screen_key in {"approval", "needs-input"})
+
+
+def fixture_render_height(state: dict[str, str], reserve_footer: bool) -> int:
+    if reserve_footer:
         return max(1, live_composer_footer_top("", False, state) - 1)
     return terminal_height()
+
+
+def strip_codex_captured_footer(lines: list[str], reserve_footer: bool) -> list[str]:
+    if PERMISSION_STYLE != "codex" or not reserve_footer:
+        return lines
+    stripped = list(lines)
+    while stripped and not plain_capture_line(stripped[-1]).strip():
+        stripped.pop()
+    if not stripped or not CODEX_CAPTURED_STATUS_RE.match(plain_capture_line(stripped[-1]).strip()):
+        return lines
+    stripped.pop()
+    while stripped and not plain_capture_line(stripped[-1]).strip():
+        stripped.pop()
+    if stripped and CODEX_CAPTURED_PROMPT_RE.match(plain_capture_line(stripped[-1]).strip()):
+        stripped.pop()
+    while stripped and not plain_capture_line(stripped[-1]).strip():
+        stripped.pop()
+    return stripped
 
 
 def render_fixture_screen(
@@ -2311,13 +2655,17 @@ def cmd_mock_fixture(state: dict[str, str], name: str, freeze_static: bool = Fal
         print()
         print_mock_fixture_list()
         return
-    if (
-        not freeze_static
-        and mock_fixture_is_codex_goal_active(case)
-        and sys.stdin.isatty()
-        and sys.stdout.isatty()
-    ):
-        start_codex_goal_active_mock(state, case)
+    if not freeze_static and mock_fixture_is_codex_live_working(case) and sys.stdin.isatty() and sys.stdout.isatty():
+        if mock_fixture_is_codex_goal_active(case):
+            start_codex_goal_active_mock(state, case)
+        else:
+            start_codex_live_working_mock(state, case)
+        return
+    if not freeze_static and mock_fixture_is_claude_live_working(case) and sys.stdin.isatty() and sys.stdout.isatty():
+        start_claude_live_working_mock(state, case)
+        return
+    if not freeze_static and mock_fixture_is_codex_draft_only(case) and sys.stdin.isatty() and sys.stdout.isatty():
+        start_codex_draft_mock(state, case)
         return
     capture = str(case.get("styled_capture") or "")
     cursor = case.get("cursor") if isinstance(case.get("cursor"), dict) else {}
@@ -2334,8 +2682,12 @@ def cmd_mock_fixture(state: dict[str, str], name: str, freeze_static: bool = Fal
     clipped_lines = [clip_display_width(line, width) for line in raw_lines]
     provisional_group = fixture_choice_group(clipped_lines) if (sys.stdin.isatty() and mock_fixture_allows_choice_interaction(case)) else None
     occupies_screen = mock_fixture_occupies_screen(case, provisional_group, freeze_static)
-    reserve_footer = fixture_reserves_footer(occupies_screen, freeze_static)
-    render_height = fixture_render_height(state, occupies_screen, freeze_static)
+    reserve_footer = fixture_reserves_footer(case, occupies_screen, provisional_group, freeze_static)
+    clipped_lines = strip_codex_captured_footer(clipped_lines, reserve_footer)
+    provisional_group = fixture_choice_group(clipped_lines) if (sys.stdin.isatty() and mock_fixture_allows_choice_interaction(case)) else None
+    occupies_screen = mock_fixture_occupies_screen(case, provisional_group, freeze_static)
+    reserve_footer = fixture_reserves_footer(case, occupies_screen, provisional_group, freeze_static)
+    render_height = fixture_render_height(state, reserve_footer)
     drop = max(0, len(clipped_lines) - render_height)
     lines = clipped_lines[drop:]
     line_count = len(lines)
@@ -2368,7 +2720,7 @@ def cmd_mock_fixture(state: dict[str, str], name: str, freeze_static: bool = Fal
         if render_cursor:
             state["fixture_park_col"] = str(render_cursor[0] + 1)
             state["fixture_park_row"] = str(render_cursor[1] + 1)
-    elif occupies_screen:
+    elif occupies_screen and not reserve_footer:
         state["pending"] = "fixture"
     if render_cursor and occupies_screen:
         x, y = render_cursor
@@ -2550,7 +2902,7 @@ def cmd_clear(state: dict[str, str]) -> None:
     sys.stdout.write("\x1b[H\x1b[J")
     sys.stdout.flush()
     state.clear()
-    print_startup()
+    print_startup(state)
 
 
 def cmd_status(state: dict[str, str]) -> None:
@@ -2665,7 +3017,6 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         return
 
     if not value:
-        print()
         return
 
     state["turn"] = str(int(state.get("turn", "0")) + 1)
@@ -2783,8 +3134,8 @@ def setup_history() -> None:
 
 def main() -> None:
     setup_history()
-    print_startup()
     state: dict[str, str] = {}
+    print_startup(state)
     while True:
         try:
             if state.get("pending") == "permission" and sys.stdin.isatty():
@@ -2793,8 +3144,11 @@ def main() -> None:
             if state.get("pending") == "question" and sys.stdin.isatty():
                 handle_pending_question_tty(state)
                 continue
-            if state.get("pending") == "codex-goal-active" and sys.stdin.isatty():
-                handle_codex_goal_active_tty(state)
+            if state.get("pending") == "claude-working" and sys.stdin.isatty():
+                handle_claude_live_working_tty(state)
+                continue
+            if state.get("pending") in {"codex-working", "codex-goal-active"} and sys.stdin.isatty():
+                handle_codex_live_working_tty(state)
                 continue
             if state.get("pending") == "fixture":
                 if state.get("fixture_interactive") == "1" and sys.stdin.isatty():
@@ -2819,14 +3173,14 @@ def main() -> None:
                 # The composer status line shows "Press Ctrl-C again to exit" while armed
                 # (see live_composer_status_line); a second Ctrl-C falls through and exits.
                 continue
-            print()
-            reset_terminal_scroll_region()
+            next_lines = codex_exit_footer_display_line_count(state) if AGENT_NAME == "codex" else 0
+            prepare_terminal_for_shell(next_lines, state)
             if AGENT_NAME == "codex":
                 print_codex_exit_footer(state)
             sys.exit(0)
         except EOFError:
-            print()
-            reset_terminal_scroll_region()
+            next_lines = codex_exit_footer_display_line_count(state) if AGENT_NAME == "codex" else 0
+            prepare_terminal_for_shell(next_lines, state)
             if AGENT_NAME == "codex":
                 print_codex_exit_footer(state)
             sys.exit(0)

@@ -467,6 +467,101 @@ def test_mock_fixture_cursor_uses_selected_option_for_choice_prompt():
     assert mock_agent_common.mock_fixture_render_cursor(lines, {}, 10, 5, group) == (0, 6)
 
 
+def test_codex_mock_question_strips_captured_footer_and_reserves_live_footer(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "choice_question",
+            "keys": {"choice_question"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "choice_question.yaml",
+            "styled_capture": (
+                "› Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?\n"
+                "  1. Pane capture 2. Transcript capture\n\n\n"
+                "• Which YOLOmux verifier mode should we use?\n\n"
+                "  1. Pane capture\n"
+                "  2. Transcript capture\n\n\n"
+                "› Improve documentation in @filename\n\n"
+                "  gpt-5.5 xhigh · ~/yolomux.dev8001"
+            ),
+            "cursor": {},
+            "expected": {"ask": True, "screen_key": "needs-input"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "›")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "medium")
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "choice_question", freeze_static=False)
+
+    output = capsys.readouterr().out
+    assert "Which YOLOmux verifier mode should we use?" in output
+    assert "gpt-5.5 xhigh" not in output
+    assert "› Improve documentation in @filename" not in output
+    assert "\x1b[18;1H\x1b[2K› \x1b[2mExplain this codebase\x1b[0m" in output
+    assert "\x1b[20;1H\x1b[2K  gpt-5.4-mini medium · ~/yolomux.dev8002" in output
+    assert state.get("pending", "") == ""
+
+
+def test_codex_mock_approval_reserves_footer_rows(monkeypatch, capsys):
+    class TtyInput:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "reappeared_prompt_after_tool",
+            "keys": {"reappeared_prompt_after_tool"},
+            "path": PROMPT_CORPUS_DIR / "synthetic" / "reappeared_prompt_after_tool.yaml",
+            "styled_capture": (
+                "• Bash(echo before)\n"
+                "  └ before\n\n"
+                "────────────────────────────────────────────────────────────────\n\n"
+                "Codex wants to run a shell command\n\n"
+                "Would you like to run the following command?\n\n"
+                "  Reason: The previous tool call finished and Codex redrew the approval.\n\n"
+                "  $ echo after-redraw\n\n"
+                "› 1. Yes, proceed (y)\n"
+                "  2. No, and tell Codex what to do differently (esc)\n\n"
+                "Press enter to confirm or esc to cancel\n\n"
+                "› Improve documentation in @filename\n\n"
+                "  gpt-5.5 xhigh · ~/yolomux.dev8001"
+            ),
+            "cursor": {},
+            "expected": {"approval_visible": True, "screen_key": "approval"},
+        },
+    ])
+    monkeypatch.setattr(sys, "stdin", TtyInput())
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "›")
+    monkeypatch.setattr(mock_agent_common, "SELECTOR_GLYPH", "›")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "medium")
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "reappeared_prompt_after_tool", freeze_static=False)
+
+    output = capsys.readouterr().out
+    assert "Would you like to run the following command?" in output
+    assert "Press enter to confirm or esc to cancel" in output
+    assert "gpt-5.5 xhigh" not in output
+    assert "› Improve documentation in @filename" not in output
+    assert "\x1b[18;1H\x1b[2K› \x1b[2mExplain this codebase\x1b[0m" in output
+    assert "\x1b[20;1H\x1b[2K  gpt-5.4-mini medium · ~/yolomux.dev8002" in output
+    assert state.get("pending") == "fixture"
+    assert state.get("fixture_interactive") == "1"
+
+
 def test_plain_mock_non_choice_fixture_prints_inline_without_clearing(monkeypatch, capsys):
     monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
         {
@@ -576,6 +671,227 @@ def test_plain_codex_goal_active_fixture_enters_live_working_state(monkeypatch):
     assert "Pursuing goal" not in rendered
 
 
+def test_plain_codex_run_fixtures_enter_live_working_state(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    class TtyInput:
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stdin", TtyInput())
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "working_command_counter",
+            "keys": {"working_command_counter"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "working_command_counter.yaml",
+            "styled_capture": "◦ Working (0s • esc to interrupt)\n\n› Improve documentation in @filename",
+            "cursor": {},
+            "expected": {"screen_key": "working", "reason_code": "busy"},
+        },
+        {
+            "agent": "codex",
+            "case_name": "working_spinner",
+            "keys": {"working_spinner"},
+            "path": PROMPT_CORPUS_DIR / "synthetic" / "working_spinner.yaml",
+            "styled_capture": "• Working (1m 21s • esc to interrupt)\n\n› Implement the detector corpus",
+            "cursor": {},
+            "expected": {"screen_key": "working"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    state: dict[str, str] = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "working_command_counter", freeze_static=False)
+    first_render = output.getvalue()
+    assert state.get("pending") == "codex-working"
+    assert state.get("codex_working_base_seconds") == "0"
+    assert "Improve documentation in @filename" not in first_render
+    assert "• Working (0s • esc to interrupt)" in mock_agent_common.ANSI_RE.sub("", first_render)
+
+    state.clear()
+    output.truncate(0)
+    output.seek(0)
+    mock_agent_common.cmd_mock_fixture(state, "working_spinner", freeze_static=False)
+    second_render = output.getvalue()
+    assert state.get("pending") == "codex-working"
+    assert state.get("codex_working_base_seconds") == "81"
+    assert "Implement the detector corpus" not in second_render
+    assert "• Working (1m 21s • esc to interrupt)" in mock_agent_common.ANSI_RE.sub("", second_render)
+
+
+def test_plain_claude_working_fixture_replaces_captured_footer(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    class TtyInput:
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stdin", TtyInput())
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "claude",
+            "case_name": "working_visible_counter",
+            "keys": {"working_visible_counter"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "working_visible_counter.yaml",
+            "styled_capture": (
+                "❯ Plan this harmless verification task\n\n"
+                "● Updated plan\n"
+                "  ⎿  /plan to preview\n\n\n"
+                "· Clauding… (11s · ↓ 471 tokens)\n"
+                "────────────────────────────────────────────────────────────────\n"
+                "❯ \n"
+                "────────────────────────────────────────────────────────────────\n"
+                "  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt\n"
+            ),
+            "cursor": {},
+            "expected": {"screen_key": "working", "reason_code": "busy"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "claude")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    state: dict[str, str] = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "working_visible_counter", freeze_static=False)
+
+    rendered = mock_agent_common.ANSI_RE.sub("", output.getvalue())
+    assert state.get("pending") == "claude-working"
+    assert state.get("claude_working_base_seconds") == "11"
+    assert state.get("claude_working_base_tokens") == "471"
+    assert "● Updated plan" in rendered
+    assert rendered.count("Clauding") == 1
+    assert rendered.count("plan mode on (shift+tab to cycle) · esc to interrupt") == 1
+    assert rendered.count('Try "fix typecheck errors"') == 1
+
+
+def test_claude_working_line_increments_from_capture(monkeypatch):
+    state = {
+        "claude_working_base_seconds": "11",
+        "claude_working_base_tokens": "471",
+        "claude_working_marker": "·",
+        "claude_working_verb": "Clauding",
+    }
+
+    assert mock_agent_common.claude_working_line(11, state) == "· Clauding… (11s · ↓ 471 tokens)"
+    assert mock_agent_common.claude_working_line(13, state) == "· Clauding… (13s · ↓ 519 tokens)"
+
+
+def test_mock_fixture_dump_prints_agent_fixtures_with_separators(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "codex_case",
+            "keys": {"codex_case"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "codex_case.yaml",
+            "styled_capture": "codex visible text",
+            "raw_capture": "",
+            "cursor": {},
+            "expected": {"screen_key": "working"},
+        },
+        {
+            "agent": "claude",
+            "case_name": "claude_case",
+            "keys": {"claude_case"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "claude_case.yaml",
+            "styled_capture": "claude visible text",
+            "raw_capture": "",
+            "cursor": {},
+            "expected": {"screen_key": "working"},
+        },
+        {
+            "agent": "generic",
+            "case_name": "shared_idle",
+            "keys": {"shared_idle"},
+            "path": PROMPT_CORPUS_DIR / "synthetic" / "shared_idle.yaml",
+            "styled_capture": "shared idle text",
+            "raw_capture": "",
+            "cursor": {},
+            "expected": {"screen_key": "idle"},
+        },
+    ])
+
+    mock_agent_common.print_mock_fixture_dump()
+
+    output = capsys.readouterr().out
+    assert "===== BEGIN FIXTURE 1/2: codex_case.yaml =====" in output
+    assert "path: " + str(PROMPT_CORPUS_DIR / "captures" / "codex_case.yaml") in output
+    assert "----- capture -----\ncodex visible text\n" in output
+    assert "===== END FIXTURE: codex_case.yaml =====" in output
+    assert "shared_idle.yaml" in output
+    assert "shared idle text" in output
+    assert "claude_case.yaml" not in output
+    assert "claude visible text" not in output
+
+
+def test_plain_codex_typed_draft_prefills_live_composer(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    class TtyInput:
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stdin", TtyInput())
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "typed_draft",
+            "keys": {"typed_draft"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "typed_draft.yaml",
+            "styled_capture": (
+                "╭─────────────────────────────────────────────╮\n"
+                "│ >_ OpenAI Codex (v0.141.0)                  │\n"
+                "│ model:     gpt-5.5 xhigh   /model to change │\n"
+                "│ directory: ~/yolomux.dev8001                │\n"
+                "╰─────────────────────────────────────────────╯\n\n"
+                "  Tip: Switch models or reasoning effort quickly with /model.\n\n\n"
+                "› run the focused detector tests \n\n"
+                "  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+            ),
+            "cursor": {},
+            "expected": {"screen_key": "input-draft", "composer_key": "draft"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "›")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "medium")
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
+    state: dict[str, str] = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "typed_draft", freeze_static=False)
+
+    rendered = output.getvalue()
+    assert state.get("composer_prefill") == "run the focused detector tests"
+    assert state.get("pending", "") == ""
+    assert "OpenAI Codex (v0.141.0)" not in rendered
+    assert "gpt-5.5 xhigh" not in rendered
+    assert "~/yolomux.dev8001" not in rendered
+    assert "\x1b[10;1H\x1b[2K› run the focused detector tests" in rendered
+    assert "\x1b[12;1H\x1b[2K  gpt-5.4-mini medium · ~/yolomux.dev8002" in rendered
+
+
 def test_codex_goal_active_working_keys_interrupt_and_preserve_draft():
     text, cursor, action = mock_agent_common.apply_codex_working_key("queued", 6, "\x1b")
     assert (text, cursor, action) == ("queued", 6, "interrupt")
@@ -624,10 +940,10 @@ def test_claude_plain_mock_scrollback_fixture_renders_above_footer(monkeypatch, 
     output = capsys.readouterr().out
     assert "Which backend should I use for this verification?" in output
     assert "● Running tests now." in output
-    assert "\x1b[15;1HWhich backend should I use for this verification?" in output
+    assert "\x1b[16;1HWhich backend should I use for this verification?" in output
     assert "\x1b[26;1H\x1b[2K" in output
-    after_fixture_write = output.split("\x1b[15;1HWhich backend should I use for this verification?", 1)[1]
-    assert "\x1b[15;1H\x1b[2K" not in after_fixture_write
+    after_fixture_write = output.split("\x1b[16;1HWhich backend should I use for this verification?", 1)[1]
+    assert "\x1b[16;1H\x1b[2K" not in after_fixture_write
     assert state.get("pending") != "fixture"
 
 
@@ -699,9 +1015,10 @@ def test_claude_interactive_fixture_reserves_composer_footer(monkeypatch):
     mock_agent_common.cmd_mock_fixture(state, "multiple_choice_question", freeze_static=False)
 
     rendered = output.getvalue()
-    assert "\x1b[2;1HWhich backend should I use for this verification?" in rendered
-    assert state["fixture_option_rows"] == "3,4,5"
-    assert "\x1b[8;1H\x1b[2K  tmux focus-events off" in rendered
+    assert "\x1b[3;1HWhich backend should I use for this verification?" in rendered
+    assert state["fixture_option_rows"] == "4,5,6"
+    assert "tmux focus-events off" not in rendered
+    assert "\x1b[9;1H\x1b[2K" in rendered
     assert '\x1b[10;1H\x1b[2K❯ \x1b[2mTry "fix typecheck errors"\x1b[0m' in rendered
     assert "\x1b[12;1H\x1b[2K  ? for shortcuts · ← for agents" in rendered
     assert state.get("pending") == "fixture"
@@ -770,7 +1087,7 @@ def test_codex_startup_hook_warning_is_conditional(monkeypatch, capsys):
     assert "permissions: danger-full-access" not in output
 
 
-def test_codex_tiny_tty_startup_drops_box_before_prompt_scrolls(monkeypatch):
+def test_codex_tiny_tty_startup_drops_box_before_fixed_footer_scrolls(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
             return True
@@ -787,20 +1104,20 @@ def test_codex_tiny_tty_startup_drops_box_before_prompt_scrolls(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
     monkeypatch.setattr(mock_agent_common, "VERSION", "0.141.0")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
-    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 9)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 11)
     monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
 
     mock_agent_common.print_codex_startup()
-    mock_agent_common.render_inline_composer("", 0)
+    mock_agent_common.render_live_composer("", 0, state={})
 
     rendered = output.getvalue()
     assert rendered.startswith("\x1b7\x1b[r\x1b8")
     assert "Tip: New Use /fast" not in rendered
     assert "╭" not in rendered and "╰" not in rendered
     assert "\x1b[H\x1b[J" not in rendered
-    assert '\r\x1b[2K› \x1b[2mExplain this codebase\x1b[0m' in rendered
-    assert '\n\r\x1b[2K\n\r\x1b[2K  gpt-5.5 xhigh · ~/yolomux.dev8002' in rendered
-    assert rendered.endswith("\x1b[2A\x1b[3G")
+    assert '\x1b[9;1H\x1b[2K› \x1b[2mExplain this codebase\x1b[0m' in rendered
+    assert "\x1b[11;1H\x1b[2K  gpt-5.5 xhigh · ~/yolomux.dev8002" in rendered
+    assert rendered.endswith("\x1b[9;3H\x1b7\x1b[1;7r\x1b8")
 
 
 def test_codex_short_tty_startup_drops_tip_but_keeps_box(monkeypatch):
@@ -820,20 +1137,54 @@ def test_codex_short_tty_startup_drops_tip_but_keeps_box(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
     monkeypatch.setattr(mock_agent_common, "VERSION", "0.141.0")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
-    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 10)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
     monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
 
     mock_agent_common.print_codex_startup()
-    mock_agent_common.render_inline_composer("", 0)
+    mock_agent_common.render_live_composer("", 0, state={})
 
     rendered = output.getvalue()
     assert rendered.startswith("\x1b7\x1b[r\x1b8╭")
     assert "\x1b[H\x1b[J" not in rendered
     assert "Tip: New Use /fast" not in rendered
     assert "╭" in rendered and "╰" in rendered
-    assert '› \x1b[2mExplain this codebase\x1b[0m' in rendered
-    assert "gpt-5.5 xhigh · ~/yolomux.dev8002" in rendered
-    assert rendered.endswith("\x1b[2A\x1b[3G")
+    assert rendered.index("╰") < rendered.index("\x1b[9;1H\x1b[2K")
+    assert '\x1b[10;1H\x1b[2K› \x1b[2mExplain this codebase\x1b[0m' in rendered
+    assert "\x1b[12;1H\x1b[2K  gpt-5.5 xhigh · ~/yolomux.dev8002" in rendered
+    assert rendered.endswith("\x1b[10;3H\x1b7\x1b[1;8r\x1b8")
+
+
+def test_codex_compact_startup_clears_before_first_submitted_prompt(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            raise OSError
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "›")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.5")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "xhigh")
+    monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "0.141.0")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
+    state: dict[str, str] = {}
+
+    mock_agent_common.print_codex_startup(state)
+    assert state["codex_clear_startup_on_first_submit"] == "1"
+
+    mock_agent_common.finish_live_composer("what time is it?", state)
+
+    rendered = output.getvalue()
+    clear_index = rendered.index("\x1b[1;1H\x1b[2K")
+    prompt_index = rendered.rindex("› what time is it?")
+    assert clear_index < prompt_index
+    assert "codex_clear_startup_on_first_submit" not in state
 
 
 def test_codex_prompt_and_working_text_match_current_cli(monkeypatch):
@@ -1034,15 +1385,13 @@ def test_codex_live_composer_finish_commits_prompt_above_fixed_footer(monkeypatc
     assert state["live_composer_output_bottom"] == "8"
 
 
-def test_codex_prompt_spacer_emits_blank_once(monkeypatch, capsys):
-    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
-    state = {"codex_prompt_spacer": "1"}
+def test_empty_mock_input_is_noop(capsys):
+    state = {}
 
-    mock_agent_common.emit_codex_prompt_leading_blank(state)
-    mock_agent_common.emit_codex_prompt_leading_blank(state)
+    mock_agent_common.handle_command("", state)
 
-    assert capsys.readouterr().out == "\n"
-    assert "codex_prompt_spacer" not in state
+    assert capsys.readouterr().out == ""
+    assert state == {}
 
 
 def test_codex_exit_footer_matches_resume_shape(monkeypatch, capsys):
@@ -1054,6 +1403,25 @@ def test_codex_exit_footer_matches_resume_shape(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Token usage: total=23,456 input=22,552 (+ 66,688 cached) output=904 (reasoning 593)" in output
     assert "To continue this session, run codex resume 019eed20-f093-7622-9dbb-ff517b2ffc1c" in output
+
+
+def test_codex_exit_footer_counts_wrapped_display_rows(monkeypatch):
+    monkeypatch.setattr(mock_agent_common.uuid, "uuid4", lambda: uuid.UUID("019eed20-f093-7622-9dbb-ff517b2ffc1c"))
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    state = {}
+
+    assert mock_agent_common.codex_exit_footer_display_line_count(state) == 3
+
+
+def test_prepare_terminal_for_shell_clears_owned_footer_and_parks_cursor(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    state = {"prompt_top_row": "5"}
+
+    mock_agent_common.prepare_terminal_for_shell(2, state)
+
+    assert capsys.readouterr().out == "\x1b[r\x1b[5;1H\x1b[J\x1b[10;1H"
 
 
 def test_live_composer_uses_row_above_bottom_status(monkeypatch):
@@ -1080,7 +1448,7 @@ def test_claude_composer_renders_separator_and_mode_line(monkeypatch, capsys):
     assert "Opus" not in output
 
 
-def test_claude_default_composer_renders_startup_hint_and_tmux_notice(monkeypatch, capsys):
+def test_claude_default_composer_renders_startup_hint_and_status(monkeypatch, capsys):
     monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
     monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
@@ -1090,7 +1458,7 @@ def test_claude_default_composer_renders_startup_hint_and_tmux_notice(monkeypatc
 
     output = capsys.readouterr().out
     assert '❯ \x1b[2mTry "fix typecheck errors"\x1b[0m' in output
-    assert "tmux focus-events off · add 'set -g focus-events on'" in output
+    assert "tmux focus-events off" not in output
     assert "? for shortcuts · ← for agents" in output
     assert "accept edits on" not in output
 
@@ -1105,13 +1473,13 @@ def test_claude_live_composer_finish_preserves_footer_rows(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     separator = "\x1b[2m" + ("─" * 80) + "\x1b[0m"
-    assert "\x1b[1;7r\x1b[7;1H\x1b[2K❯ help\n" in output
-    assert "tmux focus-events off · add 'set -g focus-events on'" in output
+    assert "\x1b[1;8r\x1b[8;1H\x1b[2K❯ help\n" in output
+    assert "tmux focus-events off" not in output
     assert f"\x1b[9;1H\x1b[2K{separator}" in output
     assert '❯ \x1b[2mTry "fix typecheck errors"\x1b[0m' in output
     assert f"\x1b[11;1H\x1b[2K{separator}" in output
     assert "? for shortcuts · ← for agents" in output
-    assert output.endswith("\x1b[1;7r\x1b[7;1H")
+    assert output.endswith("\x1b[1;8r\x1b[8;1H")
 
 
 def test_claude_permission_approval_preserves_footer_before_work(monkeypatch):
@@ -1139,8 +1507,8 @@ def test_claude_permission_approval_preserves_footer_before_work(monkeypatch):
     footer_index = rendered.index('❯ \x1b[2mTry "fix typecheck errors"\x1b[0m')
     approved_index = rendered.index("● User approved Claude's request")
     assert footer_index < approved_index
-    assert "\x1b[1;7r\x1b[7;1H" in rendered
-    assert "tmux focus-events off · add 'set -g focus-events on'" in rendered
+    assert "\x1b[1;8r\x1b[8;1H" in rendered
+    assert "tmux focus-events off" not in rendered
     assert "? for shortcuts · ← for agents" in rendered
     assert "● Bash(sleep 2)" in rendered
 
