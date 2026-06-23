@@ -570,20 +570,45 @@ def xterm_asset_path(asset: str) -> Path | None:
         "xterm.js": Path("lib") / "xterm.js",
         "xterm.css": Path("css") / "xterm.css",
     }
+    addon_relpaths = {
+        "xterm-addon-unicode11.js": ("addon-unicode11", Path("lib") / "addon-unicode11.js"),
+    }
     relpath = relpaths.get(asset)
-    if relpath is None:
+    addon = addon_relpaths.get(asset)
+    if relpath is None and addon is None:
         return None
-    for root in XTERM_ASSET_ROOTS:
-        path = root / relpath
-        if path.exists():
-            return path
+    if relpath is not None:
+        for root in XTERM_ASSET_ROOTS:
+            path = root / relpath
+            if path.exists():
+                return path
+    if addon is not None:
+        package, addon_relpath = addon
+        for root in XTERM_ASSET_ROOTS:
+            for path in (
+                root.parent / package / addon_relpath,
+                root / package / addon_relpath,
+                root / addon_relpath,
+                root / addon_relpath.name,
+            ):
+                if path.exists():
+                    return path
     for server_dir in POPULAR_IDE_SERVER_DIRS:
-        for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/xterm/{relpath}"):
-            if path.exists():
-                return path
-        for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/xterm/{relpath}"):
-            if path.exists():
-                return path
+        if relpath is not None:
+            for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/xterm/{relpath}"):
+                if path.exists():
+                    return path
+            for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/xterm/{relpath}"):
+                if path.exists():
+                    return path
+        if addon is not None:
+            package, addon_relpath = addon
+            for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/{package}/{addon_relpath}"):
+                if path.exists():
+                    return path
+            for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/{package}/{addon_relpath}"):
+                if path.exists():
+                    return path
     return None
 
 

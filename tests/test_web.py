@@ -9,6 +9,7 @@ session names) embedded in the page must not be able to break out of the bootstr
 import json
 import re
 
+from yolomux_lib import common
 from yolomux_lib import web
 
 _BOOTSTRAP_RE = re.compile(r'<script id="yolomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
@@ -55,3 +56,27 @@ def test_html_page_marks_readonly_role_without_breaking_out():
     # The access role is reflected into the bootstrap payload; a readonly guest renders a valid page.
     bootstrap = _bootstrap_json(web.html_page([], access_role="readonly"))
     assert json.loads(bootstrap)["accessRole"] == "readonly"
+
+
+def test_xterm_unicode11_addon_asset_resolves_from_sibling_package(monkeypatch, tmp_path):
+    xterm_root = tmp_path / "@xterm" / "xterm"
+    addon_path = tmp_path / "@xterm" / "addon-unicode11" / "lib" / "addon-unicode11.js"
+    xterm_root.mkdir(parents=True)
+    addon_path.parent.mkdir(parents=True)
+    addon_path.write_text("window.Unicode11Addon = {};", encoding="utf-8")
+
+    monkeypatch.setattr(common, "XTERM_ASSET_ROOTS", [xterm_root])
+
+    assert common.xterm_asset_path("xterm-addon-unicode11.js") == addon_path
+    assert web.static_content_type("xterm-addon-unicode11.js") == "application/javascript; charset=utf-8"
+
+
+def test_html_page_loads_xterm_unicode11_addon_after_xterm():
+    page = web.html_page([])
+
+    xterm_index = page.index("/static/xterm.js")
+    addon_index = page.index("/static/xterm-addon-unicode11.js")
+    bootstrap_index = page.index('id="yolomux-bootstrap"')
+
+    assert xterm_index < addon_index < bootstrap_index
+    assert "cdn.jsdelivr.net/npm/@xterm/addon-unicode11/lib/addon-unicode11.js" in page

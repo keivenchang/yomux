@@ -2346,6 +2346,24 @@ function bindTerminalContainerForSession(session, term, container) {
   container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
 }
 
+function terminalUnicode11AddonCtor() {
+  return window.Unicode11Addon?.Unicode11Addon || null;
+}
+
+function applyTerminalUnicode11Addon(term) {
+  const Unicode11AddonCtor = terminalUnicode11AddonCtor();
+  if (!Unicode11AddonCtor || typeof term?.loadAddon !== 'function' || !term?.unicode) return false;
+  try {
+    const addon = new Unicode11AddonCtor();
+    term.loadAddon(addon);
+    term.unicode.activeVersion = '11';
+    return term.unicode.activeVersion === '11';
+  } catch (error) {
+    console.warn('xterm Unicode 11 width addon failed', error);
+    return false;
+  }
+}
+
 function startTerminal(session) {
   const existing = terminals.get(session);
   const reconnectAttempt = existing?.reconnectAttempt || 0;
@@ -2380,11 +2398,14 @@ function startTerminal(session) {
     disableStdin: readOnlyMode && !shareWriteMode,
     theme: terminalThemeForSession(session),
     minimumContrastRatio: terminalMinimumContrastRatio(),
+    // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
+    allowProposedApi: true,
     // Alt-screen TUIs (claude, vim, less) enable mouse reporting, which makes xterm send drags to the app
     // instead of selecting text — so Ctrl-C/Cmd-C has nothing to copy. Option-click (Mac) forces a text
     // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
     macOptionClickForcesSelection: true,
   });
+  applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;

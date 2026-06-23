@@ -190,7 +190,7 @@ Rules:
 
 ## xterm.js Assets
 
-YOLOmux serves xterm.js from a local install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Popular IDE and agent server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
+YOLOmux serves xterm.js from a local install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Popular IDE and agent server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr. Terminals also load `@xterm/addon-unicode11` when available so emoji and other wide glyphs use modern cell widths before first paint.
 
 ## Localization
 

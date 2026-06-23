@@ -32,6 +32,7 @@ STATIC_CONTENT_TYPES = {
     "codemirror.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
+    "xterm-addon-unicode11.js": "application/javascript; charset=utf-8",
     "yolomux.css": "text/css; charset=utf-8",
     "yolomux.js": "application/javascript; charset=utf-8",
     "vendor/dockview.css": "text/css; charset=utf-8",
@@ -55,7 +56,7 @@ def static_content_type(asset: str) -> str | None:
 
 
 def static_asset_path(asset: str) -> Path | None:
-    if asset in {"xterm.css", "xterm.js"}:
+    if asset in {"xterm.css", "xterm.js", "xterm-addon-unicode11.js"}:
         return xterm_asset_path(asset)
     if asset in STATIC_CONTENT_TYPES or _LOCALE_ASSET_RE.match(asset) or _FONT_ASSET_RE.match(asset):
         path = STATIC_DIR / asset
@@ -209,6 +210,7 @@ def html_page(
 <link rel="stylesheet" href="{static_asset_url("yolomux.css")}">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
 <script src="{static_asset_url("xterm.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
+<script src="{static_asset_url("xterm-addon-unicode11.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11/lib/addon-unicode11.js';"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" defer></script>
 </head>

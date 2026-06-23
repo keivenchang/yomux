@@ -22245,7 +22245,7 @@ function terminalAttentionQuestionSentenceRanges(text) {
   const source = terminalAttentionTextPart(text);
   if (!source || !/[?？]/.test(source)) return [];
   const ranges = [];
-  const pattern = /(?:^|[.!?？|│])\s*(?:[>❯$#]\s*)*([^.!?？|│]*[?？])/g;
+  const pattern = /(?:^|[.!?？|│—–])\s*(?:[>❯$#]\s*)*([^.!?？|│—–]*[?？])/g;
   let match = pattern.exec(source);
   while (match) {
     const rawSentence = match[1] || '';
@@ -22262,6 +22262,22 @@ function terminalAttentionQuestionSentenceRanges(text) {
     match = pattern.exec(source);
   }
   return ranges;
+}
+
+function terminalAttentionContainingQuestionRange(context, start, length) {
+  const matchStart = Math.max(0, Number(start) || 0);
+  const matchEnd = matchStart + Math.max(0, Number(length) || 0);
+  return terminalAttentionQuestionSentenceRanges(context?.text || '')
+    .filter(range => range.start <= matchStart && range.start + range.length >= matchEnd)
+    .sort((left, right) => left.length - right.length)[0] || null;
+}
+
+function terminalAttentionShouldExpandQuestionFragment(item, rows, context, start) {
+  const source = context?.map?.[start];
+  if (!source?.record || Number(source.column || 0) !== 0) return false;
+  const rowIndex = rows.findIndex(record => record === source.record);
+  if (rowIndex <= 0) return false;
+  return terminalAttentionRowsLikelyWrapped(rows[rowIndex - 1], item);
 }
 
 function terminalAttentionQuestionCandidateTexts(questionTexts) {
@@ -22300,14 +22316,20 @@ function terminalAttentionSingleRowSpan(record, candidate) {
   return null;
 }
 
-function terminalAttentionSpanSegments(rows, candidate) {
+function terminalAttentionSpanSegments(item, rows, candidate) {
   const needle = terminalAttentionTextPart(candidate);
   if (!needle) return [];
   for (const separator of ['', ' ']) {
     const context = terminalAttentionJoinedContext(rows, separator);
     const start = context.text.indexOf(needle);
     if (start < 0) continue;
-    const segments = terminalAttentionSegmentsForRange(context, start, needle.length, needle);
+    const range = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start)
+      ? terminalAttentionContainingQuestionRange(context, start, needle.length)
+      : null;
+    const highlightStart = range?.start ?? start;
+    const highlightLength = range?.length ?? needle.length;
+    const highlightText = range?.text ?? needle;
+    const segments = terminalAttentionSegmentsForRange(context, highlightStart, highlightLength, highlightText);
     if (segments.length) return segments;
   }
   for (const record of rows) {
@@ -22356,7 +22378,7 @@ function terminalAttentionQuestionSegments(item, questionTexts = []) {
   if (!rows.length) return [];
   const candidates = terminalAttentionQuestionCandidateTexts(questionTexts);
   for (const candidate of candidates) {
-    const segments = terminalAttentionSpanSegments(rows, candidate);
+    const segments = terminalAttentionSpanSegments(item, rows, candidate);
     if (segments.length) return segments;
   }
   return terminalAttentionQuestionFallbackSegments(item, rows);
@@ -45810,6 +45832,24 @@ function bindTerminalContainerForSession(session, term, container) {
   container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
 }
 
+function terminalUnicode11AddonCtor() {
+  return window.Unicode11Addon?.Unicode11Addon || null;
+}
+
+function applyTerminalUnicode11Addon(term) {
+  const Unicode11AddonCtor = terminalUnicode11AddonCtor();
+  if (!Unicode11AddonCtor || typeof term?.loadAddon !== 'function' || !term?.unicode) return false;
+  try {
+    const addon = new Unicode11AddonCtor();
+    term.loadAddon(addon);
+    term.unicode.activeVersion = '11';
+    return term.unicode.activeVersion === '11';
+  } catch (error) {
+    console.warn('xterm Unicode 11 width addon failed', error);
+    return false;
+  }
+}
+
 function startTerminal(session) {
   const existing = terminals.get(session);
   const reconnectAttempt = existing?.reconnectAttempt || 0;
@@ -45844,11 +45884,14 @@ function startTerminal(session) {
     disableStdin: readOnlyMode && !shareWriteMode,
     theme: terminalThemeForSession(session),
     minimumContrastRatio: terminalMinimumContrastRatio(),
+    // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
+    allowProposedApi: true,
     // Alt-screen TUIs (claude, vim, less) enable mouse reporting, which makes xterm send drags to the app
     // instead of selecting text — so Ctrl-C/Cmd-C has nothing to copy. Option-click (Mac) forces a text
     // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
     macOptionClickForcesSelection: true,
   });
+  applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;

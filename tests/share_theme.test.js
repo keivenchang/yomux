@@ -1299,6 +1299,9 @@ async function runShareThemeSuite() {
     assert.ok(terminalContainerBindingBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
     assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared transport-only handler');
+    assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
+    assert.ok(/function applyTerminalUnicode11Addon\(term\)[\s\S]*new Unicode11AddonCtor\(\)[\s\S]*term\.loadAddon\(addon\)[\s\S]*term\.unicode\.activeVersion = '11'/.test(appSource), 'xterm terminals register Unicode 11 widths for emoji cell accounting');
+    assert.ok(/const term = new TerminalCtor\([\s\S]*?\}\);\s*applyTerminalUnicode11Addon\(term\);\s*term\.open\(container\);/.test(terminalInputBody), 'xterm Unicode widths are selected before the first terminal paint');
     assert.equal(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder because hover focus can emit focus/mouse reports');
     assert.equal(/term\.onData\(data => \{[^]*?noteTerminalExplicitInput\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder indirectly through explicit-input helpers because hover mouse reports can emit terminal bytes');
     assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling stays transport-only; DOM keydown/paste/beforeinput own explicit-input commits');

@@ -2857,6 +2857,62 @@ async function runEditorPreviewSuite() {
     assert.equal(overlays[1].style.width, `${'is in chat?'.length * 10}px`, 'fallback highlight stops before explanatory parenthetical text');
   });
 
+  test('ASK?/QUES? prompt fragment expands to the full visible question sentence', () => {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
+    const container = api.testElementForId('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 1600, height: 160, right: 1600, bottom: 160};
+    const xtermRows = new TestElement('xterm-fragment-rows');
+    xtermRows.className = 'xterm-rows';
+    xtermRows.rect = {left: 0, top: 0, width: 1600, height: 160, right: 1600, bottom: 160};
+    const firstQuestionRow = 'is published" notice, so its POC status is consistent — want me to also add an explicit "real after #10851';
+    const secondQuestionRow = 'lands" line to #10853, or is the #10851 note enough?';
+    const visibleRows = [
+      'That captures all three points: latest version after #53/#72 land, #10851 = next priority, and #10853 =',
+      'POC → real after #10851. #10853 already carries its own "WIP — DOES NOT PASS CI until the frontend-crate',
+      firstQuestionRow,
+      secondQuestionRow,
+      '* Churned for 1m 8s',
+    ].map((text, index) => {
+      const row = new TestElement(`fragment-question-row-${index}`);
+      row.textContent = text;
+      row.rect = {left: 0, top: index * 20, width: 1600, height: 20, right: 1600, bottom: (index + 1) * 20};
+      xtermRows.appendChild(row);
+      return row;
+    });
+    container.appendChild(xtermRows);
+    api.registerTerminalForTest('1', {
+      cols: firstQuestionRow.length,
+      rows: 8,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setAutoApproveStateForTest('1', {
+      enabled: true,
+      screen: {key: 'needs-input', text: secondQuestionRow, question_text: secondQuestionRow},
+      prompt: {visible: false},
+    });
+
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'partial wrapped question payload still paints the full visible question');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'prior explanation row is not marked');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), false, 'prior sentence row is not marked');
+    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), true, 'highlight starts at the want-me sentence row');
+    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), true, 'highlight includes the suffix row from the payload');
+    assert.equal(visibleRows[4].classList.contains('terminal-attention-question-row'), false, 'later status row is not marked');
+    const overlays = container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]');
+    const start = firstQuestionRow.indexOf('want me');
+    assert.equal(overlays.length, 2, 'expanded fragment creates one overlay per visual question row');
+    assert.deepStrictEqual(canonical(overlays.map(overlay => ({
+      top: overlay.style.top,
+      left: overlay.style.left,
+      width: overlay.style.width,
+    }))), [
+      {top: '40px', left: `${start * 10}px`, width: `${(firstQuestionRow.length - start) * 10}px`},
+      {top: '60px', left: '0px', width: `${secondQuestionRow.length * 10}px`},
+    ], 'overlay expands backward to the full visible question sentence');
+  });
+
   // (no false merge): even an unterminated URL-looking row cannot absorb a flush-left continuation when
   // it did not reach the terminal edge.
   test('t@7052', () => {
