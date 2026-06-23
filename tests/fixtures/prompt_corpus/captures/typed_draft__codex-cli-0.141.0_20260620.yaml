@@ -79,6 +79,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: typed_draft__codex-cli-0.141.0_20260620
 fixture_scenario: typed_draft
+height: 35
 id: typed_draft__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -92,19 +93,38 @@ operations:
   text_length: 30
   type: type_text
 provenance: real Codex CLI capture
-raw_capture: "╭─────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.141.0)                  │\n│        \
-  \                                     │\n│ model:     gpt-5.5 xhigh   /model to change │\n│ directory: ~/yolomux.dev8001\
-  \                │\n╰─────────────────────────────────────────────╯\n\n  Tip: Switch models or reasoning effort quickly\
-  \ with /model.\n\n\n› run the focused detector tests \n\n  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+raw_capture: |
+  ╭─────────────────────────────────────────────╮
+  │ >_ OpenAI Codex (v0.141.0)                  │
+  │                                             │
+  │ model:     gpt-5.5 xhigh   /model to change │
+  │ directory: ~/yolomux.dev8001                │
+  ╰─────────────────────────────────────────────╯
+
+    Tip: Switch models or reasoning effort quickly with /model.
+
+
+  › run the focused detector tests
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
 source: real Codex CLI capture
 source_capture_status: promoted from live real Codex CLI capture; staging can be discarded
 source_fixture_id: typed-draft
 source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160638Z.yaml
-styled_capture: "\e[2m╭─────────────────────────────────────────────╮\n│ >_ \e[0;1mOpenAI Codex\e[0;2m (v0.141.0)        \
-  \          │\n│                                             │\n│ model:     \e[0mgpt-5.5 xhigh\e[2m   \e[0m/model to change\
-  \ │\n\e[2m│ directory: \e[0m~/yolomux.dev8001\e[2m                │\n╰─────────────────────────────────────────────╯\n\n\
-  \e[0m  \e[1mTip:\e[0m Switch models or reasoning effort quickly with /model.\n\n\n\e[1m›\e[0m run the focused detector tests\
-  \ \n\n  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+styled_capture: |
+  ╭─────────────────────────────────────────────╮
+  │ >_ OpenAI Codex (v0.141.0)                  │
+  │                                             │
+  │ model:     gpt-5.5 xhigh   /model to change │
+  │ directory: ~/yolomux.dev8001                │
+  ╰─────────────────────────────────────────────╯
+
+    Tip: Switch models or reasoning effort quickly with /model.
+
+
+  › run the focused detector tests
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
 tmux_socket: ''
 tmux_target: 'yoreal-codex-inspect:'
 verifier_capabilities:
@@ -114,3 +134,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
+width: 78

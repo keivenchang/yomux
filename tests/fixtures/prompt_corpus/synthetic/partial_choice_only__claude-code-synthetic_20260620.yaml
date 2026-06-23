@@ -32,6 +32,7 @@ expected_screen_key: needs-input
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: partial_choice_only__claude-code-synthetic_20260620
+height: 35
 id: partial_choice_only__claude-code-synthetic_20260620
 operations: []
 raw_capture: |
@@ -52,3 +53,4 @@ visible_text: |
     2. No
 
   Esc to cancel
+width: 78

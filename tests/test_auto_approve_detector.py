@@ -153,6 +153,8 @@ def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch):
 def test_capture_prompt_fixture_harness_contract(monkeypatch, tmp_path):
     harness = load_capture_harness_module()
 
+    assert (harness.DEFAULT_CAPTURE_COLS, harness.DEFAULT_CAPTURE_ROWS) == (78, 35)
+    assert harness.parse_size("78x35") == (78, 35)
     assert harness.parse_size("120x40") == (120, 40)
     with pytest.raises(argparse.ArgumentTypeError):
         harness.parse_size("30x9")
@@ -793,6 +795,23 @@ VISIBLE_AGENT_WORKING_CASES = [
     ),
     pytest.param(
         "\n".join([
+            "○ Working (4m 46s • esc to interrupt)",
+            "",
+            "• Queued follow-up inputs",
+            "↳ when dumping the fixture, no need to print duplicate info like this: file:",
+            "  bypass_mode_no_approval__generic-agent-synthetic_20260620.yaml",
+            "  shift + ← edit last queued message",
+            "",
+            "› Use /skills to list available skills",
+            "",
+            "  gpt-5.5 xhigh · ~/yolomux.dev8002              Goal achieved (1h 50m)",
+        ]),
+        True,
+        "working",
+        id="codex-goal-achieved-queued-followup",
+    ),
+    pytest.param(
+        "\n".join([
             "○ Working (33m 05s · esc to interrupt)",
             "╭────────────────────────────────────────────╮",
             "│ Use /skills to list available skills       │",
@@ -1066,6 +1085,21 @@ def test_agent_screen_state_prefers_codex_pursuing_goal_elapsed_for_display():
     assert state["display_elapsed_seconds"] == 13500
 
 
+def test_agent_screen_state_prefers_codex_goal_achieved_elapsed_for_display():
+    visible_text = "\n".join([
+        "○ Working (4m 46s • esc to interrupt)",
+        "› Use /skills to list available skills",
+        "  gpt-5.5 xhigh · ~/yolomux.dev8002              Goal achieved (1h 50m)",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text, pane_target="%codex-goal-achieved-display", now=1000.0)
+
+    assert state["key"] == "working"
+    assert state["status_elapsed_seconds"] == 286
+    assert state["goal_elapsed_seconds"] == 6600
+    assert state["display_elapsed_seconds"] == 6600
+
+
 def test_agent_screen_state_prefers_claude_goal_active_elapsed_for_display():
     visible_text = "\n".join([
         "◉ /goal active (1m)",
@@ -1084,6 +1118,7 @@ def test_agent_screen_state_prefers_claude_goal_active_elapsed_for_display():
 @pytest.mark.parametrize("filename,pane_target", [
     ("goal_active__claude-code-2.1.185_20260621.yaml", "%real-claude-goal-active"),
     ("goal_active__codex-cli-0.141.0_20260621.yaml", "%real-codex-goal-active"),
+    ("goal_achieved_working__codex-cli-0.141.0_20260623.yaml", "%real-codex-goal-achieved-working"),
 ])
 def test_real_goal_active_captures_prefer_goal_elapsed_for_display(filename, pane_target):
     path = PROMPT_CORPUS_DIR / "captures" / filename

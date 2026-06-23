@@ -10,7 +10,7 @@ client_version: synthetic Codex CLI fixture
 client_version_slug: codex-cli-synthetic
 codex_version: ''
 cursor:
-  character: '›'
+  character: ›
   synthesized: true
   x: 1
   y: 8
@@ -23,17 +23,61 @@ expected_screen_key: idle
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: completed_prompt__codex-cli-synthetic_20260620
+height: 35
 id: completed_prompt__codex-cli-synthetic_20260620
 operations: []
-raw_capture: " Codex wants to run a shell command\n\n Would you like to run the following command?\n\n   Reason: Print a marker.\n\
-  \n   $ echo done\n\n › 1. Yes, proceed (y)\n   2. No, and tell Codex what to do differently (esc)\n\n Press enter to confirm\
-  \ or esc to cancel\n● Ran echo done\n  ⎿ done\n\n› \n"
+raw_capture: |2
+   Codex wants to run a shell command
+
+   Would you like to run the following command?
+
+     Reason: Print a marker.
+
+     $ echo done
+
+   › 1. Yes, proceed (y)
+     2. No, and tell Codex what to do differently (esc)
+
+   Press enter to confirm or esc to cancel
+  ● Ran echo done
+    ⎿ done
+
+  ›
 source: synthetic answered Codex approval followed by command output
 source_fixture_id: completed-prompt
 source_text_file: completed_prompt.txt
-styled_capture: " Codex wants to run a shell command\n\n Would you like to run the following command?\n\n   Reason: Print\
-  \ a marker.\n\n   $ echo done\n\n › 1. Yes, proceed (y)\n   2. No, and tell Codex what to do differently (esc)\n\n Press\
-  \ enter to confirm or esc to cancel\n● Ran echo done\n  ⎿ done\n\n› \n"
-visible_text: " Codex wants to run a shell command\n\n Would you like to run the following command?\n\n   Reason: Print a\
-  \ marker.\n\n   $ echo done\n\n › 1. Yes, proceed (y)\n   2. No, and tell Codex what to do differently (esc)\n\n Press enter\
-  \ to confirm or esc to cancel\n● Ran echo done\n  ⎿ done\n\n› \n"
+styled_capture: |2
+   Codex wants to run a shell command
+
+   Would you like to run the following command?
+
+     Reason: Print a marker.
+
+     $ echo done
+
+   › 1. Yes, proceed (y)
+     2. No, and tell Codex what to do differently (esc)
+
+   Press enter to confirm or esc to cancel
+  ● Ran echo done
+    ⎿ done
+
+  ›
+visible_text: |2
+   Codex wants to run a shell command
+
+   Would you like to run the following command?
+
+     Reason: Print a marker.
+
+     $ echo done
+
+   › 1. Yes, proceed (y)
+     2. No, and tell Codex what to do differently (esc)
+
+   Press enter to confirm or esc to cancel
+  ● Ran echo done
+    ⎿ done
+
+  ›
+width: 78

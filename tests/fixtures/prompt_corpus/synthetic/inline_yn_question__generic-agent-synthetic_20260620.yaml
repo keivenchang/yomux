@@ -28,6 +28,7 @@ expected_screen_key: needs-input
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: inline_yn_question__generic-agent-synthetic_20260620
+height: 35
 id: inline_yn_question__generic-agent-synthetic_20260620
 operations: []
 raw_capture: |
@@ -45,3 +46,4 @@ visible_text: |
   ● Do you want to proceed with deploying to staging? (y/n)
 
   ❯
+width: 78

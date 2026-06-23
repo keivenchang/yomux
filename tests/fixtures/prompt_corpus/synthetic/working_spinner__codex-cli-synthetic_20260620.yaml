@@ -10,7 +10,7 @@ client_version: synthetic Codex CLI fixture
 client_version_slug: codex-cli-synthetic
 codex_version: ''
 cursor:
-  character: 'I'
+  character: I
   synthesized: true
   x: 2
   y: 2
@@ -23,6 +23,7 @@ expected_screen_key: working
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: working_spinner__codex-cli-synthetic_20260620
+height: 35
 id: working_spinner__codex-cli-synthetic_20260620
 operations: []
 raw_capture: |
@@ -46,3 +47,4 @@ visible_text: |
   › Implement the detector corpus
 
     gpt-5.5 xhigh · ~/yolomux.dev8001
+width: 78

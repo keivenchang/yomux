@@ -798,7 +798,7 @@ CLIENT_PERMISSION_DEFAULTS = ClientPermissionDefaults(
 )
 CLIENT_INTENT_ROWS = (
     ClientIntentRow("Hidden model work", CODEX_OUTPUT_TERMS.title_label, CLAUDE_OUTPUT_TERMS.title_label, "Yes", "Both are internal progress/analysis streams. The prototypes expose only what the upstream stream emits."),
-    ClientIntentRow("Effort level", f"`{CODEX_CONFIG_KEYS.effort}`, `/effort`, `-c {CODEX_CONFIG_KEYS.effort}=high`", "`--effort`, `/effort`, `/config effort=high`", "Yes", "codex.py maps `/effort` to Codex reasoning effort; claude.py passes `--effort` to Claude."),
+    ClientIntentRow("Effort level", f"`--effort`, `{CODEX_CONFIG_KEYS.effort}`, `/effort`, `-c {CODEX_CONFIG_KEYS.effort}=high`", "`--effort`, `/effort`, `/config effort=high`", "Yes", "codex.py maps `--effort` and `/effort` to Codex reasoning effort; claude.py passes `--effort` to Claude."),
     ClientIntentRow("Reasoning/thinking summary", f"`model_reasoning_summary`, `{CODEX_CONFIG_KEYS.hidden_work_summary}`", f"No separate summary setting; use `{CLAUDE_CONFIG_KEYS.hidden_work_visibility}` for thinking output", "Similar", "Codex has summary controls; Claude stream-json emits thinking deltas when available and enabled."),
     ClientIntentRow("Raw reasoning/thinking", f"`{CODEX_CONFIG_KEYS.hidden_work_raw}=true`", f"`{CLAUDE_CONFIG_KEYS.hidden_work_visibility}=true`", "Similar", "codex.py separates summary and raw reasoning; claude.py has one thinking output toggle."),
     ClientIntentRow("Output prefix", CODEX_OUTPUT_TERMS.prefix_code, CLAUDE_OUTPUT_TERMS.prefix_code, "Yes", "Prefixes intentionally match each upstream product's native term."),
@@ -809,8 +809,8 @@ CLIENT_INTENT_ROWS = (
     ClientIntentRow("Permissive mode", f"`{CLIENT_PERMISSION_DEFAULTS.codex_bypass_approvals_flag}`, `sandbox={CLIENT_PERMISSION_DEFAULTS.codex_sandbox}`, `approval_policy={CLIENT_PERMISSION_DEFAULTS.codex_approval_policy}`; optional `{CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust_flag}` / `bypass_hook_trust=true`", f"`{CLIENT_PERMISSION_DEFAULTS.claude_skip_permissions_flag}`, `{CLAUDE_CONFIG_KEYS.permission}={CLIENT_PERMISSION_DEFAULTS.claude_permission_mode}`", "Same intent", "Codex keeps hook-trust bypass explicit because upstream Codex only warns when that flag/config is set; Claude has one broad permission bypass."),
     ClientIntentRow("Approval handling", "`approval_policy`, `text_client.approval_mode`", "`permission_mode`", "Similar", "codex.py can also auto-answer app-server approval requests with `text_client.approval_mode=accept`. claude.py delegates permission handling to Claude CLI."),
     ClientIntentRow("Web access", "`--search`, `web_search=live` for Codex web search", "`WebFetch` / web tools through Claude tool permissions", "Similar", "Different upstream tool names and permission controls."),
-    ClientIntentRow("Diagnostics", "`text_client.debug_json`, `text_client.raw_output`, `/raw`", "`text_client.raw_json`, `/raw`", "Similar", "Both are prototype diagnostics, not the main answer stream."),
-    ClientIntentRow("Metrics", f"`{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", f"`{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", "Yes", "Shared metric names and formatting come from `TextClientBase`."),
+    ClientIntentRow("Diagnostics", "`--raw-json`, `text_client.debug_json`, `text_client.raw_output`, `/raw`", "`--raw-json`, `text_client.raw_json`, `/raw`", "Similar", "Both are prototype diagnostics, not the main answer stream."),
+    ClientIntentRow("Metrics", f"`--show-metrics`, `--hide-metrics`, `{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", f"`--show-metrics`, `--hide-metrics`, `{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", "Yes", "Shared metric names and formatting come from `TextClientBase`."),
 )
 
 

@@ -1,0 +1,67 @@
+agent: codex
+capture_date: '2026-06-23'
+capture_mode: visible
+captured_at: '2026-06-23T21:59:00+00:00'
+case_name: goal_achieved_working
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor: {}
+expected_goal_elapsed_seconds: 6600
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: RUN
+  composer_key: draft
+  reason_code: busy
+  screen_key: working
+expected_screen_key: working
+failures: []
+fixture_id: goal_achieved_working__codex-cli-0.141.0_20260623
+fixture_scenario: goal_achieved_working
+height: 35
+id: goal_achieved_working__codex-cli-0.141.0_20260623
+include_scrollback: false
+launch_agent: ''
+launch_command: ''
+launched_session: ''
+mode: ''
+operations: []
+raw_capture: |
+  ○ Working (4m 46s • esc to interrupt)
+
+  • Queued follow-up inputs
+  ↳ when dumping the fixture, no need to print duplicate info like this: file:
+    bypass_mode_no_approval__generic-agent-synthetic_20260620.yaml
+  ↳ instead of "^ cursor", print "[block]" or something like that, something
+    visible
+    shift + ← edit last queued message
+
+  › Use /skills to list available skills
+
+    gpt-5.5 xhigh · ~/yolomux.dev8002              Goal achieved (1h 50m)
+ready_text: []
+send_lines: []
+source: screenshot-provided Codex goal-achieved working capture from tmux 8002:0.0; later tmux capture confirmed the same Working/Goal achieved bottom rows after queued follow-up rows had re-rendered away
+styled_capture: |
+  ○ Working (4m 46s • esc to interrupt)
+
+  • Queued follow-up inputs
+  ↳ when dumping the fixture, no need to print duplicate info like this: file:
+    bypass_mode_no_approval__generic-agent-synthetic_20260620.yaml
+  ↳ instead of "^ cursor", print "[block]" or something like that, something
+    visible
+    shift + ← edit last queued message
+
+  › Use /skills to list available skills
+
+    gpt-5.5 xhigh · ~/yolomux.dev8002              Goal achieved (1h 50m)
+target: '8002:0.0'
+tmux_socket: ''
+wait_text:
+- Goal achieved
+width: 78

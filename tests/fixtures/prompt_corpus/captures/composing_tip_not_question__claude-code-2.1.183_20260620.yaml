@@ -76,7 +76,7 @@ cursor:
   current_command: claude
   pane_in_mode: false
   x: 2
-  y: 37
+  y: 34
 description: 'Negative: Claude composing Tip chrome is not a user question'
 evidence_fields:
   display_evidence_lines:
@@ -108,6 +108,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: composing_tip_not_question__claude-code-2.1.183_20260620
 fixture_scenario: composing_tip_not_question
+height: 35
 id: composing_tip_not_question__claude-code-2.1.183_20260620
 operations:
 - needles: []
@@ -129,82 +130,76 @@ operations:
     sent: true
   text_length: 108
   type: send_prompt
-raw_capture: "  ⎿  User rejected Claude's plan:                                                                          \
-  \             \n     ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n\
-  \     │ Plan: Harmless Verification Task                                                                               \
-  \ │\n     │                                                                                                            \
-  \     │\n     │ Context                                                                                                \
-  \         │\n     │                                                                                                    \
-  \             │\n     │ This is a simple verification task to confirm the execution flow works end-to-end. No code changes\
-  \ are involved │\n     │ — it's a no-op timing check. The goal is to run a short blocking command, wait for it to finish,\
-  \ then report    │\n     │ completion.                                                                                 \
-  \                    │\n     │                                                                                         \
-  \                        │\n     │ Approach                                                                            \
-  \                            │\n     │                                                                                 \
-  \                                │\n     │ 1. Run sleep 10 (a benign command that blocks for 10 seconds and exits 0).  \
-  \                                    │\n     │ 2. After it returns, report \"done\" to the user.                       \
-  \                                          │\n     │                                                                   \
-  \                                              │\n     │ Files                                                         \
-  \                                                  │\n     │                                                           \
-  \                                                      │\n     │ None modified. This is a shell command only.          \
-  \                                                          │\n     │                                                   \
-  \                                                              │\n     │ Verification                                  \
-  \                                                                  │\n     │                                           \
-  \                                                                      │\n     │ - The sleep 10 command exits with status\
-  \ 0 after ~10 seconds.                                                   │\n     │ - Confirm the completion message is reported\
-  \ back.                                                              │\n     ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\
-  \                                                                                                                      \
-  \  \n❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier\
-  \  \n  mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.                           \
-  \      \n                                                                                                              \
-  \          \n● User declined to answer questions                                                                       \
-  \              \n  ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)\n\n❯ Plan this harmless\
-  \ YOLOmux E2E task: run `sleep 5` and then report done. Stop for approval before executing.          \n                \
-  \                                                                                                        \n✻ Composing…\
-  \                                                                                                            \n  ⎿  Tip:\
-  \ Did you know you can drag and drop image files into your terminal?                                            \n     \
-  \                                                                                                                  \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt\n"
+raw_capture: |2
+                                           │
+       │ - Confirm the completion message is reported back.
+                                           │
+       ╰────────────────────────────────────────────────────────────────────────
+  ─────────────────────────────────────────╯
+
+
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
+  -choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
+  election.
+
+
+  ● User declined to answer questions
+
+    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript c
+  apture)
+
+  ❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Sto
+  p for approval before executing.
+
+
+  ✻ Composing…
+
+    ⎿  Tip: Did you know you can drag and drop image files into your terminal?
+
+
+
+  ──────────────────────────────────────────────────────────────────────────────
+  ❯
+
+  ──────────────────────────────────────────────────────────────────────────────
+    ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 source_capture_status: promoted; staging discarded after promotion
 source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111001Z.yaml
-styled_capture: "  ⎿  User rejected Claude's plan:                                                                       \
-  \                \n     ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n\
-  \     │ Plan: Harmless Verification Task                                                                               \
-  \ │\n     │                                                                                                            \
-  \     │\n     │ Context                                                                                                \
-  \         │\n     │                                                                                                    \
-  \             │\n     │ This is a simple verification task to confirm the execution flow works end-to-end. No code changes\
-  \ are involved │\n     │ — it's a no-op timing check. The goal is to run a short blocking command, wait for it to finish,\
-  \ then report    │\n     │ completion.                                                                                 \
-  \                    │\n     │                                                                                         \
-  \                        │\n     │ Approach                                                                            \
-  \                            │\n     │                                                                                 \
-  \                                │\n     │ 1. Run sleep 10 (a benign command that blocks for 10 seconds and exits 0).  \
-  \                                    │\n     │ 2. After it returns, report \"done\" to the user.                       \
-  \                                          │\n     │                                                                   \
-  \                                              │\n     │ Files                                                         \
-  \                                                  │\n     │                                                           \
-  \                                                      │\n     │ None modified. This is a shell command only.          \
-  \                                                          │\n     │                                                   \
-  \                                                              │\n     │ Verification                                  \
-  \                                                                  │\n     │                                           \
-  \                                                                      │\n     │ - The sleep 10 command exits with status\
-  \ 0 after ~10 seconds.                                                   │\n     │ - Confirm the completion message is reported\
-  \ back.                                                              │\n     ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\
-  \                                                                                                                      \
-  \  \n❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier\
-  \  \n  mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.                           \
-  \      \n                                                                                                              \
-  \          \n● User declined to answer questions                                                                       \
-  \              \n  ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)\n\n❯ Plan this harmless\
-  \ YOLOmux E2E task: run `sleep 5` and then report done. Stop for approval before executing.          \n                \
-  \                                                                                                        \n✻ Composing…\
-  \                                                                                                            \n  ⎿  Tip:\
-  \ Did you know you can drag and drop image files into your terminal?                                            \n     \
-  \                                                                                                                  \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt\n"
+styled_capture: |2
+                                           │
+       │ - Confirm the completion message is reported back.
+                                           │
+       ╰────────────────────────────────────────────────────────────────────────
+  ─────────────────────────────────────────╯
+
+
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
+  -choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
+  election.
+
+
+  ● User declined to answer questions
+
+    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript c
+  apture)
+
+  ❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Sto
+  p for approval before executing.
+
+
+  ✻ Composing…
+
+    ⎿  Tip: Did you know you can drag and drop image files into your terminal?
+
+
+
+  ──────────────────────────────────────────────────────────────────────────────
+  ❯
+
+  ──────────────────────────────────────────────────────────────────────────────
+    ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-claude-2552908-c8fd27:0.0
 verifier_capabilities:
@@ -214,3 +209,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
+width: 78

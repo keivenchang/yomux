@@ -66,7 +66,7 @@ cursor:
   current_command: node
   pane_in_mode: false
   x: 2
-  y: 37
+  y: 34
 evidence_fields:
   display_evidence_lines: []
   prompt_hash: ''
@@ -96,6 +96,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Codex working after command send
 fixture_id: working_command_counter__codex-cli-0.141.0_20260620
 fixture_scenario: working_command_counter
+height: 35
 id: working_command_counter__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -118,22 +119,15 @@ operations:
   text_length: 86
   type: send_prompt
 raw_capture: |
-  › Please run the shell command `touch /tmp/yolomux-e2e-approval`.
-
-
-  ✔ You approved codex to run touch /tmp/yolomux-e2e-approval this time
-
-  • Ran touch /tmp/yolomux-e2e-approval
-    └ (no output)
-
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────
 
   • Done.
 
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Wh
+  ich YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -149,25 +143,52 @@ raw_capture: |
   • Pane capture.
 
 
-  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-202
+  60620-1106
 
 
   ◦ Working (0s • esc to interrupt)
 
 
-  › Improve documentation in @filename
+  › Improve documentation in @filename
 
     gpt-5.5 xhigh · ~/yolomux.dev8001
 source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110659Z.yaml
-styled_capture: "\e[1;2m› \e[0mPlease run the shell command `touch /tmp/yolomux-e2e-approval`.\n\n\n✔ You \e[1mapproved\e\
-  [0m codex to run \e[2mtouch /tmp/yolomux-e2e-approval\e[0;1m this time\n\n\e[0m• \e[1mRan\e[0m touch /tmp/yolomux-e2e-approval\n\
-  \e[2m  └ (no output)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \n• \e[0mDone.\n\n\e[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \n\n\e[1m› \e[0mAsk me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should\
-  \ we use?\n  1. Pane capture 2. Transcript capture\n\n\n\e[2m• \e[0mWhich YOLOmux verifier mode should we use?\n\n  1. Pane\
-  \ capture\n  2. Transcript capture\n\n\n\e[1;2m› \e[0mPane capture\n\n\n\e[2m• \e[0mPane capture.\n\n\n\e[1;2m› \e[0mRun\
-  \ this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-20260620-1106\n\n\n\e[2m◦\e[0m \e[2mWorking\e[0m\
-  \ \e[2m(0s • esc to interrupt)\n\n\n\e[0;1m›\e[0m \e[2mImprove documentation in @filename\n\n\e[0m  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+styled_capture: |
+  ──────────────────────────────────────────
+
+  • Done.
+
+  ──────────────────────────────────────────────────────────────────────────────
+
+
+  › Ask me this question and wait for my answer instead of choosing yourself: Wh
+  ich YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Pane capture
+
+
+  • Pane capture.
+
+
+  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-202
+  60620-1106
+
+
+  ◦ Working (0s • esc to interrupt)
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-codex-2552908-7ec5c7:0.0
 verifier_capabilities:
@@ -177,3 +198,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
+width: 78

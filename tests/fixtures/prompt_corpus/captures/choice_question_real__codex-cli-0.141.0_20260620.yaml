@@ -45,10 +45,12 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: choice_question_real__codex-cli-0.141.0_20260620
 fixture_scenario: choice_question_real
+height: 35
 id: choice_question_real__codex-cli-0.141.0_20260620
 operations: []
 raw_capture: |
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Wh
+  ich YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -65,7 +67,8 @@ source: real Codex CLI 0.141.0 question followed by ghost-suggestion composer
 source_fixture_id: codex-real-question-0-141-0
 source_text_file: codex_real_question_0_141_0.txt
 styled_capture: |
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Wh
+  ich YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -79,7 +82,8 @@ styled_capture: |
 
     gpt-5.5 xhigh · ~/yolomux.dev8001
 visible_text: |
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Wh
+  ich YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -92,3 +96,4 @@ visible_text: |
   › Improve documentation in @filename
 
     gpt-5.5 xhigh · ~/yolomux.dev8001
+width: 78

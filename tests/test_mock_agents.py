@@ -159,9 +159,9 @@ def run_mockcase(monkeypatch, tmp_path, case):
         "-s",
         session,
         "-x",
-        "120",
+        "78",
         "-y",
-        "40",
+        "35",
         f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
     )
     assert created.returncode == 0, created.stderr or created.stdout
@@ -800,7 +800,7 @@ def test_mock_fixture_dump_prints_agent_fixtures_with_separators(monkeypatch, ca
             "path": PROMPT_CORPUS_DIR / "captures" / "codex_case.yaml",
             "styled_capture": "codex visible text",
             "raw_capture": "",
-            "cursor": {},
+            "cursor": {"x": 6, "y": 0},
             "expected": {"screen_key": "working"},
         },
         {
@@ -829,13 +829,157 @@ def test_mock_fixture_dump_prints_agent_fixtures_with_separators(monkeypatch, ca
 
     output = capsys.readouterr().out
     assert "===== BEGIN FIXTURE 1/2: codex_case.yaml =====" in output
-    assert "path: " + str(PROMPT_CORPUS_DIR / "captures" / "codex_case.yaml") in output
-    assert "----- capture -----\ncodex visible text\n" in output
+    assert "file: codex_case.yaml" not in output
+    assert "path: " in output
+    assert "codex_case.yaml" in output
+    assert "cursor: x=6 y=0 shown=x=6 y=0 (0-based)" in output
+    assert "----- capture (78x35; cursor marked) -----\ncodex visible text\n      █ cursor\n" in output
     assert "===== END FIXTURE: codex_case.yaml =====" in output
     assert "shared_idle.yaml" in output
+    assert "cursor: missing" in output
     assert "shared idle text" in output
     assert "claude_case.yaml" not in output
     assert "claude visible text" not in output
+
+
+def test_fixture_dump_clips_overwide_rule_rows():
+    dump = mock_agent_common.format_fixture_capture_for_dump("─" * 120, {})
+
+    assert dump["text"] == ("─" * 78) + "\n"
+
+
+def test_plain_mock_stretches_capture_width_chrome(monkeypatch, capsys):
+    content_row = "│ body" + (" " * 71) + "│"
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "wide_chrome",
+            "keys": {"wide_chrome"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "wide_chrome.yaml",
+            "styled_capture": "\n".join([
+                "─" * 78,
+                "╭" + ("─" * 76) + "╮",
+                content_row,
+                "╰" + ("─" * 76) + "╯",
+            ]),
+            "cursor": {},
+            "width": 78,
+            "height": 35,
+            "expected": {"screen_key": "idle"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 90)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "wide_chrome", freeze_static=False)
+
+    output = capsys.readouterr().out
+    assert ("─" * 90) in output
+    assert ("╭" + ("─" * 88) + "╮") in output
+    assert ("│ body" + (" " * 83) + "│") in output
+    assert ("╰" + ("─" * 88) + "╯") in output
+
+
+def test_mockcase_preserves_capture_width_chrome(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "wide_chrome",
+            "keys": {"wide_chrome"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "wide_chrome.yaml",
+            "styled_capture": "─" * 78,
+            "cursor": {},
+            "width": 78,
+            "height": 35,
+            "expected": {"screen_key": "idle"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 90)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "wide_chrome", freeze_static=True)
+
+    output = capsys.readouterr().out
+    assert ("─" * 78) in output
+    assert ("─" * 90) not in output
+
+
+def test_plain_mock_reconstructs_hard_wrapped_fixture_text(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "wrapped_text",
+            "keys": {"wrapped_text"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "wrapped_text.yaml",
+            "styled_capture": "\n".join([
+                "› Ask me this question and wait for my answer instead of choosing yourself: Wh",
+                "ich YOLOmux verifier mode should we use?",
+                "  1. Pane capture",
+                "  2. Transcript capture",
+            ]),
+            "cursor": {},
+            "width": 78,
+            "height": 35,
+            "expected": {"screen_key": "idle"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "wrapped_text", freeze_static=False)
+
+    output = capsys.readouterr().out
+    assert "Which YOLOmux verifier mode should we use?" in output
+    assert "Wh\nich" not in output
+
+
+def test_mockcase_preserves_hard_wrapped_fixture_text(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "wrapped_text",
+            "keys": {"wrapped_text"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "wrapped_text.yaml",
+            "styled_capture": "\n".join([
+                "› Ask me this question and wait for my answer instead of choosing yourself: Wh",
+                "ich YOLOmux verifier mode should we use?",
+            ]),
+            "cursor": {},
+            "width": 78,
+            "height": 35,
+            "expected": {"screen_key": "idle"},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "wrapped_text", freeze_static=True)
+
+    output = capsys.readouterr().out
+    assert "Wh\nich YOLOmux verifier mode should we use?" in output
+
+
+def test_fixture_reconstruct_does_not_merge_options_or_fresh_rows():
+    line = "A" * 78
+    rendered = mock_agent_common.rerender_fixture_lines_for_width(
+        [line, "  1. Pane capture", "• Fresh assistant row"],
+        120,
+        78,
+    )
+
+    assert rendered == [line, "  1. Pane capture", "• Fresh assistant row"]
 
 
 def test_plain_codex_typed_draft_prefills_live_composer(monkeypatch):
@@ -1574,6 +1718,57 @@ def test_terminal_width_respects_narrow_pane(monkeypatch):
     assert mock_agent_common.terminal_width() <= 70
 
 
+def test_live_composer_redraws_when_terminal_size_changes(monkeypatch, capsys):
+    size = {"width": 80, "height": 12}
+    state = {}
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: size["height"])
+
+    mock_agent_common.render_live_composer("resize me", len("resize me"), state=state)
+
+    assert state["live_composer_terminal_width"] == "80"
+    assert state["live_composer_terminal_height"] == "12"
+    capsys.readouterr()
+
+    size.update({"width": 60, "height": 10})
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("resize me", len("resize me"), state=state) is True
+
+    output = capsys.readouterr().out
+    assert "\x1b7\x1b[r\x1b8" in output
+    assert "\x1b[8;1H\x1b[2K❯ resize me" in output
+    assert state["live_composer_terminal_width"] == "60"
+    assert state["live_composer_terminal_height"] == "10"
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("resize me", len("resize me"), state=state) is False
+
+
+def test_claude_header_redraw_clears_previous_rows_after_resize(monkeypatch, capsys):
+    state = {
+        "claude_startup_header_visible": "1",
+        "claude_startup_header_top": "6",
+        "claude_startup_header_bottom": "8",
+        "live_composer_terminal_width": "80",
+        "live_composer_terminal_height": "12",
+    }
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "MODEL_LINE", "Opus 4.8 (1M context) with xhigh effort · API Usage Billing")
+    monkeypatch.setattr(mock_agent_common, "WELCOME_ORG_LINE", "· GPU Corporation - Power Users")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("", 0, state=state) is True
+
+    output = capsys.readouterr().out
+    assert "\x1b[6;1H\x1b[2K" in output
+    assert "\x1b[14;1H\x1b[2K" in output
+    assert "\x1b[15;1H\x1b[2K" in output
+    assert "\x1b[16;1H\x1b[2K" in output
+    assert state["claude_startup_header_top"] == "14"
+    assert state["claude_startup_header_bottom"] == "16"
+
+
 def test_claude_startup_uses_compact_header_in_home_and_project(monkeypatch):
     calls = []
     monkeypatch.setattr(mock_agent_common, "print_welcome_box", lambda: calls.append("box"))
@@ -1590,7 +1785,40 @@ def test_claude_startup_uses_compact_header_in_home_and_project(monkeypatch):
     assert calls == ["min", "min"]
 
 
-def test_claude_startup_clears_tiny_tty_without_overwritten_header(monkeypatch):
+def test_claude_startup_tty_places_header_above_fixed_footer(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    state = {}
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(mock_agent_common, "STARTUP_STYLE", "default")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "MODEL_LINE", "Opus 4.8 (1M context) with xhigh effort · API Usage Billing")
+    monkeypatch.setattr(mock_agent_common, "WELCOME_ORG_LINE", "· GPU Corporation - Power Users")
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+
+    mock_agent_common.print_startup(state)
+
+    rendered = output.getvalue()
+    separator = "\x1b[2m" + ("─" * 80) + "\x1b[0m"
+    assert "\x1b[H\x1b[J" not in rendered
+    assert "\x1b[6;1H\x1b[2K" in rendered
+    assert "\x1b[7;1H\x1b[2K" in rendered
+    assert "\x1b[8;1H\x1b[2K" in rendered
+    assert f"\x1b[9;1H\x1b[2K{separator}" in rendered
+    assert rendered.index("\x1b[8;1H\x1b[2K") < rendered.index(f"\x1b[9;1H\x1b[2K{separator}")
+    assert '❯ \x1b[2mTry "fix typecheck errors"\x1b[0m' in rendered
+    plain_rendered = mock_agent_common.ANSI_RE.sub("", rendered)
+    assert "… · API Usage Billing · GPU Corporation - Power Users" in plain_rendered
+    assert state["claude_startup_header_top"] == "6"
+    assert state["claude_startup_header_bottom"] == "8"
+
+
+def test_claude_startup_skips_tiny_tty_without_top_clear(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
             return True
@@ -1606,7 +1834,7 @@ def test_claude_startup_clears_tiny_tty_without_overwritten_header(monkeypatch):
 
     mock_agent_common.print_startup(state)
 
-    assert output.getvalue() == "\x1b[r\x1b[H\x1b[J"
+    assert output.getvalue() == ""
     assert calls == []
     assert state["claude_startup_header_pending"] == "1"
 
@@ -1627,9 +1855,10 @@ def test_claude_startup_redraws_header_after_tiny_tty_grows(monkeypatch):
 
     assert "\x1b[r" in output.getvalue()
     assert "Claude Code" in output.getvalue()
-    assert "\x1b[1;1H" in output.getvalue()
-    assert "\x1b[2;1H" in output.getvalue()
-    assert "\x1b[3;1H" in output.getvalue()
+    assert "\x1b[14;1H" in output.getvalue()
+    assert "\x1b[15;1H" in output.getvalue()
+    assert "\x1b[16;1H" in output.getvalue()
+    assert "\x1b[1;1H" not in output.getvalue()
     assert "claude_startup_header_pending" not in state
     assert state["claude_startup_header_visible"] == "1"
 

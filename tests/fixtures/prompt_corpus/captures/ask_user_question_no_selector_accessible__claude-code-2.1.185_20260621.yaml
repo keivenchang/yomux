@@ -8,7 +8,6 @@ client_version: 2.1.185 (Claude Code)
 client_version_slug: claude-code-2.1.185
 codex_version: ''
 cursor: {}
-expected_screen_key: needs-input
 expected_promoted:
   agent_kind: claude
   approval_type: ''
@@ -18,10 +17,11 @@ expected_promoted:
   composer_key: empty
   reason_code: needs-input
   screen_key: needs-input
+expected_screen_key: needs-input
 failures: []
-fixture_scenario: ask_user_question_no_selector_accessible
 fixture_id: ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621
-height: null
+fixture_scenario: ask_user_question_no_selector_accessible
+height: 35
 id: ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621
 include_scrollback: false
 launch_agent: ''
@@ -33,7 +33,8 @@ raw_capture: |
   [Accessible screen reader mode: on]
   Claude Code v2.1.185
   Welcome back Keiven!
-  Opus 4.8 (1M context) with xh… · API Usage Billing · GPU Corporation - Power Users
+  Opus 4.8 (1M context) with xh… · API Usage Billing · GPU Corporation - Powe
+  r Users
   /tmp/yolomux-real-captures Tips for getting started
   Ask Claude to create a new app or clone a repository
   What's new
@@ -41,11 +42,14 @@ raw_capture: |
   Improved auto mode safety: destructive git commands (`git rese…
   Added a warning when the requested model is deprecated or auto…
   /release-notes for more
-  you: Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question with no default option
-   selected: Which verifier mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
+  you: Use Claude Code interactive question UI, not prose, and ask me this multi
+  ple-choice question with no default option
+   selected: Which verifier mode should we use? Options: Pane capture, Transcrip
+  t capture. Wait for my selection.
    ☐ Verifier mode
   Which verifier mode should we use?
-  menu: 1. Pane capture — Capture the visible terminal pane content for verification.
+  menu: 1. Pane capture — Capture the visible terminal pane content for verifica
+  tion.
   2. Transcript capture — Capture the full session transcript for verification.
   3. Other
   4. Chat about this
@@ -57,7 +61,8 @@ styled_capture: |
   [Accessible screen reader mode: on]
   Claude Code v2.1.185
   Welcome back Keiven!
-  Opus 4.8 (1M context) with xh… · API Usage Billing · GPU Corporation - Power Users
+  Opus 4.8 (1M context) with xh… · API Usage Billing · GPU Corporation - Powe
+  r Users
   /tmp/yolomux-real-captures Tips for getting started
   Ask Claude to create a new app or clone a repository
   What's new
@@ -65,11 +70,14 @@ styled_capture: |
   Improved auto mode safety: destructive git commands (`git rese…
   Added a warning when the requested model is deprecated or auto…
   /release-notes for more
-  you: Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question with no default option
-   selected: Which verifier mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
+  you: Use Claude Code interactive question UI, not prose, and ask me this multi
+  ple-choice question with no default option
+   selected: Which verifier mode should we use? Options: Pane capture, Transcrip
+  t capture. Wait for my selection.
    ☐ Verifier mode
   Which verifier mode should we use?
-  menu: 1. Pane capture — Capture the visible terminal pane content for verification.
+  menu: 1. Pane capture — Capture the visible terminal pane content for verifica
+  tion.
   2. Transcript capture — Capture the full session transcript for verification.
   3. Other
   4. Chat about this
@@ -77,4 +85,4 @@ styled_capture: |
 target: 'yoreal-no-selector-ax:'
 tmux_socket: ''
 wait_text: []
-width: 120
+width: 78

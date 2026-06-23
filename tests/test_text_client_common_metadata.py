@@ -171,6 +171,41 @@ def test_codex_parser_defaults_to_mini_model_and_medium_effort(monkeypatch):
     assert args.effort == "medium"
 
 
+def test_codex_accepts_claude_style_rendering_flags(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "codex.py",
+            "--effort",
+            "xhigh",
+            "--hide-thinking",
+            "--hide-tool-output",
+            "--show-metrics",
+            "--raw-json",
+            "--timeout",
+            "12.5",
+        ],
+    )
+    args = codex.parse_args()
+
+    assert args.effort == "xhigh"
+    assert args.show_reasoning_summary is False
+    assert args.show_raw_reasoning is False
+    assert args.show_tool_output is False
+    assert args.show_metrics is True
+    assert args.debug_json is True
+    assert args.timeout == 12.5
+
+
+def test_codex_show_thinking_restores_summary_from_config_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex.py", "-c", "model_reasoning_summary=none", "--show-thinking"])
+    args = codex.parse_args()
+
+    assert args.reasoning_summary == "concise"
+    assert args.show_reasoning_summary is True
+
+
 def test_codex_tui_configuration_uses_parser_model_and_effort(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["codex.py"])
     args = codex.parse_args()
@@ -258,7 +293,21 @@ def test_codex_help_explains_model_and_effort_defaults():
     assert "Default reasoning (aka thinking) effort: medium" in help_text
     assert "Change model at launch: -m <model> (default: gpt-5.4-mini)" in help_text
     assert 'Change model via config: -c model="<model>"' in help_text
+    assert 'Change reasoning (aka thinking) effort: --effort medium or -c model_reasoning_effort="medium" (default: medium)' in help_text
+    assert "Common config settings:" in help_text
     assert "Inside the REPL, use: /model <model> [effort], for example /model gpt-5.4-mini medium" in help_text
+
+
+def test_claude_help_explains_model_and_config_defaults():
+    help_text = claude.build_config_help()
+
+    assert "Models:" in help_text
+    assert "Default model: haiku" in help_text
+    assert "Default effort: medium" in help_text
+    assert "Change model at launch: -m <model> (default: haiku)" in help_text
+    assert "Change effort: --effort medium or /config effort=medium (default: medium)" in help_text
+    assert "Common config settings:" in help_text
+    assert "Inside the REPL:" in help_text
 
 
 def test_codex_help_cli_does_not_require_server_auth(tmp_path):
@@ -275,8 +324,46 @@ def test_codex_help_cli_does_not_require_server_auth(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "--dump-fixtures" in result.stdout
+    assert "--mock" in result.stdout
+    assert "--effort" in result.stdout
+    assert "--show-thinking" in result.stdout
+    assert "--hide-thinking" in result.stdout
+    assert "--show-metrics" in result.stdout
+    assert "--hide-metrics" in result.stdout
+    assert "--raw-json" in result.stdout
+    assert "--timeout" in result.stdout
     assert "Default model: gpt-5.4-mini" in result.stdout
     assert "codex CLI not found on PATH" in result.stdout
+
+
+def test_text_client_help_outputs_share_sections(tmp_path):
+    env = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    codex_result = subprocess.run(
+        [sys.executable, str(TOOLS_DIR / "codex.py"), "--help"],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    claude_result = subprocess.run(
+        [sys.executable, str(TOOLS_DIR / "claude.py"), "--help"],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert codex_result.returncode == 0, codex_result.stderr
+    assert claude_result.returncode == 0, claude_result.stderr
+    shared_sections = ["Models:", "Common config settings:", "Inside the REPL:"]
+    for section in shared_sections:
+        assert section in codex_result.stdout
+        assert section in claude_result.stdout
+    assert "Common -c settings:" not in codex_result.stdout
 
 
 def test_codex_human_error_message_extracts_json_detail():

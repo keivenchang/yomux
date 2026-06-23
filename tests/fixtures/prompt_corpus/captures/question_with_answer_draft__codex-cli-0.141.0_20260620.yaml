@@ -104,7 +104,7 @@ cursor:
   current_command: node
   pane_in_mode: false
   x: 2
-  y: 37
+  y: 34
 description: 'Positive: Codex question remains ASK? even when an answer draft is in the composer'
 evidence_fields:
   display_evidence_lines:
@@ -142,6 +142,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: question_with_answer_draft__codex-cli-0.141.0_20260620
 fixture_scenario: question_with_answer_draft
+height: 35
 id: question_with_answer_draft__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -150,16 +151,8 @@ operations:
 - needles: []
   ok: true
   type: wait_text
-raw_capture: |2
-
-  • Ran echo yolomux-e2e-approval
-    └ yolomux-e2e-approval
-
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
-  • yolomux-e2e-approval
-
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+raw_capture: |
+  ──────────────────────────────────────────
 
 
   › Please run the shell command `touch /tmp/yolomux-e2e-approval`.
@@ -170,14 +163,15 @@ raw_capture: |2
   • Ran touch /tmp/yolomux-e2e-approval
     └ (no output)
 
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────────────────────────
 
   • Done.
 
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Wh
+  ich YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -193,15 +187,40 @@ raw_capture: |2
     gpt-5.5 xhigh · ~/yolomux.dev8001
 source_capture_status: promoted; staging discarded after promotion
 source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110100Z.yaml
-styled_capture: "\n• \e[1mRan\e[0m echo yolomux-e2e-approval\n\e[2m  └ yolomux-e2e-approval\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \n• \e[0myolomux-e2e-approval\n\n\e[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \n\n\e[1m› \e[0mPlease run the shell command `touch /tmp/yolomux-e2e-approval`.\n\n\n✔ You \e[1mapproved\e[0m codex to run\
-  \ \e[2mtouch /tmp/yolomux-e2e-approval\e[0;1m this time\n\n\e[0m• \e[1mRan\e[0m touch /tmp/yolomux-e2e-approval\n\e[2m \
-  \ └ (no output)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \n• \e[0mDone.\n\n\e[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \n\n\e[1m› \e[0mAsk me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should\
-  \ we use?\n  1. Pane capture 2. Transcript capture\n\n\n\e[2m• \e[0mWhich YOLOmux verifier mode should we use?\n\n  1. Pane\
-  \ capture\n  2. Transcript capture\n\n\n\e[1m›\e[0m Pane capture\n\n\n  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+styled_capture: |
+  ──────────────────────────────────────────
+
+
+  › Please run the shell command `touch /tmp/yolomux-e2e-approval`.
+
+
+  ✔ You approved codex to run touch /tmp/yolomux-e2e-approval this time
+
+  • Ran touch /tmp/yolomux-e2e-approval
+    └ (no output)
+
+  ──────────────────────────────────────────────────────────────────────────────
+
+  • Done.
+
+  ──────────────────────────────────────────────────────────────────────────────
+
+
+  › Ask me this question and wait for my answer instead of choosing yourself: Wh
+  ich YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Pane capture
+
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-codex-2552908-7ec5c7:0.0
 verifier_capabilities:
@@ -211,3 +230,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
+width: 78

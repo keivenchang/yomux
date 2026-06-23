@@ -17,13 +17,50 @@ from . import yolo_rules
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_VISUAL_WRAP_COLS = 78
+_VISUAL_WRAP_CONTINUATION_RE = re.compile(r"^\s+|^[a-z0-9_./~:+#?)\]}-]", re.IGNORECASE)
+_BOX_OR_RULE_RE = re.compile(r"^[\s─━╌╍▔╭╮╰╯│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬\-]+$")
+
+
+def _is_visual_wrap_continuation(previous: str, current: str) -> bool:
+    prev = previous.rstrip()
+    cur = current.rstrip()
+    stripped = cur.strip()
+    if len(prev) not in {_VISUAL_WRAP_COLS - 1, _VISUAL_WRAP_COLS} or not stripped:
+        return False
+    if _BOX_OR_RULE_RE.fullmatch(prev.strip()) or _BOX_OR_RULE_RE.fullmatch(stripped):
+        return False
+    if re.match(r"^[❯›>]?\s*\d+[.:]\s+\S", stripped):
+        return False
+    if re.match(r"^[❯›>]\s+\S", stripped):
+        return False
+    return bool(_VISUAL_WRAP_CONTINUATION_RE.match(cur))
+
+
+def _join_visual_wraps(text: str) -> str:
+    lines = str(text or "").splitlines()
+    if not lines:
+        return ""
+    joined: list[str] = []
+    for line in lines:
+        if joined and _is_visual_wrap_continuation(joined[-1], line):
+            if line.startswith((" ", "\t")):
+                joined[-1] = joined[-1].rstrip() + line
+            elif line.startswith("+"):
+                joined[-1] = joined[-1].rstrip() + " " + line.lstrip()
+            else:
+                joined[-1] = joined[-1].rstrip() + line.lstrip()
+            continue
+        joined.append(line)
+    return "\n".join(joined)
 
 
 def normalize_capture_text(text: str) -> str:
     """Strip terminal control bytes before classifying captured pane text."""
     normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     normalized = _ANSI_ESCAPE_RE.sub("", normalized)
-    return _CONTROL_CHAR_RE.sub("", normalized)
+    normalized = _CONTROL_CHAR_RE.sub("", normalized)
+    return _join_visual_wraps(normalized)
 
 
 def is_dangerous(cmd_line: str) -> bool:
@@ -506,7 +543,7 @@ _CODEX_MODEL_STATUS_LINE_RE = re.compile(
     r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+(?:~|/)[^\s]*(?:\s+\d+%\s+context\s+(?:used|left|remaining))?\s*$",
     re.IGNORECASE,
 )
-_CODEX_PURSUING_GOAL_RE = re.compile(r"\bPursuing\s+goal\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
+_CODEX_GOAL_STATUS_RE = re.compile(r"\b(?:Pursuing\s+goal|Goal\s+achieved)\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
 _CLAUDE_GOAL_ACTIVE_RE = re.compile(
     r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
     re.IGNORECASE,
@@ -520,6 +557,8 @@ _WORK_QUEUE_ROW_RE = re.compile(
     r"^\s*[○●◦]\s+\S.*(?:\b\d+(?:\.\d+)?\s*s\b|↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)",
     re.IGNORECASE,
 )
+_CODEX_QUEUED_FOLLOWUP_HEADER_RE = re.compile(r"^[•◦○]\s+Queued\s+follow-up\s+inputs\b", re.IGNORECASE)
+_CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE = re.compile(r"^shift\s+\+\s+←\s+edit\s+last\s+queued\s+message$", re.IGNORECASE)
 _CHOICE_LINE_RE = re.compile(r"^\s*(?:menu:\s*)?(?:[❯›>]\s*)?\d+[.:]\s+\S", re.IGNORECASE)
 _SELECTED_CHOICE_LINE_RE = re.compile(r"^\s*[❯›>]\s*\d+[.:]\s+\S")
 _SELECTED_CHOICE_NUMBER_RE = re.compile(r"^\s*[❯›>]\s*(\d+)[.:]\s+\S", re.MULTILINE)
@@ -574,6 +613,12 @@ def _prompt_options(visible_text: str) -> list[dict[str, object]]:
         match = _OPTION_LINE_RE.match(line)
         if not match:
             stripped = line.strip()
+            if current_group and stripped and _QUESTION_RE.match(_clean_prompt_block_line(line)):
+                option_groups.append(current_group)
+                current_group = []
+                continue
+            if current_group and not stripped:
+                continue
             if current_group and stripped and (not _is_separator_or_footer(line) or (ask_question_mode and not _is_footer_hint_line(stripped))):
                 # Claude's AskUserQuestion UI can put descriptive sub-lines beneath each numbered
                 # choice, and current versions may put a separator before "Chat about this".
@@ -582,6 +627,19 @@ def _prompt_options(visible_text: str) -> list[dict[str, object]]:
             if current_group:
                 option_groups.append(current_group)
                 current_group = []
+            continue
+        inline_matches = list(re.finditer(r"(?:(?<=^)|(?<=\s))([❯›>]?)\s*(\d+)[.:]\s+", line))
+        if len(inline_matches) > 1:
+            for inline_index, inline_match in enumerate(inline_matches):
+                label_start = inline_match.end()
+                label_end = inline_matches[inline_index + 1].start() if inline_index + 1 < len(inline_matches) else len(line)
+                label = line[label_start:label_end].strip()
+                if label:
+                    current_group.append({
+                        "index": int(inline_match.group(2)),
+                        "label": re.sub(r"\s+", " ", label).strip(),
+                        "selected": bool(inline_match.group(1)),
+                    })
             continue
         menu_prefix, marker, number, label = match.groups()
         if menu_prefix or ask_question_mode:
@@ -723,7 +781,7 @@ def _parse_status_duration_seconds(line: str) -> float | None:
 
 
 def _parse_codex_goal_elapsed_seconds(line: str) -> float | None:
-    match = _CODEX_PURSUING_GOAL_RE.search(line)
+    match = _CODEX_GOAL_STATUS_RE.search(line)
     if not match:
         return None
     return _parse_duration_seconds(match.group("duration"))
@@ -737,7 +795,7 @@ def _parse_claude_goal_elapsed_seconds(line: str) -> float | None:
 
 
 def _parse_agent_goal_elapsed_seconds(line: str) -> float | None:
-    """Return active-goal elapsed time for Claude `/goal active` or Codex `Pursuing goal`."""
+    """Return active-goal elapsed time for Claude `/goal active` or Codex goal status."""
     return _parse_claude_goal_elapsed_seconds(line) or _parse_codex_goal_elapsed_seconds(line)
 
 
@@ -915,12 +973,23 @@ def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
 
 
 def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
+    in_codex_queued_followup = False
     for line in lines[working_index + 1:]:
         stripped = line.strip()
         # Same bounded-overlay rule as approval_prompt_has_later_activity: a Ctrl-T task list below a
         # working row is chrome, not a later prompt. break so real output above the header still counts.
         if _TASK_LIST_HEADER_RE.match(stripped):
             break
+        if _CODEX_QUEUED_FOLLOWUP_HEADER_RE.match(stripped):
+            in_codex_queued_followup = True
+            continue
+        if in_codex_queued_followup:
+            if not stripped:
+                in_codex_queued_followup = False
+                continue
+            if stripped.startswith("↳") or _CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE.match(stripped) or line.startswith(("    ", "  ")):
+                continue
+            in_codex_queued_followup = False
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
             continue
         if re.match(r"^[❯›>]\s+\S", stripped):
@@ -1058,9 +1127,11 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _EFFORT_STATUS_LINE_RE.match(stripped):
         return True
+    if _CODEX_QUEUED_FOLLOWUP_HEADER_RE.match(stripped) or stripped.startswith("↳") or _CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE.match(stripped):
+        return True
     if _WORK_QUEUE_HINT_RE.search(stripped) or _WORK_QUEUE_ROW_RE.match(stripped):
         return True
-    if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped) or _CODEX_PURSUING_GOAL_RE.search(stripped):
+    if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped) or _CODEX_GOAL_STATUS_RE.search(stripped):
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True

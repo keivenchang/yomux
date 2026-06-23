@@ -544,6 +544,27 @@ fixtures:
   fixture_id: goal_active__codex-cli-0.141.0_20260621
   id: codex-goal-active-real
   provenance: real Codex CLI 0.141.0 `Pursuing goal` capture from tmux 8001:0.0
+- case_name: goal_achieved_working
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: working
+    selected_option: 0
+    yes_selected: false
+  family: codex-goal-active
+  file: captures/goal_achieved_working__codex-cli-0.141.0_20260623.yaml
+  fixture_id: goal_achieved_working__codex-cli-0.141.0_20260623
+  id: codex-goal-achieved-working-real
+  provenance: screenshot-provided Codex CLI 0.141.0 `Goal achieved` capture from tmux 8002:0.0; bottom rows later confirmed by tmux capture
 - case_name: non_permission_question
   expected:
     action: null
@@ -920,7 +941,7 @@ parity_groups:
   contract: Both clients can show a goal-following busy state that must render as RUN without raising ASK? or YOLO?.
   why_names_differ: >-
     Both captures use the same `goal_active` case name, but the visible UI differs: Claude shows `/goal active` beside the
-    `Clauding...` counter, while Codex shows `Pursuing goal` beside the working counter.
+    `Clauding...` counter, while Codex shows `Pursuing goal` or `Goal achieved` beside the working counter.
   fixtures:
   - agent: claude
     case_name: goal_active
@@ -928,6 +949,9 @@ parity_groups:
   - agent: codex
     case_name: goal_active
     file: captures/goal_active__codex-cli-0.141.0_20260621.yaml
+  - agent: codex
+    case_name: goal_achieved_working
+    file: captures/goal_achieved_working__codex-cli-0.141.0_20260623.yaml
 - id: normal-choice-question
   status: covered-by-both
   contract: Both clients can ask non-permission user questions that should show ASK?.

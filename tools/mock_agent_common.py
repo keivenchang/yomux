@@ -31,6 +31,7 @@ VERSION = ".9.9.999"
 MODEL = "Opus 4.7 (1M context)"
 EFFORT = "low"
 MODEL_LINE = f"{MODEL} with {EFFORT} effort · API Usage Billing"
+CLAUDE_BILLING_SUFFIX = " · API Usage Billing"
 DEFAULT_WIDTH = 126
 # Real Claude AND real Codex both render the permission-choice selector and the input prompt with
 # `›` (U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK), NOT `❯` (U+276F). The mocks exist to
@@ -336,9 +337,6 @@ def print_startup(state: dict[str, str] | None = None) -> None:
         return
     width = terminal_width()
     if sys.stdout.isatty():
-        reset_terminal_scroll_region()
-        sys.stdout.write("\x1b[H\x1b[J")
-        sys.stdout.flush()
         if terminal_height() < 8:
             if state is not None:
                 state["claude_startup_header_pending"] = "1"
@@ -346,6 +344,10 @@ def print_startup(state: dict[str, str] | None = None) -> None:
         if state is not None:
             state.pop("claude_startup_header_pending", None)
             state["claude_startup_header_visible"] = "1"
+        reset_terminal_scroll_region(preserve_cursor=True)
+        render_contiguous_claude_startup_header(state)
+        render_live_composer("", 0, state=state)
+        return
     print_minimal_header()
     if not sys.stdout.isatty():
         print()
@@ -353,10 +355,39 @@ def print_startup(state: dict[str, str] | None = None) -> None:
         print()
 
 
-def minimal_header_lines() -> list[str]:
+def ellipsize_plain(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if visible_len(text) <= width:
+        return text
+    if width == 1:
+        return "…"
+    return text[:width - 1] + "…"
+
+
+def claude_header_model_line(width: int | None = None) -> str:
+    text = MODEL_LINE
+    if WELCOME_ORG_LINE and WELCOME_ORG_LINE not in text:
+        text = f"{text} {WELCOME_ORG_LINE}"
+    if width is None or visible_len(text) <= width:
+        return text
+    marker_index = text.find(CLAUDE_BILLING_SUFFIX)
+    if marker_index <= 0:
+        return ellipsize_plain(text, width)
+    prefix = text[:marker_index]
+    suffix = text[marker_index:]
+    suffix_width = visible_len(suffix)
+    if suffix_width >= width - 1:
+        return ellipsize_plain(text, width)
+    return ellipsize_plain(prefix, width - suffix_width) + suffix
+
+
+def minimal_header_lines(width: int | None = None) -> list[str]:
+    model_prefix = f"{CLAUDE_ORANGE}▝▜█████▛▘{ANSI_RESET}  {ANSI_DIM}"
+    model_width = None if width is None else max(0, width - visible_len(model_prefix))
     return [
         f" {CLAUDE_ORANGE}▐▛███▜▌{ANSI_RESET}   {AGENT_PRODUCT_NAME} v{VERSION}",
-        f"{CLAUDE_ORANGE}▝▜█████▛▘{ANSI_RESET}  {ANSI_DIM}{MODEL_LINE}{ANSI_RESET}",
+        f"{model_prefix}{claude_header_model_line(model_width)}{ANSI_RESET}",
         f"  {CLAUDE_ORANGE}▘▘ ▝▝{ANSI_RESET}    {ANSI_DIM}{display_cwd()}{ANSI_RESET}",
     ]
 
@@ -364,6 +395,33 @@ def minimal_header_lines() -> list[str]:
 def print_minimal_header() -> None:
     for line in minimal_header_lines():
         print(line)
+
+
+def render_contiguous_claude_startup_header(state: dict[str, str] | None = None) -> None:
+    width = terminal_width()
+    footer_top = live_composer_footer_top("", False, state)
+    header_bottom = max(1, footer_top - 1)
+    lines = minimal_header_lines(width)
+    visible_lines = lines[-header_bottom:]
+    header_top = max(1, header_bottom - len(visible_lines) + 1)
+    clear_top = header_top
+    clear_bottom = header_bottom
+    if state is not None:
+        try:
+            clear_top = min(clear_top, int(state.get("claude_startup_header_top", str(header_top)) or header_top))
+            clear_bottom = max(clear_bottom, int(state.get("claude_startup_header_bottom", str(header_bottom)) or header_bottom))
+        except ValueError:
+            clear_top = header_top
+            clear_bottom = header_bottom
+    for row in range(max(1, clear_top), min(terminal_height(), clear_bottom) + 1):
+        sys.stdout.write(f"\x1b[{row};1H\x1b[2K")
+    for offset, line in enumerate(visible_lines):
+        row = header_top + offset
+        sys.stdout.write(f"\x1b[{row};1H\x1b[2K{clip_display_width(line, width)}")
+    if state is not None:
+        state["claude_startup_header_top"] = str(header_top)
+        state["claude_startup_header_bottom"] = str(header_bottom)
+    sys.stdout.flush()
 
 
 def centered_in(text: str, width: int) -> str:
@@ -381,6 +439,40 @@ ANSI_DIM = "\x1b[2m"
 ANSI_ITALIC = "\x1b[3m"
 ANSI_RESET = "\x1b[0m"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+FIXTURE_DUMP_COLS = 78
+FIXTURE_DUMP_ROWS = 35
+RULE_LINE_CHARS = frozenset("─━╌╍")
+BOX_HORIZONTAL_CHARS = frozenset("─━╌╍═")
+BOX_LEFT_CORNERS = frozenset("╭╰┌└╔╚")
+BOX_RIGHT_CORNERS = frozenset("╮╯┐┘╗╝")
+BOX_VERTICAL_CHARS = frozenset("│┃║")
+FIXTURE_FRESH_PREFIXES = (
+    "•",
+    "●",
+    "✻",
+    "⎿",
+    "└",
+    "╭",
+    "╰",
+    "│",
+    "$ ",
+    "Bash(",
+    "Ran ",
+    "Read ",
+    "Write ",
+    "Edit ",
+    "Update ",
+    "Search ",
+    "Codex wants ",
+    "Claude wants ",
+    "Would you like ",
+    "Do you want ",
+    "Enter to ",
+    "Press enter",
+    "Esc to ",
+    "? for shortcuts",
+    "tmux focus-events",
+)
 CODEX_CAPTURED_STATUS_RE = re.compile(
     r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+·\s+\S.*$",
     re.IGNORECASE,
@@ -391,7 +483,7 @@ CLAUDE_CAPTURED_WORKING_RE = re.compile(
     re.IGNORECASE,
 )
 # Enterprise identity lines shown under the robot in the real welcome box.
-WELCOME_ORG_LINE = "· Acme Corp - Power Users"
+WELCOME_ORG_LINE = "· GPU Corporation - Power Users"
 WELCOME_PLAN_LABEL = "Claude Enterprise"
 
 
@@ -1672,7 +1764,11 @@ def _read_byte() -> str:
     return os.read(sys.stdin.fileno(), 1).decode("utf-8", errors="replace")
 
 
-def read_key() -> str:
+def read_key(timeout: float | None = None) -> str | None:
+    if timeout is not None:
+        ready, _, _ = select.select([sys.stdin.fileno()], [], [], timeout)
+        if not ready:
+            return None
     char = _read_byte()
     if char != "\x1b":
         return char
@@ -1803,6 +1899,24 @@ def live_composer_footer_top(text: str = "", armed_exit: bool = False, state: di
     return max(1, min(rows))
 
 
+def remember_live_composer_terminal_size(state: dict[str, str] | None = None) -> None:
+    if state is None:
+        return
+    state["live_composer_terminal_width"] = str(terminal_width())
+    state["live_composer_terminal_height"] = str(terminal_height())
+
+
+def live_composer_terminal_size_changed(state: dict[str, str] | None = None) -> bool:
+    if state is None:
+        return False
+    try:
+        previous_width = int(state.get("live_composer_terminal_width", "-1") or -1)
+        previous_height = int(state.get("live_composer_terminal_height", "-1") or -1)
+    except ValueError:
+        return True
+    return previous_width != terminal_width() or previous_height != terminal_height()
+
+
 def clear_live_composer_footer(text: str = "", armed_exit: bool = False, state: dict[str, str] | None = None) -> int:
     footer_top = live_composer_footer_top(text, armed_exit, state)
     previous_top = footer_top
@@ -1852,6 +1966,7 @@ def render_live_composer(text: str, cursor: int, armed_exit: bool = False, state
                 sys.stdout.write(f"\x1b[{row};1H\x1b[2K{line}")
         sys.stdout.write(f"\x1b[{prompt_row};{cursor_col}H")
         set_output_region_above_live_composer(text, armed_exit, state, preserve_cursor=True)
+        remember_live_composer_terminal_size(state)
         sys.stdout.flush()
         return
 
@@ -1870,6 +1985,7 @@ def render_live_composer(text: str, cursor: int, armed_exit: bool = False, state
             sys.stdout.write(f"\x1b[{row};1H\x1b[2K{display}")
     sys.stdout.write(f"\x1b[{prompt_row};{cursor_col}H")
     set_output_region_above_live_composer(text, armed_exit, state, preserve_cursor=True)
+    remember_live_composer_terminal_size(state)
     sys.stdout.flush()
 
 
@@ -1884,7 +2000,31 @@ def render_inline_composer(
     sys.stdout.write("\n\r\x1b[2K")
     sys.stdout.write("\n\r\x1b[2K" + status_display)
     sys.stdout.write(f"\x1b[2A\x1b[{cursor_col}G")
+    remember_live_composer_terminal_size(state)
     sys.stdout.flush()
+
+
+def maybe_redraw_live_composer_for_resize(
+    text: str,
+    cursor: int,
+    armed_exit: bool = False,
+    state: dict[str, str] | None = None,
+    *,
+    inline_composer: bool = False,
+) -> bool:
+    if state is None or not live_composer_terminal_size_changed(state):
+        return False
+    reset_terminal_scroll_region(preserve_cursor=True)
+    if PERMISSION_STYLE != "codex":
+        if state.get("claude_startup_header_pending") == "1":
+            render_pending_claude_startup_header(state)
+        elif state.get("claude_startup_header_visible") == "1":
+            render_contiguous_claude_startup_header(state)
+    if inline_composer:
+        render_inline_composer(text, cursor, armed_exit, state)
+    else:
+        render_live_composer(text, cursor, armed_exit, state)
+    return True
 
 
 def reset_terminal_scroll_region(preserve_cursor: bool = False) -> None:
@@ -1900,12 +2040,8 @@ def render_pending_claude_startup_header(state: dict[str, str] | None = None) ->
         return
     if state.get("claude_startup_header_pending") != "1" or terminal_height() < 8:
         return
-    reset_terminal_scroll_region()
-    bottom = live_composer_output_bottom("", False, state)
-    for row in range(1, bottom + 1):
-        sys.stdout.write(f"\x1b[{row};1H\x1b[2K")
-    for index, line in enumerate(minimal_header_lines(), start=1):
-        sys.stdout.write(f"\x1b[{index};1H{line}")
+    reset_terminal_scroll_region(preserve_cursor=True)
+    render_contiguous_claude_startup_header(state)
     state.pop("claude_startup_header_pending", None)
     state["claude_startup_header_visible"] = "1"
     sys.stdout.flush()
@@ -2055,28 +2191,38 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
     history_index = history_count + 1
     draft = ""
     inline_composer = False
+    needs_render = True
     old_settings = termios.tcgetattr(sys.stdin.fileno())
     try:
         tty.setraw(sys.stdin.fileno())
         while True:
-            render_pending_claude_startup_header(state)
             armed_exit = bool(state and state.get("last_ctrl_c_at"))
-            if inline_composer:
-                render_inline_composer(text, cursor, armed_exit, state)
-            else:
-                render_live_composer(text, cursor, armed_exit, state)
-            if PERMISSION_STYLE != "codex" and state and state.get("claude_startup_header_pending") == "1":
-                ready, _write, _error = select.select([sys.stdin.fileno()], [], [], 0.12)
-                if not ready:
-                    continue
-            key = read_key()
+            if needs_render:
+                render_pending_claude_startup_header(state)
+                if inline_composer:
+                    render_inline_composer(text, cursor, armed_exit, state)
+                else:
+                    render_live_composer(text, cursor, armed_exit, state)
+                needs_render = False
+            key = read_key(timeout=0.12)
+            if key is None:
+                maybe_redraw_live_composer_for_resize(
+                    text,
+                    cursor,
+                    armed_exit,
+                    state,
+                    inline_composer=inline_composer,
+                )
+                continue
             if state is not None and key != "\x03":
                 clear_ctrl_c_exit_window(state)
             if key == "\x1b[Z" and state is not None and not inline_composer:
                 cycle_claude_mode(state)
+                needs_render = True
                 continue
             if key == "?" and state is not None and not inline_composer and not text:
                 state["claude_shortcuts_visible"] = "1"
+                needs_render = True
                 continue
             if key in {"\r", "\n"}:
                 if inline_composer:
@@ -2095,6 +2241,7 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
             if key == "\x04":
                 if text:
                     text = text[:cursor] + text[cursor + 1:]
+                    needs_render = True
                     continue
                 if inline_composer:
                     clear_inline_composer()
@@ -2105,25 +2252,32 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
                 if cursor > 0:
                     text = text[:cursor - 1] + text[cursor:]
                     cursor -= 1
+                    needs_render = True
                 continue
             if key in {"\x1b[D", "\x1bOD", "\x02"}:
                 cursor = max(0, cursor - 1)
+                needs_render = True
                 continue
             if key in {"\x1b[C", "\x1bOC", "\x06"}:
                 cursor = min(len(text), cursor + 1)
+                needs_render = True
                 continue
             if key == "\x01":
                 cursor = 0
+                needs_render = True
                 continue
             if key == "\x05":
                 cursor = len(text)
+                needs_render = True
                 continue
             if key == "\x0b":
                 text = text[:cursor]
+                needs_render = True
                 continue
             if key == "\x15":
                 text = text[cursor:]
                 cursor = 0
+                needs_render = True
                 continue
             if key == "\x17":
                 start = cursor
@@ -2133,6 +2287,7 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
                     start -= 1
                 text = text[:start] + text[cursor:]
                 cursor = start
+                needs_render = True
                 continue
             if key in {"\x1b[A", "\x1bOA", "\x10"} and history_count:
                 if history_index == history_count + 1:
@@ -2140,18 +2295,21 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
                 history_index = max(1, history_index - 1)
                 text = history_item(history_index)
                 cursor = len(text)
+                needs_render = True
                 continue
             if key in {"\x1b[B", "\x1bOB", "\x0e"} and history_count:
                 if history_index <= history_count:
                     history_index += 1
                 text = draft if history_index == history_count + 1 else history_item(history_index)
                 cursor = len(text)
+                needs_render = True
                 continue
             if len(key) == 1 and key >= " ":
                 if state is not None and not inline_composer:
                     state.pop("claude_shortcuts_visible", None)
                 text = text[:cursor] + key + text[cursor:]
                 cursor += len(key)
+                needs_render = True
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
 
@@ -2366,6 +2524,8 @@ def load_mock_fixture_cases() -> list[dict[str, object]]:
                 "raw_capture": raw_capture,
                 "styled_capture": styled_capture,
                 "cursor": cursor,
+                "width": data.get("width"),
+                "height": data.get("height"),
                 "expected": fixture_expected_metadata(data, inventory_item),
             })
     MOCK_FIXTURE_CASES = cases
@@ -2543,18 +2703,18 @@ def print_mock_fixture_dump() -> None:
         agent = str(case.get("agent") or "generic")
         outcome = mock_fixture_outcome_label(case)
         case_name = str(case.get("case_name") or path.stem)
-        print(f"===== BEGIN FIXTURE {index}/{total}: {path.name} =====")
-        print(f"agent: {agent}")
-        print(f"case: {case_name}")
-        print(f"outcome: {outcome}")
-        print(f"path: {path}")
-        print("----- capture -----")
-        capture = str(case.get("styled_capture") or case.get("raw_capture") or "")
+        print_fixture_dump_line(f"===== BEGIN FIXTURE {index}/{total}: {path.name} =====")
+        print_fixture_dump_line(f"agent: {agent}")
+        print_fixture_dump_line(f"case: {case_name}")
+        print_fixture_dump_line(f"outcome: {outcome}")
+        print_fixture_dump_line(f"path: {path}")
+        capture = str(case.get("raw_capture") or case.get("styled_capture") or "")
+        dump = format_fixture_capture_for_dump(capture, case.get("cursor") if isinstance(case.get("cursor"), dict) else {})
+        print_fixture_dump_line(fixture_dump_cursor_label(dump["cursor"]))
+        print_fixture_dump_line(f"----- capture ({FIXTURE_DUMP_COLS}x{FIXTURE_DUMP_ROWS}; cursor marked) -----")
         if capture:
-            sys.stdout.write(capture)
-            if not capture.endswith("\n"):
-                print()
-        print("===== END FIXTURE: " + path.name + " =====")
+            sys.stdout.write(str(dump["text"]))
+        print_fixture_dump_line(f"===== END FIXTURE: {path.name} =====")
         if index != total:
             print()
 
@@ -2592,6 +2752,248 @@ def clip_display_width(line: str, width: int) -> str:
     if had_csi:
         out.append("\x1b[0m")  # close any color left open by the cut so it can't bleed down
     return "".join(out)
+
+
+def int_metadata(value: object, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def stretch_fixture_width_line(line: str, render_width: int, capture_width: int = FIXTURE_DUMP_COLS) -> str:
+    if render_width <= 0:
+        return ""
+    capture_cols = capture_width or FIXTURE_DUMP_COLS
+    if render_width <= capture_cols or visible_len(line) != capture_cols:
+        return clip_display_width(line, render_width)
+    plain = plain_capture_line(line)
+    indent_len = len(plain) - len(plain.lstrip(" "))
+    indent = plain[:indent_len]
+    body = plain[indent_len:]
+    body_width = max(0, render_width - indent_len)
+    stripped = body.strip()
+    if body_width <= 0:
+        return ""
+    if stripped and set(stripped) <= RULE_LINE_CHARS:
+        return indent + (stripped[0] * body_width)
+    if len(body) >= 2 and body[0] in BOX_LEFT_CORNERS and body[-1] in BOX_RIGHT_CORNERS:
+        middle = body[1:-1].strip()
+        if middle and set(middle) <= BOX_HORIZONTAL_CHARS and body_width >= 2:
+            return indent + body[0] + (middle[0] * (body_width - 2)) + body[-1]
+    if len(body) >= 2 and body[0] in BOX_VERTICAL_CHARS and body[-1] in BOX_VERTICAL_CHARS:
+        extra = render_width - capture_cols
+        if extra > 0:
+            return indent + body[:-1] + (" " * extra) + body[-1]
+    return clip_display_width(line, render_width)
+
+
+def fixture_line_is_structural(line: str) -> bool:
+    plain = plain_capture_line(line)
+    stripped = plain.strip()
+    if not stripped:
+        return False
+    if set(stripped) <= RULE_LINE_CHARS:
+        return True
+    body = plain.lstrip(" ")
+    if len(body) >= 2 and body[0] in BOX_LEFT_CORNERS and body[-1] in BOX_RIGHT_CORNERS:
+        middle = body[1:-1].strip()
+        return bool(middle and set(middle) <= BOX_HORIZONTAL_CHARS)
+    if len(body) >= 2 and body[0] in BOX_VERTICAL_CHARS and body[-1] in BOX_VERTICAL_CHARS:
+        return True
+    return False
+
+
+def fixture_line_is_option(line: str) -> bool:
+    return bool(re.match(r"^\s*(?:menu:\s*)?(?:[❯›>]\s*)?\d+[.:]\s+\S", plain_capture_line(line), re.IGNORECASE))
+
+
+def fixture_line_is_status_or_footer(line: str) -> bool:
+    stripped = plain_capture_line(line).strip()
+    if not stripped:
+        return False
+    if CODEX_CAPTURED_STATUS_RE.match(stripped):
+        return True
+    return stripped.startswith(("▶▶", "⏵⏵", "⏸", "⏺", "new task?", "claude "))
+
+
+def fixture_line_is_fresh_start(line: str) -> bool:
+    stripped = plain_capture_line(line).lstrip()
+    if not stripped:
+        return False
+    if fixture_line_is_option(stripped) or fixture_line_is_status_or_footer(stripped):
+        return True
+    if re.match(r"^[❯›>]\s+\S", stripped):
+        return True
+    return stripped.startswith(FIXTURE_FRESH_PREFIXES)
+
+
+def fixture_line_can_continue(previous: str, current: str, capture_width: int = FIXTURE_DUMP_COLS) -> bool:
+    capture_cols = capture_width or FIXTURE_DUMP_COLS
+    previous_plain = plain_capture_line(previous)
+    current_plain = plain_capture_line(current)
+    stripped = current_plain.lstrip()
+    if not stripped or visible_len(previous_plain) != capture_cols:
+        return False
+    if fixture_line_is_structural(previous_plain) or fixture_line_is_structural(current_plain):
+        return False
+    if fixture_line_is_option(previous_plain) or fixture_line_is_option(current_plain):
+        return False
+    if fixture_line_is_status_or_footer(previous_plain) or fixture_line_is_status_or_footer(current_plain):
+        return False
+    if fixture_line_is_fresh_start(current_plain):
+        return False
+    first = stripped[0]
+    if first.islower() or first.isdigit() or first in "-—–_./~:+#?)]},;:'\"":
+        return True
+    # Very short uppercase fragments are usually hard-wrap splits inside a token, for
+    # example "PD" + "T." or "Powe" + "r Users" in 78-column captures.
+    return first.isupper() and len(stripped) <= 12 and previous_plain.rstrip()[-1:].isalnum()
+
+
+def join_fixture_continuation(previous: str, current: str) -> str:
+    previous_text = plain_capture_line(previous).rstrip()
+    current_text = plain_capture_line(current)
+    stripped = current_text.lstrip()
+    if not stripped:
+        return previous_text
+    if current_text.startswith((" ", "\t")):
+        return previous_text + current_text
+    if stripped[0] in "-—–_./~:+#?)]},;:'\"" or previous_text.endswith(("-", "/", "_", ".", "~", ":")):
+        return previous_text + stripped
+    if previous_text[-1:].isalnum() and (stripped[0].islower() or len(stripped) <= 4):
+        return previous_text + stripped
+    return previous_text + " " + stripped
+
+
+def reconstruct_fixture_logical_lines(lines: list[str], capture_width: int = FIXTURE_DUMP_COLS) -> list[str]:
+    logical: list[str] = []
+    for line in lines:
+        if logical and fixture_line_can_continue(logical[-1], line, capture_width):
+            logical[-1] = join_fixture_continuation(logical[-1], line)
+            continue
+        logical.append(line)
+    return logical
+
+
+def rerender_fixture_line(line: str, render_width: int, capture_width: int = FIXTURE_DUMP_COLS) -> list[str]:
+    stretched = stretch_fixture_width_line(line, render_width, capture_width)
+    if fixture_line_is_structural(line):
+        return [stretched]
+    plain = plain_capture_line(line)
+    if visible_len(plain) > render_width:
+        return visual_wrap_plain_line(plain, render_width)
+    return [stretched]
+
+
+def rerender_fixture_lines_for_width(lines: list[str], render_width: int, capture_width: int = FIXTURE_DUMP_COLS) -> list[str]:
+    rendered: list[str] = []
+    for line in reconstruct_fixture_logical_lines(lines, capture_width):
+        rendered.extend(rerender_fixture_line(line, render_width, capture_width))
+    return rendered
+
+
+def terminal_plain_text(text: str) -> str:
+    return _CSI_RE.sub("", _OSC_RE.sub("", str(text or "")))
+
+
+def visual_wrap_plain_line(line: str, width: int) -> list[str]:
+    line = line.rstrip()
+    if width <= 0:
+        return [line]
+    if line == "":
+        return [""]
+    stripped = line.strip()
+    if len(line) > width and stripped and set(stripped) <= RULE_LINE_CHARS:
+        return [line[:width]]
+    return [line[index:index + width] for index in range(0, len(line), width)]
+
+
+def visual_wrap_plain_text(text: str, width: int) -> list[str]:
+    rows: list[str] = []
+    for line in terminal_plain_text(text).splitlines():
+        rows.extend(visual_wrap_plain_line(line, width))
+    return rows
+
+
+def fixture_cursor_xy(cursor: dict[str, object]) -> tuple[int, int] | None:
+    if "x" not in cursor or "y" not in cursor:
+        return None
+    try:
+        return int(cursor.get("x") or 0), int(cursor.get("y") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def fixture_cursor_marker_line(col: int, cols: int = FIXTURE_DUMP_COLS) -> str:
+    cursor_col = min(max(0, col), max(0, cols - 1))
+    prefix = " " * cursor_col
+    label = "█ cursor"
+    if len(prefix) + len(label) <= cols:
+        return prefix + label
+    return prefix + "█"
+
+
+def fixture_dump_cursor_label(cursor_info: dict[str, object]) -> str:
+    if cursor_info.get("error"):
+        return f"cursor: error {cursor_info.get('error')}"
+    if not cursor_info.get("present"):
+        return "cursor: missing"
+    x = int(cursor_info.get("x") or 0)
+    y = int(cursor_info.get("y") or 0)
+    if cursor_info.get("shown"):
+        shown_x = int(cursor_info.get("shown_x") or 0)
+        shown_y = int(cursor_info.get("shown_y") or 0)
+        return f"cursor: x={x} y={y} shown=x={shown_x} y={shown_y} (0-based)"
+    return f"cursor: x={x} y={y} outside dumped {FIXTURE_DUMP_COLS}x{FIXTURE_DUMP_ROWS}"
+
+
+def format_fixture_capture_for_dump(
+    capture: str,
+    cursor: dict[str, object] | None = None,
+    cols: int = FIXTURE_DUMP_COLS,
+    rows: int = FIXTURE_DUMP_ROWS,
+) -> dict[str, object]:
+    raw_lines = terminal_plain_text(capture).splitlines()
+    visual_rows: list[str] = []
+    cursor_visual_index: int | None = None
+    cursor_col = 0
+    cursor_xy = fixture_cursor_xy(cursor or {})
+    for line_index, line in enumerate(raw_lines):
+        line_rows = visual_wrap_plain_line(line, cols)
+        if cursor_xy is not None and line_index == cursor_xy[1]:
+            cursor_x = max(0, cursor_xy[0])
+            wrap_offset = cursor_x // max(1, cols)
+            cursor_visual_index = len(visual_rows) + min(wrap_offset, max(0, len(line_rows) - 1))
+            cursor_col = min(cursor_x % max(1, cols), max(0, cols - 1))
+        visual_rows.extend(line_rows)
+    cursor_info: dict[str, object] = {"present": False}
+    if isinstance(cursor, dict) and cursor.get("error"):
+        cursor_info = {"present": False, "error": str(cursor.get("error") or "")}
+    elif cursor_xy is not None:
+        cursor_info = {"present": True, "x": cursor_xy[0], "y": cursor_xy[1], "shown": False}
+    if rows > 0 and len(visual_rows) > rows:
+        crop_start = len(visual_rows) - rows
+        visible_rows = visual_rows[crop_start:]
+    else:
+        crop_start = 0
+        visible_rows = visual_rows
+    output_rows: list[str] = []
+    if cursor_visual_index is not None and crop_start <= cursor_visual_index < len(visual_rows):
+        shown_y = cursor_visual_index - crop_start
+        cursor_info.update({"shown": True, "shown_x": cursor_col, "shown_y": shown_y})
+    else:
+        shown_y = -1
+    for row_index, row in enumerate(visible_rows):
+        output_rows.append(row)
+        if row_index == shown_y:
+            output_rows.append(fixture_cursor_marker_line(cursor_col, cols))
+    return {"text": "\n".join(output_rows) + "\n", "cursor": cursor_info}
+
+
+def print_fixture_dump_line(line: str) -> None:
+    for row in visual_wrap_plain_line(terminal_plain_text(line), FIXTURE_DUMP_COLS):
+        print(row)
 
 
 def render_plain_fixture_lines(lines: list[str], state: dict[str, str]) -> None:
@@ -2705,25 +3107,31 @@ def cmd_mock_fixture(state: dict[str, str], name: str, freeze_static: bool = Fal
     cursor = case.get("cursor") if isinstance(case.get("cursor"), dict) else {}
     width = terminal_width()
     height = terminal_height()
-    # Fit the captured frame to the ACTUAL pane. Captures are recorded at a fixed
-    # size (often 120-200 cols, 40 rows); on a smaller pane the long lines WRAP and
-    # the tall frame SCROLLS, and either one desyncs the absolute-row math the
-    # interactive redraw relies on — that is what duplicated/garbled the options.
-    #   - clip each line to `width` chars     -> no wrap (1 logical line == 1 screen row)
-    #   - keep only the bottom `height` lines -> no scroll (the live prompt sits at the
-    #     bottom); `drop` records how many top lines were removed so cursor math agrees.
+    # Fit the captured frame to the ACTUAL pane. Live interactive mocks clip
+    # long lines so selector row math stays stable; frozen mockcase replay keeps
+    # logical lines intact so tmux wrap plus capture-pane -J preserves parser
+    # evidence. Both paths keep only the bottom render-height rows, matching the
+    # live prompt's bottom-anchored position.
     raw_lines = capture.splitlines()
-    clipped_lines = [clip_display_width(line, width) for line in raw_lines]
-    provisional_group = fixture_choice_group(clipped_lines) if (sys.stdin.isatty() and mock_fixture_allows_choice_interaction(case)) else None
+    if freeze_static:
+        # Frozen mockcase replay is parser evidence. Preserve the full logical
+        # line so tmux's normal wrap plus capture-pane -J can rejoin it, matching
+        # real detector captures. Live mock prompts still clip to keep selector
+        # row math stable while users move options.
+        fitted_lines = list(raw_lines)
+    else:
+        capture_width = int_metadata(case.get("width"), FIXTURE_DUMP_COLS)
+        fitted_lines = rerender_fixture_lines_for_width(raw_lines, width, capture_width)
+    provisional_group = fixture_choice_group(fitted_lines) if (sys.stdin.isatty() and mock_fixture_allows_choice_interaction(case)) else None
     occupies_screen = mock_fixture_occupies_screen(case, provisional_group, freeze_static)
     reserve_footer = fixture_reserves_footer(case, occupies_screen, provisional_group, freeze_static)
-    clipped_lines = strip_codex_captured_footer(clipped_lines, reserve_footer)
-    provisional_group = fixture_choice_group(clipped_lines) if (sys.stdin.isatty() and mock_fixture_allows_choice_interaction(case)) else None
+    fitted_lines = strip_codex_captured_footer(fitted_lines, reserve_footer)
+    provisional_group = fixture_choice_group(fitted_lines) if (sys.stdin.isatty() and mock_fixture_allows_choice_interaction(case)) else None
     occupies_screen = mock_fixture_occupies_screen(case, provisional_group, freeze_static)
     reserve_footer = fixture_reserves_footer(case, occupies_screen, provisional_group, freeze_static)
     render_height = fixture_render_height(state, reserve_footer)
-    drop = max(0, len(clipped_lines) - render_height)
-    lines = clipped_lines[drop:]
+    drop = max(0, len(fitted_lines) - render_height)
+    lines = fitted_lines[drop:]
     line_count = len(lines)
     # If this capture is a live numbered-choice prompt, let the user actually drive it
     # (arrow keys / digits / Enter / Esc) instead of just freezing the pane. We only do
@@ -2739,7 +3147,7 @@ def cmd_mock_fixture(state: dict[str, str], name: str, freeze_static: bool = Fal
     else:
         render_plain_fixture_lines(lines, state)
     state["fixture_case"] = str(case.get("case_name") or name)
-    render_cursor = mock_fixture_render_cursor(lines, cursor, render_height, top_padding, group, drop)
+    render_cursor = mock_fixture_render_cursor(lines, cursor if freeze_static else {}, render_height, top_padding, group, drop)
     if group:
         rows = [top_padding + idx + 1 for idx in group["idxs"]]
         indents = [str(indent) for indent in group["indents"]]

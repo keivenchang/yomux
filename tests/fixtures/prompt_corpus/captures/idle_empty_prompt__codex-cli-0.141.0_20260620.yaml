@@ -86,6 +86,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Codex idle empty prompt
 fixture_id: idle_empty_prompt__codex-cli-0.141.0_20260620
 fixture_scenario: idle_empty_prompt
+height: 35
 id: idle_empty_prompt__codex-cli-0.141.0_20260620
 operations:
 - state:
@@ -165,3 +166,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
+width: 78

@@ -213,7 +213,7 @@ fixtures:
     approval_visible: false
     attention_kind: ''
     attention_label: ''
-    composer_key: draft
+    composer_key: ghost
     reason_code: draft-clearable
     screen_key: input-draft
   file: typed_nbsp_draft__claude-code-2.1.183_20260620.yaml
@@ -273,7 +273,7 @@ fixtures:
     approval_visible: false
     attention_kind: question
     attention_label: ASK?
-    composer_key: ghost
+    composer_key: draft
     reason_code: needs-input
     screen_key: needs-input
   file: choice_question__codex-cli-0.141.0_20260620.yaml
@@ -460,6 +460,26 @@ fixtures:
   id: goal_active__codex-cli-0.141.0_20260621
   scenario: goal_active
   source: real Codex CLI goal-active capture from tmux 8001:0.0
+- agent: codex
+  capture_date: '2026-06-23'
+  case_name: goal_achieved_working
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex goal-achieved working status with queued follow-up inputs
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: RUN
+    composer_key: draft
+    reason_code: busy
+    screen_key: working
+  file: goal_achieved_working__codex-cli-0.141.0_20260623.yaml
+  id: goal_achieved_working__codex-cli-0.141.0_20260623
+  scenario: goal_achieved_working
+  source: screenshot-provided Codex goal-achieved working capture from tmux 8002:0.0; later tmux capture confirmed the same Working/Goal achieved bottom rows after queued follow-up rows had re-rendered away
 - agent: codex
   capture_date: '2026-06-20'
   case_name: working_command_counter

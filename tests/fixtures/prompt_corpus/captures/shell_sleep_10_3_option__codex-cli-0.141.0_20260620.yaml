@@ -138,6 +138,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: shell_sleep_10_3_option__codex-cli-0.141.0_20260620
 fixture_scenario: shell_sleep_10_3_option
+height: 35
 id: shell_sleep_10_3_option__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -168,7 +169,8 @@ raw_capture: |
   │ directory: ~/yolomux.dev8001                │
   ╰─────────────────────────────────────────────╯
 
-    Tip: New Use /fast to enable our fastest inference with increased plan usage.
+    Tip: New Use /fast to enable our fastest inference with increased plan usage
+  .
 
 
   › Please run the shell command `sleep 10`.
@@ -190,14 +192,33 @@ source: real Codex CLI capture
 source_capture_status: promoted from live real Codex CLI capture; staging can be discarded
 source_fixture_id: codex-shell-sleep-10-3-option
 source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160805Z.yaml
-styled_capture: "\e[2m╭─────────────────────────────────────────────╮\n│ >_ \e[0;1mOpenAI Codex\e[0;2m (v0.141.0)        \
-  \          │\n│                                             │\n│ model:     \e[0mgpt-5.5 xhigh\e[2m   \e[0m/model to change\
-  \ │\n\e[2m│ directory: \e[0m~/yolomux.dev8001\e[2m                │\n╰─────────────────────────────────────────────╯\n\n\
-  \e[0m  \e[1mTip:\e[0m \e[3mNew\e[0m Use \e[1m/fast\e[0m to enable our fastest inference with increased plan usage.\n\n\n\
-  \e[1;2m› \e[0mPlease run the shell command `sleep 10`.\n\n\n\e[2m◦\e[0m \e[1mRunning\e[0m sleep 10\n\n\n  Would you like\
-  \ to run the following command?\n\n  $ sleep 10\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that\
-  \ start with `sleep 10` (\e[2mp\e[0m)\n  3. No, and tell Codex what to do differently (\e[2mesc\e[0m)\n\n  \e[2mPress enter\
-  \ to confirm or esc to cancel\n"
+styled_capture: |
+  ╭─────────────────────────────────────────────╮
+  │ >_ OpenAI Codex (v0.141.0)                  │
+  │                                             │
+  │ model:     gpt-5.5 xhigh   /model to change │
+  │ directory: ~/yolomux.dev8001                │
+  ╰─────────────────────────────────────────────╯
+
+    Tip: New Use /fast to enable our fastest inference with increased plan usage
+  .
+
+
+  › Please run the shell command `sleep 10`.
+
+
+  ◦ Running sleep 10
+
+
+    Would you like to run the following command?
+
+    $ sleep 10
+
+  › 1. Yes, proceed (y)
+    2. Yes, and don't ask again for commands that start with `sleep 10` (p)
+    3. No, and tell Codex what to do differently (esc)
+
+    Press enter to confirm or esc to cancel
 tmux_socket: ''
 tmux_target: 'yoreal-codex-approval:'
 verifier_capabilities:
@@ -207,3 +228,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
+width: 78

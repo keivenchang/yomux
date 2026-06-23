@@ -19,6 +19,7 @@ expected_screen_key: idle
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: shell_program_prompt__generic-agent-synthetic_20260620
+height: 35
 id: shell_program_prompt__generic-agent-synthetic_20260620
 operations: []
 raw_capture: |
@@ -42,3 +43,4 @@ visible_text: |
   [y/N]
 
   user@host$
+width: 78

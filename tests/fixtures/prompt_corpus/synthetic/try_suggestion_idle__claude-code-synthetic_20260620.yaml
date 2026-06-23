@@ -10,7 +10,7 @@ client_version: synthetic Claude Code fixture
 client_version_slug: claude-code-synthetic
 codex_version: ''
 cursor:
-  character: 'T'
+  character: T
   synthesized: true
   x: 4
   y: 1
@@ -23,6 +23,7 @@ expected_screen_key: idle
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: try_suggestion_idle__claude-code-synthetic_20260620
+height: 35
 id: try_suggestion_idle__claude-code-synthetic_20260620
 operations: []
 raw_capture: |
@@ -43,3 +44,4 @@ visible_text: |
   │ ❯ Try "fix typecheck errors"               │
   ╰────────────────────────────────────────────╯
   ⏺ xhigh /effort
+width: 78

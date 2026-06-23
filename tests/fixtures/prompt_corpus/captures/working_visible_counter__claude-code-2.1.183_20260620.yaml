@@ -65,7 +65,7 @@ cursor:
   current_command: claude
   pane_in_mode: false
   x: 2
-  y: 37
+  y: 34
 evidence_fields:
   display_evidence_lines: []
   prompt_hash: ''
@@ -95,6 +95,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Claude working visible status counter
 fixture_id: working_visible_counter__claude-code-2.1.183_20260620
 fixture_scenario: working_visible_counter
+height: 35
 id: working_visible_counter__claude-code-2.1.183_20260620
 operations:
 - needles: []
@@ -103,25 +104,75 @@ operations:
 - needles: []
   ok: true
   type: wait_text
-raw_capture: "\n ▐▛███▜▌   Claude Code v2.1.183\n▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · API Usage Billing\n\
-  \  ▘▘ ▝▝    ~/yolomux.dev8001\n\n ⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP,\
-  \ agents, and more)\n   Restart without --safe-mode to re-enable\n\n❯ Plan this harmless verification task: run `sleep 10`\
-  \ and then report done. Stop for approval before executing.\n\n● This is a trivial task — no codebase exploration needed.\
-  \ Let me write a minimal plan and prepare to exit plan mode.\n\n● Updated plan\n  ⎿  /plan to preview\n\n\n\n\n\n\n\n\n\n\
-  \n\n\n\n\n\n\n\n\n\n\n· Clauding… (11s · ↓ 471 tokens)                \n                                               \
-  \                                                                        \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt\n"
+raw_capture: |
+  ● This is a trivial task — no codebase exploration needed. Let me write a mini
+  mal plan and prepare to exit plan mode.
+
+  ● Updated plan
+    ⎿  /plan to preview
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  · Clauding… (11s · ↓ 471 tokens)
+
+
+  ──────────────────────────────────────────────────────────────────────────────
+  ❯
+
+  ──────────────────────────────────────────────────────────────────────────────
+    ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105442Z.yaml
-styled_capture: "\n ▐▛███▜▌   Claude Code v2.1.183\n▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · API Usage Billing\n\
-  \  ▘▘ ▝▝    ~/yolomux.dev8001\n\n ⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP,\
-  \ agents, and more)\n   Restart without --safe-mode to re-enable\n\n❯ Plan this harmless verification task: run `sleep 10`\
-  \ and then report done. Stop for approval before executing.\n\n● This is a trivial task — no codebase exploration needed.\
-  \ Let me write a minimal plan and prepare to exit plan mode.\n\n● Updated plan\n  ⎿  /plan to preview\n\n\n\n\n\n\n\n\n\n\
-  \n\n\n\n\n\n\n\n\n\n\n· Clauding… (11s · ↓ 471 tokens)                \n                                               \
-  \                                                                        \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
-  \  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt\n"
+styled_capture: |
+  ● This is a trivial task — no codebase exploration needed. Let me write a mini
+  mal plan and prepare to exit plan mode.
+
+  ● Updated plan
+    ⎿  /plan to preview
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  · Clauding… (11s · ↓ 471 tokens)
+
+
+  ──────────────────────────────────────────────────────────────────────────────
+  ❯
+
+  ──────────────────────────────────────────────────────────────────────────────
+    ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-claude-2552908-c8fd27:0.0
 verifier_capabilities:
@@ -131,3 +182,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
+width: 78

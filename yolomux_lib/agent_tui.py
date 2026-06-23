@@ -30,6 +30,7 @@ ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 DEFAULT_IDLE_SUGGESTION_TEXTS = {
     "commit the DYN_PARSER_DEBUG change",
     "Explain this codebase",
+    "Improve documentation in @filename",
     "Summarize recent commits",
 }
 CLIENT_FILENAME_BASES = {
@@ -293,12 +294,18 @@ def composer_text_is_idle_placeholder(text: str, *, prompt_suggestion: bool = Fa
     candidate = " ".join(str(text or "").split()).strip()
     if not candidate:
         return False
-    if re.fullmatch(r'Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', candidate):
-        return True
-    if re.fullmatch(r"Implement\s+\{[^{}\n]{1,80}\}", candidate):
+    if _composer_text_is_template_placeholder(candidate):
         return True
     suggestions = idle_suggestions if idle_suggestions is not None else DEFAULT_IDLE_SUGGESTION_TEXTS
     return prompt_suggestion and candidate in suggestions
+
+
+def _composer_text_is_template_placeholder(text: str) -> bool:
+    candidate = " ".join(str(text or "").split()).strip()
+    return bool(
+        re.fullmatch(r'Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', candidate)
+        or re.fullmatch(r"Implement\s+\{[^{}\n]{1,80}\}", candidate)
+    )
 
 
 _COMPOSER_FOOTER_PREFIXES = ("▶▶", "⏵⏵", "⏸", "⏺", "gpt-", "claude ")
@@ -376,6 +383,13 @@ def read_composer_state(capture_or_text: AgentTuiCapture | str) -> AgentComposer
     if not candidate:
         return AgentComposerState(key="empty")
     if composer_text_is_idle_placeholder(candidate, prompt_suggestion=prompt_suggestion):
+        if (
+            prompt_suggestion
+            and not _composer_text_is_template_placeholder(candidate)
+            and isinstance(capture_or_text, AgentTuiCapture)
+            and _cursor_is_after_candidate(capture_or_text, candidate, text_start_col)
+        ):
+            return AgentComposerState(key="draft", text=candidate, detected_text=candidate, prompt_suggestion=False, evidence="cursor-after-placeholder-text")
         return AgentComposerState(key="ghost", text=raw_candidate, detected_text="", prompt_suggestion=prompt_suggestion, evidence="idle-placeholder")
     if prompt_suggestion and isinstance(capture_or_text, AgentTuiCapture) and _cursor_is_after_candidate(capture_or_text, candidate, text_start_col):
         return AgentComposerState(key="draft", text=candidate, detected_text=candidate, prompt_suggestion=False, evidence="cursor-after-suggestion-text")

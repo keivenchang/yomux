@@ -22,6 +22,9 @@ sys.path.insert(0, str(REPO_ROOT))
 from yolomux_lib.agent_tui import agent_client_version_slug
 
 
+DEFAULT_CAPTURE_COLS = 78
+DEFAULT_CAPTURE_ROWS = 35
+
 TOKEN_RE = re.compile(
     r"\b(?:"
     r"sk-[A-Za-z0-9_-]{10,}"
@@ -53,7 +56,7 @@ def dump_fixture_yaml(data: dict) -> str:
 def parse_size(value: str) -> tuple[int, int]:
     match = re.match(r"^\s*(\d+)x(\d+)\s*$", str(value or ""))
     if not match:
-        raise argparse.ArgumentTypeError("size must be COLSxROWS, for example 120x40")
+        raise argparse.ArgumentTypeError(f"size must be COLSxROWS, for example {DEFAULT_CAPTURE_COLS}x{DEFAULT_CAPTURE_ROWS}")
     cols = int(match.group(1))
     rows = int(match.group(2))
     if cols < 40 or rows < 10:
@@ -94,7 +97,7 @@ def run_tmux(socket: str, args: list[str], timeout: int = 10) -> subprocess.Comp
 
 
 def capture_tmux(target: str, include_scrollback: bool, socket: str = "") -> str:
-    cmd = ["capture-pane", "-p", "-J", "-t", target]
+    cmd = ["capture-pane", "-p", "-t", target]
     if include_scrollback:
         cmd.extend(["-S", "-"])
     result = run_tmux(socket, cmd)
@@ -184,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ready-text", action="append", default=[], help="wait for text before sending lines; repeatable")
     parser.add_argument("--wait-text", action="append", default=[], help="wait for text before capturing; repeatable")
     parser.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for ready/wait text")
-    parser.add_argument("--size", type=parse_size, action="append", default=[], help="capture size COLSxROWS; repeat for width variants")
+    parser.add_argument("--size", type=parse_size, action="append", default=[], help=f"capture size COLSxROWS; repeat for width variants. Default: {DEFAULT_CAPTURE_COLS}x{DEFAULT_CAPTURE_ROWS}")
     parser.add_argument("--kill-launched", action="store_true", help="kill the launched tmux session after capture")
     parser.add_argument("--expected-screen-key", choices=["approval", "needs-input", "working", "idle"], required=True)
     parser.add_argument("--mode", default="", help="agent permission/sandbox mode, if known")
@@ -226,8 +229,8 @@ def main() -> int:
     base = fixture_id(args.id)
     if not base:
         raise SystemExit("--id must contain at least one filename-safe character")
-    sizes = list(args.size) or [(args.width or 0, 0)]
-    initial_size = next((size for size in sizes if size[0] and size[1]), (120, 40))
+    sizes = list(args.size) or [(args.width or DEFAULT_CAPTURE_COLS, DEFAULT_CAPTURE_ROWS)]
+    initial_size = next((size for size in sizes if size[0] and size[1]), (DEFAULT_CAPTURE_COLS, DEFAULT_CAPTURE_ROWS))
     target, launched_session = launched_target(args, base, initial_size)
     try:
         drive_prompt(args, target)

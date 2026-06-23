@@ -12,7 +12,7 @@ approval prompts.
 Usage:
   python3 tools/codex.py
   python3 tools/codex.py -C . "summarize this repo"
-  python3 tools/codex.py -m gpt-5.4-mini -c model_reasoning_effort=\"medium\"
+  python3 tools/codex.py -m gpt-5.4-mini --effort medium
 """
 from __future__ import annotations
 
@@ -379,10 +379,10 @@ def build_config_help(model_rows: list[dict[str, Any]] | None = None, catalog_er
             f"  Client accepted {reasoning_label} effort values: {accepted_efforts}",
             f"  Change model at launch: -m <model> (default: {DEFAULT_CODEX_MODEL})",
             f"  Change model via config: -c {CODEX_CONFIG_KEYS.model}=\"<model>\"",
-            f"  Change {reasoning_label} effort: -c {CODEX_CONFIG_KEYS.effort}=\"{DEFAULT_CODEX_EFFORT}\" (default: {DEFAULT_CODEX_EFFORT})",
+            f"  Change {reasoning_label} effort: --effort {DEFAULT_CODEX_EFFORT} or -c {CODEX_CONFIG_KEYS.effort}=\"{DEFAULT_CODEX_EFFORT}\" (default: {DEFAULT_CODEX_EFFORT})",
             f"  Inside the REPL, use: /model <model> [effort], for example /model {DEFAULT_CODEX_MODEL} {DEFAULT_CODEX_EFFORT}",
             "",
-            "Common -c settings:",
+            "Common config settings:",
             f"  -c {CODEX_CONFIG_KEYS.model}=\"{DEFAULT_CODEX_MODEL}\"      model id; default: {DEFAULT_CODEX_MODEL}",
             f"  -c {CODEX_CONFIG_KEYS.effort}=\"{DEFAULT_CODEX_EFFORT}\"    {reasoning_label} effort values: {accepted_efforts}; default: {DEFAULT_CODEX_EFFORT}",
             f"  -c model_reasoning_summary=\"concise\"  {reasoning_label} summary values: none, auto, concise, detailed; summary aliases to concise; default: concise",
@@ -1691,6 +1691,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strict-config", action="store_true", help="Error out when config contains fields not recognized by this prototype.")
     parser.add_argument("-i", "--image", action="append", default=[], metavar="FILE", help="Accepted for Codex CLI compatibility; image input is not implemented by this prototype.")
     parser.add_argument("-m", "--model", default=DEFAULT_CODEX_MODEL, metavar="MODEL", help=f"Model the agent should use. Default: {DEFAULT_CODEX_MODEL}.")
+    parser.add_argument("--effort", choices=ordered_reasoning_efforts(REASONING_EFFORTS), default=DEFAULT_CODEX_EFFORT, metavar="LEVEL", help=f"{CODEX_OUTPUT_TERMS.title_label} effort for the current session. Default: {DEFAULT_CODEX_EFFORT}.")
     parser.add_argument("--oss", action="store_true", help="Accepted for Codex CLI compatibility; local OSS provider mode is not implemented by this prototype.")
     parser.add_argument("--local-provider", default="", metavar="OSS_PROVIDER", help="Accepted for Codex CLI compatibility.")
     parser.add_argument("-p", "--profile", default="", metavar="CONFIG_PROFILE_V2", help="Accepted for Codex CLI compatibility.")
@@ -1702,24 +1703,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-a", "--ask-for-approval", dest="approval_policy", choices=sorted(APPROVAL_POLICIES), default=DEFAULT_APPROVAL_POLICY, metavar="APPROVAL_POLICY", help=f"Configure when Codex requires human approval. Default: {DEFAULT_APPROVAL_POLICY}.")
     parser.add_argument("--search", action="store_true", help="Enable live web search.")
     parser.add_argument("--no-alt-screen", action="store_true", help="Accepted for Codex CLI compatibility.")
+    parser.add_argument("--hide-tool-output", dest="show_tool_output", action="store_false", default=None, help="Hide gray tool lines.")
+    parser.add_argument("--show-thinking", dest="show_thinking", action="store_true", default=None, help=f"Show gray {CODEX_OUTPUT_TERMS.lower_label} summaries when Codex emits them. Default.")
+    parser.add_argument("--hide-thinking", dest="show_thinking", action="store_false", help=f"Hide gray {CODEX_OUTPUT_TERMS.lower_label} summaries and raw {CODEX_OUTPUT_TERMS.lower_label}.")
+    parser.add_argument("--show-metrics", dest="show_metrics", action="store_true", default=None, help="Show TTFT, ISL/OSL, token rate, and tool timing after each turn.")
+    parser.add_argument("--hide-metrics", dest="show_metrics", action="store_false", help="Hide turn metrics. Default.")
+    parser.add_argument("--raw-json", dest="debug_json", action="store_true", default=None, help="Echo raw JSON-RPC messages to stderr.")
+    parser.add_argument("--timeout", type=float, default=None, help="App-server request timeout in seconds; during turns this is an idle timeout.")
     parser.add_argument("--mock", action="store_true", help="Run the built-in Codex TUI mock and prompt-corpus fixture replay.")
     parser.add_argument("--dump-fixtures", action="store_true", help="Dump this agent's prompt-corpus fixtures to stdout and exit.")
     parser.add_argument("-V", "--version", action="version", version=f"codex-text-client {CLIENT_VERSION}")
     args = parser.parse_args()
     args.approval_mode = DEFAULT_TEXT_CLIENT_APPROVAL_MODE
-    args.debug_json = False
-    args.effort = DEFAULT_CODEX_EFFORT
+    args.debug_json = False if args.debug_json is None else args.debug_json
     args.ephemeral = False
     args.include_hidden_models = False
     args.interactive = False
     args.list_models = False
     args.reasoning_summary = "concise"
     args.show_raw_reasoning = False
-    args.show_metrics = False
+    args.show_metrics = False if args.show_metrics is None else args.show_metrics
     args.show_reasoning_summary = True
-    args.show_tool_output = True
+    args.show_tool_output = True if args.show_tool_output is None else args.show_tool_output
     args.thread_id = ""
-    args.timeout = APP_SERVER_TIMEOUT_SECONDS
+    args.timeout = APP_SERVER_TIMEOUT_SECONDS if args.timeout is None else args.timeout
     args.base_instructions = ""
     args.service_tier = ""
     args.raw_output = True
@@ -1738,6 +1745,16 @@ def parse_args() -> argparse.Namespace:
         config_key = canonical_config_key(key)
         apply_config_override(args, config_key, value, parser)
         args.config_values[config_key] = normalized_config_value(config_key, value)
+    if args.show_thinking is not None:
+        args.show_reasoning_summary = bool(args.show_thinking)
+        if args.show_thinking:
+            if args.reasoning_summary == "none":
+                args.reasoning_summary = "concise"
+        else:
+            args.show_raw_reasoning = False
+        args.config_values[CODEX_CONFIG_KEYS.hidden_work_summary] = args.show_reasoning_summary
+        args.config_values[CODEX_CONFIG_KEYS.hidden_work_raw] = args.show_raw_reasoning
+        args.config_values["model_reasoning_summary"] = args.reasoning_summary
     if args.dangerously_bypass_approvals_and_sandbox:
         args.sandbox = DEFAULT_SANDBOX
         args.approval_policy = DEFAULT_APPROVAL_POLICY

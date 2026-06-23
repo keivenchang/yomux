@@ -46,9 +46,10 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/claude.py -C .
 - `mockcase list`: print every replayable prompt-corpus case with the owning agent and fixture file.
 - `mockcase <case>`: clear the pane, render that fixture, bottom-align short captures in the current tmux pane, and freeze the process so `tmux capture-pane` sees the prompt exactly as a live client would.
 - Case names accept the fixture scenario, fixture id, inventory id, file stem, and agent-prefixed forms such as `claude_ask_user_question` or `codex_shell_sleep_10_3_option`.
-- Plain `mock <case>` returns to the live composer for idle/history fixtures, but active working fixtures such as Codex `goal_active` occupy and freeze the whole pane so a second live composer is not appended below the captured status row.
+- Plain `mock <case>` returns to the live composer for idle/history fixtures, but active working fixtures such as Codex `goal_active` occupy and freeze the whole pane so a second live composer is not appended below the captured status row. Plain live `mock <case>` reconstructs hard-wrapped prose from the recorded fixture width, re-renders to the current pane width, and stretches separator-only rows and box-border rows that exactly hit the recorded fixture width. It does not merge menu options, prompts, footers, command/tool rows, or fresh assistant rows. `mockcase <case>` preserves the recorded viewport.
+- The shared live composer must treat terminal size as state. When tmux, the pane, or the terminal changes width or height while `claude.py` or `codex.py` is waiting for input, the client re-renders the composer/status footer at the new bottom rows, resets the scroll region above it, and clears stale Claude startup-header rows before drawing the header at its new position.
 - `yesno [N]`, `ask N`, `sleep N`, and shell commands still drive interactive permission prompts; use `mockcase` for corpus parity and the older commands for auto-approve flow tests that need keyboard interaction.
-- `--dump-fixtures` dumps this client's parser-relevant fixture corpus to stdout and exits without starting a real upstream agent. Each block has `===== BEGIN FIXTURE N/T: <filename> =====`, `agent`, `case`, `outcome`, `path`, a `----- capture -----` separator, the captured terminal text, and a matching `===== END FIXTURE: <filename> =====`. Codex dumps Codex-owned fixtures plus shared `generic`/`unknown` detector fixtures; Claude dumps Claude-owned fixtures plus shared `generic`/`unknown` detector fixtures. Idle negative fixtures are included because the dump is meant to show everything that can flow through the parser, even cases that should not trigger ASK/YOLO/RUN.
+- `--dump-fixtures` dumps this client's parser-relevant fixture corpus to stdout and exits without starting a real upstream agent. Each block has `===== BEGIN FIXTURE N/T: <filename> =====`, metadata rows for `agent`, `case`, `outcome`, `path`, and `cursor`, a `----- capture (78x35; cursor marked) -----` separator, the captured terminal text wrapped/cropped to the canonical fixture viewport, a `█ cursor` marker row under the cursor's captured row when cursor metadata is available and visible, then `===== END FIXTURE: <filename> =====`. Cursor coordinates are 0-based; `shown=x=... y=...` is relative to the dumped capture after wrapping/cropping. Separator-only rows are clipped to one 78-column row, not wrapped into a fake second rule row. Codex dumps Codex-owned fixtures plus shared `generic`/`unknown` detector fixtures; Claude dumps Claude-owned fixtures plus shared `generic`/`unknown` detector fixtures. Idle negative fixtures are included because the dump is meant to show everything that can flow through the parser, even cases that should not trigger ASK/YOLO/RUN.
 
 Some prompt-corpus case names are intentionally product-specific. The corpus records semantic parity groups in `tests/fixtures/prompt_corpus/inventory.yaml`, and every promoted real capture in `tests/fixtures/prompt_corpus/captures/inventory.yaml` must be in one of those groups. For example, Claude `working_visible_counter` and Codex `working_command_counter` are both the `visible-working-counter` group and both must classify as `RUN`, even though their capture names came from different live repros. Same-name parity is required only when the product state is actually the same, such as `idle_empty_prompt` and `goal_active`; approval prompts are grouped by detector contract because Claude plan/file/tool permissions and Codex shell/escalation/MCP approvals are different product surfaces. One-sided real captures need an explicit product-specific parity group, for example Claude's interrupted `What should Claude do instead?` prompt has no matching Codex question surface in the current corpus. Synthetic cases that should eventually be replaced by live evidence are tracked separately as `live_capture_targets`; fill those by capturing the named upstream client state, not by fabricating same-name fixtures for the other client.
 
@@ -57,7 +58,7 @@ Some prompt-corpus case names are intentionally product-specific. The corpus rec
 | User concept | `codex.py` / Codex wording | `claude.py` / Claude wording | Same idea? | Notes |
 | --- | --- | --- | --- | --- |
 | Hidden model work | Reasoning (aka Thinking) | Thinking (aka Reasoning) | Yes | Both are internal progress/analysis streams. The prototypes expose only what the upstream stream emits. |
-| Effort level | `model_reasoning_effort`, `/effort`, `-c model_reasoning_effort=high` | `--effort`, `/effort`, `/config effort=high` | Yes | codex.py maps `/effort` to Codex reasoning effort; claude.py passes `--effort` to Claude. |
+| Effort level | `--effort`, `model_reasoning_effort`, `/effort`, `-c model_reasoning_effort=high` | `--effort`, `/effort`, `/config effort=high` | Yes | codex.py maps `--effort` and `/effort` to Codex reasoning effort; claude.py passes `--effort` to Claude. |
 | Reasoning/thinking summary | `model_reasoning_summary`, `text_client.show_reasoning_summary` | No separate summary setting; use `text_client.show_thinking` for thinking output | Similar | Codex has summary controls; Claude stream-json emits thinking deltas when available and enabled. |
 | Raw reasoning/thinking | `text_client.show_raw_reasoning=true` | `text_client.show_thinking=true` | Similar | codex.py separates summary and raw reasoning; claude.py has one thinking output toggle. |
 | Output prefix | <code>reasoning&#124; ...</code> | <code>thinking&#124; ...</code> | Yes | Prefixes intentionally match each upstream product's native term. |
@@ -68,8 +69,8 @@ Some prompt-corpus case names are intentionally product-specific. The corpus rec
 | Permissive mode | `--dangerously-bypass-approvals-and-sandbox`, `sandbox=danger-full-access`, `approval_policy=never`; optional `--dangerously-bypass-hook-trust` / `bypass_hook_trust=true` | `--dangerously-skip-permissions`, `permission_mode=bypassPermissions` | Same intent | Codex keeps hook-trust bypass explicit because upstream Codex only warns when that flag/config is set; Claude has one broad permission bypass. |
 | Approval handling | `approval_policy`, `text_client.approval_mode` | `permission_mode` | Similar | codex.py can also auto-answer app-server approval requests with `text_client.approval_mode=accept`. claude.py delegates permission handling to Claude CLI. |
 | Web access | `--search`, `web_search=live` for Codex web search | `WebFetch` / web tools through Claude tool permissions | Similar | Different upstream tool names and permission controls. |
-| Diagnostics | `text_client.debug_json`, `text_client.raw_output`, `/raw` | `text_client.raw_json`, `/raw` | Similar | Both are prototype diagnostics, not the main answer stream. |
-| Metrics | `text_client.show_metrics`, `/metrics` | `text_client.show_metrics`, `/metrics` | Yes | Shared metric names and formatting come from `TextClientBase`. |
+| Diagnostics | `--raw-json`, `text_client.debug_json`, `text_client.raw_output`, `/raw` | `--raw-json`, `text_client.raw_json`, `/raw` | Similar | Both are prototype diagnostics, not the main answer stream. |
+| Metrics | `--show-metrics`, `--hide-metrics`, `text_client.show_metrics`, `/metrics` | `--show-metrics`, `--hide-metrics`, `text_client.show_metrics`, `/metrics` | Yes | Shared metric names and formatting come from `TextClientBase`. |
 
 ## Common Slash Commands
 
@@ -101,10 +102,10 @@ Rule for `claude.py` and `codex.py`: mimic interactive Claude/Codex CLI muscle m
 | --- | --- | --- | --- |
 | Initial prompt | Positional prompt starts a Claude turn through `claude -p --output-format stream-json` | Positional prompt starts a Codex turn through `codex app-server` | Keep. This is the main wrapper entrypoint. |
 | Working directory | `-C/--cd` is a wrapper convenience, `--add-dir` maps to real Claude | `-C/--cd` and `--add-dir` match real Codex startup flags | Keep `-C` on both clients for parity, even though real Claude does not expose `-C`. |
-| Model and effort | `--model`, `--effort`, `/model`, and `/effort` map to Claude session settings | `--model`, `-c model_reasoning_effort=...`, `/model`, and `/effort` map to Codex model/reasoning settings | Keep `/effort` in codex.py as clone-provided compatibility with Claude-style muscle memory, and keep the gray note that real Codex uses config terminology. |
+| Model and effort | `--model`, `--effort`, `/model`, and `/effort` map to Claude session settings | `--model`, `--effort`, `-c model_reasoning_effort=...`, `/model`, and `/effort` map to Codex model/reasoning settings | Keep `--effort` and `/effort` in codex.py as clone-provided compatibility with Claude-style muscle memory, and keep the gray note that real Codex uses config terminology. |
 | Permissions and sandboxing | `--permission-mode`, `--dangerously-skip-permissions`, `--allowedTools`, `--disallowedTools`, and `--tools` map to Claude | `--sandbox`, `--ask-for-approval`, `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`, and `text_client.approval_mode` map to Codex/app-server behavior | Keep permissive defaults and make `/status` show the effective mode in both clients. |
 | Resume and identity | `--resume`, `--continue`, `--session-id`, and `/resume` map to Claude session ids | `/resume`, `resume <thread-id>`, and `text_client.thread_id` map to Codex thread ids | Keep explicit-id resume. Picker-style resume can stay out of scope until requested. |
-| Output controls | `--show-status`, `--hide-tool-output`, `--show-thinking`, `--hide-thinking`, `--show-metrics`, `--hide-metrics`, and `--raw-json` control wrapper rendering of Claude stream-json | `-c text_client.show_*`, `/raw`, `/metrics`, and reasoning summary config control wrapper rendering of Codex app-server events | Keep shared rendering controls and shared gray output. |
+| Output controls | `--show-status`, `--hide-tool-output`, `--show-thinking`, `--hide-thinking`, `--show-metrics`, `--hide-metrics`, and `--raw-json` control wrapper rendering of Claude stream-json | `--hide-tool-output`, `--show-thinking`, `--hide-thinking`, `--show-metrics`, `--hide-metrics`, `--raw-json`, `-c text_client.show_*`, `/raw`, `/metrics`, and reasoning summary config control wrapper rendering of Codex app-server events | Keep shared rendering controls and shared gray output. |
 | Real interactive-only flags | Real Claude has interactive startup flags such as `--worktree`, `--tmux`, `--remote-control`, `--chrome`, `--ide`, `--name`, `--agent`, `--agents`, `--safe-mode`, and `--bare` that claude.py does not expose | Real Codex flags are mostly covered; compatibility-only flags like `--remote`, `--image`, `--oss`, `--local-provider`, `--profile`, and `--no-alt-screen` are accepted but not fully implemented | Add a wrapper flag only when it changes text-client behavior. Otherwise document it as accepted compatibility or unsupported. |
 | Real print/stream flags | claude.py fixes `-p --output-format stream-json --include-partial-messages` internally and exposes only the settings that make sense for stdout rendering | codex.py uses app-server JSON-RPC instead of Codex TUI output flags | Keep internals hidden unless a user-facing flag has a clean mapping. |
 
@@ -132,6 +133,8 @@ Recommended implementation order if more parity is needed: first add Ctrl-C guar
 - `--remote-auth-token-env TOKEN_VAR`
 - `--strict-config`
 - `-i, --image FILE`
+- `-m, --model MODEL`
+- `--effort minimal|low|medium|high|xhigh`
 - `--oss`
 - `--local-provider OSS_PROVIDER`
 - `-p, --profile CONFIG_PROFILE_V2`
@@ -143,13 +146,20 @@ Recommended implementation order if more parity is needed: first add Ctrl-C guar
 - `-a, --ask-for-approval untrusted|on-failure|on-request|never` (default: `never`)
 - `--search`
 - `--no-alt-screen`
+- `--hide-tool-output`
+- `--show-thinking` (default)
+- `--hide-thinking`
+- `--show-metrics`
+- `--hide-metrics` (default)
+- `--raw-json`
+- `--timeout SECONDS`
 - `--mock`
 - `--dump-fixtures`
 
 Useful Codex `-c` keys:
 
 - `model=<model>` to change the model; launch shortcut: `-m <model>`. Default: `gpt-5.4-mini`.
-- `model_reasoning_effort=minimal|low|medium|high|xhigh` for codex.py reasoning (aka thinking) effort. Default: `medium`.
+- `model_reasoning_effort=minimal|low|medium|high|xhigh` for codex.py reasoning (aka thinking) effort; launch shortcut: `--effort`. Default: `medium`.
 - `model_reasoning_summary=none|auto|concise|detailed` for codex.py reasoning (aka thinking) summaries; `summary` aliases to `concise`.
 - `service_tier=fast`
 - `approval_policy=untrusted|on-failure|on-request|never` (default: `never`)
@@ -165,7 +175,7 @@ Useful Codex `-c` keys:
 - `text_client.timeout=<seconds>`
 - `text_client.approval_mode=prompt|accept|accept-session|deny|abort` (default: `accept`)
 
-Codex `/help` queries the local app-server for the model catalog and includes hidden models when available. Codex `/status` includes the absolute session JSONL path after a thread has started and the app-server reports the path.
+`codex.py --help` and `claude.py --help` use the same high-level scan path after the option list: `Models:`, `Common config settings:`, and `Inside the REPL:`. Codex `/help` queries the local app-server for the model catalog and includes hidden models when available. Codex `/status` includes the absolute session JSONL path after a thread has started and the app-server reports the path.
 
 Codex reasoning controls are available as `/reasoning [on|off|summary|raw|none|auto|concise|detailed]`. `/thinking` is accepted as a Claude-style compatibility alias for the same settings and prints a gray compatibility note.
 

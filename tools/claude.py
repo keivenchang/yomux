@@ -61,6 +61,7 @@ DEFAULT_TIMEOUT_SECONDS = 900.0
 DEFAULT_PERMISSION_MODE = CLIENT_PERMISSION_DEFAULTS.claude_permission_mode
 CLAUDE_SKIP_PERMISSIONS_FLAG = CLIENT_PERMISSION_DEFAULTS.claude_skip_permissions_flag
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_CLAUDE_MODEL = "haiku"
 DEFAULT_CLAUDE_EFFORT = "medium"
 CLAUDE_MODEL_CHOICES = ("haiku", "sonnet", "opus", "fable", "claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8")
@@ -106,6 +107,41 @@ def split_csv_values(items: list[str]) -> list[str]:
     for item in items:
         values.extend(part.strip() for part in item.split(",") if part.strip())
     return values
+
+
+def effort_values_text() -> str:
+    return ", ".join(effort for effort in EFFORT_ORDER if effort in EFFORTS)
+
+
+def build_config_help() -> str:
+    effort_values = effort_values_text()
+    return "\n".join([
+        "Models:",
+        "  Claude model aliases are passed through to Claude Code; this client does not query a live Claude model catalog.",
+        f"  Default model: {DEFAULT_CLAUDE_MODEL}",
+        f"  Default effort: {DEFAULT_CLAUDE_EFFORT}",
+        f"  Client accepted effort values: {effort_values}",
+        f"  Change model at launch: -m <model> (default: {DEFAULT_CLAUDE_MODEL})",
+        f"  Change model via config: /config {CLAUDE_CONFIG_KEYS.model}=<model>",
+        f"  Change effort: --effort {DEFAULT_CLAUDE_EFFORT} or /config {CLAUDE_CONFIG_KEYS.effort}={DEFAULT_CLAUDE_EFFORT} (default: {DEFAULT_CLAUDE_EFFORT})",
+        "  Inside the REPL, use: /model <model> and /effort <level>, for example /model sonnet",
+        "",
+        "Common config settings:",
+        f"  /config {CLAUDE_CONFIG_KEYS.model}=sonnet        model alias or Claude model id; default: {DEFAULT_CLAUDE_MODEL}",
+        f"  /config {CLAUDE_CONFIG_KEYS.effort}={DEFAULT_CLAUDE_EFFORT}          effort values: {effort_values}; default: {DEFAULT_CLAUDE_EFFORT}",
+        f"  /config {CLAUDE_CONFIG_KEYS.permission}={DEFAULT_PERMISSION_MODE}  permission mode; default: {DEFAULT_PERMISSION_MODE}",
+        f"  /config {CLAUDE_CONFIG_KEYS.tool_output}=false",
+        f"  /config {CLAUDE_CONFIG_KEYS.hidden_work_visibility}=true toggle {CLAUDE_OUTPUT_TERMS.lower_label} output",
+        f"  /config {CLAUDE_CONFIG_KEYS.metrics}=true          print TTFT/token/tool timing after each turn",
+        f"  /config {CLAUDE_CONFIG_KEYS.raw_output}=true       dump raw stream-json events to stderr",
+        f"  /config {CLAUDE_CONFIG_KEYS.session}=<id>        or use: /resume <session-id>",
+        f"  /config {CLAUDE_CONFIG_KEYS.timeout}=900          per-turn timeout in seconds",
+        "",
+        "Inside the REPL:",
+        "  /model sonnet                  switch model for later turns",
+        f"  /effort {DEFAULT_CLAUDE_EFFORT}                  switch effort for later turns",
+        f"  /config {CLAUDE_CONFIG_KEYS.hidden_work_visibility}=false hide {CLAUDE_OUTPUT_TERMS.lower_label} output",
+    ])
 
 
 def claude_env() -> dict[str, str]:
@@ -858,11 +894,12 @@ class ClaudeTextClient(TextClientBase):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Claude Code text client prototype using Claude stream-json output.",
+        epilog=build_config_help(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("prompt", nargs="*", help="Optional user prompt to start the session.")
     parser.add_argument("-m", "--model", default=DEFAULT_CLAUDE_MODEL, metavar="MODEL", help=f"Model or alias. Available in this client: {', '.join(CLAUDE_MODEL_CHOICES)}.")
-    parser.add_argument("--effort", choices=sorted(EFFORTS), default=DEFAULT_CLAUDE_EFFORT, metavar="LEVEL", help="Effort for the current session.")
+    parser.add_argument("--effort", choices=EFFORT_ORDER, default=DEFAULT_CLAUDE_EFFORT, metavar="LEVEL", help=f"Effort for the current session. Default: {DEFAULT_CLAUDE_EFFORT}.")
     parser.add_argument("-C", "--cd", dest="cwd", default=os.getcwd(), metavar="DIR", help="Client convenience: run Claude with this working directory.")
     parser.add_argument("--add-dir", action="append", default=[], metavar="DIR", help="Additional directories to allow tool access to.")
     parser.add_argument("--allowedTools", "--allowed-tools", dest="allowed_tools", action="append", default=[], metavar="TOOLS", help="Comma-separated Claude tools to allow.")
@@ -878,10 +915,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-budget-usd", default="", metavar="USD", help="Maximum dollar amount to spend for a print-mode turn.")
     parser.add_argument("--show-status", action="store_true", help="Show Claude status events as tool lines.")
     parser.add_argument("--hide-tool-output", dest="show_tool_output", action="store_false", help="Hide gray tool lines.")
-    parser.add_argument("--show-thinking", dest="show_thinking", action="store_true", help=f"Show gray {CLAUDE_OUTPUT_TERMS.lower_label} lines when Claude emits them.")
+    parser.add_argument("--show-thinking", dest="show_thinking", action="store_true", help=f"Show gray {CLAUDE_OUTPUT_TERMS.lower_label} lines when Claude emits them. Default.")
     parser.add_argument("--hide-thinking", dest="show_thinking", action="store_false", help=f"Hide gray {CLAUDE_OUTPUT_TERMS.lower_label} lines.")
     parser.add_argument("--show-metrics", dest="show_metrics", action="store_true", help="Show TTFT, ISL/OSL, token rate, and tool timing after each turn.")
-    parser.add_argument("--hide-metrics", dest="show_metrics", action="store_false", help="Hide turn metrics.")
+    parser.add_argument("--hide-metrics", dest="show_metrics", action="store_false", help="Hide turn metrics. Default.")
     parser.add_argument("--raw-json", action="store_true", help="Echo raw stream-json events to stderr.")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-turn timeout in seconds.")
     parser.add_argument("--mock", action="store_true", help="Run the built-in Claude TUI mock and prompt-corpus fixture replay.")

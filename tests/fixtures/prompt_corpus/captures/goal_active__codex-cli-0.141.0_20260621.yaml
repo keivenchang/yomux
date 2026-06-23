@@ -2,13 +2,14 @@ agent: codex
 capture_date: '2026-06-21'
 capture_mode: visible
 captured_at: '2026-06-21T19:43:11.436161+00:00'
+case_name: goal_active
 claude_version: ''
 client_name: Codex CLI
 client_version: codex-cli 0.141.0
 client_version_slug: codex-cli-0.141.0
 codex_version: codex-cli 0.141.0
 cursor: {}
-expected_screen_key: working
+expected_goal_elapsed_seconds: 5400
 expected_promoted:
   agent_kind: codex
   approval_type: ''
@@ -18,12 +19,11 @@ expected_promoted:
   composer_key: ghost
   reason_code: busy
   screen_key: working
-expected_goal_elapsed_seconds: 5400
+expected_screen_key: working
 failures: []
-case_name: goal_active
-fixture_scenario: goal_active
 fixture_id: goal_active__codex-cli-0.141.0_20260621
-height: null
+fixture_scenario: goal_active
+height: 35
 id: goal_active__codex-cli-0.141.0_20260621
 include_scrollback: false
 launch_agent: ''
@@ -31,30 +31,31 @@ launch_command: ''
 launched_session: ''
 mode: ''
 operations: []
-raw_capture: |2
-
-  • The codebase already has a live YO!agent browser verifier, but it covers auxiliary streaming, not the
-    send/answer/sequence path in SO10. I’m checking whether there is a safer existing live harness before
-    deciding whether to make one or only use the focused API/unit evidence.
-
+raw_capture: |
   • Explored
     └ List tools
       Search yoagent|agent|live|verify
-      Read controller.py, test_server_query.py, server_auth.py, mock_claude.py, mock_codex.py,
+      Read controller.py, test_server_query.py, server_auth.py, mock_claude.py,
+  mock_codex.py,
            mock_agent_common.py, actions.py
-      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_agent_common.py
+      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_a
+  gent_common.py
       Read mock_agent_common.py
 
-  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────────────────────────
 
-  • For SO10 live verification, I’ll use disposable tmux sessions running the project’s mock agents. That
-    keeps the verification live through the 8001 server and tmux APIs, without sending prompts into your
+  • For SO10 live verification, I’ll use disposable tmux sessions running the pr
+  oject’s mock agents. That
+    keeps the verification live through the 8001 server and tmux APIs, without s
+  ending prompts into your
     active real Claude/Codex panes.
 
-  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────────────────────────
 
-  • Before the final gate, I’m adding the real Codex goal capture that is visible now. This only covers
-    the Codex half of the goal fixture item; the Claude /goal active capture remains unavailable from the
+  • Before the final gate, I’m adding the real Codex goal capture that is visibl
+  e now. This only covers
+    the Codex half of the goal fixture item; the Claude /goal active capture rem
+  ains unavailable from the
     current live panes.
 
   • Working (55m 44s • esc to interrupt)
@@ -62,34 +63,36 @@ raw_capture: |2
 
   › Implement {feature}
 
-    gpt-5.5 xhigh · ~ · Main [default]                                           Pursuing goal (1h 30m)
+    gpt-5.5 xhigh · ~ · Main [default]
+   Pursuing goal (1h 30m)
 ready_text: []
 send_lines: []
 source: real Codex CLI goal-active capture from tmux 8001:0.0
-styled_capture: |2
-
-  • The codebase already has a live YO!agent browser verifier, but it covers auxiliary streaming, not the
-    send/answer/sequence path in SO10. I’m checking whether there is a safer existing live harness before
-    deciding whether to make one or only use the focused API/unit evidence.
-
+styled_capture: |
   • Explored
     └ List tools
       Search yoagent|agent|live|verify
-      Read controller.py, test_server_query.py, server_auth.py, mock_claude.py, mock_codex.py,
+      Read controller.py, test_server_query.py, server_auth.py, mock_claude.py,
+  mock_codex.py,
            mock_agent_common.py, actions.py
-      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_agent_common.py
+      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_a
+  gent_common.py
       Read mock_agent_common.py
 
-  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────────────────────────
 
-  • For SO10 live verification, I’ll use disposable tmux sessions running the project’s mock agents. That
-    keeps the verification live through the 8001 server and tmux APIs, without sending prompts into your
+  • For SO10 live verification, I’ll use disposable tmux sessions running the pr
+  oject’s mock agents. That
+    keeps the verification live through the 8001 server and tmux APIs, without s
+  ending prompts into your
     active real Claude/Codex panes.
 
-  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────────────────────────
 
-  • Before the final gate, I’m adding the real Codex goal capture that is visible now. This only covers
-    the Codex half of the goal fixture item; the Claude /goal active capture remains unavailable from the
+  • Before the final gate, I’m adding the real Codex goal capture that is visibl
+  e now. This only covers
+    the Codex half of the goal fixture item; the Claude /goal active capture rem
+  ains unavailable from the
     current live panes.
 
   • Working (55m 44s • esc to interrupt)
@@ -97,9 +100,10 @@ styled_capture: |2
 
   › Implement {feature}
 
-    gpt-5.5 xhigh · ~ · Main [default]                                           Pursuing goal (1h 30m)
+    gpt-5.5 xhigh · ~ · Main [default]
+   Pursuing goal (1h 30m)
 target: '8001:0.0'
 tmux_socket: ''
 wait_text:
 - Pursuing goal
-width: null
+width: 78

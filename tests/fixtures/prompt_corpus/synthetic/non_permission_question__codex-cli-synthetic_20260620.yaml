@@ -10,7 +10,7 @@ client_version: synthetic Codex CLI fixture
 client_version_slug: codex-cli-synthetic
 codex_version: ''
 cursor:
-  character: '›'
+  character: ›
   synthesized: true
   x: 0
   y: 3
@@ -37,6 +37,7 @@ expected_screen_key: needs-input
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: non_permission_question__codex-cli-synthetic_20260620
+height: 35
 id: non_permission_question__codex-cli-synthetic_20260620
 operations: []
 raw_capture: |
@@ -66,3 +67,4 @@ visible_text: |
     2. pnpm
 
   gpt-5 medium · ~/repo
+width: 78
