@@ -5,16 +5,16 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import selectors
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from ..common import PROJECT_ROOT
-from ..common import YOLOMUX_VERSION
-from ..common import codex_runtime_env
 from .json_rpc import json_rpc_notification
 from .json_rpc import json_rpc_request
 from .stream_events import ASSISTANT_DELTA
@@ -22,6 +22,47 @@ from .stream_events import normalize_codex_app_server_message
 
 
 CODEX_APP_SERVER_TIMEOUT_SECONDS = 120.0
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
+
+
+def _read_yolomux_version() -> str:
+    match = YOLOMUX_VERSION_ASSIGNMENT_RE.search((PROJECT_ROOT / "yolomux_lib" / "common.py").read_text(encoding="utf-8"))
+    return match.group(1) if match else "0.0.0"
+
+
+YOLOMUX_VERSION = _read_yolomux_version()
+
+
+def _path_entries(value: str) -> list[str]:
+    return [entry for entry in str(value or "").split(os.pathsep) if entry]
+
+
+def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the Codex subprocess environment without importing server auth state."""
+    env = dict(os.environ)
+    if base_env is not None:
+        env.update(base_env)
+    path_entries = _path_entries(env.get("PATH", ""))
+    additions: list[str] = []
+    for entry in _path_entries(env.get("YOLOMUX_EXTRA_PATH", "")):
+        expanded = str(Path(entry).expanduser())
+        if expanded and expanded not in path_entries and expanded not in additions:
+            additions.append(expanded)
+    local_bin = Path.home() / ".local" / "bin"
+    if local_bin.is_dir():
+        local_bin_text = str(local_bin)
+        if local_bin_text not in path_entries and local_bin_text not in additions:
+            additions.append(local_bin_text)
+    if additions:
+        env["PATH"] = os.pathsep.join([*additions, *path_entries])
+    configured_home = str(env.get("YOLOMUX_CODEX_HOME") or env.get("CODEX_HOME") or "").strip()
+    codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    env["CODEX_HOME"] = str(codex_home)
+    env["TERM"] = "xterm-256color"
+    env["NO_COLOR"] = "1"
+    return env
 
 
 @dataclass(frozen=True)

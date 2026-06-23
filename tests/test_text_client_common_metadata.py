@@ -4,6 +4,7 @@
 import ast
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -224,6 +225,24 @@ def test_codex_help_explains_model_and_effort_defaults():
     assert "Change model at launch: -m <model> (default: gpt-5.4-mini)" in help_text
     assert 'Change model via config: -c model="<model>"' in help_text
     assert "Inside the REPL, use: /model <model> [effort], for example /model gpt-5.4-mini medium" in help_text
+
+
+def test_codex_help_cli_does_not_require_server_auth(tmp_path):
+    env = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, str(TOOLS_DIR / "codex.py"), "--help"],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--dump-fixtures" in result.stdout
+    assert "Default model: gpt-5.4-mini" in result.stdout
+    assert "codex CLI not found on PATH" in result.stdout
 
 
 def test_codex_human_error_message_extracts_json_detail():
