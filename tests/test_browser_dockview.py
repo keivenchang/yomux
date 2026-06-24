@@ -1,3 +1,5 @@
+import time
+
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
@@ -939,7 +941,8 @@ def test_dockview_window_bar_working_agent_glyph_uses_shared_pulse(browser, tmp_
     assert metrics["idleHasState"] is False, metrics
     assert metrics["idleDotCount"] == 0, metrics
     assert metrics["workingAnimationName"] == "agent-symbol-glow-cadence", metrics
-    assert 0.4 <= float(metrics["workingOpacity"]) <= 1, metrics
+    # The blink dips to ~0.15 at its off frame, so accept the full animated opacity range.
+    assert 0.0 <= float(metrics["workingOpacity"]) <= 1, metrics
     assert metrics["workingGlowRgb"] == "102 126 248", metrics
 
 
@@ -999,6 +1002,236 @@ def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_
     assert metrics["iconGlowRgb"] == "102 126 248", metrics
     assert metrics["dotCount"] == 0, metrics
     assert metrics["dotText"] == "", metrics
+
+
+def test_dockview_working_glyph_animation_advances_over_wall_clock_time(browser, tmp_path):
+    # Regression for "the working glyph does not visibly pulse". The earlier fixture test only froze
+    # the animation at two fractions and pixel-diffed them, which proves the keyframes differ but NOT
+    # that the live app actually animates over time. Here we boot the real app and assert the
+    # live-computed opacity sweeps across the cycle on its own over wall-clock time.
+    #
+    # We read getComputedStyle().opacity rather than diffing screenshots on purpose: the pulse
+    # animates opacity+transform, which Chrome runs on the compositor; headless captureScreenshot
+    # serves a static composited frame, so an over-time screenshot diff reads ~0 even while the
+    # animation is genuinely running. The main-thread computed opacity is the reliable live signal.
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "codex", "state": "working", "window_index": 1, "window_label": "1:codex"},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return !!document.querySelector('.agent-window-agent-icon--working')")
+    )
+    base = browser.execute_script(
+        """
+        const el = document.querySelector('.agent-window-agent-icon--working');
+        el.setAttribute('data-pulse-probe', '1');
+        const cs = getComputedStyle(el);
+        return {
+          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+          animationName: cs.animationName,
+          animationDuration: cs.animationDuration,
+          animationIterationCount: cs.animationIterationCount,
+          animationPlayState: cs.animationPlayState,
+          animationCount: el.getAnimations({subtree: false}).length,
+          opacity: cs.opacity,
+        };
+        """
+    )
+    if base["reducedMotion"]:
+        pytest.skip("browser prefers reduced motion")
+    assert base["animationName"] == "agent-symbol-glow-cadence", base
+    assert base["animationDuration"] == "1.55s", base
+    assert base["animationIterationCount"] == "infinite", base
+    assert base["animationPlayState"] == "running", base
+    assert base["animationCount"] == 1, base
+
+    # Sample the live-computed opacity across ~2 full 1.55s cycles. Do NOT set currentTime.
+    opacities = [float(base["opacity"])]
+    stamps = [True]
+    for _ in range(12):
+        time.sleep(0.25)
+        sample = browser.execute_script(
+            """
+            const el = document.querySelector('.agent-window-agent-icon--working');
+            return {opacity: getComputedStyle(el).opacity, stamped: el.getAttribute('data-pulse-probe') === '1'};
+            """
+        )
+        opacities.append(float(sample["opacity"]))
+        stamps.append(bool(sample["stamped"]))
+    low = min(opacities)
+    high = max(opacities)
+    # The rest frame is opacity 0.46 and the peak frame is opacity 1; over two cycles the live value
+    # must reach both ends, proving the animation is actually advancing rather than stuck on a frame.
+    assert low <= 0.6, (low, high, opacities)
+    assert high >= 0.95, (low, high, opacities)
+    assert (high - low) >= 0.3, (low, high, opacities)
+    # The animated node must persist (not be replaced/restarted every activity poll); the phase
+    # anchor only helps if the same element keeps animating.
+    assert all(stamps), stamps
+
+
+def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp_path):
+    # Regression: with prefers-reduced-motion the pulse animation is correctly disabled, but the
+    # working/active glyph must still be visually distinct from an idle glyph (a steady glow ring),
+    # otherwise a user with reduced motion sees a static icon identical to idle and cannot tell an
+    # agent is working. Before the fix, working and idle were byte-identical under reduced motion.
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
+                {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "codex", "state": "working", "window_index": 1, "window_label": "1:codex"},
+                    {"kind": "claude", "state": "idle", "window_index": 2, "window_label": "2:claude", "idle_since": 1},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
+    try:
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1&layout=left&tabs=left:1",
+            sessions=["1"],
+            transcript_sessions=transcript_sessions,
+            auto_approve_payload=auto_approve_payload,
+        )
+        wait_for_dockview(browser, min_tabs=1)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script("return !!document.querySelector('.agent-window-agent-icon--working')")
+        )
+        data = browser.execute_script(
+            """
+            const working = document.querySelector('.agent-window-agent-icon--working');
+            const idle = document.querySelector('.agent-window-agent-icon:not(.agent-window-agent-icon--working):not(.agent-window-agent-icon--active)');
+            const ws = getComputedStyle(working);
+            const is = idle ? getComputedStyle(idle) : null;
+            return {
+              reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              workingAnimationName: ws.animationName,
+              workingBoxShadow: ws.boxShadow,
+              workingFilter: ws.filter,
+              workingGlowRgb: ws.getPropertyValue('--agent-working-glow-rgb').trim(),
+              idleFound: !!idle,
+              idleBoxShadow: is ? is.boxShadow : null,
+              idleFilter: is ? is.filter : null,
+            };
+            """
+        )
+        assert data["reducedMotion"] is True, data
+        # Animation is disabled under reduced motion (no motion), as intended.
+        assert data["workingAnimationName"] == "none", data
+        # ...but a steady glow ring keeps the working glyph distinct from idle.
+        assert data["idleFound"] is True, data
+        assert data["workingBoxShadow"] != "none", data
+        assert data["idleBoxShadow"] == "none", data
+        assert data["workingBoxShadow"] != data["idleBoxShadow"], data
+        # The glow color comes from the per-agent token (codex blue), not a hard-coded value.
+        assert data["workingGlowRgb"] == "102 126 248", data
+        assert "102, 126, 248" in data["workingBoxShadow"], data
+    finally:
+        browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
+
+
+def test_dockview_tab_symbol_pulses_when_session_works_via_screen_proxy(browser, tmp_path):
+    # Regression for "Tab 7 is YO'ing but the AI symbol is not blinking". The YO ball spins on
+    # sessionYoloIsWorking (per-window 'working' OR screen.key==='working'), but the dock-tab AI symbol
+    # used to render only when a per-window agent row reported state==='working' exactly. When the working
+    # signal arrives via the screen-state proxy (no per-window 'working' row), the ball spun while the
+    # symbol vanished. Both must now pulse on the same condition.
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "screen": {"key": "working"},
+                "agent_windows": [
+                    # Note: the claude window is idle/current, NOT state=='working' — the working signal
+                    # comes only from screen.key above, which is exactly the case that lost the symbol.
+                    {"kind": "claude", "state": "idle", "window_index": 1, "window_label": "1:claude", "current": True, "window_active": True, "idle_since": 1},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return !!document.querySelector('.dockview-pane-tab .session-yolo-marker, .pane-tab .session-yolo-marker')")
+    )
+    data = browser.execute_script(
+        """
+        const tab = document.querySelector('.dockview-pane-tab, .pane-tab');
+        const marker = tab && tab.querySelector('.session-agent-activity-marker');
+        const sym = tab && tab.querySelector('.session-agent-activity-marker .agent-window-agent-icon--working');
+        return {
+          tabFound: !!tab,
+          hasMarker: !!marker,
+          hasWorkingSymbol: !!sym,
+          symbolAnimationName: sym ? getComputedStyle(sym).animationName : null,
+          symbolIsClaude: sym ? sym.classList.contains('claude') : null,
+        };
+        """
+    )
+    assert data["tabFound"] is True, data
+    assert data["hasMarker"] is True, data
+    assert data["hasWorkingSymbol"] is True, data
+    assert data["symbolAnimationName"] == "agent-symbol-glow-cadence", data
+    assert data["symbolIsClaude"] is True, data
 
 
 def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):

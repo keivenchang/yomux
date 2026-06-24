@@ -243,18 +243,22 @@
   animation-duration: var(--agent-alternate-pulse-duration);
   animation-delay: var(--agent-alternate-animation-delay, var(--attention-animation-delay, 0s));
 }
+/* Working/active agent symbol BLINK. This must read as an unmistakable on/off blink (as salient as the
+   attention agent-symbol-status-alternate flash), not a gentle breathe. So it holds bright, drops to
+   near-invisible (opacity 0.15) with hold frames, and snaps back — mirroring the attention keyframe's
+   contrast. Color stays the per-agent --agent-working-glow-rgb (Claude warm, Codex blue). */
 @keyframes agent-symbol-glow-cadence {
-  0%, 100% {
-    opacity: 0.46;
-    transform: scale(0.93);
-    filter: saturate(var(--attention-pulse-saturate-rest, 0.86)) brightness(var(--attention-pulse-brightness-rest, 0.72)) drop-shadow(0 0 0 rgb(var(--agent-working-glow-rgb) / 0));
-    box-shadow: 0 0 0 0 rgb(var(--agent-working-glow-rgb) / 0);
-  }
-  45%, 55% {
+  0%, 30% {
     opacity: 1;
     transform: scale(1.12);
-    filter: saturate(var(--attention-pulse-saturate-peak, 1.52)) brightness(var(--attention-pulse-brightness-peak, 1.44)) drop-shadow(0 0 12px rgb(var(--agent-working-glow-rgb) / 0.88));
-    box-shadow: 0 0 0 2px rgb(var(--agent-working-glow-rgb) / 0.48), 0 0 16px rgb(var(--agent-working-glow-rgb) / 0.76);
+    filter: saturate(var(--attention-pulse-saturate-peak, 1.52)) brightness(var(--attention-pulse-brightness-peak, 1.5)) drop-shadow(0 0 12px rgb(var(--agent-working-glow-rgb) / 0.9));
+    box-shadow: 0 0 0 2px rgb(var(--agent-working-glow-rgb) / 0.55), 0 0 16px rgb(var(--agent-working-glow-rgb) / 0.82);
+  }
+  55%, 85% {
+    opacity: 0.15;
+    transform: scale(0.9);
+    filter: saturate(var(--attention-pulse-saturate-rest, 0.86)) brightness(var(--attention-pulse-brightness-rest, 0.7)) drop-shadow(0 0 0 rgb(var(--agent-working-glow-rgb) / 0));
+    box-shadow: 0 0 0 0 rgb(var(--agent-working-glow-rgb) / 0);
   }
 }
 @keyframes agent-symbol-status-alternate {
@@ -394,6 +398,17 @@
   .panel.needs-exec-pane::after,
   .panel.needs-blocked-pane::after {
     animation: none;
+  }
+  /* The pulse animation above is the only thing that distinguishes a working/active agent glyph
+     from an idle one. With motion disabled it would render identical to idle (opacity 1, no glow),
+     so the user could not tell an agent is working. Pin it to a steady peak-like glow instead of
+     animating it. Reuses the same peak filter and per-agent --agent-working-glow-rgb token the
+     keyframe peak uses, so it stays in sync and carries the correct Claude/Codex color. */
+  .agent-window-agent-icon--working,
+  .agent-window-agent-icon--active {
+    opacity: 1;
+    filter: saturate(var(--attention-pulse-saturate-peak, 1.52)) brightness(var(--attention-pulse-brightness-peak, 1.44));
+    box-shadow: 0 0 0 2px rgb(var(--agent-working-glow-rgb) / 0.48), 0 0 12px rgb(var(--agent-working-glow-rgb) / 0.7);
   }
 }
 .session-yolo-marker {

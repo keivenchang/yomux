@@ -418,10 +418,22 @@ function yoloMarkerHtml(session, auto, options = {}) {
 }
 
 function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
+  // The tab's AI symbol must pulse on the SAME condition the YO ball spins (sessionYoloIsWorking), so the
+  // two never disagree. Prefer a window literally reporting state==='working'; otherwise, when the session
+  // is working only via the screen-state proxy (screen.key==='working' with no per-window 'working' row),
+  // present the current/first agent window AS working so the symbol pulses instead of vanishing. Routing
+  // both notions of "working" through sessionYoloIsWorking is what fixes the "YO'ing but the AI symbol is
+  // not blinking" bug, where the dock-tab symbol disappeared while the YO ball kept spinning.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
-  const agents = sessionAgentWindowStatusPayloads(session, info, payload)
-    .filter(agent => agentWindowIsWorkingState(agent?.state));
-  return agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0] || null;
+  const agents = sessionAgentWindowStatusPayloads(session, info, payload);
+  if (!agents.length) return null;
+  const working = agents.filter(agent => agentWindowIsWorkingState(agent?.state));
+  const literal = working.find(agent => agentWindowPayloadCurrent(agent) === true) || working[0] || null;
+  if (literal) return literal;
+  if (!sessionYoloIsWorking(session, payload)) return null;
+  const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
+  if (!candidate || agentWindowIsAttentionState(candidate.state)) return null;
+  return {...candidate, state: 'working'};
 }
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
