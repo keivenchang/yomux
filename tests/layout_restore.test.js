@@ -579,6 +579,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
     assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }'), 'Markdown thematic breaks render as preview rules');
     assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
+    assert.ok(/\.markdown-body img\.markdown-preview-image\s*\{[\s\S]*max-width:\s*100%[\s\S]*height:\s*auto[\s\S]*object-fit:\s*contain[\s\S]*\}/.test(editorCss), 'Markdown Preview images keep document sizing instead of direct-image viewport fitting');
+    assert.equal(/\.markdown-body img\.markdown-preview-image\s*\{[^}]*max-height:/.test(editorCss), false, 'Markdown Preview images are not height-clamped because that changes width for different aspect ratios');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*var\(--lt-text\)/.test(editorCss), 'vanilla preview uses a neutral white email-friendly surface');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*var\(--lt-text\)[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');

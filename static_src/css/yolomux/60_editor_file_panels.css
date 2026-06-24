@@ -73,11 +73,16 @@ body.editor-theme-light .file-editor-image-panel {
   padding: 10px;
 }
 .file-editor-preview-image,
-.markdown-body img.markdown-preview-image,
 .mermaid-preview-image {
   display: block;
   max-width: 100%;
   max-height: min(340px, 48vh);
+  height: auto;
+  object-fit: contain;
+}
+.markdown-body img.markdown-preview-image {
+  display: block;
+  max-width: 100%;
   height: auto;
   object-fit: contain;
 }

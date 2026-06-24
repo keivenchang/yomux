@@ -1532,6 +1532,10 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               parse(markdown) {
                 const parts = [];
                 for (const line of String(markdown || '').split('\\n')) {
+                  if (line.startsWith('<img ')) {
+                    parts.push(line);
+                    continue;
+                  }
                   if (line.startsWith('![')) {
                     const match = line.match(/^!\\[([^\\]]*)\\]\\(([^)]+)\\)/);
                     if (match) parts.push(`<p><img alt="${escapeHtml(match[1])}" src="${escapeHtml(match[2])}"></p>`);
@@ -1557,6 +1561,28 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 return parts.join('');
               },
             };
+            const pngDataUrl = (width, height, color) => {
+              const canvas = document.createElement('canvas');
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx.fillStyle = color;
+              ctx.fillRect(0, 0, width, height);
+              return canvas.toDataURL('image/png');
+            };
+            const waitImage = image => new Promise(resolve => {
+              if (!image) {
+                resolve(false);
+                return;
+              }
+              if (image.complete && image.naturalWidth > 0) {
+                resolve(true);
+                return;
+              }
+              const finish = () => resolve(image.naturalWidth > 0);
+              image.addEventListener('load', finish, {once: true});
+              image.addEventListener('error', finish, {once: true});
+            });
             const mermaidCalls = [];
             window.mermaid = {
               initialize(config) {
@@ -1571,6 +1597,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               },
             };
             const path = '/home/test/repo/docs/README.md';
+            const wideFixed = pngDataUrl(720, 120, '#f97316');
+            const tallFixed = pngDataUrl(120, 720, '#14b8a6');
             const content = [
               '# Preview Media',
               '![local](./images/local pic.png?cache=1#frag)',
@@ -1578,6 +1606,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               '![external](https://example.test/image.png)',
               '![unsafe](javascript:alert(1))',
               '![missing](./missing.png)',
+              `<img alt="fixed wide" src="${wideFixed}" width="220">`,
+              `<img alt="fixed tall" src="${tallFixed}" width="220">`,
               '```mermaid',
               'graph TD; A-->B;',
               '```',
@@ -1598,8 +1628,11 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            const fixedImages = Array.from(preview.querySelectorAll('img[alt^="fixed "]'));
+            await Promise.all(fixedImages.map(waitImage));
             const imageSnapshot = label => {
               const img = preview.querySelector(`img[alt="${label}"]`);
+              const box = img?.getBoundingClientRect();
               return {
                 exists: Boolean(img),
                 src: img?.getAttribute('src') || '',
@@ -1607,6 +1640,11 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 originalSrc: img?.dataset?.originalSrc || '',
                 className: img?.className || '',
                 hasSrc: img?.hasAttribute('src') === true,
+                widthAttr: img?.getAttribute('width') || '',
+                renderedWidth: box?.width || 0,
+                renderedHeight: box?.height || 0,
+                naturalWidth: img?.naturalWidth || 0,
+                naturalHeight: img?.naturalHeight || 0,
               };
             };
             const initialImages = {
@@ -1615,6 +1653,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               external: imageSnapshot('external'),
               unsafe: imageSnapshot('unsafe'),
               missing: imageSnapshot('missing'),
+              fixedWide: imageSnapshot('fixed wide'),
+              fixedTall: imageSnapshot('fixed tall'),
             };
             const missing = preview.querySelector('img[alt="missing"]');
             if (missing) missing.dispatchEvent(new Event('error'));
@@ -1653,6 +1693,16 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local pic.png", metrics
     assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local pic.png?cache=1#frag", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
+    assert metrics["initialImages"]["fixedWide"]["exists"] is True, metrics
+    assert metrics["initialImages"]["fixedTall"]["exists"] is True, metrics
+    assert metrics["initialImages"]["fixedWide"]["widthAttr"] == "220", metrics
+    assert metrics["initialImages"]["fixedTall"]["widthAttr"] == "220", metrics
+    assert "markdown-preview-image" in metrics["initialImages"]["fixedWide"]["className"], metrics
+    assert "markdown-preview-image" in metrics["initialImages"]["fixedTall"]["className"], metrics
+    assert metrics["initialImages"]["fixedWide"]["naturalWidth"] == 720 and metrics["initialImages"]["fixedWide"]["naturalHeight"] == 120, metrics
+    assert metrics["initialImages"]["fixedTall"]["naturalWidth"] == 120 and metrics["initialImages"]["fixedTall"]["naturalHeight"] == 720, metrics
+    assert abs(metrics["initialImages"]["fixedWide"]["renderedWidth"] - 220) <= 1, metrics
+    assert abs(metrics["initialImages"]["fixedTall"]["renderedWidth"] - 220) <= 1, metrics
     assert metrics["initialImages"]["svg"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fassets%2Flogo.svg", metrics
     assert metrics["initialImages"]["svg"]["resolvedPath"] == "/home/test/repo/assets/logo.svg", metrics
     assert metrics["initialImages"]["external"]["src"] == "https://example.test/image.png", metrics
