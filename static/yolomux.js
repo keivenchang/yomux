@@ -31552,6 +31552,22 @@ function sessionFilesPayloadIsLoadedForSession(payload, session = '') {
   return !session || String(payload.session || '') === String(session);
 }
 
+function sessionFilesPayloadIsRootlessEmpty(payload) {
+  if (!payload || payload.loaded !== true) return false;
+  if ((Array.isArray(payload.files) ? payload.files : []).length) return false;
+  if ((Array.isArray(payload.repos) ? payload.repos : []).length) return false;
+  if ((Array.isArray(payload.errors) ? payload.errors : []).length) return false;
+  return true;
+}
+
+function sessionFilesPayloadShouldPreserveCurrent(nextPayload) {
+  const session = String(nextPayload?.session || '');
+  const current = sessionFilesPayloadForDestination('finder');
+  if (!session || !sessionFilesPayloadIsRootlessEmpty(nextPayload)) return false;
+  if (!sessionFilesPayloadIsLoadedForSession(current, session)) return false;
+  return sessionFilesRepoRoots(current).length > 0;
+}
+
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
@@ -31707,6 +31723,7 @@ async function fetchSessionFiles(options = {}) {
     };
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
+    if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
@@ -31749,6 +31766,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
     to_ref: payload.to_ref || request.to_ref || diffRefTo,
     loaded: true,
   };
+  if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   const shouldRender = signature !== sessionFilesSignatureForDestination(destination);
   setSessionFilesPayloadForDestination(destination, nextPayload);

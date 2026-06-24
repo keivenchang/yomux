@@ -1351,7 +1351,30 @@ async function runShareThemeSuite() {
       {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
     ), false, 'stale session-files push is ignored before it can replace the active Differ payload');
     assert.equal(stalePushApi.sessionFilesPayloadForTest().repos[0].added, 270, 'ignored stale push leaves the visible Differ payload intact');
+    const rootlessDifferApi = loadYolomux('', ['8002']);
+    const yolomuxRepo = '/home/keivenc/yolomux.dev8002';
+    rootlessDifferApi.setFileExplorerModeForTest('diff');
+    rootlessDifferApi.setFileExplorerChangesSelectedSessionForTest('8002');
+    rootlessDifferApi.setFileExplorerSessionFilesPayloadForTest({
+      session: '8002',
+      loaded: true,
+      files: [{session: '8002', repo: yolomuxRepo, path: 'docs/DONE.md', abs_path: `${yolomuxRepo}/docs/DONE.md`, status: 'M'}],
+      repos: [{repo: yolomuxRepo, count: 1, touched_count: 1, added: 4, removed: 0}],
+      errors: [],
+    });
+    assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
+      {session: '8002', loaded: true, files: [], repos: [], errors: []},
+      {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
+    ), false, 'rootless empty session-files push cannot blank a loaded same-session Differ repo');
+    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].repo, yolomuxRepo, 'ignored rootless push leaves the yolomux.dev8002 Differ repo visible');
+    assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
+      {session: '8002', loaded: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+      {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
+    ), true, 'clean session-files push with the live repo root still clears Differ rows');
+    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].count, 0, 'clean rooted payload replaces the previous dirty count');
     assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
+    assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
+    assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted Differ payload with a rootless empty result');
     assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
     assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
     assert.ok(/function setFileExplorerMode\([\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'switching back from Differ to Finder forces a fresh worktree-status fetch');

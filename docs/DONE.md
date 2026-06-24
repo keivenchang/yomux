@@ -6,6 +6,10 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-24
 
+### Differ rootless-empty session-files flicker
+
+- Fixed the Differ panel flashing between `~/yolomux.dev8002` and an empty result for Tab `8002`. The frontend accepted a transient `session_files_ready` payload with `repos: []` and `files: []` for the selected session, so a weak session-discovery snapshot could blank an already-loaded rooted Differ payload until the next rooted payload arrived. Background fetches and SSE pushes now preserve the current same-session Differ payload when the incoming update is rootless and empty; a real clean result still applies because it carries the live repo root with `count: 0`. Added regression coverage for the exact `8002` / `~/yolomux.dev8002` shape and rebuilt `static/yolomux.js`. Focused verification: `node tests/share_theme.test.js` and `python3 -m pytest tests/test_node_suite.py`.
+
 ### Tmux signal patch key refactor
 
 - Completed and removed `DOIT.refactor_tmux_signal_keys.md`. Tmux signal window patching now routes record keys through one backend helper (`window_record_key()`, backed by `window_key()`) and one frontend helper (`tmuxSignalWindowKey()`), instead of rebuilding `session:window_index` in `app.py`, patch merge code, pane lookup, and global activity counters. Added regression coverage for fallback session/window records with no explicit `key`.
@@ -21,6 +25,10 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 ### DOIT queue audit
 
 - Audited the remaining `/tmp/DOIT*` queue against `main` at `56ed4dd8`. Cleared `/tmp/DOIT.balls_not_pulsating_research.md`: current code restores status-ball pulse cadence through the shared high-specificity `.status-indicator.heartbeat-pulse` parent, keeps static Claude/Codex symbols with separate glowing balls, pins reduced-motion parity with `test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion`, and documents the contract in `docs/specs/GUI.md`. Kept `/tmp/DOIT.yoagent_chat_413_request_entity_too_large.md`, `/tmp/DOIT.slow-fresh-reload-client-event-flood.md`, and `/tmp/DOIT.optimize_slow_api_calls.md` with audit notes because they still contain real unchecked follow-up work.
+
+### Agent status ball reduced-motion pulse
+
+- Completed and removed `/tmp/DOIT.balls_not_pulsating_research.md`. The reduced-motion freeze was a CSS specificity split: status balls kept `animation-name` on a high-specificity dot selector but inherited timing from the low-specificity `.heartbeat-pulse`, so `prefers-reduced-motion` reset the ball duration to `0s` while the `ASK?` pillbox kept pulsing. The pulse cadence now lives on the shared high-specificity `.status-indicator.heartbeat-pulse` parent, generated `static/yolomux.css` is rebuilt, and `test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion` proves working/attention balls keep the same nonzero `attention-ring-fade` duration, delay, timing, and running/pending animation state as the `ASK?` pillbox under reduced motion. `docs/specs/GUI.md` already records the contract: status balls remain separate from the static agent symbol and must keep the same cadence as `ASK?` under `prefers-reduced-motion: reduce`.
 
 ### Correctness bug audit
 
