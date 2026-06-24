@@ -143,6 +143,7 @@ from .tmux_utils import tmux_session_client_rows
 from .tmux_utils import tmux_session_target
 from .tmux_signals import fetch_tmux_signal_snapshot
 from .tmux_signals import TmuxSignalEventWatcher
+from .tmux_signals import window_record_key
 from .types import AutoApproveState
 from .types import AutoApproveStatusPayload
 from .types import RunHistoryEntry
@@ -235,6 +236,7 @@ SHARE_DEBUG_PROFILE_LOG_DIR = Path(os.environ.get("YOLOMUX_SHARE_DEBUG_DIR", "/t
 SHARE_DEBUG_PROFILE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|bearer)", re.I)
 SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 10.0
+AUTO_APPROVE_CACHE_MAX_AGE_SECONDS = 5.003
 SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = 10.0
 TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
 TMUX_SIGNAL_ACTIVITY_WINDOW_SECONDS = 120.0
@@ -250,6 +252,7 @@ BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS = 0.2
 CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
     "activity_age_seconds",
     "activity_ts",
+    "cache",
     "compute_ms",
     "display_elapsed_seconds",
     "generated_at",
@@ -271,6 +274,7 @@ CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
     "status_marker",
     "status_tokens",
     "metadata_badge_pulse_remaining_ms",
+    "timings",
     "title",
     "working_elapsed_seconds",
 })
@@ -303,6 +307,12 @@ class SelfRestartContext:
 
 def session_files_batch_worker_count(count: int) -> int:
     return max(1, min(SESSION_FILES_BATCH_MAX_WORKERS, count))
+
+
+def add_phase_timing(timings: dict[str, float] | None, key: str, started: float) -> None:
+    if timings is None:
+        return
+    timings[key] = round(float(timings.get(key) or 0.0) + (time.perf_counter() - started) * 1000, 1)
 
 
 class SharedWatchRootIndex:
@@ -771,8 +781,13 @@ class TmuxWebtermApp:
         self.tabber_activity_cache_refreshing = False
         self.tabber_activity_cache_warmer_thread: threading.Thread | None = None
         self.tabber_activity_cache_warmer_running = False
+        self.auto_approve_cache_lock = threading.RLock()
+        self.auto_approve_cache_condition = threading.Condition(self.auto_approve_cache_lock)
+        self.auto_approve_cache: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]] | None = None
+        self.auto_approve_cache_refreshing = False
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
         self.tmux_signal_event_watcher: TmuxSignalEventWatcher | None = None
+        self.client_watch_tmux_signal_payload: dict[str, Any] | None = None
         self.tmux_snapshot_history_lock = threading.RLock()
         self.tmux_snapshot_history_signatures: dict[tuple[str, str, int], tuple[int, int]] = {}
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
@@ -2115,6 +2130,42 @@ class TmuxWebtermApp:
             if key not in {"generated_at", "compute_ms"}
         }
 
+    def tmux_signal_patch_payload(self, previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+        previous_windows = previous.get("windows") if isinstance(previous, dict) else None
+        current_windows = current.get("windows") if isinstance(current, dict) else None
+        if not isinstance(previous_windows, list) or not isinstance(current_windows, list):
+            return {"data": current}
+        previous_meta = {key: value for key, value in self.tmux_signal_signature_payload(previous or {}).items() if key != "windows"}
+        current_meta = {key: value for key, value in self.tmux_signal_signature_payload(current).items() if key != "windows"}
+        if previous_meta != current_meta:
+            return {"data": current}
+        previous_by_key = {
+            key: window
+            for window in previous_windows
+            if isinstance(window, dict) and (key := window_record_key(window))
+        }
+        changed_windows: list[dict[str, Any]] = []
+        current_keys: set[str] = set()
+        for window in current_windows:
+            if not isinstance(window, dict):
+                continue
+            key = window_record_key(window)
+            if not key:
+                return {"data": current}
+            current_keys.add(key)
+            if self.stable_client_event_payload_signature(previous_by_key.get(key)) != self.stable_client_event_payload_signature(window):
+                changed_windows.append(window)
+        removed_keys = sorted(set(previous_by_key) - current_keys)
+        return {
+            "patch": True,
+            "windows": changed_windows,
+            "removed_window_keys": removed_keys,
+            "window_count": current.get("window_count", len(current_windows)),
+            "ok": current.get("ok", True),
+            "generated_at": current.get("generated_at"),
+            "compute_ms": current.get("compute_ms"),
+        }
+
     def tmux_signal_window_for_target(self, target: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
         raw_target = str(target or "").strip()
         if not raw_target:
@@ -2718,6 +2769,14 @@ class TmuxWebtermApp:
             return []
         if change_summary is not None:
             payload["change_summary"] = change_summary
+            payload = {
+                "roots": payload.get("roots", roots),
+                "refresh": True,
+                "signature": signature,
+                "change_summary": change_summary,
+                "listing_summary": payload.get("listing_summary", {}),
+                "compute_ms": payload.get("compute_ms", 0.0),
+            }
         self.publish_client_event(
             "fs_changed",
             payload,
@@ -2795,7 +2854,7 @@ class TmuxWebtermApp:
             if previous_signature != signature:
                 self.publish_client_event(
                     "transcripts_changed",
-                    {"signature": signature, "data": payload},
+                    {"signature": signature, "refresh": True},
                     trigger="watch_state",
                     cache="ready",
                     compute_ms=(time.perf_counter() - started) * 1000,
@@ -2982,8 +3041,11 @@ class TmuxWebtermApp:
     def poll_auto_approve_client_event_once(self) -> list[str]:
         started = time.perf_counter()
         payload, status = self.auto_approve_status()
-        event_payload = {"status": int(status), "data": payload}
-        signature = self.stable_client_event_payload_signature(event_payload)
+        signature_payload = {"status": int(status), "data": payload}
+        serialization_started = time.perf_counter()
+        signature = self.stable_client_event_payload_signature(signature_payload)
+        timings = copy.deepcopy(payload.get("timings")) if isinstance(payload, dict) and isinstance(payload.get("timings"), dict) else {}
+        add_phase_timing(timings, "serialization", serialization_started)
         with self.client_watch_lock:
             previous = self.client_watch_auto_approve_signature
             self.client_watch_auto_approve_signature = signature
@@ -2991,6 +3053,11 @@ class TmuxWebtermApp:
             return []
         if previous == signature:
             return []
+        event_payload: dict[str, Any] = {"status": int(status), "refresh": True, "signature": signature}
+        if timings:
+            event_payload["timings"] = timings
+        if isinstance(payload, dict) and isinstance(payload.get("cache"), dict):
+            event_payload["cache"] = copy.deepcopy(payload["cache"])
         self.publish_client_event(
             "auto_approve_changed",
             event_payload,
@@ -3006,14 +3073,17 @@ class TmuxWebtermApp:
         signature = self.stable_client_event_payload_signature(self.tmux_signal_signature_payload(payload))
         with self.client_watch_lock:
             previous = self.client_watch_tmux_signal_signature
+            previous_payload = copy.deepcopy(self.client_watch_tmux_signal_payload) if self.client_watch_tmux_signal_payload is not None else None
             self.client_watch_tmux_signal_signature = signature
+            self.client_watch_tmux_signal_payload = copy.deepcopy(payload)
         if not previous:
             return []
         if previous == signature:
             return []
+        event_payload = self.tmux_signal_patch_payload(previous_payload, payload)
         self.publish_client_event(
             "tmux_signals_changed",
-            {"data": payload},
+            event_payload,
             trigger="timer",
             cache="ready",
             compute_ms=(time.perf_counter() - started) * 1000,
@@ -6563,6 +6633,7 @@ class TmuxWebtermApp:
         activity_snapshot: dict[str, Any] | None = None,
         preclassified_by_target: dict[str, dict[str, Any]] | None = None,
         files_payload: dict[str, Any] | None = None,
+        include_path_metadata: bool = True,
     ) -> list[dict[str, Any]]:
         if info is None:
             info = discovered_sessions.get(session) if discovered_sessions is not None else None
@@ -6575,7 +6646,7 @@ class TmuxWebtermApp:
         observed_ts = time.time()
         rows: list[dict[str, Any]] = []
         window_names = {str(pane.window or ""): str(pane.window_name or "") for pane in info.panes}
-        path_records = self.agent_window_path_records(info, files_payload=files_payload)
+        path_records = self.agent_window_path_records(info, files_payload=files_payload) if include_path_metadata else {}
         current_by_window, pane_by_window = self.agent_window_pane_maps(info)
         fallback_git_cache: dict[str, dict[str, Any] | None] = {}
         for agent_index, agent in enumerate(info.agents):
@@ -6598,8 +6669,10 @@ class TmuxWebtermApp:
             pid = int(pane_record.process_label_pid or pane_record.pid) if pane_record and (pane_record.process_label_pid or pane_record.pid) else int(agent.pid or 0)
             window_is_current = current_by_window.get(self.agent_window_index_key(window), False)
             path_record = path_records.get((self.agent_window_index_key(window), kind))
-            if not path_record:
+            if not path_record and include_path_metadata:
                 path_record = self.agent_window_fallback_path_record(pane_record, fallback_git_cache)
+            if not path_record:
+                path_record = {"path": "", "paths": [], "path_entries": [], "git": None}
             path_entries = copy.deepcopy(path_record.get("path_entries") if isinstance(path_record, dict) else [])
             paths = [str(item.get("path") or "") for item in path_entries if isinstance(item, dict) and str(item.get("path") or "")]
             fallback_path = str(path_record.get("path") or "") if isinstance(path_record, dict) else ""
@@ -6644,6 +6717,7 @@ class TmuxWebtermApp:
         include_live_prompt: bool = True,
         capture_bare_session_when_roster: bool = False,
         activity_snapshot: dict[str, Any] | None = None,
+        timings: dict[str, float] | None = None,
     ) -> AutoApproveState:
         with self.auto_workers_lock:
             worker_sessions = self.auto_worker_session_map()
@@ -6684,29 +6758,41 @@ class TmuxWebtermApp:
                     "error": auto_approve_lock_message(owner),
                 })
         capture_target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
+        prompt_started = time.perf_counter()
         prompt, screen = self.prompt_and_screen_status(
             session,
             discovered_sessions=discovered_sessions,
             capture_pane=include_live_prompt,
             capture_bare_session_when_roster=capture_bare_session_when_roster,
         )
+        add_phase_timing(timings, "prompt_screen", prompt_started)
         payload["prompt"] = prompt
         payload["screen"] = screen
         info = discovered_sessions.get(session) if discovered_sessions is not None else None
+        agent_windows_started = time.perf_counter()
         payload["agent_windows"] = self.agent_window_status_payloads(
             session,
             info=info,
             discovered_sessions=discovered_sessions,
             activity_snapshot=activity_snapshot,
             preclassified_by_target={capture_target: screen} if capture_target else None,
+            include_path_metadata=False,
         )
+        add_phase_timing(timings, "agent_windows", agent_windows_started)
         return payload
 
-    def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
+    def build_auto_approve_status(
+        self,
+        session: str | None = None,
+        timings: dict[str, float] | None = None,
+    ) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
+        refresh_started = time.perf_counter()
         refresh_errors = self.refresh_sessions(maintenance=False)
+        add_phase_timing(timings, "refresh_sessions", refresh_started)
         if session is not None and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         removed = False
+        worker_started = time.perf_counter()
         with self.auto_workers_lock:
             worker_sessions = self.auto_worker_session_map()
             for name, worker in list(self.auto_workers.items()):
@@ -6717,27 +6803,117 @@ class TmuxWebtermApp:
                     worker_sessions.pop(name, None)
                     removed = True
             self.sync_auto_approve_agent_workers(takeover=False)
+        add_phase_timing(timings, "worker_sync", worker_started)
         if removed:
             self.persist_auto_sessions()
         activity_snapshot = self.activity_snapshot_with_recency()
         if session is not None:
-            return self.auto_approve_session_status(session, activity_snapshot=activity_snapshot), HTTPStatus.OK
+            payload = self.auto_approve_session_status(session, activity_snapshot=activity_snapshot, timings=timings)
+            if timings:
+                payload["timings"] = dict(timings)
+            return payload, HTTPStatus.OK
+        discover_started = time.perf_counter()
         discovered_sessions, discovery_errors = discover_sessions(self.sessions)
-        return {
+        add_phase_timing(timings, "discover_sessions", discover_started)
+        sessions_started = time.perf_counter()
+        sessions_payload = {
+            name: self.auto_approve_session_status(
+                name,
+                discovered_sessions=discovered_sessions,
+                include_live_prompt=False,
+                capture_bare_session_when_roster=True,
+                activity_snapshot=activity_snapshot,
+                timings=timings,
+            )
+            for name in self.sessions
+        }
+        add_phase_timing(timings, "sessions", sessions_started)
+        payload: AutoApproveStatusPayload = {
             "session_order": self.sessions,
-            "sessions": {
-                name: self.auto_approve_session_status(
-                    name,
-                    discovered_sessions=discovered_sessions,
-                    include_live_prompt=False,
-                    capture_bare_session_when_roster=True,
-                    activity_snapshot=activity_snapshot,
-                )
-                for name in self.sessions
-            },
+            "sessions": sessions_payload,
             "errors": [*refresh_errors, *discovery_errors],
             "rules": self.yolo_rules_payload(),
-        }, HTTPStatus.OK
+        }
+        if timings:
+            payload["timings"] = dict(timings)
+        return payload, HTTPStatus.OK
+
+    def auto_approve_cache_payload(self, cached: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]]) -> tuple[AutoApproveStatusPayload, HTTPStatus]:
+        stored_at, (payload, status) = cached
+        age_seconds = max(0.0, time.monotonic() - stored_at)
+        result = copy.deepcopy(payload)
+        result["cache"] = {
+            "age_seconds": round(age_seconds, 3),
+            "max_age_seconds": AUTO_APPROVE_CACHE_MAX_AGE_SECONDS,
+            "refreshing": self.auto_approve_cache_refreshing,
+            "stale": age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS,
+        }
+        return result, status
+
+    def set_auto_approve_cache(self, payload: AutoApproveStatusPayload, status: HTTPStatus) -> None:
+        with self.auto_approve_cache_condition:
+            self.auto_approve_cache = (time.monotonic(), (copy.deepcopy(payload), status))
+            self.auto_approve_cache_refreshing = False
+            self.auto_approve_cache_condition.notify_all()
+
+    def run_auto_approve_cache_refresh(self) -> None:
+        try:
+            timings: dict[str, float] = {}
+            payload, status = self.build_auto_approve_status(timings=timings)
+            if isinstance(payload, dict):
+                payload["timings"] = dict(timings)
+            self.set_auto_approve_cache(payload, status)
+        except Exception:
+            logger.exception("auto-approve cache refresh failed")
+            with self.auto_approve_cache_condition:
+                self.auto_approve_cache_refreshing = False
+                self.auto_approve_cache_condition.notify_all()
+
+    def start_auto_approve_cache_refresh(self) -> bool:
+        with self.auto_approve_cache_condition:
+            if self.auto_approve_cache_refreshing:
+                return False
+            self.auto_approve_cache_refreshing = True
+        worker = threading.Thread(target=self.run_auto_approve_cache_refresh, name="auto-approve-cache-refresh", daemon=True)
+        worker.start()
+        return True
+
+    def refresh_auto_approve_cache_sync(self) -> tuple[AutoApproveStatusPayload, HTTPStatus]:
+        with self.auto_approve_cache_condition:
+            if self.auto_approve_cache_refreshing:
+                while self.auto_approve_cache_refreshing and self.auto_approve_cache is None:
+                    self.auto_approve_cache_condition.wait(timeout=0.5)
+                if self.auto_approve_cache is not None:
+                    return self.auto_approve_cache_payload(self.auto_approve_cache)
+            self.auto_approve_cache_refreshing = True
+        try:
+            timings: dict[str, float] = {}
+            payload, status = self.build_auto_approve_status(timings=timings)
+            if isinstance(payload, dict):
+                payload["timings"] = dict(timings)
+            self.set_auto_approve_cache(payload, status)
+            with self.auto_approve_cache_condition:
+                assert self.auto_approve_cache is not None
+                return self.auto_approve_cache_payload(self.auto_approve_cache)
+        except Exception:
+            with self.auto_approve_cache_condition:
+                self.auto_approve_cache_refreshing = False
+                self.auto_approve_cache_condition.notify_all()
+            raise
+
+    def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
+        if session is not None:
+            timings: dict[str, float] = {}
+            return self.build_auto_approve_status(session, timings=timings)
+        with self.auto_approve_cache_condition:
+            cached = self.auto_approve_cache
+            if cached is not None:
+                stored_at, _payload = cached
+                age_seconds = max(0.0, time.monotonic() - stored_at)
+                if age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
+                    self.start_auto_approve_cache_refresh()
+                return self.auto_approve_cache_payload(cached)
+        return self.refresh_auto_approve_cache_sync()
 
     def stop_auto_approve_all(self) -> None:
         with self.auto_workers_lock:

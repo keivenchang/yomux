@@ -35,7 +35,7 @@ const {
 
 async function runLayoutAsyncSuite() {
     {
-      const api = loadYolomux('', ['1'], 'https:');
+      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
       const transcriptPath = '/home/test/.local/state/yolomux/yoagent/conversation.jsonl';
       api.applyYoagentConversationPayloadForTest({
         transcript_path: transcriptPath,
@@ -63,6 +63,70 @@ async function runLayoutAsyncSuite() {
       assert.equal(clickEvent.defaultPrevented, true, 'shared path-copy handler claims the YO!agent copy click');
       assert.equal(api.clipboardTextForTest(), transcriptPath, 'YO!agent transcript copy writes the transcript path');
       assert.ok(api.statusHtmlForTest().includes('copied'), 'YO!agent transcript copy reports success');
+    }
+
+    {
+      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
+      const calls = [];
+      api.setClientEventsSourceForTest({readyState: 1});
+      api.setFileExplorerRootForTest('/repo');
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), method: options.method || 'GET', body: options.body || ''});
+        return Promise.resolve(jsonResponse({ok: true}));
+      });
+
+      api.syncServerWatchRootsForTest();
+      api.syncServerWatchRootsForTest();
+      await flushAsyncWork();
+      await flushAsyncWork();
+
+      const watchCalls = calls.filter(call => call.url === '/api/watch/roots');
+      assert.equal(watchCalls.length, 1, 'adjacent watch-root syncs coalesce into one POST');
+      assert.equal(watchCalls[0].method, 'POST', 'watch-root sync still sends the server registration');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      const calls = [];
+      api.setFileExplorerRootForTest('/repo');
+      api.setFetchForTest((url, options = {}) => {
+        calls.push(String(url));
+        if (String(url) === '/api/fs/batch') {
+          const requestId = JSON.parse(options.body || '{"requests":[]}').requests?.[0]?.id || '';
+          return Promise.resolve(jsonResponse({
+            responses: [{
+              id: requestId,
+              action: 'list',
+              path: '/repo',
+              ok: true,
+              status: 200,
+              payload: {path: '/repo', entries: [{name: 'changed.txt', kind: 'file', mtime: 10, size: 5}]},
+            }],
+          }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+
+      const refresh = api.refreshFileExplorerFromPushForTest({refresh: true, roots: ['/repo'], change_summary: {roots_changed: 1}});
+      await api.flushFileExplorerFsBatchForTest();
+      await refresh;
+      await flushAsyncWork();
+
+      assert.ok(calls.includes('/api/fs/batch'), 'compact fs_changed invalidation refetches watched directories');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.applyTmuxSignalsPayloadForTest({data: {ok: true, windows: [
+        {session: '1', window_index: 0, active: true},
+        {session: '1', window_index: 1, active: false},
+      ]}});
+      api.applyTmuxSignalsPayloadForTest({patch: true, windows: [
+        {session: '1', window_index: 0, active: false},
+        {session: '1', window_index: 1, active: true},
+      ], removed_window_keys: []});
+
+      assert.equal(String(api.activeTmuxSignalWindowForSessionForTest('1').window_index), '1', 'tmux signal patches merge into the existing window snapshot');
     }
 
     {
@@ -1549,6 +1613,20 @@ async function runLayoutAsyncSuite() {
       assert.equal(Object.prototype.hasOwnProperty.call(chatBody, 'history'), false, 'YO!agent chat relies on server-side transcript history instead of reposting browser messages');
       assert.ok(encodedBody.length < 2048, 'YO!agent chat request stays small even when prior visible messages carry hidden stream/tool data');
       assert.equal(encodedBody.includes('hidden tool output'), false, 'hidden stream/tool details are not serialized into the chat request');
+    }
+
+    {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      api.setFetchForTest((url) => {
+        if (String(url) === '/api/yoagent/chat') {
+          return Promise.resolve(jsonResponse({error: 'Request Entity Too Large'}, 413));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      await api.sendYoagentChatMessageForTest('hello?');
+      const html = api.yoagentChatHtml();
+      assert.ok(html.includes('conversation too large to resume'), 'YO!agent 413 errors explain that the resumable conversation is too large');
+      assert.equal(html.includes('chat failed: Request Entity Too Large'), false, 'YO!agent 413 errors do not expose only the raw HTTP reason');
     }
 
     {

@@ -146,4 +146,7 @@ class YolomuxControlServer:
         return payload if isinstance(payload, dict) else None
 
     def write_response(self, conn: socket.socket, response: dict[str, Any]) -> None:
-        conn.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
+        try:
+            conn.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
+        except BrokenPipeError:
+            return

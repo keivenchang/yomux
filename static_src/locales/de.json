@@ -1121,6 +1121,7 @@
   "yoagent.chatDisabled": "Lege in den Einstellungen ein Claude- oder Codex-Backend fest, um zu chatten.",
   "yoagent.chatEmpty": "Frage {name}, was die laufenden KI-Agenten tun.",
   "yoagent.chatFailed": "Chat fehlgeschlagen: {error}",
+  "yoagent.chatTooLarge": "Die Unterhaltung ist zu groß, um fortgesetzt zu werden. YO!agent hat einen neuen Thread versucht; nutze Unterhaltung löschen, falls es weiter fehlschlägt.",
   "yoagent.chatPlaceholder": "Frage nach Agenten, Repos, Dateien, CI, Blockern...",
   "yoagent.clear": "Unterhaltung löschen",
   "yoagent.conversationLoadFailed": "YO!agent-Unterhaltung konnte nicht geladen werden: {error}",

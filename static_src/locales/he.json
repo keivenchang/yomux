@@ -1121,6 +1121,7 @@
   "yoagent.chatDisabled": "הגדר מנגנון Claude או Codex בהעדפות כדי לשוחח.",
   "yoagent.chatEmpty": "שאל את {name} מה עושים סוכני הבינה המלאכותית הפעילים.",
   "yoagent.chatFailed": "השיחה נכשלה: {error}",
+  "yoagent.chatTooLarge": "השיחה גדולה מדי לחידוש. YO!agent ניסה שרשור חדש; השתמש בניקוי השיחה אם זה ממשיך להיכשל.",
   "yoagent.chatPlaceholder": "שאל כל דבר…",
   "yoagent.clear": "נקה שיחה",
   "yoagent.conversationLoadFailed": "טעינת שיחת YO!agent נכשלה: {error}",

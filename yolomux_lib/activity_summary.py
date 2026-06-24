@@ -32,6 +32,9 @@ YOAGENT_CONTEXT_GUARD = (
     "YO!agent can execute server-verified sends to target agent sessions, orchestrate multi-session handoffs itself instead of asking agents to contact each other directly, manage user-local YO!skills under ~/.config/yolomux/skills.d/ plus context under ~/.config/yolomux/context.d/, create preview/confirmation actions when the user asks for them, and background-watch target-session results when the user asks to show them here. Preserve perspectives: strip routing wrappers like `ask agent 1 to` from text sent to the target, so `ask agent 1 to <do ...>` sends only `<do ...>`, and address the target as `you`. Direct agent-to-agent relay or chaining is rare and allowed only when the user explicitly requests it; pass explicit relay instructions instead of letting target agents infer routing. If needed facts are missing, "
     "say what the user can inspect in YOLOmux instead of inventing details. The tmux session number/label is the handle; do not claim there is no live handle or transport, demand a separate agent ID, or ask the user to paste/relay an explicit send. For sequential dependent instructions, including a single target session, split the request into send -> wait for the real response -> compute/derive inside YO!agent -> send the follow-up; do not flatten those steps into one prompt."
 )
+YOAGENT_TOOL_OUTPUT_GUARD = (
+    "Keep shell output bounded: prefer `rg -M 2000 --max-columns 2000`, targeted paths, and summaries over broad `cat` or `rg` across generated files."
+)
 YOAGENT_README_PATH = Path(__file__).resolve().parents[1] / "README.md"
 YOAGENT_HELP_PRIMER_MAX_CHARS = 8_000
 RECENT_ACTIVITY_SECONDS = 5 * 60
@@ -840,8 +843,11 @@ def yoagent_output_format(settings: dict[str, Any], locale: str = "en") -> str:
 
 
 def yoagent_concepts_prompt_block(locale: str = "en") -> list[str]:
+    context_guard = server_string(locale, "yoagent.prompt.contextGuard")
+    if "rg -M 2000 --max-columns 2000" not in context_guard:
+        context_guard = f"{context_guard} {YOAGENT_TOOL_OUTPUT_GUARD}".strip()
     return [
-        server_string(locale, "yoagent.prompt.contextGuard"),
+        context_guard,
         server_string(locale, "yoagent.prompt.concepts"),
         yolomux_help_primer(),
     ]

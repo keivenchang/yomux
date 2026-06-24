@@ -1121,6 +1121,7 @@
   "yoagent.chatDisabled": "Définissez un backend Claude ou Codex dans les Préférences pour discuter.",
   "yoagent.chatEmpty": "Demandez à {name} ce que font les agents IA en cours d'exécution.",
   "yoagent.chatFailed": "échec du chat : {error}",
+  "yoagent.chatTooLarge": "La conversation est trop volumineuse pour reprendre. YO!agent a essayé un nouveau fil ; utilisez Effacer la conversation si l'échec persiste.",
   "yoagent.chatPlaceholder": "Posez des questions sur les agents, dépôts, fichiers, CI, blocages...",
   "yoagent.clear": "Effacer la conversation",
   "yoagent.conversationLoadFailed": "échec du chargement de la conversation YO!agent : {error}",

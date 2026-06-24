@@ -336,6 +336,15 @@ def window_key(session: str, window_index: str) -> str:
     return f"{session}:{window_index}"
 
 
+def window_record_key(window: dict[str, Any]) -> str:
+    key = str(window.get("key") or "").strip()
+    if key:
+        return key
+    session = str(window.get("session") or window.get("session_name") or "").strip()
+    window_index = str(window.get("window_index") if window.get("window_index") is not None else window.get("window") or "").strip()
+    return window_key(session, window_index) if session and window_index else ""
+
+
 def row_map(line: str, fields: tuple[str, ...]) -> dict[str, str] | None:
     parts = line.split(TMUX_SIGNAL_FIELD_SEPARATOR)
     if len(parts) != len(fields):

@@ -348,6 +348,10 @@ async function refreshOpenFilesFromPush(payload = {}) {
 
 async function refreshFileExplorerFromPush(payload = {}) {
   const entriesByDir = entriesByDirFromFilesystemPush(payload);
+  if (!entriesByDir.size && payload?.refresh === true) {
+    await refreshFileExplorerIfChanged();
+    return;
+  }
   if (!entriesByDir.size) return;
   fileExplorerPushRefreshDepth += 1;
   try {

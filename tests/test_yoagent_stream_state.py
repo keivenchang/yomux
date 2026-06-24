@@ -321,7 +321,35 @@ def test_yoagent_conversation_persists_stream_items_without_auxiliary_lines(tmp_
     assert loaded == [written]
 
 
-def test_yoagent_stream_callback_preserves_full_auxiliary_history():
+def test_yoagent_conversation_caps_oversized_auxiliary_fields(tmp_path):
+    path = tmp_path / "conversation.jsonl"
+    long_auxiliary = "x" * (app_module.yoagent_conversation.YOAGENT_AUXILIARY_LINE_LIMIT + 1000)
+    long_stream_item = "y" * (app_module.yoagent_conversation.YOAGENT_STREAM_ITEM_TEXT_LIMIT + 1000)
+
+    written = app_module.yoagent_conversation.append_message(
+        {
+            "role": "assistant",
+            "content": "Visible answer",
+            "auxiliaryLines": [long_auxiliary],
+            "auxiliaryPreview": long_auxiliary,
+            "streamItems": [{"kind": "tool", "text": long_stream_item}],
+        },
+        path=path,
+    )
+    loaded = app_module.yoagent_conversation.load_messages(path=path)
+
+    assert written is not None
+    assert written["auxiliaryTruncated"] is True
+    assert written["auxiliaryLines"][0].endswith("[truncated]")
+    assert written["auxiliaryPreview"].endswith("[truncated]")
+    assert written["streamItems"][0]["text"].endswith("[truncated]")
+    assert len(written["auxiliaryText"]) < len(long_auxiliary)
+    assert len(written["streamItems"][0]["text"]) < len(long_stream_item)
+    assert len(path.read_text(encoding="utf-8")) < 40_000
+    assert loaded == [written]
+
+
+def test_yoagent_stream_callback_truncates_oversized_auxiliary_history():
     webapp = app_module.TmuxWebtermApp(["5"])
     last_payload = {}
 
@@ -341,9 +369,11 @@ def test_yoagent_stream_callback_preserves_full_auxiliary_history():
     finally:
         webapp.control_server.stop()
 
-    assert "auxiliary_truncated" not in last_payload
-    assert len(last_payload["auxiliary_lines"]) == 5005
-    assert len(fields["auxiliary_lines"]) == 5005
-    assert fields["auxiliary_lines"][0] == f"tool output: command: line 0 {long_line}"
-    assert "[truncated]" not in "\n".join(fields["auxiliary_lines"])
-    assert fields["stream_items"][0]["text"] == f"tool output: command: line 0 {long_line}"
+    assert last_payload["auxiliary_truncated"] is True
+    assert fields["auxiliary_truncated"] is True
+    assert len(last_payload["auxiliary_lines"]) < 5005
+    assert len(fields["auxiliary_lines"]) < 5005
+    assert fields["auxiliary_lines"][-1] == "tool output: command: line 5004"
+    assert "tool output: command: line 0 " not in "\n".join(fields["auxiliary_lines"])
+    assert len("\n".join(fields["auxiliary_lines"])) <= app_module.yoagent_conversation.YOAGENT_AUXILIARY_TOTAL_LIMIT
+    assert len("\n".join(item["text"] for item in fields["stream_items"])) <= app_module.yoagent_conversation.YOAGENT_STREAM_ITEMS_TOTAL_LIMIT

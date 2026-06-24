@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "実行中の AI エージェントが何をしているか {name} に聞いてみましょう。",
   "yoagent.chatFailed": "チャットに失敗しました: {error}",
   "yoagent.chatPlaceholder": "エージェント・リポジトリ・ファイル・CI・ブロッカーについて聞いてください...",
+  "yoagent.chatTooLarge": "会話が大きすぎて再開できません。YO!agent は新しいスレッドを試しました。失敗が続く場合は会話をクリアしてください。",
   "yoagent.clear": "会話をクリア",
   "yoagent.conversationLoadFailed": "YO!agent の会話を読み込めませんでした: {error}",
   "yoagent.emptyGlobal": "AI エージェントのアクティビティはまだ検出されていません。",

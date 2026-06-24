@@ -88,6 +88,68 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert payload["sessions"] == {"new": {"target": "new"}}
 
 
+def test_auto_approve_status_reuses_cached_roster(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    build_calls = []
+
+    def fake_build_auto_approve_status(session=None, timings=None):
+        build_calls.append(session)
+        if timings is not None:
+            timings["refresh_sessions"] = 1.0
+        return {"session_order": ["1"], "sessions": {"1": {"enabled": False}}, "errors": [], "rules": {}}, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp, "build_auto_approve_status", fake_build_auto_approve_status)
+    try:
+        first, first_status = webapp.auto_approve_status()
+        second, second_status = webapp.auto_approve_status()
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert first["sessions"] == second["sessions"] == {"1": {"enabled": False}}
+    assert build_calls == [None]
+    assert second["cache"]["stale"] is False
+
+
+def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    refreshes = []
+    stale_payload = {"session_order": ["1"], "sessions": {"1": {"enabled": True}}, "errors": [], "rules": {}}
+    with webapp.auto_approve_cache_condition:
+        webapp.auto_approve_cache = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (stale_payload, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append("refresh") or True)
+    try:
+        payload, status = webapp.auto_approve_status()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["sessions"] == stale_payload["sessions"]
+    assert payload["cache"]["stale"] is True
+    assert refreshes == ["refresh"]
+
+
+def test_auto_approve_session_status_skips_roster_cache(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    build_calls = []
+
+    def fake_build_auto_approve_status(session=None, timings=None):
+        build_calls.append(session)
+        return {"target": session, "enabled": False}, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp, "build_auto_approve_status", fake_build_auto_approve_status)
+    try:
+        payload, status = webapp.auto_approve_status("5")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload == {"target": "5", "enabled": False}
+    assert build_calls == ["5"]
+    assert webapp.auto_approve_cache is None
+
+
 def test_auto_approve_session_lock_owner_probes_agent_pane_targets(monkeypatch):
     # Regression: YO workers lock the agent PANE target (e.g. %7), NOT the bare session, so a server
     # without a local worker must probe the pane-target lock to notice another server's ownership.
@@ -787,6 +849,9 @@ def test_timer_client_event_polls_initialize_without_initial_push(monkeypatch):
         webapp.control_server.stop()
 
     assert [event_type for event_type, _payload in events] == ["auto_approve_changed", "tmux_signals_changed", "watched_prs_changed"]
+    assert events[0][1]["refresh"] is True
+    assert "signature" in events[0][1]
+    assert "data" not in events[0][1]
 
 
 def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
@@ -838,6 +903,26 @@ def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
         webapp.control_server.stop()
 
     assert [event_type for event_type, _payload in events] == ["auto_approve_changed", "tmux_signals_changed"]
+    assert events[0][1]["refresh"] is True
+    assert "data" not in events[0][1]
+
+
+def test_tmux_signal_event_publishes_changed_window_patch(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    payloads = [
+        {"ok": True, "window_count": 2, "windows": [{"session": "1", "window_index": 0, "active": True}, {"session": "1", "window_index": 1, "active": False}], "generated_at": 1.0},
+        {"ok": True, "window_count": 2, "windows": [{"session": "1", "window_index": 0, "active": False}, {"session": "1", "window_index": 1, "active": True}], "generated_at": 2.0},
+    ]
+    monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: payloads.pop(0))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.poll_tmux_signals_client_event_once() == []
+        assert webapp.poll_tmux_signals_client_event_once() == ["tmux_signals_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert events == [("tmux_signals_changed", {"patch": True, "windows": [{"session": "1", "window_index": 0, "active": False}, {"session": "1", "window_index": 1, "active": True}], "removed_window_keys": [], "window_count": 2, "ok": True, "generated_at": 2.0, "compute_ms": None})]
 
 
 def test_tmux_signal_event_does_not_force_auto_approve_poll():
@@ -1037,7 +1122,10 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
     monkeypatch.setattr(app_module, "agent_screen_state", fake_screen_state)
     monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
 
+    git_calls = []
+
     def fake_git_inventory(cwd):
+        git_calls.append(str(cwd))
         root = str(cwd)
         return {
             "root": root,
@@ -1075,18 +1163,20 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
     assert "active" not in by_kind["claude"]
     assert by_kind["claude"]["current"] is True
     assert by_kind["claude"]["window_active"] is True
-    assert by_kind["claude"]["paths"] == ["/repo/claude-touched"]
-    assert by_kind["claude"]["path_entries"][0]["path"] == "/repo/claude-touched"
-    assert by_kind["claude"]["git"]["branch"] == "claude-touched-branch"
+    assert by_kind["claude"]["paths"] == []
+    assert by_kind["claude"]["path_entries"] == []
+    assert by_kind["claude"]["git"] is None
     assert by_kind["codex"]["state"] == "idle"
     assert by_kind["codex"]["idle_since"] == 1010.0
     assert by_kind["codex"]["pid"] == 11
     assert "active" not in by_kind["codex"]
     assert by_kind["codex"]["current"] is False
     assert by_kind["codex"]["window_active"] is False
-    assert by_kind["codex"]["paths"] == ["/repo/codex-touched"]
-    assert by_kind["codex"]["git"]["branch"] == "codex-touched-branch"
+    assert by_kind["codex"]["paths"] == []
+    assert by_kind["codex"]["path_entries"] == []
+    assert by_kind["codex"]["git"] is None
     assert capture_calls == [("%10", True), ("%11", True)]
+    assert git_calls == []
 
 
 def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(monkeypatch, tmp_path):
@@ -1811,6 +1901,8 @@ def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatc
 
     assert [event_type for event_type, _payload, _kwargs in events] == ["transcripts_changed"]
     assert events[0][2]["trigger"] == "watch_state"
+    assert events[0][1]["refresh"] is True
+    assert "data" not in events[0][1]
 
 
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
@@ -2834,12 +2926,30 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
 
     assert [event_type for event_type, _payload in events] == ["settings_changed", "transcripts_changed", "fs_changed"]
     fs_payload = events[-1][1]
+    assert fs_payload["refresh"] is True
+    assert "directories" not in fs_payload
     assert fs_payload["change_summary"]["roots_changed"] == 1
     assert fs_payload["change_summary"]["entries_added"] == 1
     assert fs_payload["change_summary"]["entries_removed"] == 1
     assert fs_payload["listing_summary"]["roots_listed"] == 1
     assert webapp.session_files_cache != {}
     assert webapp.transcripts_payload_cache is None
+
+
+def test_session_files_ready_skips_unchanged_fs_republish(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    requests = [{"session": "5", "hours": 24}]
+    monkeypatch.setattr(webapp, "client_watch_state_snapshot", lambda: ([], requests, {}))
+    monkeypatch.setattr(webapp, "session_files_payload", lambda *args, **kwargs: ({"files": [{"path": "/repo/a.py"}], "repos": [], "errors": [], "cache": {"age": time.time()}}, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.publish_session_files_ready_events(trigger="fs_changed") == ["session_files_ready"]
+        assert webapp.publish_session_files_ready_events(trigger="fs_changed") == []
+    finally:
+        webapp.control_server.stop()
+
+    assert [event_type for event_type, _payload in events] == ["session_files_ready"]
 
 
 def test_poll_client_events_once_transcript_change_is_lightweight_timing_regression(monkeypatch):
@@ -6556,8 +6666,14 @@ def test_reset_yoagent_chat_clears_cli_sessions():
     webapp = app_module.TmuxWebtermApp(["5"])
     try:
         webapp.yoagent_cli_sessions["claude"] = {"session_id": "old"}
+        webapp.record_yoagent_message("user", "persisted question")
+        app_module.yoagent_conversation.save_cli_sessions({"claude": {"session_id": "old"}})
+        assert app_module.yoagent_conversation.YOAGENT_CONVERSATION_PATH.exists()
+        assert app_module.yoagent_conversation.YOAGENT_CLI_STATE_PATH.exists()
         assert webapp.reset_yoagent_chat()["ok"] is True
         assert webapp.yoagent_cli_sessions == {}
+        assert not app_module.yoagent_conversation.YOAGENT_CONVERSATION_PATH.exists()
+        assert not app_module.yoagent_conversation.YOAGENT_CLI_STATE_PATH.exists()
     finally:
         webapp.control_server.stop()
 

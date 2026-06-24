@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "실행 중인 AI 에이전트가 무엇을 하고 있는지 {name}에게 물어보세요.",
   "yoagent.chatFailed": "채팅 실패: {error}",
   "yoagent.chatPlaceholder": "에이전트, 저장소, 파일, CI, 차단 사항에 대해 물어보세요...",
+  "yoagent.chatTooLarge": "대화가 너무 커서 다시 시작할 수 없습니다. YO!agent가 새 스레드를 시도했습니다. 계속 실패하면 대화 지우기를 사용하세요.",
   "yoagent.clear": "대화 지우기",
   "yoagent.conversationLoadFailed": "YO!agent 대화를 불러오지 못했습니다: {error}",
   "yoagent.emptyGlobal": "아직 AI 에이전트 활동이 감지되지 않았습니다.",

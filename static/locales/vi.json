@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "Ask {name} what the running AI agents are doing.",
   "yoagent.chatFailed": "chat failed: {error}",
   "yoagent.chatPlaceholder": "Hỏi bất cứ điều gì…",
+  "yoagent.chatTooLarge": "Cuộc trò chuyện quá lớn để tiếp tục. YO!agent đã thử một luồng mới; dùng Xóa cuộc trò chuyện nếu vẫn lỗi.",
   "yoagent.clear": "Xóa cuộc trò chuyện",
   "yoagent.conversationLoadFailed": "không tải được cuộc trò chuyện YO!agent: {error}",
   "yoagent.emptyGlobal": "No AI agent activity detected yet.",

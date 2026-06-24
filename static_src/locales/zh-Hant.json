@@ -1121,6 +1121,7 @@
   "yoagent.chatDisabled": "在偏好設定中設定 Claude 或 Codex 後端即可聊天。",
   "yoagent.chatEmpty": "詢問 {name} 執行中的 AI 代理正在做什麼。",
   "yoagent.chatFailed": "聊天失敗：{error}",
+  "yoagent.chatTooLarge": "對話太大，無法繼續。YO!agent 已嘗試新執行緒；如果仍然失敗，請使用清除對話。",
   "yoagent.chatPlaceholder": "詢問代理、儲存庫、檔案、CI、阻礙…",
   "yoagent.clear": "清除對話",
   "yoagent.conversationLoadFailed": "載入優!助手對話失敗：{error}",

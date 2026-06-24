@@ -740,6 +740,8 @@ const fileEditorScrollSyncSuppressMs = 150;
 let serverWatchRootsSignature = '';
 let serverWatchRootsInFlight = false;
 let serverWatchRootsSyncedAt = 0;
+let serverWatchRootsTimer = null;
+let serverWatchRootsPendingOptions = {};
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms');
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
@@ -1285,6 +1287,7 @@ const uiDelayMs = Object.freeze({
   shareHostStatusBackupRefresh: 3000,
   shareRemoteResizeAfterSocketOpen: 50,
   serverWatchRenew: 60000,
+  serverWatchDebounce: 300,
   tmuxWindowReadback: 120,
   tmuxWindowReadbackRetry: 80,
   terminalRefreshAfterTabSelect: 120,
@@ -1301,6 +1304,7 @@ const yolomuxTiming = Object.freeze({
   shareHostStatusBackupRefreshMs: uiDelayMs.shareHostStatusBackupRefresh,
   shareRemoteResizeAfterSocketOpenMs: uiDelayMs.shareRemoteResizeAfterSocketOpen,
   serverWatchRenewMs: uiDelayMs.serverWatchRenew,
+  serverWatchDebounceMs: uiDelayMs.serverWatchDebounce,
   tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
@@ -1323,6 +1327,7 @@ const {
   shareHostStatusBackupRefreshMs,
   shareRemoteResizeAfterSocketOpenMs,
   serverWatchRenewMs,
+  serverWatchDebounceMs,
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
   terminalRefreshAfterTabSelectMs,
@@ -5851,6 +5856,14 @@ function tmuxSignalWindowSession(windowRecord) {
   return String(windowRecord?.session || windowRecord?.session_name || '').trim();
 }
 
+function tmuxSignalWindowKey(windowRecord) {
+  const key = String(windowRecord?.key || '').trim();
+  if (key) return key;
+  const session = tmuxSignalWindowSession(windowRecord);
+  const index = String(windowRecord?.window_index ?? windowRecord?.window ?? '').trim();
+  return session && index ? `${session}:${index}` : '';
+}
+
 function tmuxSignalWindowActivityTs(windowRecord) {
   const value = Number(windowRecord?.activity_ts ?? windowRecord?.window_activity ?? 0);
   return Number.isFinite(value) ? value : 0;
@@ -5886,13 +5899,19 @@ function tmuxSignalPaneSession(pane) {
 }
 
 function tmuxSignalPaneWindowKey(pane) {
-  return String(pane?.window_key || pane?._tmux_window?.key || `${tmuxSignalPaneSession(pane)}:${pane?.window_index || ''}`).trim();
+  const key = String(pane?.window_key || '').trim();
+  if (key) return key;
+  const windowKey = tmuxSignalWindowKey(pane?._tmux_window);
+  if (windowKey) return windowKey;
+  const session = tmuxSignalPaneSession(pane);
+  const index = String(pane?.window_index ?? '').trim();
+  return session && index ? `${session}:${index}` : '';
 }
 
 function tmuxSignalWindowForPane(pane) {
   if (pane?._tmux_window) return pane._tmux_window;
   const key = tmuxSignalPaneWindowKey(pane);
-  return tmuxSignalWindows().find(windowRecord => String(windowRecord?.key || '') === key) || null;
+  return tmuxSignalWindows().find(windowRecord => tmuxSignalWindowKey(windowRecord) === key) || null;
 }
 
 function tmuxSignalWindowsForSession(session) {
@@ -6131,12 +6150,14 @@ function globalActivityCounts() {
     const signalPromptSignature = signalSession ? promptAttentionPayloadSignature(signalPayload) : '';
     const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature) : false;
     if (windowRecord?.bell_flag === true && !signalPromptCleared) {
-      bellSignalWindows.add(String(windowRecord?.key || `${tmuxSignalWindowSession(windowRecord)}:${windowRecord?.window_index || ''}`));
+      const signalKey = tmuxSignalWindowKey(windowRecord);
+      if (signalKey) bellSignalWindows.add(signalKey);
       if (signalSession) signalAttentionSessions.add(signalSession);
     }
     const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
     if (panes.some(tmuxSignalPaneActionRequired) && !signalPromptCleared) {
-      actionRequiredSignalWindows.add(String(windowRecord?.key || `${tmuxSignalWindowSession(windowRecord)}:${windowRecord?.window_index || ''}`));
+      const signalKey = tmuxSignalWindowKey(windowRecord);
+      if (signalKey) actionRequiredSignalWindows.add(signalKey);
       if (signalSession) signalAttentionSessions.add(signalSession);
     }
     if (!tmuxSignalWindowIsRecentlyActive(windowRecord)) continue;
@@ -10138,6 +10159,10 @@ async function refreshOpenFilesFromPush(payload = {}) {
 
 async function refreshFileExplorerFromPush(payload = {}) {
   const entriesByDir = entriesByDirFromFilesystemPush(payload);
+  if (!entriesByDir.size && payload?.refresh === true) {
+    await refreshFileExplorerIfChanged();
+    return;
+  }
   if (!entriesByDir.size) return;
   fileExplorerPushRefreshDepth += 1;
   try {
@@ -16303,7 +16328,7 @@ function clientServerWatchState() {
   return state;
 }
 
-function syncServerWatchRoots(options = {}) {
+function syncServerWatchRootsNow(options = {}) {
   if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsInFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
@@ -16322,6 +16347,22 @@ function syncServerWatchRoots(options = {}) {
   }).finally(() => {
     serverWatchRootsInFlight = false;
   });
+}
+
+function syncServerWatchRoots(options = {}) {
+  serverWatchRootsPendingOptions = {
+    ...serverWatchRootsPendingOptions,
+    ...options,
+    renew: serverWatchRootsPendingOptions.renew === true || options.renew === true,
+  };
+  if (serverWatchRootsTimer) clearTimeout(serverWatchRootsTimer);
+  const delay = options.immediate === true ? 0 : serverWatchDebounceMs;
+  serverWatchRootsTimer = setTimeout(() => {
+    serverWatchRootsTimer = null;
+    const pending = serverWatchRootsPendingOptions;
+    serverWatchRootsPendingOptions = {};
+    syncServerWatchRootsNow(pending);
+  }, delay);
 }
 
 async function refreshFileExplorerIfChanged() {
@@ -29092,9 +29133,17 @@ function yoagentChatNetworkError(error) {
   return error instanceof TypeError || /failed to fetch|networkerror|load failed|fetch failed/i.test(text);
 }
 
+function yoagentChatRequestTooLargeError(error) {
+  const text = `${error?.status || ''} ${error?.statusText || ''} ${error?.message || error || ''} ${JSON.stringify(error?.payload || {})}`;
+  return /\b413\b|request entity too large|request body too large|payload too large|entity too large/i.test(text);
+}
+
 function yoagentChatErrorMessage(error) {
   if (yoagentChatNetworkError(error)) {
     return t('yoagent.networkError');
+  }
+  if (yoagentChatRequestTooLargeError(error)) {
+    return t('yoagent.chatTooLarge');
   }
   return t('yoagent.chatFailed', {error: error?.message || error});
 }
@@ -30497,6 +30546,15 @@ function debugFilesystemEventSummaryText(event) {
   return parts.length ? `fs=${parts.join(' ')}` : '';
 }
 
+function debugPhaseTimingText(event) {
+  const timings = event.phaseTimings && typeof event.phaseTimings === 'object' ? event.phaseTimings : null;
+  if (!timings) return '';
+  const rows = Object.entries(timings)
+    .filter(([_key, value]) => Number.isFinite(Number(value)))
+    .map(([key, value]) => `${key}=${Number(value).toFixed(1)}ms`);
+  return rows.length ? `timings=${rows.join(',')}` : '';
+}
+
 function debugEventMetaText(event) {
   return [
     debugTimeText(event.ts),
@@ -30506,6 +30564,7 @@ function debugEventMetaText(event) {
     Number.isFinite(event.frameBytes) ? `rx ${event.frameBytes} B` : '',
     Number.isFinite(event.bytes) && event.bytes !== event.frameBytes ? `data ${event.bytes} B` : '',
     Number.isFinite(event.responseBytes) ? `${event.responseBytes} B rx` : '',
+    debugPhaseTimingText(event),
     debugEventStatusText(event),
     event.source ? `source: ${event.source}` : '',
     event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
@@ -30521,6 +30580,7 @@ function debugEventLineText(event) {
   const sseMeta = event.type === 'sse'
     ? [
       Number.isFinite(event.frameBytes) ? `rx=${event.frameBytes}B` : '',
+      debugPhaseTimingText(event),
     ].filter(Boolean).join(' ')
     : '';
   const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';
@@ -47918,6 +47978,7 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
     frameBytes,
     changeSummary: payload?.change_summary && typeof payload.change_summary === 'object' ? payload.change_summary : null,
     listingSummary: payload?.listing_summary && typeof payload.listing_summary === 'object' ? payload.listing_summary : null,
+    phaseTimings: payload?.timings && typeof payload.timings === 'object' ? payload.timings : null,
     key: payload?.session || payload?.locale || payload?.request?.session || '',
   });
 }
@@ -48041,8 +48102,25 @@ function tmuxSignalsPayloadWithWindowOverrides(data) {
   return changed ? {...data, windows} : data;
 }
 
+function tmuxSignalsPayloadWithPatch(data) {
+  if (!data || typeof data !== 'object' || data.patch !== true) return data;
+  if (!tmuxSignalState || typeof tmuxSignalState !== 'object' || !Array.isArray(tmuxSignalState.windows)) return data;
+  const nextByKey = new Map(tmuxSignalState.windows.map(windowRecord => [tmuxSignalWindowKey(windowRecord), windowRecord]).filter(([key]) => key));
+  for (const key of data.removed_window_keys || []) nextByKey.delete(String(key || ''));
+  for (const windowRecord of data.windows || []) {
+    const key = tmuxSignalWindowKey(windowRecord);
+    if (key) nextByKey.set(key, windowRecord);
+  }
+  return {
+    ...tmuxSignalState,
+    ...data,
+    patch: false,
+    windows: Array.from(nextByKey.values()),
+  };
+}
+
 function applyTmuxSignalsPayload(payload = {}) {
-  const rawData = tmuxSignalPayloadData(payload);
+  const rawData = tmuxSignalsPayloadWithPatch(tmuxSignalPayloadData(payload));
   const data = tmuxSignalsPayloadWithWindowOverrides(rawData);
   if (!data || typeof data !== 'object') return null;
   tmuxSignalState = data;
@@ -48064,6 +48142,10 @@ function handleClientPushEvent(type, payload = {}) {
     return;
   }
   if (type === 'auto_approve_changed') {
+    if (payload.refresh) {
+      refreshAutoStatuses().catch(() => {});
+      return;
+    }
     if (payload.data) applyAutoApprovePayload(payload.data);
     return;
   }

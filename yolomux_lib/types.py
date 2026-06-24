@@ -61,6 +61,8 @@ class AutoApproveStatusPayload(TypedDict, total=False):
     sessions: dict[str, AutoApproveState]
     errors: list[str]
     rules: dict[str, Any]
+    cache: dict[str, Any]
+    timings: dict[str, float]
     error: str
 
 

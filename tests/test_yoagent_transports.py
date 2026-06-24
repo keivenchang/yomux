@@ -684,6 +684,57 @@ def test_codex_app_server_session_resumes_or_starts_after_process_restart(monkey
     assert fake_process.stdin.messages[4]["params"]["threadId"] == "thread-new"
 
 
+def test_codex_app_server_session_retries_fresh_thread_after_request_too_large():
+    processes = [
+        FakeCodexAppServerProcess([
+            {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
+            {"jsonrpc": "2.0", "id": "thread-1", "result": {"thread": {"id": "thread-old"}}},
+            {"jsonrpc": "2.0", "id": "turn-1", "error": {"code": 413, "message": "Request Entity Too Large"}},
+        ]),
+        FakeCodexAppServerProcess([
+            {"jsonrpc": "2.0", "id": "initialize-2", "result": {}},
+            {"jsonrpc": "2.0", "id": "thread-2", "result": {"thread": {"id": "thread-new"}}},
+            {"jsonrpc": "2.0", "id": "turn-2", "result": {"turn": {"id": "turn-2", "items": [], "status": "inProgress"}}},
+            {"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "thread-new", "turn": {"id": "turn-2", "items": [{"type": "agentMessage", "id": "item-1", "text": "Fresh thread answer."}], "status": "completed"}}},
+        ]),
+    ]
+    target = {
+        "session": "job-1",
+        "agent_kind": "codex",
+        "transport": "codex-app-server",
+        "managed": True,
+        "cwd": "/repo/app",
+        "agent_session_id": "thread-old",
+    }
+    popen_calls = []
+
+    def fake_popen(*_args, **_kwargs):
+        popen_calls.append(True)
+        return processes[len(popen_calls) - 1]
+
+    session = CodexAppServerSession(target, popen=fake_popen)
+
+    try:
+        result, status = session.send("continue", target, timeout=3)
+    finally:
+        session.close()
+
+    assert result.ok is True
+    assert result.text == "Fresh thread answer."
+    assert status["oversize_resume_retried"] is True
+    assert status["dropped_thread_id"] == "thread-old"
+    assert status["thread_started"] is True
+    assert session.thread_id == "thread-new"
+    assert len(popen_calls) == 2
+    assert processes[0].terminated is True
+    assert processes[0].stdin.messages[2]["method"] == "thread/resume"
+    assert processes[0].stdin.messages[3]["method"] == "turn/start"
+    assert processes[0].stdin.messages[3]["params"]["threadId"] == "thread-old"
+    assert processes[1].stdin.messages[2]["method"] == "thread/start"
+    assert processes[1].stdin.messages[3]["method"] == "turn/start"
+    assert processes[1].stdin.messages[3]["params"]["threadId"] == "thread-new"
+
+
 def test_codex_app_server_transport_accepts_idle_status_as_turn_done(monkeypatch):
     monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     messages = [

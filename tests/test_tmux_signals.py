@@ -7,6 +7,13 @@ from yolomux_lib.tmux_signals import tmux_signal_subscription_commands
 from yolomux_lib.tmux_signals import tmux_control_attach_command
 from yolomux_lib.tmux_signals import tmux_control_event_relevant
 from yolomux_lib.tmux_signals import tmux_control_event_type
+from yolomux_lib.tmux_signals import window_record_key
+
+
+def test_window_record_key_prefers_record_key_and_falls_back_to_session_window():
+    assert window_record_key({"key": "alpha:2", "session": "ignored", "window_index": 9}) == "alpha:2"
+    assert window_record_key({"session": "alpha", "window_index": 2}) == "alpha:2"
+    assert window_record_key({"session_name": "beta", "window": "3"}) == "beta:3"
 
 
 def test_parse_tmux_signal_snapshot_maps_window_and_pane_fields():

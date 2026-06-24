@@ -3526,6 +3526,7 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
     frameBytes,
     changeSummary: payload?.change_summary && typeof payload.change_summary === 'object' ? payload.change_summary : null,
     listingSummary: payload?.listing_summary && typeof payload.listing_summary === 'object' ? payload.listing_summary : null,
+    phaseTimings: payload?.timings && typeof payload.timings === 'object' ? payload.timings : null,
     key: payload?.session || payload?.locale || payload?.request?.session || '',
   });
 }
@@ -3649,8 +3650,25 @@ function tmuxSignalsPayloadWithWindowOverrides(data) {
   return changed ? {...data, windows} : data;
 }
 
+function tmuxSignalsPayloadWithPatch(data) {
+  if (!data || typeof data !== 'object' || data.patch !== true) return data;
+  if (!tmuxSignalState || typeof tmuxSignalState !== 'object' || !Array.isArray(tmuxSignalState.windows)) return data;
+  const nextByKey = new Map(tmuxSignalState.windows.map(windowRecord => [tmuxSignalWindowKey(windowRecord), windowRecord]).filter(([key]) => key));
+  for (const key of data.removed_window_keys || []) nextByKey.delete(String(key || ''));
+  for (const windowRecord of data.windows || []) {
+    const key = tmuxSignalWindowKey(windowRecord);
+    if (key) nextByKey.set(key, windowRecord);
+  }
+  return {
+    ...tmuxSignalState,
+    ...data,
+    patch: false,
+    windows: Array.from(nextByKey.values()),
+  };
+}
+
 function applyTmuxSignalsPayload(payload = {}) {
-  const rawData = tmuxSignalPayloadData(payload);
+  const rawData = tmuxSignalsPayloadWithPatch(tmuxSignalPayloadData(payload));
   const data = tmuxSignalsPayloadWithWindowOverrides(rawData);
   if (!data || typeof data !== 'object') return null;
   tmuxSignalState = data;
@@ -3672,6 +3690,10 @@ function handleClientPushEvent(type, payload = {}) {
     return;
   }
   if (type === 'auto_approve_changed') {
+    if (payload.refresh) {
+      refreshAutoStatuses().catch(() => {});
+      return;
+    }
     if (payload.data) applyAutoApprovePayload(payload.data);
     return;
   }

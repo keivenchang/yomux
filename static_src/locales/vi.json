@@ -1121,6 +1121,7 @@
   "yoagent.chatDisabled": "Set a Claude or Codex backend in Preferences to chat.",
   "yoagent.chatEmpty": "Ask {name} what the running AI agents are doing.",
   "yoagent.chatFailed": "chat failed: {error}",
+  "yoagent.chatTooLarge": "Cuộc trò chuyện quá lớn để tiếp tục. YO!agent đã thử một luồng mới; dùng Xóa cuộc trò chuyện nếu vẫn lỗi.",
   "yoagent.chatPlaceholder": "Hỏi bất cứ điều gì…",
   "yoagent.clear": "Xóa cuộc trò chuyện",
   "yoagent.conversationLoadFailed": "không tải được cuộc trò chuyện YO!agent: {error}",

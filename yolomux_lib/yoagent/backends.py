@@ -278,6 +278,8 @@ class YoagentBackendsMixin:
             result, status = self.yoagent_codex_app_server.send(prompt, target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS, on_event=stream_callback)
             captured_session_id = self.yoagent_codex_app_server.thread_id
         status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        if result.reason_code:
+            status["reason_code"] = result.reason_code
         if result.ok and result.text:
             return result.text, "", captured_session_id, status
         return "", result.error or "codex app-server completed without a final agent message", captured_session_id, status

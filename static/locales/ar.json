@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "اسأل {name} عمّا تفعله عوامل الذكاء الاصطناعي قيد التشغيل.",
   "yoagent.chatFailed": "فشلت المحادثة: {error}",
   "yoagent.chatPlaceholder": "اسأل عن العوامل والمستودعات والملفات وCI والعوائق...",
+  "yoagent.chatTooLarge": "المحادثة كبيرة جدًا ولا يمكن استئنافها. جرّب YO!agent سلسلة جديدة؛ استخدم مسح المحادثة إذا استمر الفشل.",
   "yoagent.clear": "مسح المحادثة",
   "yoagent.conversationLoadFailed": "فشل تحميل محادثة YO!agent: {error}",
   "yoagent.emptyGlobal": "لم يُكتشف أي نشاط لعامل الذكاء الاصطناعي بعد.",

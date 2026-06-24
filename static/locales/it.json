@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "Ask {name} what the running AI agents are doing.",
   "yoagent.chatFailed": "chat failed: {error}",
   "yoagent.chatPlaceholder": "Chiedi qualsiasi cosa…",
+  "yoagent.chatTooLarge": "La conversazione è troppo grande da riprendere. YO!agent ha provato un nuovo thread; usa Cancella conversazione se continua a fallire.",
   "yoagent.clear": "Clear conversation",
   "yoagent.conversationLoadFailed": "caricamento conversazione YO!agent non riuscito: {error}",
   "yoagent.emptyGlobal": "No AI agent activity detected yet.",

@@ -34,6 +34,11 @@ class FakeClientSocket(FakeConnection):
         self.connected_to = path
 
 
+class BrokenPipeConnection(FakeConnection):
+    def sendall(self, data):
+        raise BrokenPipeError("client disconnected")
+
+
 def response_from_fake_connection(conn):
     return json.loads(conn.sent.decode("utf-8").splitlines()[0])
 
@@ -55,6 +60,13 @@ def test_control_server_returns_expected_control_request_error():
     server.serve_connection(conn)
 
     assert response_from_fake_connection(conn) == {"ok": False, "error": "unknown action"}
+
+
+def test_control_server_ignores_broken_pipe_during_response():
+    server = control.YolomuxControlServer(lambda _request: {"ok": True})
+    conn = BrokenPipeConnection(b'{"action":"ping"}\n')
+
+    server.serve_connection(conn)
 
 
 def test_send_yolomux_control_request_round_trips(monkeypatch):

@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "שאל את {name} מה עושים סוכני הבינה המלאכותית הפעילים.",
   "yoagent.chatFailed": "השיחה נכשלה: {error}",
   "yoagent.chatPlaceholder": "שאל כל דבר…",
+  "yoagent.chatTooLarge": "השיחה גדולה מדי לחידוש. YO!agent ניסה שרשור חדש; השתמש בניקוי השיחה אם זה ממשיך להיכשל.",
   "yoagent.clear": "נקה שיחה",
   "yoagent.conversationLoadFailed": "טעינת שיחת YO!agent נכשלה: {error}",
   "yoagent.emptyGlobal": "לא זוהתה עדיין פעילות של סוכן בינה מלאכותית.",

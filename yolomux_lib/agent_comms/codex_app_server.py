@@ -74,6 +74,24 @@ class CodexAppServerResult:
     reason_code: str = ""
 
 
+CODEX_APP_SERVER_REQUEST_TOO_LARGE_RE = re.compile(
+    r"\b413\b|request entity too large|request body too large|payload too large|entity too large",
+    re.IGNORECASE,
+)
+
+
+def codex_app_server_request_too_large(error: Any) -> bool:
+    try:
+        text = json.dumps(error, ensure_ascii=False, sort_keys=True) if isinstance(error, (dict, list)) else str(error or "")
+    except (TypeError, ValueError):
+        text = str(error or "")
+    return bool(CODEX_APP_SERVER_REQUEST_TOO_LARGE_RE.search(text))
+
+
+def codex_app_server_request_too_large_message() -> str:
+    return "conversation was too large to resume; YO!agent started a fresh Codex thread, but the retry also failed. Use Clear conversation and try again."
+
+
 def codex_app_server_initialize_params() -> dict[str, Any]:
     return {
         "clientInfo": {"name": "yolomux", "title": "YOLOmux", "version": YOLOMUX_VERSION},
@@ -266,6 +284,15 @@ class CodexAppServerSession:
             return {"ok": False, "interrupted": False, "error": str(exc)}
         return {"ok": True, "interrupted": True, "transport": "codex-app-server"}
 
+    def _drop_resume_thread(self, target: dict[str, Any] | None = None) -> str:
+        dropped = self.thread_id or str(self.target.get("thread_id") or self.target.get("agent_session_id") or "").strip()
+        self.thread_id = ""
+        for key in ("thread_id", "agent_session_id"):
+            self.target.pop(key, None)
+            if target is not None:
+                target.pop(key, None)
+        return dropped
+
     def _start_process(self, target: dict[str, Any], deadline: float, notifications: list[dict[str, Any]]) -> dict[str, Any]:
         cwd = str(target.get("cwd") or PROJECT_ROOT)
         args = ["codex", "app-server", "--listen", "stdio://"]
@@ -352,45 +379,75 @@ class CodexAppServerSession:
         on_event: Any | None = None,
     ) -> tuple[CodexAppServerResult, dict[str, Any]]:
         with self.lock:
-            status: dict[str, Any] = {}
-            turn_started = False
-            started = time.monotonic()
-            try:
-                self.interrupted.clear()
-                deadline = time.monotonic() + max(1.0, float(timeout))
-                thread_id, status = self.ensure_started(target, timeout=timeout)
-                status["thread_ready_ms"] = round((time.monotonic() - started) * 1000, 3)
-                notifications: list[dict[str, Any]] = []
-                turn_id = self._request_id("turn")
-                first_event_seen = False
-                first_assistant_delta_seen = False
+            retry_target = dict(target) if target is not None else None
+            retry_status: dict[str, Any] = {}
+            last_oversize_error = ""
+            for attempt in range(2):
+                status: dict[str, Any] = dict(retry_status)
+                turn_started = False
+                started = time.monotonic()
+                try:
+                    self.interrupted.clear()
+                    deadline = time.monotonic() + max(1.0, float(timeout))
+                    thread_id, attempt_status = self.ensure_started(retry_target, timeout=timeout)
+                    status.update(attempt_status)
+                    status["thread_ready_ms"] = round((time.monotonic() - started) * 1000, 3)
+                    notifications: list[dict[str, Any]] = []
+                    turn_id = self._request_id("turn")
+                    first_event_seen = False
+                    first_assistant_delta_seen = False
 
-                def timed_on_event(event: dict[str, Any]) -> None:
-                    nonlocal first_event_seen, first_assistant_delta_seen
-                    now = time.monotonic()
-                    if not first_event_seen:
-                        first_event_seen = True
-                        status["first_stream_event_ms"] = round((now - started) * 1000, 3)
-                    if not first_assistant_delta_seen and str(event.get("kind") or event.get("event") or "") == ASSISTANT_DELTA:
-                        first_assistant_delta_seen = True
-                        status["first_assistant_delta_ms"] = round((now - started) * 1000, 3)
-                    if callable(on_event):
-                        on_event(event)
+                    def timed_on_event(event: dict[str, Any]) -> None:
+                        nonlocal first_event_seen, first_assistant_delta_seen
+                        now = time.monotonic()
+                        if not first_event_seen:
+                            first_event_seen = True
+                            status["first_stream_event_ms"] = round((now - started) * 1000, 3)
+                        if not first_assistant_delta_seen and str(event.get("kind") or event.get("event") or "") == ASSISTANT_DELTA:
+                            first_assistant_delta_seen = True
+                            status["first_assistant_delta_ms"] = round((now - started) * 1000, 3)
+                        if callable(on_event):
+                            on_event(event)
 
-                status["turn_start_request_ms"] = round((time.monotonic() - started) * 1000, 3)
-                self.protocol.write_message(self.process, json_rpc_request(turn_id, "turn/start", codex_app_server_turn_params(thread_id, text, self.target)))
-                self.protocol.read_response(self.process, turn_id, deadline, notifications)
-                status["turn_start_ack_ms"] = round((time.monotonic() - started) * 1000, 3)
-                turn_started = True
-                final_text, error = self.protocol.wait_turn_complete(self.process, thread_id, deadline, notifications, on_event=timed_on_event)
-                status["turn_complete_ms"] = round((time.monotonic() - started) * 1000, 3)
-                if error:
-                    return CodexAppServerResult(ok=False, sent=True, error=error), status
-                if final_text:
-                    return CodexAppServerResult(ok=True, sent=True, text=final_text), status
-                return CodexAppServerResult(ok=False, sent=True, error="codex app-server completed without a final agent message"), status
-            except (OSError, subprocess.SubprocessError) as exc:
-                self.close()
-                if self.interrupted.is_set():
-                    return CodexAppServerResult(ok=False, sent=turn_started, error="interrupted", reason_code="interrupted"), status
-                return CodexAppServerResult(ok=False, sent=turn_started, error=str(exc)), status
+                    status["turn_start_request_ms"] = round((time.monotonic() - started) * 1000, 3)
+                    self.protocol.write_message(self.process, json_rpc_request(turn_id, "turn/start", codex_app_server_turn_params(thread_id, text, self.target)))
+                    self.protocol.read_response(self.process, turn_id, deadline, notifications)
+                    status["turn_start_ack_ms"] = round((time.monotonic() - started) * 1000, 3)
+                    turn_started = True
+                    final_text, error = self.protocol.wait_turn_complete(self.process, thread_id, deadline, notifications, on_event=timed_on_event)
+                    status["turn_complete_ms"] = round((time.monotonic() - started) * 1000, 3)
+                    if error:
+                        if attempt == 0 and codex_app_server_request_too_large(error):
+                            last_oversize_error = str(error)
+                            dropped_thread_id = self._drop_resume_thread(retry_target)
+                            self.close()
+                            retry_status = {
+                                "oversize_resume_retried": True,
+                                "oversize_retry_error": last_oversize_error,
+                                "dropped_thread_id": dropped_thread_id,
+                            }
+                            continue
+                        reason_code = "request_entity_too_large" if codex_app_server_request_too_large(error) else ""
+                        message = codex_app_server_request_too_large_message() if reason_code else error
+                        return CodexAppServerResult(ok=False, sent=True, error=message, reason_code=reason_code), status
+                    if final_text:
+                        return CodexAppServerResult(ok=True, sent=True, text=final_text), status
+                    return CodexAppServerResult(ok=False, sent=True, error="codex app-server completed without a final agent message"), status
+                except (OSError, subprocess.SubprocessError) as exc:
+                    error_text = str(exc)
+                    self.close()
+                    if self.interrupted.is_set():
+                        return CodexAppServerResult(ok=False, sent=turn_started, error="interrupted", reason_code="interrupted"), status
+                    if attempt == 0 and codex_app_server_request_too_large(error_text):
+                        last_oversize_error = error_text
+                        dropped_thread_id = self._drop_resume_thread(retry_target)
+                        retry_status = {
+                            "oversize_resume_retried": True,
+                            "oversize_retry_error": last_oversize_error,
+                            "dropped_thread_id": dropped_thread_id,
+                        }
+                        continue
+                    reason_code = "request_entity_too_large" if codex_app_server_request_too_large(error_text or last_oversize_error) else ""
+                    message = codex_app_server_request_too_large_message() if reason_code else error_text
+                    return CodexAppServerResult(ok=False, sent=turn_started, error=message, reason_code=reason_code), status
+            return CodexAppServerResult(ok=False, sent=False, error=codex_app_server_request_too_large_message(), reason_code="request_entity_too_large"), retry_status

@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "Pergunte ao {name} o que os agentes de IA em execução estão fazendo.",
   "yoagent.chatFailed": "chat falhou: {error}",
   "yoagent.chatPlaceholder": "Pergunte sobre agentes, repositórios, arquivos, CI, bloqueios...",
+  "yoagent.chatTooLarge": "A conversa é grande demais para retomar. YO!agent tentou uma nova conversa; use Limpar conversa se continuar falhando.",
   "yoagent.clear": "Limpar conversa",
   "yoagent.conversationLoadFailed": "falha ao carregar conversa do YO!agent: {error}",
   "yoagent.emptyGlobal": "Nenhuma atividade de agente de IA detectada ainda.",

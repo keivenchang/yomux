@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "Frage {name}, was die laufenden KI-Agenten tun.",
   "yoagent.chatFailed": "Chat fehlgeschlagen: {error}",
   "yoagent.chatPlaceholder": "Frage nach Agenten, Repos, Dateien, CI, Blockern...",
+  "yoagent.chatTooLarge": "Die Unterhaltung ist zu groß, um fortgesetzt zu werden. YO!agent hat einen neuen Thread versucht; nutze Unterhaltung löschen, falls es weiter fehlschlägt.",
   "yoagent.clear": "Unterhaltung löschen",
   "yoagent.conversationLoadFailed": "YO!agent-Unterhaltung konnte nicht geladen werden: {error}",
   "yoagent.emptyGlobal": "Noch keine KI-Agentenaktivität erkannt.",

@@ -1121,6 +1121,7 @@
   "yoagent.chatDisabled": "Set a Claude or Codex backend in Preferences to chat.",
   "yoagent.chatEmpty": "Ask {name} what the running AI agents are doing.",
   "yoagent.chatFailed": "chat failed: {error}",
+  "yoagent.chatTooLarge": "Konuşma sürdürülemeyecek kadar büyük. YO!agent yeni bir iş parçacığı denedi; sorun sürerse konuşmayı temizleyin.",
   "yoagent.chatPlaceholder": "Her şeyi sor…",
   "yoagent.clear": "Clear conversation",
   "yoagent.conversationLoadFailed": "YO!agent konuşması yüklenemedi: {error}",

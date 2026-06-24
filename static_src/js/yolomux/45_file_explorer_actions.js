@@ -2113,7 +2113,7 @@ function clientServerWatchState() {
   return state;
 }
 
-function syncServerWatchRoots(options = {}) {
+function syncServerWatchRootsNow(options = {}) {
   if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsInFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
@@ -2132,6 +2132,22 @@ function syncServerWatchRoots(options = {}) {
   }).finally(() => {
     serverWatchRootsInFlight = false;
   });
+}
+
+function syncServerWatchRoots(options = {}) {
+  serverWatchRootsPendingOptions = {
+    ...serverWatchRootsPendingOptions,
+    ...options,
+    renew: serverWatchRootsPendingOptions.renew === true || options.renew === true,
+  };
+  if (serverWatchRootsTimer) clearTimeout(serverWatchRootsTimer);
+  const delay = options.immediate === true ? 0 : serverWatchDebounceMs;
+  serverWatchRootsTimer = setTimeout(() => {
+    serverWatchRootsTimer = null;
+    const pending = serverWatchRootsPendingOptions;
+    serverWatchRootsPendingOptions = {};
+    syncServerWatchRootsNow(pending);
+  }, delay);
 }
 
 async function refreshFileExplorerIfChanged() {

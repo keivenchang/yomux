@@ -89,6 +89,15 @@ function debugFilesystemEventSummaryText(event) {
   return parts.length ? `fs=${parts.join(' ')}` : '';
 }
 
+function debugPhaseTimingText(event) {
+  const timings = event.phaseTimings && typeof event.phaseTimings === 'object' ? event.phaseTimings : null;
+  if (!timings) return '';
+  const rows = Object.entries(timings)
+    .filter(([_key, value]) => Number.isFinite(Number(value)))
+    .map(([key, value]) => `${key}=${Number(value).toFixed(1)}ms`);
+  return rows.length ? `timings=${rows.join(',')}` : '';
+}
+
 function debugEventMetaText(event) {
   return [
     debugTimeText(event.ts),
@@ -98,6 +107,7 @@ function debugEventMetaText(event) {
     Number.isFinite(event.frameBytes) ? `rx ${event.frameBytes} B` : '',
     Number.isFinite(event.bytes) && event.bytes !== event.frameBytes ? `data ${event.bytes} B` : '',
     Number.isFinite(event.responseBytes) ? `${event.responseBytes} B rx` : '',
+    debugPhaseTimingText(event),
     debugEventStatusText(event),
     event.source ? `source: ${event.source}` : '',
     event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
@@ -113,6 +123,7 @@ function debugEventLineText(event) {
   const sseMeta = event.type === 'sse'
     ? [
       Number.isFinite(event.frameBytes) ? `rx=${event.frameBytes}B` : '',
+      debugPhaseTimingText(event),
     ].filter(Boolean).join(' ')
     : '';
   const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';

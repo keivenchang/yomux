@@ -1122,6 +1122,7 @@
   "yoagent.chatEmpty": "{name} से पूछें कि चल रहे AI agents क्या कर रहे हैं।",
   "yoagent.chatFailed": "chat विफल: {error}",
   "yoagent.chatPlaceholder": "Agents, repos, फ़ाइलें, CI, blockers के बारे में पूछें...",
+  "yoagent.chatTooLarge": "बातचीत फिर से शुरू करने के लिए बहुत बड़ी है। YO!agent ने नया थ्रेड आज़माया; अगर विफलता जारी रहे तो बातचीत साफ़ करें का उपयोग करें।",
   "yoagent.clear": "बातचीत साफ़ करें",
   "yoagent.conversationLoadFailed": "YO!agent बातचीत लोड नहीं हुई: {error}",
   "yoagent.emptyGlobal": "अभी तक कोई AI agent activity नहीं मिली।",

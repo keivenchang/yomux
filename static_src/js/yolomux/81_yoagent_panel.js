@@ -1158,9 +1158,17 @@ function yoagentChatNetworkError(error) {
   return error instanceof TypeError || /failed to fetch|networkerror|load failed|fetch failed/i.test(text);
 }
 
+function yoagentChatRequestTooLargeError(error) {
+  const text = `${error?.status || ''} ${error?.statusText || ''} ${error?.message || error || ''} ${JSON.stringify(error?.payload || {})}`;
+  return /\b413\b|request entity too large|request body too large|payload too large|entity too large/i.test(text);
+}
+
 function yoagentChatErrorMessage(error) {
   if (yoagentChatNetworkError(error)) {
     return t('yoagent.networkError');
+  }
+  if (yoagentChatRequestTooLargeError(error)) {
+    return t('yoagent.chatTooLarge');
   }
   return t('yoagent.chatFailed', {error: error?.message || error});
 }

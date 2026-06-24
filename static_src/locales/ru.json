@@ -1121,6 +1121,7 @@
   "yoagent.chatDisabled": "Укажите backend Claude или Codex в Настройках для чата.",
   "yoagent.chatEmpty": "Спросите {name}, что делают запущенные ИИ-агенты.",
   "yoagent.chatFailed": "чат не удался: {error}",
+  "yoagent.chatTooLarge": "Разговор слишком большой, чтобы его возобновить. YO!agent попробовал новый поток; используйте Очистить разговор, если ошибка повторяется.",
   "yoagent.chatPlaceholder": "Спросите об агентах, репозиториях, файлах, CI, блокировках...",
   "yoagent.clear": "Очистить разговор",
   "yoagent.conversationLoadFailed": "не удалось загрузить разговор YO!agent: {error}",

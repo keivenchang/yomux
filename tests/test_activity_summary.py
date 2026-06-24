@@ -351,6 +351,8 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "YOLOmux concepts:" in prompt
     assert "Pane" in prompt
     assert "Context sourcing chain" in prompt
+    assert "rg -M 2000 --max-columns 2000" in prompt
+    assert "broad `cat` or `rg` across generated files" in prompt
     assert "M static/yolomux.js" in prompt
     assert "YO!agent skill `work-next`" in prompt
     assert "old1" not in prompt
