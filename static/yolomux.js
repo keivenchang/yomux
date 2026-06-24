@@ -6202,12 +6202,6 @@ function attentionAnimationStyle(now = Date.now(), durationMs = redReminderMs, p
   return `${property}: ${attentionAnimationDelay(now, durationMs)}`;
 }
 
-function agentAlternateAnimationStyle() {
-  const now = Date.now();
-  const duration = Math.max(1, Number(redReminderMs) || 1) * 2;
-  return `${attentionAnimationStyle(now)}; ${attentionAnimationStyle(now, duration, '--agent-alternate-animation-delay')}`;
-}
-
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
   node.classList?.toggle?.('attention-pulse', active === true);
@@ -13448,7 +13442,7 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const pid = Number(options.pid);
   const nameText = text;
   const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
-  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {
@@ -13458,7 +13452,8 @@ function tabberSessionChromeHtml(data) {
   const state = sessionState(session, info);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
-  return `<span class="${classes}" data-tabber-session-chrome="shared">${tmuxPaneTabHtml(session, info, state, auto)}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+  const tabHtml = stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto));
+  return `<span class="${classes}" data-tabber-session-chrome="shared">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
 }
 
 function bindTabberSessionChrome(row, session) {
@@ -13538,8 +13533,10 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     data.branchText ? `branch: ${data.branchText}` : '',
     data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
-  if (titleParts.length) row.setAttribute('title', titleParts.join('\n'));
-  else row.removeAttribute('title');
+  const titleText = titleParts.join('\n');
+  if (titleText) row.dataset.tabberTitle = titleText;
+  else delete row.dataset.tabberTitle;
+  row.removeAttribute('title');
   const windowAgentIconHtml = data.type === 'window' && ['claude', 'codex'].includes(data.agentKey)
     ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)}))
     : '';
@@ -14087,8 +14084,8 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 }
 
 function agentWindowStatusDotHtml(item) {
-  if (!item || item.state === 'working') return '';
-  if (!['attention', 'cooldown'].includes(item.state)) return '';
+  if (!item) return '';
+  if (!['attention', 'cooldown', 'working'].includes(item.state)) return '';
   const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
@@ -14110,15 +14107,11 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     'agent-window-agent-icon',
     `agent-window-activity-icon--${stateKey}`,
     `agent-window-agent-icon--${stateKey}`,
-    item?.state === 'working' || item?.state === 'active' || item?.state === 'attention' || item?.state === 'cooldown' ? 'heartbeat-pulse' : '',
+    item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
   const markerHtml = agentWindowStatusDotHtml(item);
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = tone === 'working' || tone === 'active'
-    ? statusIndicatorToneStyle(tone)
-    : ['attention', 'cooldown'].includes(tone)
-      ? ` style="${agentAlternateAnimationStyle()}"`
-      : '';
+  const style = ['working', 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
   return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
 }
 

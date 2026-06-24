@@ -2729,9 +2729,7 @@ body.app-vw-lte-760 .share-result-meta {
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
   border-radius: var(--radius-control);
-  transform-origin: center;
-  animation: yolo-marker-rotate var(--yolo-rotation-duration, 20s) linear infinite;
-  animation-delay: var(--yolo-rotate-delay, 0s);
+  /* No rotation: the About wordmark YO is static now (the glowing working ball is the only YO motion). */
 }
 .about-brand-lo {
   color: var(--brand-green);

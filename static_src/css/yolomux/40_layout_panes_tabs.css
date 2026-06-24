@@ -1760,6 +1760,14 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   color: var(--bad);
   text-shadow: 0 0 0 var(--bad), 0 0 6px rgb(var(--attention-ring-rgb, 255 51 71) / 0.85);
 }
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--working {
+  color: var(--pr-status-passing);
+  text-shadow: 0 0 0 var(--pr-status-passing), 0 0 4px rgb(var(--attention-ring-rgb, 82 210 115) / 0.45);
+}
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--cooldown {
+  color: var(--accent-gold);
+  text-shadow: 0 0 0 var(--accent-gold), 0 0 6px rgb(var(--attention-ring-rgb, 245 197 66) / 0.72);
+}
 .terminal-tab {
   flex: 0 1 auto;
   max-width: 72px;

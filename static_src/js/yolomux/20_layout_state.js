@@ -1758,12 +1758,6 @@ function attentionAnimationStyle(now = Date.now(), durationMs = redReminderMs, p
   return `${property}: ${attentionAnimationDelay(now, durationMs)}`;
 }
 
-function agentAlternateAnimationStyle() {
-  const now = Date.now();
-  const duration = Math.max(1, Number(redReminderMs) || 1) * 2;
-  return `${attentionAnimationStyle(now)}; ${attentionAnimationStyle(now, duration, '--agent-alternate-animation-delay')}`;
-}
-
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
   node.classList?.toggle?.('attention-pulse', active === true);

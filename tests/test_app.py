@@ -25,7 +25,7 @@ from yolomux_lib.yoagent import transports as transport_module
 
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
 PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus" / "captures"
-pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")
+pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
 
 
 def test_session_http_guards_use_shared_decorator():

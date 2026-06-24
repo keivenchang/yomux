@@ -1365,9 +1365,12 @@ async function runTabberSuite() {
     const inactiveSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '2');
     assert.ok(activeSessionRow, 'A5: rendered rows include the focused session');
     assert.ok(inactiveSessionRow, 'A5: rendered rows include an inactive session');
+    assert.equal(rows.every(r => r.nativeTitle === ''), true, 'Tabber rows do not show native browser titles in addition to the custom Tabber hover');
+    assert.equal(/ title="/.test((activeSessionRow.nameHtml || '').split('<div class="session-popover"')[0]), false, 'visible Tabber tab chrome strips nested native title hovers');
     assert.ok(activeSessionRow.classes.includes('tabber-active-session'), 'A5: the current tmux session row gets the active-session class');
     const activeWindowRow = rows.find(r => r.type === 'window' && /^0:claude/.test(r.name));
     assert.ok(activeWindowRow?.nameHtml.includes('tabber-window-pid') && activeWindowRow.nameHtml.includes('(pid=12345)'), 'PD4: agent Tabber rows render canonical index:agent plus pid');
+    assert.equal(/ title="/.test(activeWindowRow?.nameHtml || ''), false, 'visible Tabber window chrome strips nested native title hovers');
     assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux window row exposes aria-current');
     assert.equal(activeWindowRow?.date, 'working for 3h 45m', 'TD1: working agent Tabber rows use the shared state text with working duration');
     assert.equal(activeWindowRow?.dateHtml.includes('attention-pulse'), false, 'working Tabber status text does not inherit the ASK? attention pulse');
@@ -1445,7 +1448,7 @@ async function runTabberSuite() {
     assert.equal(/tabber-window-label[^>]*>[\s\S]*tabber-window-text[^>]*>0:claude<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), false, 'Claude icon no longer renders after the canonical window name');
     assert.equal(/agent-icon[\s\S]*tabber-window-text[^>]*>1:bash</.test(shellWindowRow?.nameHtml || ''), false, 'bash Tabber rows do not gain a leading agent icon');
     assert.ok(/agent-icon claude[^"]*agent-window-agent-icon--working[\s\S]*tabber-window-text[^>]*>0:claude<[\s\S]*tabber-window-pid/.test(claudeWindowRow?.nameHtml || ''), 'working agent glyph stays before the canonical window name and pid stays after it');
-    assert.equal(/status-indicator--dot[\s\S]*tabber-window-text[^>]*>0:claude<|tabber-window-text[^>]*>0:claude<[\s\S]*status-indicator--dot[\s\S]*tabber-window-pid/.test(claudeWindowRow?.nameHtml || ''), false, 'working Tabber rows do not render a competing status dot around the label');
+    assert.ok(/agent-window-agent-icon--working[\s\S]*?status-indicator--dot[\s\S]*?status-indicator--working[\s\S]*?tabber-window-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'working Tabber rows render the green status ball (a working-tone status dot) beside the static agent symbol');
     api.setFileExplorerTreeSortModeForTest('newest');
     api.setTabberActivityForTest({activity: {'1:1': {last_user_input_ts: 99999}, '1:0': {last_user_input_ts: 1}}});
     api.setTabberCollapsedForTest(['/s_1']);

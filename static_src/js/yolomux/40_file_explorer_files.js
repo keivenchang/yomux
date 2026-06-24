@@ -3665,7 +3665,7 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const pid = Number(options.pid);
   const nameText = text;
   const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
-  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {
@@ -3675,7 +3675,8 @@ function tabberSessionChromeHtml(data) {
   const state = sessionState(session, info);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
-  return `<span class="${classes}" data-tabber-session-chrome="shared">${tmuxPaneTabHtml(session, info, state, auto)}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+  const tabHtml = stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto));
+  return `<span class="${classes}" data-tabber-session-chrome="shared">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
 }
 
 function bindTabberSessionChrome(row, session) {
@@ -3755,8 +3756,10 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     data.branchText ? `branch: ${data.branchText}` : '',
     data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
-  if (titleParts.length) row.setAttribute('title', titleParts.join('\n'));
-  else row.removeAttribute('title');
+  const titleText = titleParts.join('\n');
+  if (titleText) row.dataset.tabberTitle = titleText;
+  else delete row.dataset.tabberTitle;
+  row.removeAttribute('title');
   const windowAgentIconHtml = data.type === 'window' && ['claude', 'codex'].includes(data.agentKey)
     ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)}))
     : '';

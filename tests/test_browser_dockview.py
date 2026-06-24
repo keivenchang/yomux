@@ -860,7 +860,7 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
     assert query == "session=1&window=2"
 
 
-def test_dockview_window_bar_working_agent_glyph_uses_shared_pulse(browser, tmp_path):
+def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_glowing_ball(browser, tmp_path):
     transcript_sessions = {
         "1": {
             "panes": [
@@ -904,11 +904,14 @@ def test_dockview_window_bar_working_agent_glyph_uses_shared_pulse(browser, tmp_
     )
     metrics = browser.execute_script(
         """
-        const working = document.querySelector('.agent-window-agent-icon--working');
+        const workingButton = Array.from(document.querySelectorAll('.tmux-window-button')).find(button => button.textContent.includes('1:codex'));
+        const working = workingButton?.querySelector('.agent-window-agent-icon--working');
         const idleButton = Array.from(document.querySelectorAll('.tmux-window-button')).find(button => button.textContent.includes('2:claude'));
         const idleIcon = idleButton?.querySelector('.agent-icon.claude');
         const idleDot = idleButton?.querySelector('.agent-window-status-dot');
+        const workingDot = workingButton?.querySelector('.agent-window-status-dot');
         const workingStyle = getComputedStyle(working);
+        const workingDotStyle = workingDot ? getComputedStyle(workingDot) : null;
         return {
           workingText: (working?.textContent || '').trim(),
           idleText: idleDot?.textContent || '',
@@ -923,7 +926,9 @@ def test_dockview_window_bar_working_agent_glyph_uses_shared_pulse(browser, tmp_
           idleHasState: idleDot?.classList.contains('status-indicator--idle') || false,
           workingAnimationName: workingStyle.animationName,
           workingOpacity: workingStyle.opacity,
-          workingGlowRgb: workingStyle.getPropertyValue('--agent-working-glow-rgb').trim(),
+          workingDotExists: !!workingDot,
+          workingDotIsWorkingTone: workingDot?.classList.contains('status-indicator--working') || false,
+          workingDotAnimationName: workingDotStyle ? workingDotStyle.animationName : null,
           idleDotCount: idleButton?.querySelectorAll('.agent-window-status-dot').length || 0,
         };
         """
@@ -940,10 +945,14 @@ def test_dockview_window_bar_working_agent_glyph_uses_shared_pulse(browser, tmp_
     assert metrics["idleHasDot"] is False, metrics
     assert metrics["idleHasState"] is False, metrics
     assert metrics["idleDotCount"] == 0, metrics
-    assert metrics["workingAnimationName"] == "agent-symbol-glow-cadence", metrics
-    # The blink dips to ~0.15 at its off frame, so accept the full animated opacity range.
-    assert 0.0 <= float(metrics["workingOpacity"]) <= 1, metrics
-    assert metrics["workingGlowRgb"] == "102 126 248", metrics
+    # Working = static AI symbol + a SEPARATE green ball that glows (side by side, not alternating).
+    # The symbol does not animate; a green working-tone status dot sits beside it and glows via
+    # attention-ring-fade.
+    assert metrics["workingAnimationName"] == "none", metrics
+    assert float(metrics["workingOpacity"]) == 1, metrics
+    assert metrics["workingDotExists"] is True, metrics
+    assert metrics["workingDotIsWorkingTone"] is True, metrics
+    assert metrics["workingDotAnimationName"] == "attention-ring-fade", metrics
 
 
 def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_path):
@@ -1004,16 +1013,11 @@ def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_
     assert metrics["dotText"] == "", metrics
 
 
-def test_dockview_working_glyph_animation_advances_over_wall_clock_time(browser, tmp_path):
-    # Regression for "the working glyph does not visibly pulse". The earlier fixture test only froze
-    # the animation at two fractions and pixel-diffed them, which proves the keyframes differ but NOT
-    # that the live app actually animates over time. Here we boot the real app and assert the
-    # live-computed opacity sweeps across the cycle on its own over wall-clock time.
-    #
-    # We read getComputedStyle().opacity rather than diffing screenshots on purpose: the pulse
-    # animates opacity+transform, which Chrome runs on the compositor; headless captureScreenshot
-    # serves a static composited frame, so an over-time screenshot diff reads ~0 even while the
-    # animation is genuinely running. The main-thread computed opacity is the reliable live signal.
+def test_dockview_working_glyph_shows_static_symbol_and_glowing_green_ball(browser, tmp_path):
+    # Working = a STATIC agent symbol followed by a SEPARATE green ball that glows (side by side, not
+    # alternating, not a symbol pulse). Assert the symbol does not animate, the wrapper lays them out
+    # inline (flex, not the attention/cooldown grid stack), and a green working-tone status dot glows
+    # via attention-ring-fade (infinite, running).
     transcript_sessions = {
         "1": {
             "panes": [
@@ -1047,53 +1051,38 @@ def test_dockview_working_glyph_animation_advances_over_wall_clock_time(browser,
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return !!document.querySelector('.agent-window-agent-icon--working')")
     )
-    base = browser.execute_script(
+    data = browser.execute_script(
         """
-        const el = document.querySelector('.agent-window-agent-icon--working');
-        el.setAttribute('data-pulse-probe', '1');
-        const cs = getComputedStyle(el);
+        const sym = document.querySelector('.agent-window-agent-icon--working');
+        const wrap = sym?.closest('.agent-window-activity');
+        const dot = wrap?.querySelector('.agent-window-status-dot');
+        const ss = getComputedStyle(sym);
+        const ds = dot ? getComputedStyle(dot) : null;
         return {
           reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
-          animationName: cs.animationName,
-          animationDuration: cs.animationDuration,
-          animationIterationCount: cs.animationIterationCount,
-          animationPlayState: cs.animationPlayState,
-          animationCount: el.getAnimations({subtree: false}).length,
-          opacity: cs.opacity,
+          wrapDisplay: wrap ? getComputedStyle(wrap).display : null,
+          symAnimationName: ss.animationName,
+          symOpacity: ss.opacity,
+          dotPresent: !!dot,
+          dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
+          dotAnimationName: ds ? ds.animationName : null,
+          dotIterationCount: ds ? ds.animationIterationCount : null,
+          dotPlayState: ds ? ds.animationPlayState : null,
         };
         """
     )
-    if base["reducedMotion"]:
-        pytest.skip("browser prefers reduced motion")
-    assert base["animationName"] == "agent-symbol-glow-cadence", base
-    assert base["animationDuration"] == "1.55s", base
-    assert base["animationIterationCount"] == "infinite", base
-    assert base["animationPlayState"] == "running", base
-    assert base["animationCount"] == 1, base
-
-    # Sample the live-computed opacity across ~2 full 1.55s cycles. Do NOT set currentTime.
-    opacities = [float(base["opacity"])]
-    stamps = [True]
-    for _ in range(12):
-        time.sleep(0.25)
-        sample = browser.execute_script(
-            """
-            const el = document.querySelector('.agent-window-agent-icon--working');
-            return {opacity: getComputedStyle(el).opacity, stamped: el.getAttribute('data-pulse-probe') === '1'};
-            """
-        )
-        opacities.append(float(sample["opacity"]))
-        stamps.append(bool(sample["stamped"]))
-    low = min(opacities)
-    high = max(opacities)
-    # The rest frame is opacity 0.46 and the peak frame is opacity 1; over two cycles the live value
-    # must reach both ends, proving the animation is actually advancing rather than stuck on a frame.
-    assert low <= 0.6, (low, high, opacities)
-    assert high >= 0.95, (low, high, opacities)
-    assert (high - low) >= 0.3, (low, high, opacities)
-    # The animated node must persist (not be replaced/restarted every activity poll); the phase
-    # anchor only helps if the same element keeps animating.
-    assert all(stamps), stamps
+    # Symbol is static.
+    assert data["symAnimationName"] == "none", data
+    assert float(data["symOpacity"]) == 1, data
+    # Laid out side by side (base inline-flex), not the attention/cooldown grid stack.
+    assert data["wrapDisplay"] == "flex", data
+    # A separate green ball is present and glows.
+    assert data["dotPresent"] is True, data
+    assert data["dotWorkingTone"] is True, data
+    if not data["reducedMotion"]:
+        assert data["dotAnimationName"] == "attention-ring-fade", data
+        assert data["dotIterationCount"] == "infinite", data
+        assert data["dotPlayState"] == "running", data
 
 
 def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp_path):
@@ -1141,37 +1130,35 @@ def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp
         data = browser.execute_script(
             """
             const working = document.querySelector('.agent-window-agent-icon--working');
-            const idle = document.querySelector('.agent-window-agent-icon:not(.agent-window-agent-icon--working):not(.agent-window-agent-icon--active)');
-            const ws = getComputedStyle(working);
-            const is = idle ? getComputedStyle(idle) : null;
+            const workingWrap = working?.closest('.agent-window-activity');
+            const workingDot = workingWrap?.querySelector('.agent-window-status-dot');
+            const idleSym = document.querySelector('.agent-window-agent-icon:not(.agent-window-agent-icon--working):not(.agent-window-agent-icon--active)');
+            const idleWrap = idleSym?.closest('.agent-window-activity');
+            const idleDot = idleWrap?.querySelector('.agent-window-status-dot');
             return {
               reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
-              workingAnimationName: ws.animationName,
-              workingBoxShadow: ws.boxShadow,
-              workingFilter: ws.filter,
-              workingGlowRgb: ws.getPropertyValue('--agent-working-glow-rgb').trim(),
-              idleFound: !!idle,
-              idleBoxShadow: is ? is.boxShadow : null,
-              idleFilter: is ? is.filter : null,
+              workingSymStatic: working ? getComputedStyle(working).animationName === 'none' : null,
+              workingDotPresent: !!workingDot,
+              workingDotWorkingTone: workingDot ? workingDot.classList.contains('status-indicator--working') : false,
+              idleFound: !!idleSym,
+              idleDotPresent: !!idleDot,
             };
             """
         )
         assert data["reducedMotion"] is True, data
-        # Animation is disabled under reduced motion (no motion), as intended.
-        assert data["workingAnimationName"] == "none", data
-        # ...but a steady glow ring keeps the working glyph distinct from idle.
+        # Symbol is static (it never animates regardless of motion).
+        assert data["workingSymStatic"] is True, data
+        # The separate green ball keeps working distinct from idle even with motion disabled: working
+        # renders a green working-tone status dot, idle renders no status dot.
+        assert data["workingDotPresent"] is True, data
+        assert data["workingDotWorkingTone"] is True, data
         assert data["idleFound"] is True, data
-        assert data["workingBoxShadow"] != "none", data
-        assert data["idleBoxShadow"] == "none", data
-        assert data["workingBoxShadow"] != data["idleBoxShadow"], data
-        # The glow color comes from the per-agent token (codex blue), not a hard-coded value.
-        assert data["workingGlowRgb"] == "102 126 248", data
-        assert "102, 126, 248" in data["workingBoxShadow"], data
+        assert data["idleDotPresent"] is False, data
     finally:
         browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
 
 
-def test_dockview_tab_symbol_pulses_when_session_works_via_screen_proxy(browser, tmp_path):
+def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(browser, tmp_path):
     # Regression for "Tab 7 is YO'ing but the AI symbol is not blinking". The YO ball spins on
     # sessionYoloIsWorking (per-window 'working' OR screen.key==='working'), but the dock-tab AI symbol
     # used to render only when a per-window agent row reported state==='working' exactly. When the working
@@ -1218,20 +1205,27 @@ def test_dockview_tab_symbol_pulses_when_session_works_via_screen_proxy(browser,
         const tab = document.querySelector('.dockview-pane-tab, .pane-tab');
         const marker = tab && tab.querySelector('.session-agent-activity-marker');
         const sym = tab && tab.querySelector('.session-agent-activity-marker .agent-window-agent-icon--working');
+        const dot = tab && tab.querySelector('.session-agent-activity-marker .agent-window-status-dot');
         return {
           tabFound: !!tab,
           hasMarker: !!marker,
           hasWorkingSymbol: !!sym,
-          symbolAnimationName: sym ? getComputedStyle(sym).animationName : null,
+          symbolStatic: sym ? getComputedStyle(sym).animationName === 'none' : null,
           symbolIsClaude: sym ? sym.classList.contains('claude') : null,
+          dotPresent: !!dot,
+          dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
         };
         """
     )
+    # The working indicator (static symbol + green ball) renders even when working comes only from
+    # the screen-state proxy.
     assert data["tabFound"] is True, data
     assert data["hasMarker"] is True, data
     assert data["hasWorkingSymbol"] is True, data
-    assert data["symbolAnimationName"] == "agent-symbol-glow-cadence", data
+    assert data["symbolStatic"] is True, data
     assert data["symbolIsClaude"] is True, data
+    assert data["dotPresent"] is True, data
+    assert data["dotWorkingTone"] is True, data
 
 
 def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):

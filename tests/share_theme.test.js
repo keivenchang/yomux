@@ -2606,7 +2606,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.modal\.share-open \.modal-dialog\s*\{[\s\S]*?max-height:\s*min\(80vh/.test(preferencesCss), 'YO!share modal is bounded to the viewport so long active-share lists cannot push the create form offscreen');
     assert.ok(/\.modal\.share-open #modalBody\s*\{[\s\S]*?overflow:\s*auto/.test(preferencesCss), 'YO!share modal body scrolls inside the shared modal panel');
     assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
-    assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
+    assert.equal(/\.about-brand-yo\s*\{[^}]*animation:\s*yolo-marker-rotate/.test(preferencesCss), false, 'About YO glyph is static — it no longer rotates (the working green ball is the only YO motion)');
     assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');
     assert.ok(/\.about-brand-lo\s*\{[\s\S]*color:\s*var\(--brand-green\)/.test(preferencesCss), 'About LO stays brand green regardless of active color');
     const brandCss = fs.readFileSync('static/brand.css', 'utf8');

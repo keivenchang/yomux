@@ -326,8 +326,8 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 }
 
 function agentWindowStatusDotHtml(item) {
-  if (!item || item.state === 'working') return '';
-  if (!['attention', 'cooldown'].includes(item.state)) return '';
+  if (!item) return '';
+  if (!['attention', 'cooldown', 'working'].includes(item.state)) return '';
   const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
@@ -349,15 +349,11 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     'agent-window-agent-icon',
     `agent-window-activity-icon--${stateKey}`,
     `agent-window-agent-icon--${stateKey}`,
-    item?.state === 'working' || item?.state === 'active' || item?.state === 'attention' || item?.state === 'cooldown' ? 'heartbeat-pulse' : '',
+    item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
   const markerHtml = agentWindowStatusDotHtml(item);
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = tone === 'working' || tone === 'active'
-    ? statusIndicatorToneStyle(tone)
-    : ['attention', 'cooldown'].includes(tone)
-      ? ` style="${agentAlternateAnimationStyle()}"`
-      : '';
+  const style = ['working', 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
   return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
 }
 

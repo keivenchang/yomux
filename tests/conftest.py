@@ -72,6 +72,13 @@ def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")
 
 
+@pytest.fixture
+def isolated_tmux_socket(monkeypatch, tmp_path):
+    sock_dir = tmp_path / "tmux"
+    sock_dir.mkdir()
+    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(sock_dir / "s"))
+
+
 def local_socket_capability() -> tuple[bool, str]:
     global _SOCKET_AVAILABILITY
     if _SOCKET_AVAILABILITY is not None:

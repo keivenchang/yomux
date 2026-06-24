@@ -23,87 +23,35 @@ _CODEX_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
 </svg>"""
 
 
-def _working_agent_glyph_html(kind, element_id):
+def _agent_status_glyph_html(kind, state, element_id):
     svg = _CLAUDE_WORKING_ICON_SVG if kind == "claude" else _CODEX_WORKING_ICON_SVG
-    label = "Claude working" if kind == "claude" else "Codex working"
+    label = f"{'Claude' if kind == 'claude' else 'Codex'} {state}"
+    dot_classes = [
+        "status-indicator",
+        "status-indicator--dot",
+        f"status-indicator--{state}",
+        "heartbeat-pulse",
+        "agent-window-activity-icon",
+        "agent-window-status-dot",
+        f"agent-window-activity-icon--{state}",
+    ]
+    if state in ("attention", "cooldown"):
+        dot_classes.append("attention-pulse")
     return f"""
-      <span class="agent-window-activity agent-window-activity--working" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
-        <span id="{element_id}" class="agent-icon {kind} agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--working agent-window-agent-icon--working heartbeat-pulse" aria-label="{label}" title="{label}">
+      <span class="agent-window-activity agent-window-activity--{state}" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
+        <span id="{element_id}" class="agent-icon {kind} agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--{state} agent-window-agent-icon--{state}" aria-label="{label}" title="{label}">
           {svg}
         </span>
+        <span id="{element_id}-dot" class="{' '.join(dot_classes)}" aria-hidden="true">●</span>
       </span>
     """
 
 
-def _freeze_agent_glyph_animation(browser, selector, fraction):
-    return browser.execute_async_script(
-        """
-        const selector = arguments[0];
-        const fraction = arguments[1];
-        const done = arguments[2];
-        const element = document.querySelector(selector);
-        if (!element) {
-          done({missing: true, selector});
-          return;
-        }
-        const animations = element.getAnimations({subtree: false});
-        for (const animation of animations) {
-          const timing = animation.effect.getComputedTiming();
-          animation.pause();
-          animation.currentTime = Number(timing.duration || 0) * fraction;
-        }
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const rect = element.getBoundingClientRect();
-          const style = getComputedStyle(element);
-          done({
-            selector,
-            animationCount: animations.length,
-            animationName: style.animationName,
-            animationPlayState: style.animationPlayState,
-            opacity: style.opacity,
-            reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
-            rect: {left: rect.left, top: rect.top, width: rect.width, height: rect.height},
-          });
-        }));
-        """,
-        selector,
-        fraction,
-    )
+def _working_agent_glyph_html(kind, element_id):
+    return _agent_status_glyph_html(kind, "working", element_id)
 
 
-def _rendered_frame_delta(rest_image, peak_image, dpr, rest_rect, peak_rect):
-    left = max(0, int((min(rest_rect["left"], peak_rect["left"]) - 6) * dpr))
-    top = max(0, int((min(rest_rect["top"], peak_rect["top"]) - 6) * dpr))
-    right = min(rest_image.width, int((max(rest_rect["left"] + rest_rect["width"], peak_rect["left"] + peak_rect["width"]) + 6) * dpr))
-    bottom = min(rest_image.height, int((max(rest_rect["top"] + rest_rect["height"], peak_rect["top"] + peak_rect["height"]) + 6) * dpr))
-    pixels = 0
-    changed = 0
-    strong = 0
-    total_delta = 0
-    max_delta = 0
-    for y in range(top, bottom):
-        for x in range(left, right):
-            rest_pixel = rest_image.getpixel((x, y))
-            peak_pixel = peak_image.getpixel((x, y))
-            delta = sum(abs(left_channel - right_channel) for left_channel, right_channel in zip(rest_pixel, peak_pixel))
-            pixels += 1
-            total_delta += delta
-            max_delta = max(max_delta, delta)
-            if delta >= 25:
-                changed += 1
-            if delta >= 75:
-                strong += 1
-    return {
-        "pixels": pixels,
-        "changed": changed,
-        "strong": strong,
-        "meanDelta": total_delta / max(pixels, 1),
-        "maxDelta": max_delta,
-        "sampleRect": {"left": left, "top": top, "right": right, "bottom": bottom},
-    }
-
-
-def test_working_agent_glyphs_visibly_pulse_in_tabs_windows_and_tabber(browser, tmp_path):
+def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_windows_and_tabber(browser, tmp_path):
     page = tmp_path / "working-agent-visible-pulse.html"
     page.write_text(page_html(f"""
       <section class="agent-pulse-fixture">
@@ -164,7 +112,7 @@ def test_working_agent_glyphs_visibly_pulse_in_tabs_windows_and_tabber(browser, 
       }
     """), encoding="utf-8")
     browser.get(page.as_uri())
-    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+    reduced = browser.execute_script("return matchMedia('(prefers-reduced-motion: reduce)').matches")
     targets = {
         "dock-tab Claude": "#dock-claude",
         "window-bar Claude": "#window-claude",
@@ -173,20 +121,136 @@ def test_working_agent_glyphs_visibly_pulse_in_tabs_windows_and_tabber(browser, 
     }
     results = {}
     for label, selector in targets.items():
-        rest = _freeze_agent_glyph_animation(browser, selector, 0)
-        if rest.get("reducedMotion"):
-            pytest.skip("browser prefers reduced motion")
-        rest_image = browser_screenshot_rgb(browser)
-        peak = _freeze_agent_glyph_animation(browser, selector, 0.5)
-        peak_image = browser_screenshot_rgb(browser)
-        delta = _rendered_frame_delta(rest_image, peak_image, dpr, rest["rect"], peak["rect"])
-        results[label] = {"rest": rest, "peak": peak, "delta": delta}
-        assert rest["animationCount"] >= 1, results
-        assert rest["animationName"] == "agent-symbol-glow-cadence", results
-        assert peak["animationName"] == "agent-symbol-glow-cadence", results
-        assert delta["changed"] >= 250, results
-        assert delta["strong"] >= 160, results
-        assert delta["meanDelta"] >= 80, results
+        info = browser.execute_script(
+            """
+            const sym = document.querySelector(arguments[0]);
+            const dot = document.querySelector(arguments[0] + '-dot');
+            return {
+              symAnim: getComputedStyle(sym).animationName,
+              symOpacity: getComputedStyle(sym).opacity,
+              dotPresent: !!dot,
+              dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
+              dotAnim: dot ? getComputedStyle(dot).animationName : null,
+            };
+            """,
+            selector,
+        )
+        results[label] = info
+        # On every surface the agent symbol is STATIC (no pulse) ...
+        assert info["symAnim"] == "none", results
+        assert float(info["symOpacity"]) == 1, results
+        # ... and a separate green ball sits beside it and glows (green via attention-ring-fade).
+        assert info["dotPresent"] is True, results
+        assert info["dotWorkingTone"] is True, results
+        if not reduced:
+            assert info["dotAnim"] == "attention-ring-fade", results
+
+
+def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_path):
+    page = tmp_path / "agent-status-split-surfaces.html"
+    page.write_text(page_html(f"""
+      <section class="agent-status-split-fixture">
+        <button id="dock-tab" class="pane-tab active">
+          <span class="pane-tab-core">
+            <span class="session-yolo-marker">YO</span>
+            <span class="session-agent-activity-marker">{_agent_status_glyph_html("claude", "attention", "dock-attention")}</span>
+            <span class="session-button-prefix">8002b ASK?</span>
+          </span>
+        </button>
+        <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
+          <span class="file-tree-name">
+            <span class="tabber-session-tab active" data-tabber-session-chrome="shared">
+              <span class="pane-tab-core">
+                <span class="session-yolo-marker">YO</span>
+                <span class="session-agent-activity-marker">{_agent_status_glyph_html("codex", "working", "tabber-session-working")}</span>
+                <span class="session-button-prefix">8001</span>
+              </span>
+            </span>
+          </span>
+        </div>
+        <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
+          <span class="file-tree-name">
+            <span class="tabber-window-label">
+              {_agent_status_glyph_html("claude", "cooldown", "tabber-window-cooldown")}
+              <span class="tabber-window-text">0:claude</span>
+            </span>
+          </span>
+        </div>
+        <div id="info-pane" class="pane-info-bar">
+          <button id="info-button" class="tab tmux-window-button active">
+            <span class="tmux-window-name-label">
+              {_agent_status_glyph_html("codex", "attention", "info-attention")}
+              <span class="tmux-window-name-text">1:codex</span>
+            </span>
+          </button>
+        </div>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 28px; background: #17270e; color: #e8eef8; font: 18px sans-serif; }
+      .agent-status-split-fixture { display: grid; justify-items: start; gap: 20px; }
+      #dock-tab { width: 360px; height: 30px; }
+      .file-tree-row.tabber-row { width: 520px; padding: 4px 8px; background: #2c3340; }
+      .pane-info-bar { display: flex; width: 520px; padding: 4px; background: #202633; }
+      .tmux-window-button { width: max-content; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const read = id => {
+          const icon = document.getElementById(id);
+          const dot = document.getElementById(id + '-dot');
+          const wrap = icon?.closest('.agent-window-activity');
+          const iconRect = icon.getBoundingClientRect();
+          const dotRect = dot.getBoundingClientRect();
+          const wrapStyle = getComputedStyle(wrap);
+          const iconStyle = getComputedStyle(icon);
+          const dotStyle = getComputedStyle(dot);
+          return {
+            wrapDisplay: wrapStyle.display,
+            iconAnimation: iconStyle.animationName,
+            iconOpacity: iconStyle.opacity,
+            dotAnimation: dotStyle.animationName,
+            dotPlayState: dotStyle.animationPlayState,
+            dotIterationCount: dotStyle.animationIterationCount,
+            dotColor: dotStyle.color,
+            dotToneWorking: dot.classList.contains('status-indicator--working'),
+            dotToneAttention: dot.classList.contains('status-indicator--attention'),
+            dotToneCooldown: dot.classList.contains('status-indicator--cooldown'),
+            greenGlowAlpha: dotStyle.getPropertyValue('--attention-ring-peak-glow-alpha').trim(),
+            greenGlowSize: dotStyle.getPropertyValue('--attention-ring-peak-glow-size').trim(),
+            iconLeft: iconRect.left,
+            iconRight: iconRect.right,
+            dotLeft: dotRect.left,
+            dotRight: dotRect.right,
+            centerDy: Math.abs((iconRect.top + iconRect.height / 2) - (dotRect.top + dotRect.height / 2)),
+          };
+        };
+        return {
+          dockAttention: read('dock-attention'),
+          tabberSessionWorking: read('tabber-session-working'),
+          tabberWindowCooldown: read('tabber-window-cooldown'),
+          infoAttention: read('info-attention'),
+          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        };
+        """
+    )
+    for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention"):
+        item = metrics[name]
+        assert item["wrapDisplay"] == "flex", (name, metrics)
+        assert item["iconAnimation"] == "none", (name, metrics)
+        assert float(item["iconOpacity"]) == 1, (name, metrics)
+        assert item["dotLeft"] >= item["iconRight"] - 0.5, (name, metrics)
+        assert item["centerDy"] <= 1, (name, metrics)
+        if not metrics["reducedMotion"]:
+            assert item["dotAnimation"] == "attention-ring-fade", (name, metrics)
+            assert item["dotPlayState"] == "running", (name, metrics)
+            assert item["dotIterationCount"] == "infinite", (name, metrics)
+    assert metrics["dockAttention"]["dotToneAttention"] is True, metrics
+    assert metrics["infoAttention"]["dotToneAttention"] is True, metrics
+    assert metrics["tabberSessionWorking"]["dotToneWorking"] is True, metrics
+    assert metrics["tabberWindowCooldown"]["dotToneCooldown"] is True, metrics
+    assert float(metrics["tabberSessionWorking"]["greenGlowAlpha"]) < float(metrics["dockAttention"]["greenGlowAlpha"]), metrics
+    assert float(metrics["tabberSessionWorking"]["greenGlowSize"].rstrip("px")) < float(metrics["dockAttention"]["greenGlowSize"].rstrip("px")), metrics
 
 
 def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_path):
@@ -236,19 +300,19 @@ def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_
         assert dot["borderTopWidth"] != "0px", {dot_id: dot}
 
 
-def test_agent_attention_and_cooldown_dot_overlays_ai_icon(browser, tmp_path):
-    page = tmp_path / "agent-status-overlay.html"
+def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(browser, tmp_path):
+    page = tmp_path / "agent-status-split.html"
     page.write_text(page_html("""
-      <div id="base" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.42s; --agent-alternate-animation-delay:-0.84s">
-        <span id="base-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention heartbeat-pulse">
+      <div id="base" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.42s">
+        <span id="base-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
         </span>
         <span id="base-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse">●</span>
       </div>
       <button id="info-button" class="tab tmux-window-button">
         <span class="tmux-window-name-label">
-          <span id="info" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.37s; --agent-alternate-animation-delay:-0.74s">
-            <span id="info-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention heartbeat-pulse">
+          <span id="info" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.37s">
+            <span id="info-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
             </span>
             <span id="info-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse">●</span>
@@ -258,8 +322,8 @@ def test_agent_attention_and_cooldown_dot_overlays_ai_icon(browser, tmp_path):
       </button>
       <div class="file-tree-row tabber-row" style="--file-explorer-font-size: 14px;">
         <span class="tabber-window-label">
-          <span id="tabber" class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s; --agent-alternate-animation-delay:-1.82s">
-            <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown heartbeat-pulse">
+          <span id="tabber" class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s">
+            <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#667ef8" d="M3 12a9 9 0 1 0 18 0A9 9 0 0 0 3 12z"/></svg>
             </span>
             <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse">●</span>
@@ -275,7 +339,7 @@ def test_agent_attention_and_cooldown_dot_overlays_ai_icon(browser, tmp_path):
         """
         const rect = id => {
           const r = document.getElementById(id).getBoundingClientRect();
-          return {left: r.left, top: r.top, width: r.width, height: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2};
+          return {left: r.left, top: r.top, width: r.width, height: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2, right: r.right};
         };
         const read = (rootId, iconId, dotId) => {
           const root = document.getElementById(rootId);
@@ -288,22 +352,12 @@ def test_agent_attention_and_cooldown_dot_overlays_ai_icon(browser, tmp_path):
           return {
             rootDisplay: rootStyle.display,
             rootWidth: rootRect.width,
-            iconGridArea: iconStyle.gridArea,
-            dotGridArea: dotStyle.gridArea,
             iconAnimation: iconStyle.animationName,
             dotAnimation: dotStyle.animationName,
-            iconDelay: iconStyle.animationDelay,
             dotDelay: dotStyle.animationDelay,
-            iconDuration: iconStyle.animationDuration,
-            dotDuration: dotStyle.animationDuration,
-            pulseDuration: getComputedStyle(document.documentElement).getPropertyValue('--pulse-duration').trim(),
             rootDelayVar: rootStyle.getPropertyValue('--attention-animation-delay').trim(),
-            iconDelayVar: iconStyle.getPropertyValue('--attention-animation-delay').trim(),
             dotDelayVar: dotStyle.getPropertyValue('--attention-animation-delay').trim(),
-            rootAlternateDelayVar: rootStyle.getPropertyValue('--agent-alternate-animation-delay').trim(),
-            iconAlternateDelayVar: iconStyle.getPropertyValue('--agent-alternate-animation-delay').trim(),
-            dotAlternateDelayVar: dotStyle.getPropertyValue('--agent-alternate-animation-delay').trim(),
-            centerDx: Math.abs(iconRect.cx - dotRect.cx),
+            leftGap: dotRect.left - iconRect.right,
             centerDy: Math.abs(iconRect.cy - dotRect.cy),
             dotWithinRoot: dotRect.left >= rootRect.left - 1 && dotRect.left + dotRect.width <= rootRect.left + rootRect.width + 1,
           };
@@ -316,24 +370,16 @@ def test_agent_attention_and_cooldown_dot_overlays_ai_icon(browser, tmp_path):
         """
     )
     for name, item in metrics.items():
-        icon_duration = float(item["iconDuration"].rstrip("s"))
-        pulse_duration = float(item["pulseDuration"].rstrip("s"))
-        assert item["rootDisplay"] in ("grid", "inline-grid"), (name, item)
-        assert item["iconGridArea"] == "agent-status", (name, item)
-        assert item["dotGridArea"] == "agent-status", (name, item)
-        assert item["centerDx"] <= 0.75, (name, item)
-        assert item["centerDy"] <= 0.75, (name, item)
+        assert item["rootDisplay"] == "flex", (name, item)
+        assert item["iconAnimation"] == "none", (name, item)
+        assert item["dotAnimation"] == "attention-ring-fade", (name, item)
+        assert item["leftGap"] >= -0.5, (name, item)
+        assert item["centerDy"] <= 1, (name, item)
         assert item["dotWithinRoot"] is True, (name, item)
-        assert item["dotAnimation"] == "agent-status-dot-alternate", (name, item)
-        assert item["iconDelay"] == item["dotDelay"], (name, item)
-        assert item["iconDuration"] == item["dotDuration"], (name, item)
-        assert abs(icon_duration - (pulse_duration * 2)) < 0.01, (name, item)
-        assert item["iconDelayVar"] == item["dotDelayVar"] == item["rootDelayVar"], (name, item)
-        assert item["iconAlternateDelayVar"] == item["dotAlternateDelayVar"] == item["rootAlternateDelayVar"], (name, item)
-        assert item["iconDelay"] == item["rootAlternateDelayVar"], (name, item)
-    assert metrics["base"]["iconAnimation"] == "agent-symbol-status-alternate"
-    assert metrics["info"]["rootWidth"] <= 16
-    assert metrics["tabber"]["rootWidth"] >= 14
+        assert item["dotDelay"] == item["rootDelayVar"], (name, item)
+        assert item["dotDelayVar"] == item["rootDelayVar"], (name, item)
+    assert metrics["info"]["rootWidth"] >= 24
+    assert metrics["tabber"]["rootWidth"] >= 28
 
 
 def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser, tmp_path):
@@ -1551,6 +1597,75 @@ def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
     assert metrics["tabber"]["boxShadow"] == metrics["normal"]["boxShadow"], metrics
     assert metrics["tabber"]["borderRadius"] == metrics["normal"]["borderRadius"], metrics
     assert metrics["tabber"]["transform"] == metrics["normal"]["transform"], metrics
+
+
+def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=__files__,1&layout=row@34(left,right)&tabs=left:__files__;right:1",
+        sessions=["1"],
+        file_explorer_open_intent="1",
+        transcript_sessions={
+            "1": {
+                "current_path": "/home/test/yolomux.dev8001",
+                "git_root": "/home/test/yolomux.dev8001",
+                "branch": "hover-fix",
+                "panes": [
+                    {
+                        "window": "0",
+                        "pane": "0",
+                        "window_name": "claude",
+                        "process_label": "claude",
+                        "command": "claude",
+                        "window_active": True,
+                        "active": True,
+                        "pid": 12345,
+                    },
+                ],
+            },
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof setFileExplorerMode === 'function'
+              && document.querySelector('#panel-__files__ .file-explorer-mode-toggle') !== null;
+            """
+        )
+    )
+    browser.execute_script("setFileExplorerMode('tabber', {force: true});")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('.file-tree-row[data-tabber-type]').length >= 2"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const rows = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type]'));
+        const visibleChromeTitles = rows.flatMap(row => Array.from(row.querySelectorAll('[title]'))
+          .filter(node => !node.closest('.session-popover'))
+          .map(node => node.outerHTML.slice(0, 220)));
+        const sessionTab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
+        const customPopover = sessionTab?.querySelector(':scope > .session-popover');
+        return {
+          rowCount: rows.length,
+          rowTitles: rows.map(row => row.getAttribute('title') || ''),
+          dataTitles: rows.map(row => row.dataset.tabberTitle || ''),
+          visibleChromeTitles,
+          sessionTabHasTitle: sessionTab?.hasAttribute('title') || false,
+          customPopoverPresent: !!customPopover,
+          customPopoverRole: customPopover?.getAttribute('role') || '',
+        };
+        """
+    )
+    assert metrics["rowCount"] >= 2, metrics
+    assert all(title == "" for title in metrics["rowTitles"]), metrics
+    assert any(title for title in metrics["dataTitles"]), metrics
+    assert metrics["visibleChromeTitles"] == [], metrics
+    assert metrics["sessionTabHasTitle"] is False, metrics
+    assert metrics["customPopoverPresent"] is True, metrics
+    assert metrics["customPopoverRole"] == "tooltip", metrics
 
 
 def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):
@@ -4010,10 +4125,10 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert browser.execute_script("return document.getElementById('editor-close').getBoundingClientRect().width") <= 24
     assert browser.execute_script("return document.getElementById('tab-minimize').getBoundingClientRect().width") >= 18
     assert browser.execute_script("return getComputedStyle(document.getElementById('collapsed-preferences')).display") == "none"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationName") == "yolo-marker-rotate"
+    # The working YO marker no longer rotates — the glowing green ball beside the agent symbol is the
+    # working indicator now.
+    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationName") == "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').content") == "none"
-    # working YO spins SLOWLY at the yolo_rotate_ms setting (20s), not a fast hardcoded value.
-    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationDuration") == "20s"
     # An idle (auto-on, NON-working) marker must be STATIC — no ambient rotation.
     assert browser.execute_script("return getComputedStyle(document.getElementById('idle-yolo')).animationName") == "none"
     triangle_sizes = browser.execute_script(
