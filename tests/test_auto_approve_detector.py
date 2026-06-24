@@ -1554,7 +1554,7 @@ def test_ask_user_question_survives_claude_focus_warning_and_bottom_composer():
 
 
 def test_ask_user_question_accessible_menu_no_selector_is_needs_input():
-    visible_text = fixture_visible_text(PROMPT_CORPUS_DIR / "captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml")
+    visible_text = fixture_visible_text(PROMPT_CORPUS_DIR / "captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml")
 
     state = prompt_detector.agent_screen_state(visible_text)
 
@@ -1591,12 +1591,7 @@ def test_codex_numbered_question_survives_fixed_bottom_composer_footer():
 
 @pytest.mark.parametrize("fixture_path,expected_question,expected_selected", [
     (
-        "synthetic/ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621.yaml",
-        "Which verifier mode should we use?",
-        0,
-    ),
-    (
-        "captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml",
+        "captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml",
         "Which verifier mode should we use?",
         0,
     ),

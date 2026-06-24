@@ -345,9 +345,13 @@ def print_startup(state: dict[str, str] | None = None) -> None:
             return
         if state is not None:
             state.pop("claude_startup_header_pending", None)
-            state["claude_startup_header_visible"] = "1"
         reset_terminal_scroll_region(preserve_cursor=True)
-        render_contiguous_claude_startup_header(state)
+        if launched_from_interactive_shell():
+            print_flowing_claude_startup_header(state)
+        else:
+            if state is not None:
+                state["claude_startup_header_visible"] = "1"
+            render_contiguous_claude_startup_header(state)
         render_live_composer("", 0, state=state)
         return
     print_minimal_header()
@@ -397,6 +401,38 @@ def minimal_header_lines(width: int | None = None) -> list[str]:
 def print_minimal_header() -> None:
     for line in minimal_header_lines():
         print(line)
+
+
+def parent_process_command() -> str:
+    proc_comm = Path(f"/proc/{os.getppid()}/comm")
+    if not proc_comm.exists():
+        return ""
+    try:
+        return proc_comm.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def launched_from_interactive_shell() -> bool:
+    return parent_process_command() in {"bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh"}
+
+
+def claude_composer_footer_line_count(state: dict[str, str] | None = None) -> int:
+    return max(0, terminal_height() - live_composer_footer_top("", False, state) + 1)
+
+
+def print_flowing_claude_startup_header(state: dict[str, str] | None = None) -> None:
+    width = terminal_width()
+    for line in minimal_header_lines(width):
+        sys.stdout.write(clip_display_width(line, width) + "\n")
+    # When launched from an existing shell, startup must behave like normal output:
+    # scroll the old prompt/history out of the footer-owned rows instead of
+    # repainting absolute rows above it.
+    sys.stdout.write("\n" * claude_composer_footer_line_count(state))
+    if state is not None:
+        for key in ("claude_startup_header_visible", "claude_startup_header_top", "claude_startup_header_bottom"):
+            state.pop(key, None)
+    sys.stdout.flush()
 
 
 def render_contiguous_claude_startup_header(state: dict[str, str] | None = None) -> None:
@@ -2296,6 +2332,30 @@ def clear_codex_startup_on_first_input(state: dict[str, str] | None = None) -> b
     return True
 
 
+def release_claude_startup_header_for_submitted_prompt(bottom: int, state: dict[str, str] | None = None) -> None:
+    if PERMISSION_STYLE == "codex" or state is None:
+        return
+    if state.get("claude_startup_header_visible") != "1":
+        return
+    try:
+        header_bottom = int(state.get("claude_startup_header_bottom", "0") or 0)
+    except ValueError:
+        header_bottom = 0
+    if header_bottom >= bottom:
+        # The startup header is real transcript chrome after the first input. Scroll
+        # once to make room for the submitted prompt instead of repainting the header.
+        sys.stdout.write(f"\x1b[{bottom};1H\n")
+    for key in ("claude_startup_header_visible", "claude_startup_header_top", "claude_startup_header_bottom"):
+        state.pop(key, None)
+
+
+def prepare_output_region_for_submitted_prompt(state: dict[str, str] | None = None) -> int:
+    clear_codex_startup_on_first_input(state)
+    bottom = set_output_region_above_live_composer("", False, state, preserve_cursor=False)
+    release_claude_startup_header_for_submitted_prompt(bottom, state)
+    return bottom
+
+
 def codex_startup_inline_composer_pending(state: dict[str, str] | None = None, text: str = "") -> bool:
     if PERMISSION_STYLE != "codex" or state is None or text:
         return False
@@ -2312,8 +2372,7 @@ def prepare_output_above_live_composer_footer(state: dict[str, str] | None = Non
 def commit_live_composer_text(text: str, state: dict[str, str] | None = None) -> None:
     if not text.strip():
         return
-    clear_codex_startup_on_first_input(state)
-    bottom = set_output_region_above_live_composer("", False, state, preserve_cursor=False)
+    bottom = prepare_output_region_for_submitted_prompt(state)
     prompt_display, _status_display, _cursor_col = composer_render_parts(text, len(text), state=state)
     sys.stdout.write(f"\x1b[{bottom};1H\x1b[2K{prompt_display}\n")
     if PERMISSION_STYLE == "codex":
@@ -2875,12 +2934,11 @@ def print_mock_fixture_list(
     only_idle: bool = False,
 ) -> None:
     print(f"{transcript_bullet()} Mock fixture cases")
-    width = terminal_width()
     for case in mock_fixture_list_cases(include_shared, include_idle, only_idle):
         outcome = mock_fixture_outcome_label(case)
         cursor = case.get("cursor") if isinstance(case.get("cursor"), dict) else {}
         line = f"  ⎿  {case['case_name']} [{outcome}] {Path(case['path']).name} {mock_fixture_cursor_label(cursor)}"
-        print(clipped(line, width))
+        print(line)
     print()
 
 

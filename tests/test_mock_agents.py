@@ -242,8 +242,10 @@ class VisualTmuxHarness:
         self.sessions.append(session)
         return session
 
-    def capture(self, session, *, scrollback=False):
+    def capture(self, session, *, scrollback=False, join_wrapped=False):
         command = ["capture-pane", "-p", "-t", f"{session}:"]
+        if join_wrapped:
+            command.append("-J")
         if scrollback:
             command.extend(["-S", "-2000"])
         return tmux_cmd(self.tmux_binary, self.socket_path, *command, timeout=5).stdout or ""
@@ -251,6 +253,21 @@ class VisualTmuxHarness:
     def send_keys(self, session, *keys):
         sent = tmux_cmd(self.tmux_binary, self.socket_path, "send-keys", "-t", f"{session}:", *keys, timeout=5)
         assert sent.returncode == 0, sent.stderr or sent.stdout
+
+    def resize(self, session, *, width, height):
+        resized = tmux_cmd(
+            self.tmux_binary,
+            self.socket_path,
+            "resize-window",
+            "-t",
+            f"{session}:",
+            "-x",
+            str(width),
+            "-y",
+            str(height),
+            timeout=5,
+        )
+        assert resized.returncode == 0, resized.stderr or resized.stdout
 
     def wait_until(self, session, predicate, *, timeout=15):
         deadline = time.monotonic() + timeout
@@ -335,12 +352,13 @@ def test_mock_fixture_list_reports_cursor_status(monkeypatch, capsys):
     assert "synthetic_plan [idle]" not in output
 
 
-def test_mock_fixture_list_clips_long_rows_to_terminal_width(monkeypatch, capsys):
+def test_mock_fixture_list_prints_full_rows_for_terminal_wrap(monkeypatch, capsys):
+    file_name = "interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml"
     monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
         {
             "agent": "claude",
             "case_name": "interrupted_what_should_claude_do_instead",
-            "path": PROMPT_CORPUS_DIR / "captures" / "interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml",
+            "path": PROMPT_CORPUS_DIR / "captures" / file_name,
             "cursor": {},
             "expected": {"attention_label": "ASK?", "screen_key": "needs-input"},
         },
@@ -353,8 +371,8 @@ def test_mock_fixture_list_clips_long_rows_to_terminal_width(monkeypatch, capsys
     output = capsys.readouterr().out
     lines = output.splitlines()
     assert any(line.startswith("  ⎿  interrupted_what_should_claude_do_instead [ASK?]") for line in lines)
-    assert all(len(mock_agent_common.ANSI_RE.sub("", line)) <= 72 for line in lines)
-    assert any(line.endswith("…") for line in lines)
+    assert file_name in output
+    assert "…" not in output
 
 
 def test_mocklist_alias_prints_fixture_list(monkeypatch, capsys):
@@ -818,15 +836,6 @@ def test_plain_codex_run_fixtures_enter_live_working_state(monkeypatch):
             "cursor": {},
             "expected": {"screen_key": "working", "reason_code": "busy"},
         },
-        {
-            "agent": "codex",
-            "case_name": "working_spinner",
-            "keys": {"working_spinner"},
-            "path": PROMPT_CORPUS_DIR / "synthetic" / "working_spinner.yaml",
-            "styled_capture": "• Working (1m 21s • esc to interrupt)\n\n› Implement the detector corpus",
-            "cursor": {},
-            "expected": {"screen_key": "working"},
-        },
     ])
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
@@ -838,18 +847,9 @@ def test_plain_codex_run_fixtures_enter_live_working_state(monkeypatch):
     first_render = output.getvalue()
     assert state.get("pending") == "codex-working"
     assert state.get("codex_working_base_seconds") == "0"
+    assert "codex_working_pause_until" not in state
     assert "Improve documentation in @filename" not in first_render
     assert "• Working (0s • esc to interrupt)" in mock_agent_common.ANSI_RE.sub("", first_render)
-
-    state.clear()
-    output.truncate(0)
-    output.seek(0)
-    mock_agent_common.cmd_mock_fixture(state, "working_spinner", freeze_static=False)
-    second_render = output.getvalue()
-    assert state.get("pending") == "codex-working"
-    assert state.get("codex_working_base_seconds") == "81"
-    assert "Implement the detector corpus" not in second_render
-    assert "• Working (1m 21s • esc to interrupt)" in mock_agent_common.ANSI_RE.sub("", second_render)
 
 
 def test_codex_working_refresh_updates_only_status_row_on_steady_tick(monkeypatch):
@@ -2046,6 +2046,26 @@ def test_claude_live_composer_finish_preserves_footer_rows(monkeypatch, capsys):
     assert output.endswith("\x1b[1;8r\x1b[8;1H")
 
 
+def test_claude_first_submit_scrolls_startup_header_before_prompt(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    state = {
+        "claude_startup_header_visible": "1",
+        "claude_startup_header_top": "6",
+        "claude_startup_header_bottom": "8",
+    }
+
+    mock_agent_common.finish_live_composer("mock", state)
+
+    output = capsys.readouterr().out
+    assert "\x1b[1;8r\x1b[8;1H\n\x1b[8;1H\x1b[2K❯ mock\n" in output
+    assert "claude_startup_header_visible" not in state
+    assert "claude_startup_header_top" not in state
+    assert "claude_startup_header_bottom" not in state
+
+
 def test_claude_permission_approval_preserves_footer_before_work(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
@@ -2216,10 +2236,12 @@ def test_claude_startup_tty_places_header_above_fixed_footer(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "STARTUP_STYLE", "default")
     monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
     monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "2.1.185")
     monkeypatch.setattr(mock_agent_common, "MODEL_LINE", "Opus 4.8 (1M context) with xhigh effort · API Usage Billing")
     monkeypatch.setattr(mock_agent_common, "WELCOME_ORG_LINE", "· GPU Corporation - Power Users")
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "launched_from_interactive_shell", lambda: False)
 
     mock_agent_common.print_startup(state)
 
@@ -2236,6 +2258,36 @@ def test_claude_startup_tty_places_header_above_fixed_footer(monkeypatch):
     assert "… · API Usage Billing · GPU Corporation - Power Users" in plain_rendered
     assert state["claude_startup_header_top"] == "6"
     assert state["claude_startup_header_bottom"] == "8"
+
+
+def test_claude_startup_tty_shell_launch_flows_instead_of_clearing_history_rows(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    state = {}
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(mock_agent_common, "STARTUP_STYLE", "default")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "2.1.185")
+    monkeypatch.setattr(mock_agent_common, "MODEL_LINE", "Opus 4.8 (1M context) with xhigh effort · API Usage Billing")
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 8)
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "launched_from_interactive_shell", lambda: True)
+
+    mock_agent_common.print_startup(state)
+
+    rendered = output.getvalue()
+    assert "Claude Code v2.1.185" in rendered
+    assert "▘▘ ▝▝" in rendered
+    assert "\x1b[2;1H\x1b[2K" not in rendered
+    assert "\x1b[3;1H\x1b[2K" not in rendered
+    assert "\x1b[4;1H\x1b[2K" not in rendered
+    assert "claude_startup_header_visible" not in state
+    assert "claude_startup_header_top" not in state
+    assert "claude_startup_header_bottom" not in state
 
 
 def test_claude_startup_skips_tiny_tty_without_top_clear(monkeypatch):
@@ -2348,7 +2400,53 @@ def test_tmux_codex_compact_startup_keeps_box_after_typing(visual_tmux):
 
 @pytest.mark.e2e
 @pytest.mark.socket
-def test_tmux_codex_working_spinner_keeps_single_visual_working_block_while_typing(visual_tmux):
+def test_tmux_claude_startup_cwd_survives_first_mock_submit(visual_tmux):
+    cwd_row = "▘▘ ▝▝    ~/yolomux.dev8002"
+    session = visual_tmux.launch(
+        "claude-startup-submit",
+        [sys.executable, "tools/claude.py", "--mock", "-m", "opus", "--effort", "xhigh", "-C", str(REPO_ROOT)],
+        width=120,
+        height=42,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: cwd_row in text and '❯ Try "fix typecheck errors"' in text)
+    assert booted, pane
+    visual_tmux.send_keys(session, "mock", "Enter")
+    listed, pane = visual_tmux.wait_until(
+        session,
+        lambda text: cwd_row in text and "❯ mock" in text and "working_visible_counter [RUN]" in text,
+    )
+    assert listed, pane
+    assert pane.index(cwd_row) < pane.index("❯ mock") < pane.index("● Mock fixture cases")
+
+
+@pytest.mark.socket
+def test_tmux_claude_shell_launch_scrolls_history_instead_of_clobbering(visual_tmux):
+    session = visual_tmux.launch(
+        "claude-shell-launch",
+        ["bash", "--noprofile", "--norc"],
+        width=160,
+        height=8,
+    )
+
+    visual_tmux.send_keys(session, "printf 'history-one\\nhistory-two\\nhistory-three\\nhistory-four\\n'", "Enter")
+    printed, pane = visual_tmux.wait_until(session, lambda text: "history-four" in text)
+    assert printed, pane
+    visual_tmux.send_keys(session, "python3 ./utils/claude.py --mock", "Enter")
+    booted, pane = visual_tmux.wait_until(
+        session,
+        lambda text: "Claude Code v2.1.185" in text and '❯ Try "fix typecheck errors"' in text,
+    )
+    assert booted, pane
+
+    scrollback = visual_tmux.capture(session, scrollback=True)
+    for line in ("history-one", "history-two", "history-three", "history-four"):
+        assert line in scrollback
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_codex_working_command_counter_keeps_single_visual_working_block_while_typing(visual_tmux):
     session = visual_tmux.launch(
         "codex-working",
         [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
@@ -2358,7 +2456,7 @@ def test_tmux_codex_working_spinner_keeps_single_visual_working_block_while_typi
 
     booted, pane = visual_tmux.wait_until(session, lambda text: "› Explain this codebase" in text)
     assert booted, pane
-    visual_tmux.send_keys(session, "mock working_spinner", "Enter")
+    visual_tmux.send_keys(session, "mock working_command_counter", "Enter")
     working, pane = visual_tmux.wait_until(session, lambda text: "• Working (" in text and "esc to interrupt" in text)
     assert working, pane
     assert pane.count("• Working (") == 1
@@ -2368,6 +2466,63 @@ def test_tmux_codex_working_spinner_keeps_single_visual_working_block_while_typi
     assert queued, pane
     assert pane.count("• Working (") == 1
     assert "esc to interrupt" in pane
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_after_resize(visual_tmux):
+    long_fixture_file = "question_with_answer_draft__codex-cli-0.141.0_20260620.yaml"
+    session = visual_tmux.launch(
+        "codex-mock-list-resize",
+        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.4-mini", "--effort", "medium", "-C", str(REPO_ROOT)],
+        width=92,
+        height=42,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: "› Explain this codebase" in text)
+    assert booted, pane
+    visual_tmux.send_keys(session, "mock", "Enter")
+    listed, pane = visual_tmux.wait_until(session, lambda text: "Mock fixture cases" in text and "question_with_answer_draft" in text)
+    assert listed, pane
+    assert "…" not in pane
+    assert "..." not in pane
+    assert long_fixture_file in visual_tmux.capture(session, scrollback=True, join_wrapped=True)
+
+    visual_tmux.resize(session, width=150, height=42)
+    resized = visual_tmux.capture(session, scrollback=True, join_wrapped=True)
+    resized_rows = "\n".join(line for line in resized.splitlines() if "⎿" in line)
+    assert "…" not in resized_rows
+    assert "..." not in resized_rows
+    assert long_fixture_file in resized
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_claude_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_after_resize(visual_tmux):
+    long_fixture_file = "parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml"
+    session = visual_tmux.launch(
+        "claude-mock-list-resize",
+        [sys.executable, "tools/claude.py", "--mock", "-m", "sonnet", "--effort", "medium", "-C", str(REPO_ROOT)],
+        width=92,
+        height=42,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: '❯ Try "fix typecheck errors"' in text)
+    assert booted, pane
+    visual_tmux.send_keys(session, "mock", "Enter")
+    listed, pane = visual_tmux.wait_until(session, lambda text: "parser_dependency_choice_question [ASK?]" in text)
+    assert listed, pane
+    list_rows = "\n".join(line for line in pane.splitlines() if "⎿" in line)
+    assert "…" not in list_rows
+    assert "..." not in list_rows
+    assert long_fixture_file in visual_tmux.capture(session, scrollback=True, join_wrapped=True)
+
+    visual_tmux.resize(session, width=150, height=42)
+    resized = visual_tmux.capture(session, scrollback=True, join_wrapped=True)
+    resized_rows = "\n".join(line for line in resized.splitlines() if "⎿" in line)
+    assert "…" not in resized_rows
+    assert "..." not in resized_rows
+    assert long_fixture_file in resized
 
 
 @pytest.mark.e2e

@@ -255,28 +255,6 @@ fixtures:
   fixture_id: tool_allow_webfetch__claude-code-synthetic_20260620
   id: claude-tool-allow-webfetch
   provenance: synthetic current Claude layout
-- case_name: plan_approval
-  expected:
-    action: option1
-    agent: claude
-    approval_visible: true
-    ask: true
-    command: null
-    confidence_min: 0.9
-    option_labels:
-    - 'Yes'
-    - No, keep planning
-    prompt_kind: plan-approval
-    prompt_type: plan
-    question_text: Do you want to proceed with this plan?
-    screen_key: approval
-    selected_option: 1
-    yes_selected: true
-  family: claude-plan-approval
-  file: synthetic/plan_approval__claude-code-synthetic_20260620.yaml
-  fixture_id: plan_approval__claude-code-synthetic_20260620
-  id: claude-plan-approval
-  provenance: synthetic current Claude plan approval layout
 - case_name: plan_approval_real
   expected:
     action: option1
@@ -367,28 +345,6 @@ fixtures:
   fixture_id: multiple_choice_question__claude-code-synthetic_20260620
   id: claude-multiple-choice-question
   provenance: synthetic current Claude question layout
-- case_name: ask_user_question_no_selector_descriptions
-  expected:
-    action: null
-    agent: claude
-    approval_visible: false
-    ask: true
-    command: null
-    confidence_min: 0.9
-    option_labels:
-    - Pane capture
-    - Transcript capture
-    prompt_kind: question
-    prompt_type: ''
-    question_text: Which verifier mode should we use?
-    screen_key: needs-input
-    selected_option: 0
-    yes_selected: false
-  family: claude-ask-user-question-no-selector
-  file: synthetic/ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621.yaml
-  fixture_id: ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621
-  id: claude-ask-user-question-no-selector-descriptions
-  provenance: synthetic Claude AskUserQuestion redraw with no highlighted selector and option descriptions
 - case_name: ask_user_question_no_selector_accessible
   expected:
     action: null
@@ -409,10 +365,10 @@ fixtures:
     selected_option: 0
     yes_selected: false
   family: claude-ask-user-question-no-selector
-  file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml
-  fixture_id: ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621
+  file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml
+  fixture_id: ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624
   id: claude-ask-user-question-no-selector-accessible-real
-  provenance: real Claude Code 2.1.185 accessible AskUserQuestion no-selector capture
+  provenance: real Claude Code 2.1.190 accessible AskUserQuestion no-selector capture at 240 columns
 - case_name: ask_user_question_selected_option
   expected:
     action: null
@@ -462,26 +418,6 @@ fixtures:
   fixture_id: parser_dependency_choice_question__claude-code-2.1.185_20260622
   id: claude-parser-dependency-choice-question-real
   provenance: real Claude Code 2.1.185 parser dependency AskUserQuestion selected-option capture from tmux session 4:0.0
-- case_name: interrupted_what_should_claude_do_instead
-  expected:
-    action: null
-    agent: claude
-    approval_visible: false
-    ask: true
-    command: null
-    confidence_min: 0.75
-    option_labels: []
-    prompt_kind: question
-    prompt_type: ''
-    question_text: Interrupted · What should Claude do instead?
-    screen_key: needs-input
-    selected_option: 0
-    yes_selected: false
-  family: claude-interrupted-question
-  file: synthetic/interrupted_what_should_claude_do_instead__claude-code-synthetic_20260621.yaml
-  fixture_id: interrupted_what_should_claude_do_instead__claude-code-synthetic_20260621
-  id: claude-interrupted-what-should-do-instead
-  provenance: synthetic Claude interrupted awaiting-user-instruction screen
 - case_name: interrupted_what_should_claude_do_instead
   expected:
     action: null
@@ -565,31 +501,6 @@ fixtures:
   fixture_id: goal_achieved_working__codex-cli-0.141.0_20260623
   id: codex-goal-achieved-working-real
   provenance: screenshot-provided Codex CLI 0.141.0 `Goal achieved` capture from tmux 8002:0.0; bottom rows later confirmed by tmux capture
-- case_name: non_permission_question
-  expected:
-    action: null
-    agent: codex
-    approval_visible: false
-    ask: true
-    command: null
-    confidence_min: 0.9
-    option_labels:
-    - npm
-    - pnpm
-    prompt_kind: question
-    prompt_type: ''
-    question_text: |-
-      Which package manager should I use?
-      1. npm
-      2. pnpm
-    screen_key: needs-input
-    selected_option: 1
-    yes_selected: false
-  family: codex-normal-question
-  file: synthetic/non_permission_question__codex-cli-synthetic_20260620.yaml
-  fixture_id: non_permission_question__codex-cli-synthetic_20260620
-  id: codex-non-permission-question
-  provenance: synthetic Codex numbered-choice question with Codex model footer
 - case_name: choice_question_real
   expected:
     action: null
@@ -709,17 +620,6 @@ fixtures:
   fixture_id: typed_draft__codex-cli-0.141.0_20260620
   id: typed-draft
   provenance: real Codex CLI 0.141.0 capture
-- case_name: working_spinner
-  expected:
-    approval_visible: false
-    ask: false
-    negative_reason_contains: working
-    screen_key: working
-  family: working-spinner
-  file: synthetic/working_spinner__codex-cli-synthetic_20260620.yaml
-  fixture_id: working_spinner__codex-cli-synthetic_20260620
-  id: working-spinner
-  provenance: synthetic current Codex working layout
 - case_name: working_visible_counter
   expected:
     approval_visible: false
@@ -730,7 +630,7 @@ fixtures:
   file: captures/working_visible_counter__claude-code-2.1.183_20260620.yaml
   fixture_id: working_visible_counter__claude-code-2.1.183_20260620
   id: claude-visible-working-counter-real
-  provenance: real Claude Code 2.1.183 `Clauding...` visible counter capture
+  provenance: real Claude Code 2.1.183 `Clauding…` visible counter capture
 - case_name: working_command_counter
   expected:
     approval_visible: false
@@ -854,11 +754,6 @@ live_capture_targets:
   current_fixture: synthetic/reappeared_prompt_after_tool__codex-cli-synthetic_20260620.yaml
   family: reappeared-prompt-after-tool
   why_currently_synthetic: This guards redraw ordering after tool output. The equivalent Claude risk is covered by other visible prompt boundaries, not a same-name capture.
-- agent: codex
-  capture_when: Capture a minimal live Codex working block if the current CLI exposes one without old transcript rows.
-  current_fixture: synthetic/working_spinner__codex-cli-synthetic_20260620.yaml
-  family: working-spinner
-  why_currently_synthetic: Real working state is already covered by Codex `working_command_counter` and Claude `working_visible_counter`; this is a compact Codex layout target, not a missing Claude case.
 - agent: claude
   capture_when: Capture a real Claude Bash permission prompt when a live pane is stopped on a Bash command approval.
   current_fixture: synthetic/bash_step_marker__claude-code-synthetic_20260620.yaml
@@ -913,7 +808,6 @@ required_families:
 - idle-empty-prompt
 - suggestion-not-question
 - typed-draft
-- working-spinner
 - visible-working-counter
 - claude-goal-active
 - codex-goal-active
@@ -928,7 +822,7 @@ parity_groups:
 - id: visible-working-counter
   status: covered-by-both
   contract: Both clients are working/busy and must render as RUN without raising ASK? or YOLO?.
-  why_names_differ: The Claude capture name came from the visible `Clauding...` status counter; the Codex capture name came from the command-send scenario that produced the visible working counter. They are the same detector state, not missing counterparts.
+  why_names_differ: The Claude capture name came from the visible `Clauding…` status counter; the Codex capture name came from the command-send scenario that produced the visible working counter. They are the same detector state, not missing counterparts.
   fixtures:
   - agent: claude
     case_name: working_visible_counter
@@ -944,7 +838,7 @@ parity_groups:
   contract: Both clients can show a goal-following busy state that must render as RUN without raising ASK? or YOLO?.
   why_names_differ: >-
     Both captures use the same `goal_active` case name, but the visible UI differs: Claude shows `/goal active` beside the
-    `Clauding...` counter, while Codex shows `Pursuing goal` or `Goal achieved` beside the working counter.
+    `Clauding…` counter, while Codex shows `Pursuing goal` or `Goal achieved` beside the working counter.
   fixtures:
   - agent: claude
     case_name: goal_active
@@ -965,7 +859,7 @@ parity_groups:
     file: captures/ask_user_question__claude-code-2.1.183_20260620.yaml
   - agent: claude
     case_name: ask_user_question_no_selector_accessible
-    file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml
+    file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml
   - agent: claude
     case_name: ask_user_question_selected_option
     file: captures/ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml

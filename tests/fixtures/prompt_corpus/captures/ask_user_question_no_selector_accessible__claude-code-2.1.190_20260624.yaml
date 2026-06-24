@@ -1,0 +1,74 @@
+agent: claude
+capture_date: '2026-06-24'
+capture_mode: visible
+captured_at: '2026-06-24T17:58:23.942586+00:00'
+case_name: ask_user_question_no_selector_accessible
+claude_version: 2.1.190 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.190 (Claude Code)
+client_version_slug: claude-code-2.1.190
+codex_version: ''
+cursor:
+  character: ' '
+  current_command: claude
+  pane_in_mode: false
+  x: 43
+  y: 13
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: ASK?
+  composer_key: empty
+  reason_code: needs-input
+  screen_key: needs-input
+expected_screen_key: needs-input
+failures: []
+fixture_id: ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624
+fixture_scenario: ask_user_question_no_selector_accessible
+height: 40
+id: ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624
+include_scrollback: false
+launch_agent: ''
+launch_command: ''
+launched_session: ''
+mode: ''
+operations: []
+raw_capture: |
+  [Accessible screen reader mode: on]
+  Claude Code v2.1.190
+  Opus 4.8 with xhigh effort · API Usage Billing
+  ~/yolomux.dev8002
+  you: Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question with
+   no default option selected: Which verifier mode should we use? Options: Pane capture, Transcript
+  capture. Wait for my selection.
+   ☐ Verifier mode
+  Which verifier mode should we use?
+  menu: 1. Pane capture — Verify by capturing the tmux/terminal pane contents.
+  2. Transcript capture — Verify by capturing the session transcript.
+  3. Other
+  4. Chat about this
+  Enter selection [1-4], or Escape to cancel:
+ready_text: []
+send_lines: []
+source: real Claude Code accessible AskUserQuestion no-selector capture from wide tmux test-wide-ask-30bf57be:0.0
+styled_capture: |
+  [Accessible screen reader mode: on]
+  Claude Code v2.1.190
+  Opus 4.8 with xhigh effort · API Usage Billing
+  ~/yolomux.dev8002
+  you: Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question with
+   no default option selected: Which verifier mode should we use? Options: Pane capture, Transcript
+  capture. Wait for my selection.
+   ☐ Verifier mode
+  Which verifier mode should we use?
+  menu: 1. Pane capture — Verify by capturing the tmux/terminal pane contents.
+  2. Transcript capture — Verify by capturing the session transcript.
+  3. Other
+  4. Chat about this
+  Enter selection [1-4], or Escape to cancel:
+target: 'test-wide-ask-30bf57be:'
+tmux_socket: ''
+wait_text: []
+width: 240
