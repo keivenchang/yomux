@@ -539,6 +539,7 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
             borderTopStyle: style.borderTopStyle,
             borderTopWidth: style.borderTopWidth,
             delayVar: style.getPropertyValue('--attention-animation-delay').trim(),
+            peakGlowSize: style.getPropertyValue('--attention-ring-peak-glow-size').trim(),
             rest,
             peak,
             reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
@@ -571,6 +572,9 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
     assert metrics["working-dot"]["rest"]["color"] != metrics["working-dot"]["peak"]["color"], metrics["working-dot"]
     peak_rgb = [int(float(item)) for item in re.findall(r"\d+(?:\.\d+)?", metrics["working-dot"]["peak"]["color"])[:3]]
     assert peak_rgb[1] - peak_rgb[0] >= 90 and peak_rgb[1] - peak_rgb[2] >= 70, metrics["working-dot"]
+    working_peak_glow = float(metrics["working-dot"]["peakGlowSize"].replace("px", ""))
+    default_peak_glow = float(metrics["window-dot"]["peakGlowSize"].replace("px", ""))
+    assert working_peak_glow < default_peak_glow, metrics
     for dot_id in ("window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
         assert abs(metrics["working-dot"]["rest"]["rect"]["width"] - metrics[dot_id]["rest"]["rect"]["width"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
         assert abs(metrics["working-dot"]["rest"]["rect"]["height"] - metrics[dot_id]["rest"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
@@ -612,10 +616,15 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
         rest_score = _status_ball_tone_score(rest_screenshot, dpr, rest_rects[dot_id], peak_rects[dot_id], tone)
         peak_score = _status_ball_tone_score(peak_screenshot, dpr, rest_rects[dot_id], peak_rects[dot_id], tone)
         visual_scores[dot_id] = {"rest": rest_score, "peak": peak_score}
-        energy_ratio = 1.8 if dot_id == "working-dot" else 1.25
-        count_delta = 20 if dot_id == "working-dot" else 10
+        energy_ratio = 1.08 if dot_id == "working-dot" else 1.25
+        count_delta = 6 if dot_id == "working-dot" else 10
         assert peak_score["energy"] > rest_score["energy"] * energy_ratio, visual_scores
         assert peak_score["count"] > rest_score["count"] + count_delta, visual_scores
+    working_energy_delta = visual_scores["working-dot"]["peak"]["energy"] - visual_scores["working-dot"]["rest"]["energy"]
+    red_energy_delta = visual_scores["window-dot"]["peak"]["energy"] - visual_scores["window-dot"]["rest"]["energy"]
+    yellow_energy_delta = visual_scores["cooldown-dot"]["peak"]["energy"] - visual_scores["cooldown-dot"]["rest"]["energy"]
+    assert working_energy_delta < red_energy_delta, visual_scores
+    assert working_energy_delta < yellow_energy_delta, visual_scores
 
 
 def test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion(browser, tmp_path):

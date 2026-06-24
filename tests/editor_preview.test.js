@@ -183,7 +183,13 @@ async function runEditorPreviewSuite() {
     assert.equal(/display:\s*inline-grid/.test(dotBlock), false, 'status balls are not drawn as fixed inline-grid discs');
     assert.equal(/font-size:\s*0\s*;/.test(dotBlock), false, 'status balls keep a visible glyph font size');
     assert.ok(/\.status-indicator--dot\.status-indicator--working\.heartbeat-pulse\s*\{[\s\S]*animation-name:\s*attention-ring-fade,\s*working-ball-hard-flash/.test(sessionsCss), 'working balls use a color flash on top of the shared glow pulse, not a separate size path');
-    assert.ok(/@keyframes working-ball-hard-flash\s*\{[\s\S]*color:\s*var\(--pr-status-passing\)[\s\S]*color:\s*#35f06d/.test(sessionsCss), 'working ball flash is color-only and stays pure green');
+    const workingDotPulseBlock = sessionsCss.match(/\.status-indicator--dot\.status-indicator--working\.heartbeat-pulse\s*\{[^}]*\}/)?.[0] || '';
+    const pulsingDotDefaultsBlock = sessionsCss.match(/\.status-indicator--dot\.heartbeat-pulse\s*\{[^}]*\}/)?.[0] || '';
+    const cssNumber = (block, name) => Number(block.match(new RegExp(`${name}:\\s*([0-9.]+)`))?.[1]);
+    assert.ok(cssNumber(workingDotPulseBlock, '--attention-pulse-brightness-peak') < cssNumber(pulsingDotDefaultsBlock, '--attention-pulse-brightness-peak'), 'working green ball brightness pulse is quieter than the default red/yellow pulse');
+    assert.ok(cssNumber(workingDotPulseBlock, '--attention-ring-peak-glow-size') < cssNumber(pulsingDotDefaultsBlock, '--attention-ring-peak-glow-size'), 'working green ball glow is smaller than the default red/yellow glow');
+    assert.ok(cssNumber(workingDotPulseBlock, '--attention-ring-peak-glow-alpha') < cssNumber(pulsingDotDefaultsBlock, '--attention-ring-peak-glow-alpha'), 'working green ball glow alpha is lower than the default red/yellow glow');
+    assert.ok(/@keyframes working-ball-hard-flash\s*\{[\s\S]*color:\s*var\(--pr-status-passing\)[\s\S]*color:\s*#4be878/.test(sessionsCss), 'working ball flash is color-only and stays pure green');
     assert.equal(/#a9ff7a/.test(sessionsCss), false, 'working balls do not peak into the old yellow-lime tone');
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'the --active agent glyph keeps the glow-cadence; status states use a static symbol plus a glowing ball');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*display:\s*inline-flex[\s\S]*gap:\s*2px/.test(sessionsCss), 'agent status symbols and balls render side by side through the shared inline-flex activity wrapper');

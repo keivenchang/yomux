@@ -165,17 +165,17 @@
   animation-direction: normal;
 }
 .status-indicator--dot.status-indicator--working.heartbeat-pulse {
-  --attention-pulse-saturate-rest: 0.96;
-  --attention-pulse-saturate-peak: 1.18;
-  --attention-pulse-brightness-rest: 0.92;
-  --attention-pulse-brightness-peak: 1.16;
-  --attention-ring-border-rest-alpha: 0.28;
-  --attention-ring-border-peak-alpha: 0.74;
-  --attention-ring-rest-glow-alpha: 0.12;
-  --attention-ring-peak-outline-alpha: 0.32;
-  --attention-ring-peak-glow-alpha: 0.36;
-  --attention-ring-rest-glow-size: 3px;
-  --attention-ring-peak-glow-size: 14px;
+  --attention-pulse-saturate-rest: 1;
+  --attention-pulse-saturate-peak: 1.08;
+  --attention-pulse-brightness-rest: 0.96;
+  --attention-pulse-brightness-peak: 1.06;
+  --attention-ring-border-rest-alpha: 0.18;
+  --attention-ring-border-peak-alpha: 0.42;
+  --attention-ring-rest-glow-alpha: 0.06;
+  --attention-ring-peak-outline-alpha: 0.14;
+  --attention-ring-peak-glow-alpha: 0.18;
+  --attention-ring-rest-glow-size: 2px;
+  --attention-ring-peak-glow-size: 8px;
   border: 1px solid transparent;
   animation-name: attention-ring-fade, working-ball-hard-flash;
 }
@@ -335,7 +335,7 @@
     color: var(--pr-status-passing);
   }
   45%, 55% {
-    color: #35f06d;
+    color: #4be878;
   }
 }
 .attention-pulse {
