@@ -5878,6 +5878,7 @@ class TmuxWebtermApp:
         if info is None:
             return []
         activity = self.activity_snapshot_with_recency(activity_snapshot)
+        observed_ts = time.time()
         rows: list[dict[str, Any]] = []
         window_names = {str(pane.window or ""): str(pane.window_name or "") for pane in info.panes}
         path_records = self.agent_window_path_records(info, files_payload=files_payload)
@@ -5931,6 +5932,7 @@ class TmuxWebtermApp:
                 "working_elapsed_seconds": elapsed if state == "working" and elapsed >= 0 else None,
                 "idle_since": last_active_ts if state == "idle" and last_active_ts > 0 else None,
                 "last_active_ts": last_active_ts,
+                "observed_ts": observed_ts,
                 "screen_text": str(screen.get("text") or ""),
                 "status_tokens": screen.get("status_tokens") if isinstance(screen.get("status_tokens"), (int, float)) else None,
                 "_agent_order": agent_index,

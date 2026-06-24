@@ -936,6 +936,71 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
     assert capture_calls == [("%10", True), ("%11", True)]
 
 
+def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(monkeypatch, tmp_path):
+    claude_capture = yaml.safe_load((PROMOTED_CAPTURE_DIR / "working_visible_counter__claude-code-2.1.183_20260620.yaml").read_text(encoding="utf-8"))["raw_capture"]
+    codex_capture = yaml.safe_load((PROMOTED_CAPTURE_DIR / "working_command_counter__codex-cli-0.141.0_20260620.yaml").read_text(encoding="utf-8"))["raw_capture"]
+    pane0 = PaneInfo(
+        session="mock",
+        window="0",
+        window_name="claude",
+        pane="0",
+        pane_id="%claude",
+        target="%claude",
+        current_path=str(tmp_path),
+        command="python3",
+        active=True,
+        window_active=True,
+        title="claude.py",
+        pid=10,
+        process_label="claude",
+        process_label_pid=10,
+    )
+    pane1 = PaneInfo(
+        session="mock",
+        window="1",
+        window_name="codex",
+        pane="0",
+        pane_id="%codex",
+        target="%codex",
+        current_path=str(tmp_path),
+        command="python3",
+        active=True,
+        window_active=False,
+        title="codex.py",
+        pid=11,
+        process_label="codex",
+        process_label_pid=11,
+    )
+    info = SessionInfo(
+        session="mock",
+        panes=[pane0, pane1],
+        selected_pane=pane0,
+        agents=[
+            AgentInfo("mock", "claude", 10, "%claude", "python3 tools/claude.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+            AgentInfo("mock", "codex", 11, "%codex", "python3 tools/codex.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+        ],
+    )
+    captures = {"%claude": claude_capture, "%codex": codex_capture}
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, **_kwargs: captures[target])
+
+    before = time.time()
+    webapp = app_module.TmuxWebtermApp(["mock"])
+    try:
+        rows = webapp.agent_window_status_payloads("mock", info=info, discovered_sessions={"mock": info})
+    finally:
+        webapp.control_server.stop()
+    after = time.time()
+
+    by_kind = {row["kind"]: row for row in rows}
+    assert by_kind["claude"]["state"] == "working"
+    assert by_kind["claude"]["working_elapsed_seconds"] == 11.0
+    assert by_kind["claude"]["status_tokens"] == 471
+    assert by_kind["codex"]["state"] == "working"
+    assert by_kind["codex"]["working_elapsed_seconds"] == 0.0
+    assert before <= by_kind["claude"]["observed_ts"] <= after
+    assert before <= by_kind["codex"]["observed_ts"] <= after
+
+
 def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
     pane = PaneInfo(
         session="2",

@@ -426,16 +426,12 @@ function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveSta
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
+  const yoloHtml = yoloMarkerHtml(session, auto, {...options, yoloWorking: false, payload});
   const workingAgent = sessionWorkingAgentWindowForTab(session, info, payload);
   if (workingAgent) {
     const iconHtml = agentWindowActivityIconHtmlForStatus(workingAgent, workingAgent.kind, session);
     if (iconHtml) {
-      const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
-      const stateText = auto ? t('yolo.state.onHere') : (autoApproveEnabledElsewhere(payload) ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
-      const title = options.toggle && readOnlyMode
-        ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
-        : t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)});
-      return `<span class="session-agent-activity-marker"${toggleAttr} title="${esc(title)}">${iconHtml}</span>`;
+      return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
   }
   return yoloMarkerHtml(session, auto, {

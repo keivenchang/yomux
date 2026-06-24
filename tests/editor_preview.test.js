@@ -758,6 +758,24 @@ async function runEditorPreviewSuite() {
     assert.ok(windowBarWithStatusHtml.includes('agent-icon codex') && windowBarWithStatusHtml.includes('agent-window-activity-icon--working') && !/agent-window-activity-icon--working[^"]*status-indicator--dot/.test(windowBarWithStatusHtml), 'window bar renders a pulsing Codex glyph instead of a green working dot after AI labels');
     assert.equal(/agent-window-status-dot[^"]*agent-window-activity-icon--idle/.test(windowBarWithStatusHtml), false, 'window bar does not render black/hollow idle dots after one-minute idle AI labels');
     assert.ok(!/<span class="agent-window-activity[\s\S]*<span class="tmux-window-name-text">1:bash<\/span>/.test(windowBarWithStatusHtml), 'bash window labels do not get AI activity icons');
+    const runWindowPanes = [
+      {window: '0', window_name: 'claude', window_active: true, active: true, command: 'claude', process_label: 'claude', process_label_pid: 4444, pid: 4444},
+      {window: '1', window_name: 'codex', window_active: false, active: true, command: 'codex', process_label: 'codex', process_label_pid: 5555, pid: 5555},
+    ];
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'claude', state: 'idle', observed_ts: 1000, window_index: 0, window_label: '0:claude'},
+      {kind: 'codex', state: 'idle', observed_ts: 1000, window_index: 1, window_label: '1:codex'},
+    ]});
+    api.setTabberActivityForTest({activity: {}, agent_windows: {'1': [
+      {kind: 'claude', state: 'working', observed_ts: 1005, working_elapsed_seconds: 11, window_index: 0, window_label: '0:claude'},
+      {kind: 'codex', state: 'working', observed_ts: 1005, working_elapsed_seconds: 0, window_index: 1, window_label: '1:codex'},
+    ]}});
+    const mergedRunRows = api.sessionAgentWindowStatusPayloadsForTest('1', {panes: runWindowPanes});
+    assert.equal(mergedRunRows.find(row => row.kind === 'claude' && row.window_index === 0)?.state, 'working', 'newer /api/activity Claude RUN row overrides stale auto-approve idle row');
+    assert.equal(mergedRunRows.find(row => row.kind === 'codex' && row.window_index === 1)?.state, 'working', 'newer /api/activity Codex RUN row overrides stale auto-approve idle row');
+    const activityRunWindowBarHtml = api.tmuxWindowBarHtml('1', {panes: runWindowPanes});
+    assert.ok(/0:claude[\s\S]*agent-window-activity-icon--working|agent-window-activity-icon--working[\s\S]*0:claude/.test(activityRunWindowBarHtml), 'Claude RUN from /api/activity drives the shared window-bar glyph');
+    assert.ok(/1:codex[\s\S]*agent-window-activity-icon--working|agent-window-activity-icon--working[\s\S]*1:codex/.test(activityRunWindowBarHtml), 'Codex RUN from /api/activity drives the shared window-bar glyph');
     const manyWindows = Array.from({length: 9}, (_unused, index) => ({
       window: String(index + 1),
       window_name: `w${index + 1}`,
@@ -1564,15 +1582,17 @@ async function runEditorPreviewSuite() {
       {kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude', current: true, window_active: true},
     ]});
     const workingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(workingHtml), 'working Claude session tabs show the glowing Claude glyph instead of the YO marker');
-    assert.equal(/session-yolo-marker/.test(workingHtml), false, 'working Claude session tabs do not show the yellow YO marker');
+    assert.ok(/session-yolo-marker[^"]*active/.test(workingHtml), 'working Claude session tabs keep the YO button visible');
+    assert.equal(/session-yolo-marker[^"]*working/.test(workingHtml), false, 'attributed working Claude tabs leave motion to the agent glyph');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(workingHtml), 'working Claude session tabs also show the glowing Claude glyph');
+    assert.ok(workingHtml.indexOf('session-yolo-marker') < workingHtml.indexOf('session-agent-activity-marker'), 'YO button stays before the working agent glyph');
 
     api.setAutoApproveStateForTest('4', {enabled: false, screen: {key: 'working'}, agent_windows: [
       {kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude', current: true, window_active: true},
     ]});
     const autoOffWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
+    assert.ok(/session-yolo-marker[^"]*inactive/.test(autoOffWorkingHtml), 'auto-off working Claude tabs still show the YO button state');
     assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(autoOffWorkingHtml), 'working Claude session tabs keep the glowing Claude glyph even when auto-approve is off');
-    assert.equal(/session-yolo-marker/.test(autoOffWorkingHtml), false, 'auto-off working Claude tabs do not fall back to the YO marker');
     const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
     // the YO ball spins ONLY when .working, and at the slow rotation setting (not a fast
     // hardcoded value); there is NO ambient idle-rotation rule, so an idle marker is static.

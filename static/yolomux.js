@@ -2908,12 +2908,16 @@ function clearPendingFileEditorFocusExcept(item) {
 
 function focusTerminalWhenAutoFocus(session, delay = 0) {
   if (!autoFocusEnabled) return;
-  setTimeout(() => terminals.get(session)?.term?.focus?.(), delay);
+  focusTerminalDom(session, delay);
 }
 
 function focusTerminalFromUserAction(session, delay = 0) {
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true});
+  focusTerminalDom(session, delay);
+}
+
+function focusTerminalDom(session, delay = 0) {
   const run = () => terminals.get(session)?.term?.focus?.();
   if (delay > 0) setTimeout(run, delay);
   else run();
@@ -13869,6 +13873,52 @@ function agentWindowPayloadRows(value) {
   return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
 }
 
+function agentWindowObservedTs(agent) {
+  for (const key of ['observed_ts', 'observedTs', 'captured_ts', 'updated_ts']) {
+    const value = Number(agent?.[key] || 0);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+
+function agentWindowStateMergeRank(state) {
+  const key = agentWindowStateKey(state);
+  if (agentWindowIsAttentionState(key)) return 0;
+  if (key === 'working') return 1;
+  if (key === 'cooldown') return 2;
+  if (key === 'active') return 3;
+  if (key === 'idle') return 4;
+  return 9;
+}
+
+function agentWindowPayloadIsPreferred(candidate, current) {
+  if (!current) return true;
+  const candidateTs = agentWindowObservedTs(candidate);
+  const currentTs = agentWindowObservedTs(current);
+  if (candidateTs > 0 || currentTs > 0) {
+    if (candidateTs !== currentTs) return candidateTs > currentTs;
+  }
+  const candidateRank = agentWindowStateMergeRank(candidate?.state);
+  const currentRank = agentWindowStateMergeRank(current?.state);
+  if (candidateRank !== currentRank) return candidateRank < currentRank;
+  return true;
+}
+
+function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows) {
+  const rowsByKey = new Map();
+  const looseRows = [];
+  for (const row of [...infoRows, ...activityRows, ...stateRows]) {
+    const key = agentWindowPayloadKey(row);
+    if (!key) {
+      looseRows.push(row);
+      continue;
+    }
+    const current = rowsByKey.get(key);
+    if (agentWindowPayloadIsPreferred(row, current)) rowsByKey.set(key, row);
+  }
+  return [...rowsByKey.values(), ...looseRows];
+}
+
 function agentWindowStatusVisualSignature(payload = {}) {
   const rows = agentWindowPayloadRows(payload?.agent_windows)
     .map(agent => normalizedAgentWindowPayload(agent))
@@ -13921,7 +13971,7 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  const source = stateRows.length ? stateRows : activityRows.length ? activityRows : infoRows;
+  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
@@ -19318,16 +19368,12 @@ function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveSta
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
+  const yoloHtml = yoloMarkerHtml(session, auto, {...options, yoloWorking: false, payload});
   const workingAgent = sessionWorkingAgentWindowForTab(session, info, payload);
   if (workingAgent) {
     const iconHtml = agentWindowActivityIconHtmlForStatus(workingAgent, workingAgent.kind, session);
     if (iconHtml) {
-      const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
-      const stateText = auto ? t('yolo.state.onHere') : (autoApproveEnabledElsewhere(payload) ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
-      const title = options.toggle && readOnlyMode
-        ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
-        : t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)});
-      return `<span class="session-agent-activity-marker"${toggleAttr} title="${esc(title)}">${iconHtml}</span>`;
+      return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
   }
   return yoloMarkerHtml(session, auto, {
@@ -26410,8 +26456,12 @@ function bindPanelShell(panel, session) {
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   panel.addEventListener('pointerdown', event => {
     if (isTmuxSession(session)) {
-      noteFileExplorerChangesSessionInteraction(session);
-      setFocusedTerminal(session, {userInitiated: true});
+      if (eventTargetIsTerminalFocusSurface(event?.target)) {
+        focusTerminalFromUserAction(session);
+      } else {
+        noteFileExplorerChangesSessionInteraction(session);
+        setFocusedTerminal(session, {userInitiated: true});
+      }
     } else {
       setFocusedPanelItem(session, {userInitiated: true});
     }
@@ -26523,6 +26573,10 @@ function bindPanelShell(panel, session) {
     event.stopPropagation();
     setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
   });
+}
+
+function eventTargetIsTerminalFocusSurface(target) {
+  return Boolean(target?.closest?.('.terminal, .xterm'));
 }
 
 function bindPaneFrameControls(panel, session) {
@@ -46402,6 +46456,7 @@ function startTerminal(session) {
   // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
   // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
   term.onData(data => handleTerminalData(session, data));
+  if (focusedTerminal === session && terminalPaneIsActive(session)) focusTerminalDom(session);
   connectTerminalSocket(session, item);
 }
 

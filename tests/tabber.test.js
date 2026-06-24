@@ -889,6 +889,8 @@ async function runTabberSuite() {
   test('t@8634', () => {
     const api = loadYolomux();
     const back = api.testElementForId('topbarNavBack');
+    let focusCount = 0;
+    api.registerTerminalForTest('2', {focus() { focusCount += 1; }});
     api.editorNav.stack = [];
     api.editorNav.index = -1;
     back.disabled = true;
@@ -897,6 +899,23 @@ async function runTabberSuite() {
     assert.deepEqual(api.editorNav.stack, ['1', '2'], 'user focus transition records previous pane then target pane');
     assert.equal(api.editorNav.index, 1, 'user focus transition points history at the target pane');
     assert.equal(back.disabled, false, 'Back is active after clicking/typing into another pane');
+    assert.equal(focusCount, 1, 'user focus transition focuses xterm so the cursor leaves inactive outline mode');
+  });
+
+  test('tmux terminal body clicks focus xterm, not only the pane ring', () => {
+    const api = loadYolomux('', ['1']);
+    api.renderPanels([]);
+    const panel = api.testElementForId('panelPool').children.find(child => child.id === 'panel-1');
+    const terminalTarget = new TestElement('terminal-target');
+    let focusCount = 0;
+    terminalTarget.classList.add('terminal');
+    panel.appendChild(terminalTarget);
+    api.registerTerminalForTest('1', {focus() { focusCount += 1; }});
+
+    panel.listeners.get('pointerdown')[0]({target: terminalTarget});
+
+    assert.equal(api.focusedTerminalForTest(), '1', 'terminal body click still selects the tmux pane');
+    assert.equal(focusCount, 1, 'terminal body click calls xterm.focus so the cursor becomes filled immediately');
   });
 
   // Tab history is bounded — the oldest entries drop past the cap so it can't grow without limit.

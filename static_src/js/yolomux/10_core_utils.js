@@ -1328,12 +1328,16 @@ function clearPendingFileEditorFocusExcept(item) {
 
 function focusTerminalWhenAutoFocus(session, delay = 0) {
   if (!autoFocusEnabled) return;
-  setTimeout(() => terminals.get(session)?.term?.focus?.(), delay);
+  focusTerminalDom(session, delay);
 }
 
 function focusTerminalFromUserAction(session, delay = 0) {
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true});
+  focusTerminalDom(session, delay);
+}
+
+function focusTerminalDom(session, delay = 0) {
   const run = () => terminals.get(session)?.term?.focus?.();
   if (delay > 0) setTimeout(run, delay);
   else run();

@@ -2445,6 +2445,7 @@ function startTerminal(session) {
   // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
   // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
   term.onData(data => handleTerminalData(session, data));
+  if (focusedTerminal === session && terminalPaneIsActive(session)) focusTerminalDom(session);
   connectTerminalSocket(session, item);
 }
 

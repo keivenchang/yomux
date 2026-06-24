@@ -112,6 +112,52 @@ function agentWindowPayloadRows(value) {
   return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
 }
 
+function agentWindowObservedTs(agent) {
+  for (const key of ['observed_ts', 'observedTs', 'captured_ts', 'updated_ts']) {
+    const value = Number(agent?.[key] || 0);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+
+function agentWindowStateMergeRank(state) {
+  const key = agentWindowStateKey(state);
+  if (agentWindowIsAttentionState(key)) return 0;
+  if (key === 'working') return 1;
+  if (key === 'cooldown') return 2;
+  if (key === 'active') return 3;
+  if (key === 'idle') return 4;
+  return 9;
+}
+
+function agentWindowPayloadIsPreferred(candidate, current) {
+  if (!current) return true;
+  const candidateTs = agentWindowObservedTs(candidate);
+  const currentTs = agentWindowObservedTs(current);
+  if (candidateTs > 0 || currentTs > 0) {
+    if (candidateTs !== currentTs) return candidateTs > currentTs;
+  }
+  const candidateRank = agentWindowStateMergeRank(candidate?.state);
+  const currentRank = agentWindowStateMergeRank(current?.state);
+  if (candidateRank !== currentRank) return candidateRank < currentRank;
+  return true;
+}
+
+function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows) {
+  const rowsByKey = new Map();
+  const looseRows = [];
+  for (const row of [...infoRows, ...activityRows, ...stateRows]) {
+    const key = agentWindowPayloadKey(row);
+    if (!key) {
+      looseRows.push(row);
+      continue;
+    }
+    const current = rowsByKey.get(key);
+    if (agentWindowPayloadIsPreferred(row, current)) rowsByKey.set(key, row);
+  }
+  return [...rowsByKey.values(), ...looseRows];
+}
+
 function agentWindowStatusVisualSignature(payload = {}) {
   const rows = agentWindowPayloadRows(payload?.agent_windows)
     .map(agent => normalizedAgentWindowPayload(agent))
@@ -164,7 +210,7 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  const source = stateRows.length ? stateRows : activityRows.length ? activityRows : infoRows;
+  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',

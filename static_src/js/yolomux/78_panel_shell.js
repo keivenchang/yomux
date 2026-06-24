@@ -1048,8 +1048,12 @@ function bindPanelShell(panel, session) {
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   panel.addEventListener('pointerdown', event => {
     if (isTmuxSession(session)) {
-      noteFileExplorerChangesSessionInteraction(session);
-      setFocusedTerminal(session, {userInitiated: true});
+      if (eventTargetIsTerminalFocusSurface(event?.target)) {
+        focusTerminalFromUserAction(session);
+      } else {
+        noteFileExplorerChangesSessionInteraction(session);
+        setFocusedTerminal(session, {userInitiated: true});
+      }
     } else {
       setFocusedPanelItem(session, {userInitiated: true});
     }
@@ -1161,6 +1165,10 @@ function bindPanelShell(panel, session) {
     event.stopPropagation();
     setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
   });
+}
+
+function eventTargetIsTerminalFocusSurface(target) {
+  return Boolean(target?.closest?.('.terminal, .xterm'));
 }
 
 function bindPaneFrameControls(panel, session) {
