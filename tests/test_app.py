@@ -799,7 +799,7 @@ def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
                     "1": {
                         "enabled": False,
                         "screen": {"status_elapsed_seconds": 1.0, "status_line": "working 1s", "status_marker": "a"},
-                        "agent_windows": [{"state": "working", "observed_ts": 1.0, "working_elapsed_seconds": 1.0, "status_tokens": 100}],
+                        "agent_windows": [{"state": "working", "observed_ts": 1.0, "working_elapsed_seconds": 1.0, "status_tokens": 100, "last_active_ts": 1.0, "idle_since": 1.0}],
                     }
                 }
             },
@@ -811,7 +811,7 @@ def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
                     "1": {
                         "enabled": False,
                         "screen": {"status_elapsed_seconds": 2.0, "status_line": "working 2s", "status_marker": "b"},
-                        "agent_windows": [{"state": "working", "observed_ts": 2.0, "working_elapsed_seconds": 2.0, "status_tokens": 200}],
+                        "agent_windows": [{"state": "working", "observed_ts": 2.0, "working_elapsed_seconds": 2.0, "status_tokens": 200, "last_active_ts": 2.0, "idle_since": 2.0}],
                     }
                 }
             },
@@ -838,6 +838,23 @@ def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
         webapp.control_server.stop()
 
     assert [event_type for event_type, _payload in events] == ["auto_approve_changed", "tmux_signals_changed"]
+
+
+def test_tmux_signal_event_does_not_force_auto_approve_poll():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        webapp.client_event_next_auto_poll_at = 123.0
+        webapp.client_event_next_tmux_signal_poll_at = 456.0
+        webapp.tmux_signal_cache.set("snapshot", {"ok": True})
+
+        webapp.handle_tmux_signal_event({"event": "pane_changed"})
+
+        assert webapp.client_event_next_auto_poll_at == pytest.approx(123.0)
+        assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(0.0)
+        assert webapp.tmux_signal_cache.get_or_miss("snapshot") is app_module.CACHE_MISS
+        assert webapp.client_watch_wake_event.is_set()
+    finally:
+        webapp.control_server.stop()
 
 
 def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
@@ -1726,6 +1743,74 @@ def test_refresh_transcripts_payload_cache_publishes_full_payload_when_requested
     assert events and events[0][0] == "transcripts_changed"
     assert events[0][1]["data"]["metadata_loading"] is False
     assert events[0][2]["trigger"] == "transcripts_refresh"
+
+
+def test_transcripts_payload_event_signature_ignores_volatile_fields():
+    webapp = app_module.TmuxWebtermApp([])
+    base = {
+        "server_time": "2026-06-24 12:00:00 PDT",
+        "server_uptime_seconds": 1.0,
+        "session_order": ["5"],
+        "sessions": {
+            "5": {
+                "session": "5",
+                "metadata_badge_pulse_remaining_ms": {"pr": 900},
+                "project": {"git": {"branch": "main"}},
+            },
+        },
+    }
+    changed = {
+        **base,
+        "server_time": "2026-06-24 12:00:05 PDT",
+        "server_uptime_seconds": 6.0,
+        "sessions": {
+            "5": {
+                **base["sessions"]["5"],
+                "metadata_badge_pulse_remaining_ms": {"pr": 400},
+            },
+        },
+    }
+    try:
+        assert webapp.transcripts_payload_event_signature(base) == webapp.transcripts_payload_event_signature(changed)
+        real_change = {**changed, "sessions": {"5": {**changed["sessions"]["5"], "project": {"git": {"branch": "feature"}}}}}
+        assert webapp.transcripts_payload_event_signature(base) != webapp.transcripts_payload_event_signature(real_change)
+    finally:
+        webapp.control_server.stop()
+
+
+def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    payloads = [
+        {
+            "server_time": "2026-06-24 12:00:00 PDT",
+            "server_uptime_seconds": 1.0,
+            "session_order": ["5"],
+            "sessions": {"5": {"session": "5", "project": {"git": {"branch": "main"}}}},
+        },
+        {
+            "server_time": "2026-06-24 12:00:05 PDT",
+            "server_uptime_seconds": 6.0,
+            "session_order": ["5"],
+            "sessions": {"5": {"session": "5", "project": {"git": {"branch": "main"}}}},
+        },
+    ]
+    monkeypatch.setattr(webapp, "build_transcripts_payload", lambda: payloads.pop(0))
+    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
+    monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+    monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
+    try:
+        webapp.publish_client_watch_snapshot()
+        webapp.publish_client_watch_snapshot()
+    finally:
+        webapp.control_server.stop()
+
+    assert [event_type for event_type, _payload, _kwargs in events] == ["transcripts_changed"]
+    assert events[0][2]["trigger"] == "watch_state"
 
 
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
@@ -2788,6 +2873,41 @@ def test_poll_client_events_once_transcript_change_is_lightweight_timing_regress
     assert elapsed < 0.2
     assert events == [("transcripts_changed", {"signature": ("transcripts", 2), "refresh": True})]
     assert "data" not in events[0][1]
+
+
+def test_poll_client_events_once_transcript_content_change_skips_metadata_refresh(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp([])
+    settings_signatures = [("settings", 1), ("settings", 1)]
+    transcript_signatures = [("transcripts", 1), ("transcripts", 1)]
+    transcript_content_signatures = [("content", 1), ("content", 2)]
+    filesystem_signatures = [(("/repo", ("stable",)),), (("/repo", ("stable",)),)]
+    context_triggers = []
+    session_file_triggers = []
+    published_events = []
+    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: settings_signatures.pop(0))
+    monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
+    monkeypatch.setattr(webapp, "transcript_content_watch_signature", lambda sessions: transcript_content_signatures.pop(0))
+    monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
+    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": context_triggers.append(trigger) or ["context_items_ready"])
+    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": session_file_triggers.append(trigger) or ["session_files_ready"])
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published_events.append((event_type, payload or {})))
+    try:
+        webapp.transcripts_payload_cache = (1.0, {"sessions": {"cached": {}}})
+        webapp.transcript_tail_cache = {("tail",): (1.0, "cached")}
+        webapp.context_items_cache = {("context",): (1.0, [{"cached": True}])}
+        assert webapp.poll_client_events_once() == []
+        assert webapp.poll_client_events_once() == ["context_items_ready", "session_files_ready"]
+    finally:
+        webapp.control_server.stop()
+
+    assert context_triggers == ["transcript_content_changed"]
+    assert session_file_triggers == ["transcript_content_changed"]
+    assert published_events == []
+    assert webapp.transcripts_payload_cache == (1.0, {"sessions": {"cached": {}}})
+    assert webapp.transcript_tail_cache == {}
+    assert webapp.context_items_cache == {}
 
 
 def test_poll_client_events_once_refreshes_session_files_on_transcript_change(monkeypatch):

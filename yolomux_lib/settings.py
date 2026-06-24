@@ -202,7 +202,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tab_popover_show_delay_ms": 1000,
         "tab_popover_follow_delay_ms": 120,
         "remote_resize_delay_ms": 220,
-        "auto_approve_interval_seconds": 0.5,
+        "auto_approve_interval_seconds": 2.0,
     },
     "notifications": {
         "toast_duration_ms": 10000,
@@ -340,6 +340,7 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "server_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_background_file_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
+    ("performance", "auto_approve_interval_seconds"): 0.5,
     ("share", "max_viewers"): 5,
 }
 

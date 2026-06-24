@@ -256,16 +256,21 @@ CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
     "history_bytes",
     "history_size",
     "last_counter_seen_at",
+    "idle_since",
+    "last_active_ts",
     "observed_ts",
     "screen_text",
     "session_activity_ts",
     "session_last_attached_ts",
+    "server_time",
+    "server_uptime_seconds",
     "status_counter_advanced",
     "status_elapsed_seconds",
     "status_identity",
     "status_line",
     "status_marker",
     "status_tokens",
+    "metadata_badge_pulse_remaining_ms",
     "title",
     "working_elapsed_seconds",
 })
@@ -789,6 +794,7 @@ class TmuxWebtermApp:
         self.client_watch_initialized = False
         self.client_watch_settings_signature: tuple[Any, ...] | None = None
         self.client_watch_transcripts_signature: tuple[Any, ...] | None = None
+        self.client_watch_transcript_content_signature: tuple[Any, ...] | None = None
         self.client_watch_filesystem_signature: tuple[Any, ...] | None = None
         self.client_watch_file_signature: tuple[Any, ...] | None = None
         self.client_watch_background_file_signature: tuple[Any, ...] | None = None
@@ -2051,6 +2057,9 @@ class TmuxWebtermApp:
     def stable_client_event_payload_signature(self, payload: Any) -> str:
         return self.client_event_payload_signature(self.stable_client_event_signature_payload(payload))
 
+    def transcripts_payload_event_signature(self, payload: dict[str, Any]) -> str:
+        return self.stable_client_event_payload_signature(payload)
+
     def performance_setting_ms_as_seconds(self, key: str, minimum: float, maximum: float) -> float:
         default = float(DEFAULT_PERFORMANCE_SETTINGS[key])
         settings = settings_payload().get("settings", {})
@@ -2590,6 +2599,16 @@ class TmuxWebtermApp:
                 transcript = str(agent.transcript or "")
                 if not transcript:
                     continue
+                rows.append((name, agent.kind or "", agent.session_id or "", transcript))
+        return tuple(rows)
+
+    def transcript_content_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
+        rows: list[tuple[Any, ...]] = []
+        for name, info in sorted(sessions.items()):
+            for agent in info.agents:
+                transcript = str(agent.transcript or "")
+                if not transcript:
+                    continue
                 try:
                     signature = file_stat_signature(Path(transcript))
                 except OSError:
@@ -2744,11 +2763,14 @@ class TmuxWebtermApp:
             "compute_ms": round((time.perf_counter() - started) * 1000, 1),
         }
 
-    def clear_transcript_caches(self) -> None:
+    def clear_transcript_content_caches(self) -> None:
         with self.transcript_tail_cache_lock:
             self.transcript_tail_cache.clear()
         with self.context_items_cache_lock:
             self.context_items_cache.clear()
+
+    def clear_transcript_caches(self) -> None:
+        self.clear_transcript_content_caches()
         with self.transcripts_payload_cache_lock:
             self.transcripts_payload_cache = None
 
@@ -2766,7 +2788,7 @@ class TmuxWebtermApp:
             started = time.perf_counter()
             payload = self.build_transcripts_payload()
             self.set_transcripts_payload_cache(payload)
-            signature = self.client_event_payload_signature(payload)
+            signature = self.transcripts_payload_event_signature(payload)
             with self.client_watch_lock:
                 previous_signature = self.client_watch_transcripts_payload_signature
                 self.client_watch_transcripts_payload_signature = signature
@@ -2794,6 +2816,7 @@ class TmuxWebtermApp:
         sessions, _errors = discover_sessions(self.sessions)
         settings_signature = self.settings_watch_signature()
         transcripts_signature = self.transcripts_watch_signature(sessions)
+        transcript_content_signature = self.transcript_content_watch_signature(sessions)
         if self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
             filesystem_signature = self.filesystem_roots_watch_signature(sessions)
         else:
@@ -2804,10 +2827,12 @@ class TmuxWebtermApp:
             previous_filesystem_signature = self.client_watch_filesystem_signature
             settings_changed = initialized and self.client_watch_settings_signature != settings_signature
             transcripts_changed = initialized and self.client_watch_transcripts_signature != transcripts_signature
+            transcript_content_changed = initialized and self.client_watch_transcript_content_signature != transcript_content_signature
             filesystem_changed = initialized and previous_filesystem_signature != filesystem_signature
             self.client_watch_initialized = True
             self.client_watch_settings_signature = settings_signature
             self.client_watch_transcripts_signature = transcripts_signature
+            self.client_watch_transcript_content_signature = transcript_content_signature
             self.client_watch_filesystem_signature = filesystem_signature
         if settings_changed:
             started = time.perf_counter()
@@ -2830,6 +2855,11 @@ class TmuxWebtermApp:
             events.extend(self.publish_context_items_ready_events(trigger="transcripts_changed"))
             events.extend(self.publish_activity_summary_ready_events(trigger="transcripts_changed"))
             events.extend(self.publish_session_files_ready_events(trigger="transcripts_changed"))
+        elif transcript_content_changed:
+            self.clear_transcript_content_caches()
+            events.extend(self.publish_context_items_ready_events(trigger="transcript_content_changed"))
+            events.extend(self.publish_activity_summary_ready_events(trigger="transcript_content_changed"))
+            events.extend(self.publish_session_files_ready_events(trigger="transcript_content_changed"))
         if filesystem_changed:
             roots = self.filesystem_roots_for_watch(sessions)
             change_summary = filesystem_change_summary(previous_filesystem_signature, filesystem_signature)
@@ -2993,7 +3023,6 @@ class TmuxWebtermApp:
     def handle_tmux_signal_event(self, event: dict[str, Any]) -> None:
         self.tmux_signal_cache.clear()
         with self.client_watch_lock:
-            self.client_event_next_auto_poll_at = 0.0
             self.client_event_next_tmux_signal_poll_at = 0.0
         self.client_watch_wake_event.set()
 
@@ -3626,7 +3655,7 @@ class TmuxWebtermApp:
             payload = self.build_transcripts_payload()
             self.set_transcripts_payload_cache(payload)
             if publish:
-                payload_signature = self.client_event_payload_signature(payload)
+                payload_signature = self.transcripts_payload_event_signature(payload)
                 with self.client_watch_lock:
                     self.client_watch_transcripts_payload_signature = payload_signature
                 self.publish_client_event(

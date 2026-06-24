@@ -1858,6 +1858,8 @@ async function runEditorPreviewSuite() {
     assert.equal(debugText.includes('"events"'), false, 'debug copy payload is compact text, not JSON');
     const url = api.syncInitialLayoutUrlForTest();
     assert.equal(parseUrl(url).get('debug'), '1', 'layout URL updates preserve debug=1');
+    api.recordSseDebugEventForTest('fs_changed', {time: (Date.now() / 1000) + 1000, payload: {trigger: 'watch', cache: 'ready'}}, {data: 'x'});
+    assert.equal(api.jsDebugEventsForTest().at(-1).receiveLatencyMs, 0, 'SSE debug receive time clamps tiny client/server clock skew to zero');
     const openedApi = loadYolomux('?debug=1&sessions=debug', ['1']);
     assert.deepStrictEqual(canonical(openedApi.serialize(openedApi.currentSlots()).panes), {
       left: {tabs: [openedApi.debugPaneItemId], active: openedApi.debugPaneItemId},

@@ -40,6 +40,9 @@ async function runShareThemeSuite() {
     assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,search-history,preferences,image-viewer,file-editor');
     assert.equal(api.debugModeEnabledForTest(), false, 'JS Debug pane is off without the debug=1 URL flag');
     assert.equal(api.resolveLayoutItem('debug'), 'debug', 'debug layout item is ignored while the URL flag is off');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'follower', ready_elsewhere: true}), 'ready', 'follower-owned ready file indexes stop polling');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'building'}), 'building', 'building file indexes keep polling');
     // #40: YO!info and YO!agent are merged into the single info item; the legacy yoagent/yosup aliases
     // resolve to it so saved layouts and bookmarked ?…=yoagent URLs open the merged pane.
     assert.equal(api.resolveLayoutItem('yoagent'), api.infoItemId, 'yoagent alias resolves to the merged YO!info item');

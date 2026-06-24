@@ -3521,7 +3521,7 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
     + 1;
   const serverTimeMs = Number(envelope?.time) * 1000;
   const receiveLatencyMs = Number.isFinite(serverTimeMs)
-    ? Number((Date.now() - serverTimeMs).toFixed(1))
+    ? Math.max(0, Number((Date.now() - serverTimeMs).toFixed(1)))
     : undefined;
   recordJsDebugEvent('sse', {
     eventType,

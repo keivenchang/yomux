@@ -576,6 +576,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "server_event_poll_ms": 5_009,
             "server_background_file_event_poll_ms": 5_009,
             "server_directory_event_poll_ms": 5_009,
+            "auto_approve_interval_seconds": 0.5,
         },
     })
     defaults = default_settings()
@@ -584,6 +585,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert migrated["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
     assert migrated["performance"]["server_background_file_event_poll_ms"] == defaults["performance"]["server_background_file_event_poll_ms"]
     assert migrated["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
+    assert migrated["performance"]["auto_approve_interval_seconds"] == defaults["performance"]["auto_approve_interval_seconds"]
     rounded_legacy = sanitize_settings({"performance": {"server_event_poll_ms": 5000}})
     assert rounded_legacy["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
     rounded_background_legacy = sanitize_settings({"performance": {"server_background_file_event_poll_ms": 5000}})

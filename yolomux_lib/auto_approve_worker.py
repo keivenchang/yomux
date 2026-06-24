@@ -31,6 +31,8 @@ from .types import AutoApproveState
 # and the thread can release its flock before a takeover re-acquires.
 AUTO_APPROVE_STOP_JOIN_SECONDS = 5.0
 AUTO_APPROVE_MISSING_CAPTURE_LIMIT = 3
+AUTO_APPROVE_IDLE_RAMP_SECONDS = 60.0
+AUTO_APPROVE_IDLE_MAX_INTERVAL_SECONDS = 10.0
 
 
 LOGGER = logging.getLogger(__name__)
@@ -226,8 +228,8 @@ class AutoApproveWorker:
         try:
             module = auto_approve_tmux
             idle_since: float | None = None
-            max_interval = max(2.5, self.interval)
-            ramp_duration = 60.0
+            max_interval = max(AUTO_APPROVE_IDLE_MAX_INTERVAL_SECONDS, self.interval)
+            ramp_duration = AUTO_APPROVE_IDLE_RAMP_SECONDS
             self.update(last_action="watching", lock_owner=self.process_lock.owner)
 
             while not self.stop_event.is_set():

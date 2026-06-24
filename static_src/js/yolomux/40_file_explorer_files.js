@@ -3073,6 +3073,13 @@ function fileExplorerIndexBadgeTitle(path) {
 
 // Warm the backend index for a root (kicks the build) and track building/ready; polls while
 // building so the badge title transitions indexing… -> indexed exactly once.
+function fileIndexStatusFromPayload(payload) {
+  if (!payload || typeof payload !== 'object') return 'building';
+  const state = String(payload.state || '');
+  if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
+  return 'building';
+}
+
 async function refreshFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
@@ -3083,7 +3090,7 @@ async function refreshFileIndexStatus(root) {
     return;  // transient error: keep the prior badge, don't flip it
   }
   if (!fileExplorerIndexedDirs.has(normalized)) return;  // un-indexed while the request was in flight
-  const status = payload && payload.ready ? 'ready' : 'building';
+  const status = fileIndexStatusFromPayload(payload);
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
   if (status === 'building') fileIndexStatusPollRoots.add(normalized);
