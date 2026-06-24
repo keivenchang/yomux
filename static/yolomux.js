@@ -723,7 +723,6 @@ let tmuxSignalState = null;
 tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
 let agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds');
 let redReminderMs = initialSetting('appearance.red_reminder_ms');
-let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms');
 const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms');
 const toastMaxLines = 3;
@@ -2542,6 +2541,14 @@ function writeStoredFileExplorerRootMode(mode) {
 
 function normalizeFileExplorerMode(mode) {
   return mode === 'diff' || mode === 'tabber' ? mode : 'files';
+}
+
+function fileExplorerModeFromUrlParam(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'finder' || mode === 'files') return 'files';
+  if (mode === 'differ' || mode === 'diff') return 'diff';
+  if (mode === 'tabber') return 'tabber';
+  return '';
 }
 
 function readStoredFileExplorerMode() {
@@ -5096,6 +5103,13 @@ function maybeAdoptYoagentDeepLink(params) {
   }
 }
 
+function maybeAdoptFileExplorerModeDeepLink(params) {
+  const mode = fileExplorerModeFromUrlParam(params.get('finder'));
+  if (!mode) return;
+  fileExplorerMode = mode;
+  writeStoredFileExplorerMode(fileExplorerMode);
+}
+
 function shareBootstrapLayoutParams() {
   if (!shareViewMode || !shareBootstrap) return null;
   const params = new URLSearchParams();
@@ -5113,6 +5127,7 @@ function shareBootstrapLayoutParams() {
 function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
+  if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
@@ -6185,12 +6200,6 @@ function updateTopbarActivityStatus() {
   node.innerHTML = html;
   node.hidden = !html;
   node.classList.toggle('has-attention', counts.attention > 0);
-}
-
-function yoloRotationDelay(now = Date.now()) {
-  const duration = Math.max(0, Number(yoloRotateMs) || 0);
-  if (duration <= 0) return '0s';
-  return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
 function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
@@ -8278,6 +8287,7 @@ function updateActiveSessionParam() {
   params.delete('sessions');
   params.delete('layout');
   params.delete('tabs');
+  params.delete('finder');
   const queryParts = [];
   const inactiveItems = inactiveTabItems();
   if (activeSessions.length || inactiveItems.length) {
@@ -8287,6 +8297,9 @@ function updateActiveSessionParam() {
     queryParts.push(`layout=${layoutParamValue(layoutSlots)}`);
     const tabs = layoutTabsParamValue(layoutSlots);
     if (tabs) queryParts.push(`tabs=${tabs}`);
+    if (paneItems(layoutSlots).some(isFileExplorerItem)) {
+      queryParts.push(`finder=${readableParamComponent(normalizeFileExplorerMode(fileExplorerMode))}`);
+    }
   }
   const remaining = params.toString();
   if (remaining) queryParts.push(remaining);
@@ -8413,7 +8426,7 @@ function updateBrandTitles() {
 }
 
 function aboutBrandHtml() {
-  return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+  return `<span class="about-brand-yo">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
 }
 
 function showAboutModal() {
@@ -8674,13 +8687,13 @@ async function refreshYoloRulesStatus(options = {}) {
 
 function tmuxYoloMenuItems() {
   return [
-    menuNumberSetting('appearance.yolo_rotate_ms', t('pref.appearance.yolo_rotate_ms.label'), {
+    menuNumberSetting('appearance.red_reminder_ms', t('pref.appearance.red_reminder_ms.label'), {
       min: 0,
-      max: 60000,
-      step: 250,
+      max: 10000,
+      step: 50,
       suffix: 'ms',
-      fallback: 20000,
-      detail: t('pref.appearance.yolo_rotate_ms.help'),
+      fallback: 1550,
+      detail: t('pref.appearance.red_reminder_ms.help'),
     }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
@@ -9433,8 +9446,8 @@ function clampAppMenuNumberSetting(item, rawValue) {
 }
 
 function applyAppMenuNumberSettingPreview(path, value) {
-  if (path === 'appearance.yolo_rotate_ms') {
-    yoloRotateMs = Math.max(0, Number(value) || 0);
+  if (path === 'appearance.red_reminder_ms') {
+    redReminderMs = Math.max(0, Number(value) || 0);
     applyCssSettings();
   }
 }
@@ -18707,8 +18720,8 @@ function applyCssSettings() {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
+  root.setProperty('--pulse-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
-  root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
   root.setProperty('--file-image-preview-max-size', `${Math.max(1, fileExplorerImagePreviewMaxPx)}px`);
@@ -18817,7 +18830,6 @@ function applySettingsPayload(payload, options = {}) {
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
   agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds');
   redReminderMs = numberSetting('appearance.red_reminder_ms');
-  yoloRotateMs = numberSetting('appearance.yolo_rotate_ms');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
   hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms');
@@ -19392,12 +19404,11 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
-  const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
   const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
 function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
@@ -28486,7 +28497,7 @@ function yoagentPendingWaitsHtml() {
       ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('yoagent.clear'))}" aria-label="${esc(t('yoagent.clear'))}">${esc(t('yoagent.clear'))}</button>`
       : '';
     return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
-      <span class="session-yolo-marker active working yoagent-waiting-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+      <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
       <span class="yoagent-waiting-label">${esc(label)}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
       ${clearButton}
@@ -29047,7 +29058,7 @@ function yoagentChatHtml() {
   const hasConversation = Boolean(yoagentMessages.length || yoagentChatQueue.length || yoagentPendingWaits.length || yoagentJobs.length || yoagentNotice || isThinking || yoagentError || startupInfo || !chatEnabled);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
@@ -29668,7 +29679,6 @@ function preferenceSections() {
       {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
       {path: 'appearance.separator_color', label: t('pref.appearance.separator_color.label'), type: 'radio', choices: separatorColorPreferenceChoices(), help: t('pref.appearance.separator_color.help')},
       {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: cursorColorPreferenceChoices(), help: t('pref.appearance.editor_cursor_color.help')},
-      {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
@@ -32023,7 +32033,7 @@ function changesLoadingHtml(session = '') {
   const label = session ? sessionLabel(session) : '';
   const loadingText = label ? `${stripTrailingEllipsisText(base)} ${label}` : base;
   return `<span class="changes-loading" aria-live="polite" aria-busy="true">
-    <span class="session-yolo-marker active working changes-loading-yolo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+    <span class="session-yolo-marker active working changes-loading-yolo" aria-hidden="true">${esc(t('brand.marker'))}</span>
     <span>${textWithMovingEllipsisHtml(loadingText, 'changes-loading-dots')}</span>
   </span>`;
 }
@@ -32491,6 +32501,7 @@ function setFileExplorerMode(mode, options = {}) {
   fileExplorerMode = nextMode;
   writeStoredFileExplorerMode(fileExplorerMode);
   applyFileExplorerMode();
+  if (typeof updateActiveSessionParam === 'function') updateActiveSessionParam();
   renderFileExplorerChangesPanels({force: true});
   // Tabber renders from the already-polled transcriptMeta + the activity ledger (recency sort), so it
   // needs no Differ changed-files fetch — instead it polls /api/activity while it's the active mode.
@@ -46983,18 +46994,10 @@ function renderAutoApproveButton(session, payload) {
   const locked = payload?.locked === true && !enabled;
   const working = sessionYoloIsWorking(session, payload);
   for (const button of buttons) {
-    const wasWorking = button.classList.contains('working');
     syncPressedButton(button, enabled);
     button.classList.toggle('inactive', !enabled && !locked);
     button.classList.toggle('locked', locked);
     button.classList.toggle('working', working);
-    if (working) {
-      if (!wasWorking || !button.style.getPropertyValue('--yolo-rotate-delay')) {
-        button.style.setProperty('--yolo-rotate-delay', yoloRotationDelay());
-      }
-    } else {
-      button.style.removeProperty('--yolo-rotate-delay');
-    }
     button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = t('brand.marker');
     const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';

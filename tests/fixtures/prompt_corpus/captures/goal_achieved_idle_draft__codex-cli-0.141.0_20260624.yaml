@@ -1,0 +1,134 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: ''
+  attention_label: ''
+  composer:
+    accepting: false
+    detected_text: Explain this codebase
+    key: draft
+    prompt_suggestion: false
+    text: Explain this codebase
+  cursor:
+    character: E
+    current_command: node
+    pane_in_mode: false
+    x: 3
+    y: 37
+  display:
+    attention_kind: ''
+    attention_label: ''
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: target input box already contains unsent text
+    screen_key: input-draft
+    selected_option: 0
+  reason_code: draft-clearable
+  screen:
+    detected_text: Explain this codebase
+    key: input-draft
+    text: target input box already contains unsent text
+agent: codex
+capture_date: '2026-06-24'
+capture_mode: visible
+captured_at: '2026-06-24T21:01:00+00:00'
+case_name: goal_achieved_idle_draft
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: E
+  current_command: node
+  pane_in_mode: false
+  x: 3
+  y: 37
+expected:
+  approval_visible: false
+  ask: false
+  negative_reason_contains: ''
+  screen_key: idle
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: ''
+  attention_label: ''
+  composer_key: draft
+  reason_code: draft-clearable
+  screen_key: input-draft
+expected_screen_key: idle
+failures: []
+fixture_id: goal_achieved_idle_draft__codex-cli-0.141.0_20260624
+fixture_scenario: goal_achieved_idle_draft
+height: 40
+id: goal_achieved_idle_draft__codex-cli-0.141.0_20260624
+include_scrollback: false
+launch_agent: ''
+launch_command: ''
+launched_session: ''
+mode: ''
+operations: []
+raw_capture: |
+  • Confirmed and fixed.
+
+  Active YO Rotation is no longer used: I removed appearance.yolo_rotate_ms, yoloRotationDelay(), --yolo-rotate-delay, and --yolo-rotation-duration from runtime/source/generated assets. The old “Red reminder duration” setting is now renamed to Red/yellow/green status pulse period, and it drives the real shared --pulse-duration used by ASK? and the red/yellow/green status balls.
+
+  Also restarted 8001 and verified served assets contain no old rotation tokens.
+
+  Verification:
+
+  - node --test tests/editor_preview.test.js tests/share_theme.test.js tests/tabber.test.js
+  - python3 -m pytest tests/test_settings.py -q
+  - focused Selenium status/settings tests
+  - python3 tools/check.py passed
+
+  No commit or push.
+
+  Worked for 14m 10s
+
+  › Explain this codebase
+
+  gpt-5.5 xhigh · ~                                      Goal achieved (21m)
+ready_text: []
+send_lines: []
+source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 8001:0.0; `Goal achieved` footer must not classify as RUN without a visible current Working row
+styled_capture: |
+  • Confirmed and fixed.
+
+  Active YO Rotation is no longer used: I removed appearance.yolo_rotate_ms, yoloRotationDelay(), --yolo-rotate-delay, and --yolo-rotation-duration from runtime/source/generated assets. The old “Red reminder duration” setting is now renamed to Red/yellow/green status pulse period, and it drives the real shared --pulse-duration used by ASK? and the red/yellow/green status balls.
+
+  Also restarted 8001 and verified served assets contain no old rotation tokens.
+
+  Verification:
+
+  - node --test tests/editor_preview.test.js tests/share_theme.test.js tests/tabber.test.js
+  - python3 -m pytest tests/test_settings.py -q
+  - focused Selenium status/settings tests
+  - python3 tools/check.py passed
+
+  No commit or push.
+
+  Worked for 14m 10s
+
+  › Explain this codebase
+
+  gpt-5.5 xhigh · ~                                      Goal achieved (21m)
+target: '8001:0.0'
+tmux_socket: ''
+wait_text:
+- Goal achieved
+width: 200

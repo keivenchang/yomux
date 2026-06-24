@@ -185,7 +185,6 @@ function preferenceSections() {
       {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
       {path: 'appearance.separator_color', label: t('pref.appearance.separator_color.label'), type: 'radio', choices: separatorColorPreferenceChoices(), help: t('pref.appearance.separator_color.help')},
       {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: cursorColorPreferenceChoices(), help: t('pref.appearance.editor_cursor_color.help')},
-      {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},

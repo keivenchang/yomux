@@ -501,6 +501,27 @@ fixtures:
   fixture_id: goal_achieved_working__codex-cli-0.141.0_20260623
   id: codex-goal-achieved-working-real
   provenance: screenshot-provided Codex CLI 0.141.0 `Goal achieved` capture from tmux 8002:0.0; bottom rows later confirmed by tmux capture
+- case_name: goal_achieved_idle_draft
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: idle
+    selected_option: 0
+    yes_selected: false
+  family: codex-goal-achieved-idle
+  file: captures/goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
+  fixture_id: goal_achieved_idle_draft__codex-cli-0.141.0_20260624
+  id: codex-goal-achieved-idle-draft-real
+  provenance: screenshot-provided Codex CLI 0.141.0 `Goal achieved` idle/draft capture from tmux 8001:0.0
 - case_name: choice_question_real
   expected:
     action: null
@@ -849,6 +870,14 @@ parity_groups:
   - agent: codex
     case_name: goal_achieved_working
     file: captures/goal_achieved_working__codex-cli-0.141.0_20260623.yaml
+- id: codex-goal-achieved-idle
+  status: product-specific
+  contract: Codex `Goal achieved` without a visible current Working row is not busy and must not render as RUN.
+  why_names_differ: Codex exposes a completed-goal footer that can remain visible while the prompt is idle or contains a draft; this is not the same state as Claude `/goal active`.
+  fixtures:
+  - agent: codex
+    case_name: goal_achieved_idle_draft
+    file: captures/goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
 - id: normal-choice-question
   status: covered-by-both
   contract: Both clients can ask non-permission user questions that should show ASK?.

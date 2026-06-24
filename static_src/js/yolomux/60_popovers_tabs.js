@@ -409,12 +409,11 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
-  const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
   const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
 function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {

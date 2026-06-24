@@ -466,7 +466,6 @@
   --red-reminder-duration: var(--pulse-duration);
   --red-reminder-easing: var(--pulse-easing);
   --yolo-reminder-duration: 2.8s;
-  --yolo-rotation-duration: 20s;
 }
 
 .app-modal-overlay {

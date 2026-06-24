@@ -722,7 +722,6 @@ let tmuxSignalState = null;
 tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
 let agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds');
 let redReminderMs = initialSetting('appearance.red_reminder_ms');
-let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms');
 const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms');
 const toastMaxLines = 3;

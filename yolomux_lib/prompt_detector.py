@@ -562,6 +562,8 @@ _CODEX_MODEL_STATUS_LINE_RE = re.compile(
     r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+(?:~|/)[^\s]*(?:\s+\d+%\s+context\s+(?:used|left|remaining))?\s*$",
     re.IGNORECASE,
 )
+_CODEX_PURSUING_GOAL_STATUS_RE = re.compile(r"\bPursuing\s+goal\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
+_CODEX_GOAL_ACHIEVED_STATUS_RE = re.compile(r"\bGoal\s+achieved\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
 _CODEX_GOAL_STATUS_RE = re.compile(r"\b(?:Pursuing\s+goal|Goal\s+achieved)\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
 _CLAUDE_GOAL_ACTIVE_RE = re.compile(
     r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
@@ -808,11 +810,25 @@ def _parse_status_duration_seconds(line: str) -> float | None:
     return _parse_duration_seconds(match.group(0))
 
 
-def _parse_codex_goal_elapsed_seconds(line: str) -> float | None:
-    match = _CODEX_GOAL_STATUS_RE.search(line)
+def _parse_codex_pursuing_goal_elapsed_seconds(line: str) -> float | None:
+    match = _CODEX_PURSUING_GOAL_STATUS_RE.search(line)
     if not match:
         return None
     return _parse_duration_seconds(match.group("duration"))
+
+
+def _parse_codex_goal_achieved_elapsed_seconds(line: str) -> float | None:
+    match = _CODEX_GOAL_ACHIEVED_STATUS_RE.search(line)
+    if not match:
+        return None
+    return _parse_duration_seconds(match.group("duration"))
+
+
+def _parse_codex_goal_elapsed_seconds(line: str) -> float | None:
+    elapsed = _parse_codex_pursuing_goal_elapsed_seconds(line)
+    if elapsed is not None:
+        return elapsed
+    return _parse_codex_goal_achieved_elapsed_seconds(line)
 
 
 def _parse_claude_goal_elapsed_seconds(line: str) -> float | None:
@@ -824,7 +840,17 @@ def _parse_claude_goal_elapsed_seconds(line: str) -> float | None:
 
 def _parse_agent_goal_elapsed_seconds(line: str) -> float | None:
     """Return active-goal elapsed time for Claude `/goal active` or Codex goal status."""
-    return _parse_claude_goal_elapsed_seconds(line) or _parse_codex_goal_elapsed_seconds(line)
+    elapsed = _parse_claude_goal_elapsed_seconds(line)
+    if elapsed is not None:
+        return elapsed
+    return _parse_codex_goal_elapsed_seconds(line)
+
+
+def _parse_agent_active_goal_elapsed_seconds(line: str) -> float | None:
+    elapsed = _parse_claude_goal_elapsed_seconds(line)
+    if elapsed is not None:
+        return elapsed
+    return _parse_codex_pursuing_goal_elapsed_seconds(line)
 
 
 def _parse_status_token_count(line: str) -> int | None:
@@ -968,7 +994,7 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
 
 
 def _is_working_line(line: str) -> bool:
-    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _parse_agent_goal_elapsed_seconds(line) is not None)
+    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _parse_agent_active_goal_elapsed_seconds(line) is not None)
 
 
 def visible_agent_working(visible_text: str) -> bool:

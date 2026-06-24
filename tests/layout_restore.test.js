@@ -169,6 +169,29 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.fileExplorerRootForOpen('6'), '/home/test/yolomux.dev1');
   });
 
+  test('layout URL remembers Finder Differ Tabber or none', () => {
+    for (const mode of ['files', 'diff', 'tabber']) {
+      const api = loadYolomux('', ['1']);
+      api.setFileExplorerModeForTest(mode);
+      const params = parseUrl(api.syncInitialLayoutUrlForTest());
+      assert.equal(params.get('finder'), mode, `${mode} is written to the URL while the Finder pane exists`);
+
+      const restored = loadYolomux(
+        `?sessions=files,1&layout=row@22(slot1,left)&tabs=slot1:files;left:1&finder=${mode}`,
+        ['1'],
+        'http:',
+        'Linux x86_64',
+        'admin',
+        {localStorage: {'yolomux.fileExplorerMode.v1': mode === 'tabber' ? 'files' : 'tabber'}},
+      );
+      assert.equal(restored.fileExplorerModeForTest(), mode, `${mode} is restored from the URL ahead of localStorage`);
+    }
+
+    const noFinder = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1&finder=tabber', ['1']);
+    const noFinderParams = parseUrl(noFinder.syncInitialLayoutUrlForTest());
+    assert.equal(noFinderParams.has('finder'), false, 'closed Finder/Differ/Tabber state is omitted from the URL');
+  });
+
   test('t@1212', () => {
     const api = loadYolomux('?keep=1');
     assert.equal(api.layoutFromParam('', ''), null, 'empty layout param falls back to default layout');

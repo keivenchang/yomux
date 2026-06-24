@@ -1302,7 +1302,7 @@ function changesLoadingHtml(session = '') {
   const label = session ? sessionLabel(session) : '';
   const loadingText = label ? `${stripTrailingEllipsisText(base)} ${label}` : base;
   return `<span class="changes-loading" aria-live="polite" aria-busy="true">
-    <span class="session-yolo-marker active working changes-loading-yolo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+    <span class="session-yolo-marker active working changes-loading-yolo" aria-hidden="true">${esc(t('brand.marker'))}</span>
     <span>${textWithMovingEllipsisHtml(loadingText, 'changes-loading-dots')}</span>
   </span>`;
 }
@@ -1770,6 +1770,7 @@ function setFileExplorerMode(mode, options = {}) {
   fileExplorerMode = nextMode;
   writeStoredFileExplorerMode(fileExplorerMode);
   applyFileExplorerMode();
+  if (typeof updateActiveSessionParam === 'function') updateActiveSessionParam();
   renderFileExplorerChangesPanels({force: true});
   // Tabber renders from the already-polled transcriptMeta + the activity ledger (recency sort), so it
   // needs no Differ changed-files fetch — instead it polls /api/activity while it's the active mode.

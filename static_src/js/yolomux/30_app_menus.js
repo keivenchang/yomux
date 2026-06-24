@@ -114,7 +114,7 @@ function updateBrandTitles() {
 }
 
 function aboutBrandHtml() {
-  return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+  return `<span class="about-brand-yo">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
 }
 
 function showAboutModal() {
@@ -375,13 +375,13 @@ async function refreshYoloRulesStatus(options = {}) {
 
 function tmuxYoloMenuItems() {
   return [
-    menuNumberSetting('appearance.yolo_rotate_ms', t('pref.appearance.yolo_rotate_ms.label'), {
+    menuNumberSetting('appearance.red_reminder_ms', t('pref.appearance.red_reminder_ms.label'), {
       min: 0,
-      max: 60000,
-      step: 250,
+      max: 10000,
+      step: 50,
       suffix: 'ms',
-      fallback: 20000,
-      detail: t('pref.appearance.yolo_rotate_ms.help'),
+      fallback: 1550,
+      detail: t('pref.appearance.red_reminder_ms.help'),
     }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
@@ -1134,8 +1134,8 @@ function clampAppMenuNumberSetting(item, rawValue) {
 }
 
 function applyAppMenuNumberSettingPreview(path, value) {
-  if (path === 'appearance.yolo_rotate_ms') {
-    yoloRotateMs = Math.max(0, Number(value) || 0);
+  if (path === 'appearance.red_reminder_ms') {
+    redReminderMs = Math.max(0, Number(value) || 0);
     applyCssSettings();
   }
 }

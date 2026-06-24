@@ -708,8 +708,8 @@ function applyCssSettings() {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
+  root.setProperty('--pulse-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
-  root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
   root.setProperty('--file-image-preview-max-size', `${Math.max(1, fileExplorerImagePreviewMaxPx)}px`);
@@ -818,7 +818,6 @@ function applySettingsPayload(payload, options = {}) {
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
   agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds');
   redReminderMs = numberSetting('appearance.red_reminder_ms');
-  yoloRotateMs = numberSetting('appearance.yolo_rotate_ms');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
   hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms');

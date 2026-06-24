@@ -467,7 +467,6 @@
   --red-reminder-duration: var(--pulse-duration);
   --red-reminder-easing: var(--pulse-easing);
   --yolo-reminder-duration: 2.8s;
-  --yolo-rotation-duration: 20s;
 }
 
 .app-modal-overlay {
@@ -2400,10 +2399,6 @@ body.theme-light .session-yolo-marker.inactive {
   background: var(--agent-inactive-marker-bg);
   border-color: var(--agent-inactive-marker-border);
 }
-/* the YO ball spins ONLY when the agent is working, and SLOWLY — at the
-   "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
-   value. An idle marker (auto-on or not) is STATIC — there is no ambient idle rotation rule.
-   yolo_rotate_ms = 0 -> --yolo-rotation-duration: 0s -> the rotation renders static (disabled). */
 /* The session YO marker no longer rotates to signal "working" — the glowing green ball beside the
    agent symbol does that now. Loading/thinking spinners (which reuse the YO glyph) still spin below;
    they indicate transient loading, not session-working. */
@@ -2415,8 +2410,7 @@ body.theme-light .session-yolo-marker.inactive {
 .session-yolo-marker.yoagent-chat-spinner {
   transform-origin: center;
   animation-name: yolo-marker-rotate;
-  animation-duration: var(--yolo-rotation-duration, 20s);
-  animation-delay: var(--yolo-rotate-delay, 0s);
+  animation-duration: var(--pulse-duration, 1.55s);
   animation-timing-function: linear;
   animation-iteration-count: infinite;
 }

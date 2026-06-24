@@ -2364,6 +2364,7 @@ def test_corrupt_activity_ledger_does_not_break_app_start(monkeypatch, tmp_path)
     activity_path.write_text("{broken", encoding="utf-8")
     monkeypatch.setattr(app_module, "ACTIVITY_PATH", activity_path)
     monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", heartbeat_path)
+    monkeypatch.setattr(app_module, "TABBER_ACTIVITY_CACHE_DIR", tmp_path / "activity-cache")
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
 
     webapp = app_module.TmuxWebtermApp(["5"])

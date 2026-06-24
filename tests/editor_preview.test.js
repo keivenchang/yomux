@@ -163,6 +163,7 @@ async function runEditorPreviewSuite() {
     const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
     const treeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    const settingsRuntimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
     const dotBlock = sessionsCss.match(/\.status-indicator--dot\s*\{[^}]*\}/)?.[0] || '';
@@ -217,6 +218,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/@keyframes attention-ring-fade\s*\{[\s\S]*box-shadow:\s*0 0 0 0 rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\), 0 0 var\(--attention-ring-rest-glow-size, 5px\) rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ var\(--attention-ring-rest-glow-alpha, 0\.24\)\)[\s\S]*box-shadow:\s*0 0 0 2px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ var\(--attention-ring-peak-outline-alpha, 0\.72\)\), 0 0 var\(--attention-ring-peak-glow-size, 26px\) rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ var\(--attention-ring-peak-glow-alpha, 0\.68\)\)/.test(sessionsCss), 'attention-ring-fade uses parameterized weak/strong glow variables');
     assert.ok(/@keyframes attention-ring-fade\s*\{[\s\S]*filter:\s*saturate\(var\(--attention-pulse-saturate-rest, 1\)\) brightness\(var\(--attention-pulse-brightness-rest, 1\)\)[\s\S]*filter:\s*saturate\(var\(--attention-pulse-saturate-peak, 1\)\) brightness\(var\(--attention-pulse-brightness-peak, 1\)\)/.test(sessionsCss), 'attention-ring-fade also carries the dot brightness pulse with neutral defaults for non-dot users');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse duration token');
+    assert.ok(/root\.setProperty\('--pulse-duration', `\$\{Math\.max\(0, redReminderMs\) \/ 1000\}s`\)/.test(settingsRuntimeSource), 'renamed red/yellow/green status pulse setting drives the actual shared pulse duration');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
     assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation:\s*metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), 'metadata pulse no longer has a hardcoded duration');
     assert.equal(/900ms ease-in-out infinite alternate|metadata-badge-pulse 1\.4s/.test(sessionsCss), false, 'old hardcoded pulse durations are gone from session/popover CSS');
@@ -1697,10 +1699,11 @@ async function runEditorPreviewSuite() {
     assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(autoOffWorkingHtml), 'working Claude session tabs keep the glowing Claude glyph even when auto-approve is off');
     const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
     // The working YO marker no longer spins — the glowing green ball beside the agent symbol is the
-    // working indicator now. The slow rotation setting still drives the loading/thinking spinners.
+    // working indicator now. Loading/thinking spinners use the shared status pulse duration instead.
     assert.equal(/\.session-yolo-marker\.working\s*\{[^}]*yolo-marker-rotate/.test(yoloMarkerCss), false, '#23: working YO marker is static (no rotation animation)');
-    assert.ok(/\.session-yolo-marker\.yoagent-waiting-spinner[\s\S]*?animation-name:\s*yolo-marker-rotate[\s\S]*?--yolo-rotation-duration/.test(yoloMarkerCss), '#23: loading/thinking spinners still spin at the slow yolo_rotate_ms setting');
+    assert.ok(/\.session-yolo-marker\.yoagent-waiting-spinner[\s\S]*?animation-name:\s*yolo-marker-rotate[\s\S]*?animation-duration:\s*var\(--pulse-duration/.test(yoloMarkerCss), '#23: loading/thinking spinners still spin from the shared status pulse duration');
     assert.equal(yoloMarkerCss.includes('--yolo-working-duration'), false, '#23: the dead --yolo-working-duration token is removed');
+    assert.equal(/yolo_rotate_ms|yoloRotationDelay|--yolo-rotation-duration|--yolo-rotate-delay/.test(fs.readFileSync('static/yolomux.js', 'utf8') + yoloMarkerCss), false, '#23: the old Active YO rotation setting and delay variables are removed');
     assert.equal(/\.session-yolo-marker:not\(\.inactive\):not\(\.locked\):not\(\.working\)/.test(yoloMarkerCss), false, '#23: the ambient idle-rotation rule is deleted (idle markers are static)');
 
     api.setAutoApproveStateForTest('4', {enabled: false, enabled_elsewhere: true, locked: true, lock_owner: {pid: 1234}, screen: {key: 'working'}});
@@ -4701,7 +4704,8 @@ async function runEditorPreviewSuite() {
     assert.ok(appearanceHtml.includes('Plasma violet'), 'Cursor color Purple is labeled Plasma violet');
     assert.ok(appearanceHtml.includes('Starlight white'), 'Cursor color White is labeled Starlight white');
     assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
-    assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.yolo_rotate_ms"/.test(appearanceHtml), 'Separator and Cursor color sit immediately after Active color in Appearance');
+    assert.equal(appearanceHtml.includes('data-setting-path="appearance.yolo_rotate_ms"'), false, 'Active YO rotation is removed from Appearance');
+    assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.date_time_hour_cycle"/.test(appearanceHtml), 'Separator and Cursor color sit immediately after Active color in Appearance, with no YO rotation row between them');
     assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
     const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');

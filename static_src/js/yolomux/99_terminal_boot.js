@@ -2602,18 +2602,10 @@ function renderAutoApproveButton(session, payload) {
   const locked = payload?.locked === true && !enabled;
   const working = sessionYoloIsWorking(session, payload);
   for (const button of buttons) {
-    const wasWorking = button.classList.contains('working');
     syncPressedButton(button, enabled);
     button.classList.toggle('inactive', !enabled && !locked);
     button.classList.toggle('locked', locked);
     button.classList.toggle('working', working);
-    if (working) {
-      if (!wasWorking || !button.style.getPropertyValue('--yolo-rotate-delay')) {
-        button.style.setProperty('--yolo-rotate-delay', yoloRotationDelay());
-      }
-    } else {
-      button.style.removeProperty('--yolo-rotate-delay');
-    }
     button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = t('brand.marker');
     const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';

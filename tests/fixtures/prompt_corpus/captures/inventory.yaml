@@ -501,6 +501,26 @@ fixtures:
   scenario: goal_achieved_working
   source: screenshot-provided Codex goal-achieved working capture from tmux 8002:0.0; later tmux capture confirmed the same Working/Goal achieved bottom rows after queued follow-up rows had re-rendered away
 - agent: codex
+  capture_date: '2026-06-24'
+  case_name: goal_achieved_idle_draft
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex goal-achieved footer with idle draft prompt
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: draft
+    reason_code: draft-clearable
+    screen_key: input-draft
+  file: goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
+  id: goal_achieved_idle_draft__codex-cli-0.141.0_20260624
+  scenario: goal_achieved_idle_draft
+  source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 8001:0.0; `Goal achieved` footer must not classify as RUN without a visible current Working row
+- agent: codex
   capture_date: '2026-06-20'
   case_name: working_command_counter
   client_name: Codex CLI

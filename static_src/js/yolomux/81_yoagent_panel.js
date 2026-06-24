@@ -563,7 +563,7 @@ function yoagentPendingWaitsHtml() {
       ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('yoagent.clear'))}" aria-label="${esc(t('yoagent.clear'))}">${esc(t('yoagent.clear'))}</button>`
       : '';
     return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
-      <span class="session-yolo-marker active working yoagent-waiting-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+      <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
       <span class="yoagent-waiting-label">${esc(label)}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
       ${clearButton}
@@ -1124,7 +1124,7 @@ function yoagentChatHtml() {
   const hasConversation = Boolean(yoagentMessages.length || yoagentChatQueue.length || yoagentPendingWaits.length || yoagentJobs.length || yoagentNotice || isThinking || yoagentError || startupInfo || !chatEnabled);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`

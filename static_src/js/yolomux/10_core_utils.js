@@ -964,6 +964,14 @@ function normalizeFileExplorerMode(mode) {
   return mode === 'diff' || mode === 'tabber' ? mode : 'files';
 }
 
+function fileExplorerModeFromUrlParam(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'finder' || mode === 'files') return 'files';
+  if (mode === 'differ' || mode === 'diff') return 'diff';
+  if (mode === 'tabber') return 'tabber';
+  return '';
+}
+
 function readStoredFileExplorerMode() {
   const stored = storageGet(fileExplorerModeStorageKey);
   if (stored === 'diff' || stored === 'files') return stored;

@@ -652,6 +652,13 @@ function maybeAdoptYoagentDeepLink(params) {
   }
 }
 
+function maybeAdoptFileExplorerModeDeepLink(params) {
+  const mode = fileExplorerModeFromUrlParam(params.get('finder'));
+  if (!mode) return;
+  fileExplorerMode = mode;
+  writeStoredFileExplorerMode(fileExplorerMode);
+}
+
 function shareBootstrapLayoutParams() {
   if (!shareViewMode || !shareBootstrap) return null;
   const params = new URLSearchParams();
@@ -669,6 +676,7 @@ function shareBootstrapLayoutParams() {
 function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
+  if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
@@ -1741,12 +1749,6 @@ function updateTopbarActivityStatus() {
   node.innerHTML = html;
   node.hidden = !html;
   node.classList.toggle('has-attention', counts.attention > 0);
-}
-
-function yoloRotationDelay(now = Date.now()) {
-  const duration = Math.max(0, Number(yoloRotateMs) || 0);
-  if (duration <= 0) return '0s';
-  return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
 function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
@@ -3834,6 +3836,7 @@ function updateActiveSessionParam() {
   params.delete('sessions');
   params.delete('layout');
   params.delete('tabs');
+  params.delete('finder');
   const queryParts = [];
   const inactiveItems = inactiveTabItems();
   if (activeSessions.length || inactiveItems.length) {
@@ -3843,6 +3846,9 @@ function updateActiveSessionParam() {
     queryParts.push(`layout=${layoutParamValue(layoutSlots)}`);
     const tabs = layoutTabsParamValue(layoutSlots);
     if (tabs) queryParts.push(`tabs=${tabs}`);
+    if (paneItems(layoutSlots).some(isFileExplorerItem)) {
+      queryParts.push(`finder=${readableParamComponent(normalizeFileExplorerMode(fileExplorerMode))}`);
+    }
   }
   const remaining = params.toString();
   if (remaining) queryParts.push(remaining);

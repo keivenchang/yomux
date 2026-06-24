@@ -6,7 +6,6 @@ const FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST = 'yolomux.fileExplorerOpen
 const DEFAULT_TEST_SETTINGS = Object.freeze({
   appearance: Object.freeze({
     red_reminder_ms: 1550,
-    yolo_rotate_ms: 20000,
   }),
   editor: Object.freeze({
     trim_trailing_whitespace_on_save: false,
