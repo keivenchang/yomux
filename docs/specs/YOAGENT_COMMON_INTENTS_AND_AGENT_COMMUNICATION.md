@@ -14,6 +14,8 @@ YO!agent's own Claude/Codex chat stream separates assistant answer text from bac
 
 YO!agent's own Ask queue is FIFO and waits for the active model turn to finish before starting the next queued ask. This is enforced in the browser state and at the server backend-call boundary, so duplicate or overlapping `/api/yoagent/chat` requests cannot run two Claude/Codex model turns at the same time.
 
+YO!agent browser chat submissions must stay small and must not replay the visible conversation transcript. `POST /api/yoagent/chat` sends only the current prompt plus routing/control metadata such as locale and request/stream ids; persisted history, context, and backend resume state are server-owned. Hidden auxiliary activity such as thinking text, tool output, `auxiliaryLines`, `auxiliaryText`, `auxiliaryPreview`, and `streamItems` must never be serialized back through the browser request body.
+
 Peer-to-peer relay is the exception. If the user explicitly says that one target should contact, relay to, or instruct another target directly, YO!agent may pass relay instructions, but the prompt must say exactly how to relay and what to disclose. Without that wording, target sessions should not know about each other.
 
 ## Common User Questions And Expected Behavior

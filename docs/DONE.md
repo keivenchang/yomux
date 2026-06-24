@@ -6,6 +6,10 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-24
 
+### DOIT queue audit
+
+- Audited the remaining `/tmp/DOIT*` queue against `main` at `56ed4dd8`. Cleared `/tmp/DOIT.balls_not_pulsating_research.md`: current code restores status-ball pulse cadence through the shared high-specificity `.status-indicator.heartbeat-pulse` parent, keeps static Claude/Codex symbols with separate glowing balls, pins reduced-motion parity with `test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion`, and documents the contract in `docs/specs/GUI.md`. Kept `/tmp/DOIT.yoagent_chat_413_request_entity_too_large.md`, `/tmp/DOIT.slow-fresh-reload-client-event-flood.md`, and `/tmp/DOIT.optimize_slow_api_calls.md` with audit notes because they still contain real unchecked follow-up work.
+
 ### Correctness bug audit
 
 - Completed and removed `DOIT.bug-audit.md`. Verified the current tree covers all 13 audited backend/frontend correctness bugs: share viewer snapshots, hidden-tab terminal resize recovery, PTY/share cleanup, bounded tmux option calls, owned share-reader fds, vanished auto-approve session cleanup, incremental UTF-8 stream decoding, tmux replacement decoding, SIGKILL wait, bounded share sends, late websocket-frame guards, terminal fit callback teardown, and non-ASCII websocket-key rejection. Final focused verification for the remaining items: `python3 -m pytest tests/test_server_query.py::test_share_viewer_send_frame_restores_bounded_timeout tests/test_server_query.py::test_accept_websocket_rejects_non_ascii_key_cleanly -q` and `node tests/editor_preview.test.js`.
