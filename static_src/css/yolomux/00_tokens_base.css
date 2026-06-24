@@ -414,8 +414,10 @@
   --markdown-html-light-code: #a40e26;
   --markdown-html-light-code-bg: #fff1d6;
   --markdown-html-light-code-border: #d8a657;
-  --markdown-html-dark-bg: #4a3b0a;
-  --markdown-html-dark-border: #4a3b0a;
+  --markdown-alert-caution-light-bg: #fde7e9;
+  --markdown-alert-caution-dark-bg: #6f2632;
+  --markdown-html-dark-bg: #6f5a0c;
+  --markdown-html-dark-border: #6f5a0c;
   --markdown-html-dark-text: #e4e8ee;
   --markdown-html-dark-link: #7ee9ff;
   --markdown-html-dark-code: #ffe08a;

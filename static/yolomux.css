@@ -415,8 +415,10 @@
   --markdown-html-light-code: #a40e26;
   --markdown-html-light-code-bg: #fff1d6;
   --markdown-html-light-code-border: #d8a657;
-  --markdown-html-dark-bg: #4a3b0a;
-  --markdown-html-dark-border: #4a3b0a;
+  --markdown-alert-caution-light-bg: #fde7e9;
+  --markdown-alert-caution-dark-bg: #6f2632;
+  --markdown-html-dark-bg: #6f5a0c;
+  --markdown-html-dark-border: #6f5a0c;
   --markdown-html-dark-text: #e4e8ee;
   --markdown-html-dark-link: #7ee9ff;
   --markdown-html-dark-code: #ffe08a;
@@ -11195,6 +11197,54 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
 .markdown-body li > p { margin: 0; }
 .markdown-body blockquote { border-inline-start: 3px solid var(--line); margin: 6px 0; padding: 3px 8px; color: var(--muted); }
+.markdown-body blockquote.markdown-alert {
+  --markdown-heading: var(--markdown-html-light-text);
+  --markdown-strong: var(--markdown-html-light-text);
+  --markdown-emphasis: var(--markdown-html-light-text);
+  --markdown-link: var(--markdown-html-light-link);
+  --code-inline: var(--markdown-html-light-code);
+  --code-inline-bg: var(--markdown-html-light-code-bg);
+  --code-inline-border: var(--markdown-html-light-code-border);
+  margin: 8px 0;
+  padding: 10px 12px;
+  color: var(--markdown-html-light-text);
+  background: #fff8cc;
+  border: 0;
+  border-radius: var(--radius-control);
+}
+.markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
+.markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
+.markdown-body blockquote.markdown-alert :is(strong, em) { color: var(--markdown-html-light-text); }
+.markdown-body blockquote.markdown-alert code {
+  color: var(--markdown-html-light-code);
+  background: var(--markdown-html-light-code-bg);
+  border-color: var(--markdown-html-light-code-border);
+}
+.markdown-body blockquote.markdown-alert-caution {
+  background: var(--markdown-alert-caution-light-bg);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) {
+  --markdown-heading: var(--markdown-html-dark-text);
+  --markdown-strong: var(--markdown-html-dark-text);
+  --markdown-emphasis: var(--markdown-html-dark-text);
+  --markdown-link: var(--markdown-html-dark-link);
+  --code-inline: var(--markdown-html-dark-code);
+  --code-inline-bg: var(--markdown-html-dark-code-bg);
+  --code-inline-border: var(--markdown-html-dark-code-border);
+  color: var(--markdown-html-dark-text);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.markdown-alert-warning {
+  background: var(--markdown-html-dark-bg);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.markdown-alert-caution {
+  background: var(--markdown-alert-caution-dark-bg);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) code {
+  color: var(--markdown-html-dark-code);
+  background: var(--markdown-html-dark-code-bg);
+  border-color: var(--markdown-html-dark-code-border);
+}
 .markdown-body table { border-collapse: collapse; margin: 8px 0; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
 .markdown-body th { background: var(--panel2); }

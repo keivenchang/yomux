@@ -5656,7 +5656,7 @@ class TmuxWebtermApp:
         target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
         capture_roster_target = not capture_pane and discovered_sessions is not None and session in discovered_sessions
         capture_idle_bare_session = capture_bare_session_when_roster and not capture_pane and target == session
-        if not capture_roster_target and not capture_idle_bare_session and not self.auto_approve_session_has_pending_prompt(session) and not self.auto_approve_capture_allowed_for_target(target):
+        if not capture_pane and not capture_roster_target and not capture_idle_bare_session and not self.auto_approve_session_has_pending_prompt(session) and not self.auto_approve_capture_allowed_for_target(target):
             return hidden_prompt, {"key": "idle", "text": "tmux activity quiet"}
 
         def prompt_classifier(prompt_target: str, visible_text: str, pane_text: str | None, prompt_source: str) -> dict[str, Any]:

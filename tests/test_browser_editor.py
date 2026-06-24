@@ -1602,10 +1602,12 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const content = [
               '# Preview Media',
               '![local](./images/local pic.png?cache=1#frag)',
+              '![bare](images/bare.png)',
               '![svg](../assets/logo.svg)',
               '![external](https://example.test/image.png)',
               '![unsafe](javascript:alert(1))',
               '![missing](./missing.png)',
+              '<img alt="html bare" src="images/html-bare.png" width="300">',
               `<img alt="fixed wide" src="${wideFixed}" width="220">`,
               `<img alt="fixed tall" src="${tallFixed}" width="220">`,
               '```mermaid',
@@ -1649,6 +1651,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             };
             const initialImages = {
               local: imageSnapshot('local'),
+              bare: imageSnapshot('bare'),
+              htmlBare: imageSnapshot('html bare'),
               svg: imageSnapshot('svg'),
               external: imageSnapshot('external'),
               unsafe: imageSnapshot('unsafe'),
@@ -1693,6 +1697,15 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local pic.png", metrics
     assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local pic.png?cache=1#frag", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
+    assert metrics["initialImages"]["bare"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fbare.png", metrics
+    assert metrics["initialImages"]["bare"]["resolvedPath"] == "/home/test/repo/docs/images/bare.png", metrics
+    assert metrics["initialImages"]["bare"]["originalSrc"] == "images/bare.png", metrics
+    assert "markdown-preview-image" in metrics["initialImages"]["bare"]["className"], metrics
+    assert metrics["initialImages"]["htmlBare"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fhtml-bare.png", metrics
+    assert metrics["initialImages"]["htmlBare"]["resolvedPath"] == "/home/test/repo/docs/images/html-bare.png", metrics
+    assert metrics["initialImages"]["htmlBare"]["originalSrc"] == "images/html-bare.png", metrics
+    assert metrics["initialImages"]["htmlBare"]["widthAttr"] == "300", metrics
+    assert "markdown-preview-image" in metrics["initialImages"]["htmlBare"]["className"], metrics
     assert metrics["initialImages"]["fixedWide"]["exists"] is True, metrics
     assert metrics["initialImages"]["fixedTall"]["exists"] is True, metrics
     assert metrics["initialImages"]["fixedWide"]["widthAttr"] == "220", metrics
@@ -2524,6 +2537,18 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
           parse() {
             return `
               <table id="normal"><tr><td id="normal-cell">Normal dark preview table</td></tr></table>
+              <blockquote id="md-warning">
+                <p>[!WARNING] There is no one way.</p>
+                <p><strong id="md-warning-strong">IMPORTANT NOTE:</strong> run <code id="md-warning-code">gpu-info</code> before continuing.</p>
+              </blockquote>
+              <blockquote id="md-caution">
+                <p>[!CAUTION] Do not skip.</p>
+                <p><strong id="md-caution-strong">IMPORTANT NOTE:</strong> read <code id="md-caution-code">OSS and OSRB</code> before continuing.</p>
+              </blockquote>
+              <blockquote id="md-caution-direct">
+                [!CAUTION]<br>
+                <strong id="md-caution-direct-strong">IMPORTANT NOTE:</strong> protect the GPU.
+              </blockquote>
               <table id="callout" bgcolor="#fff8cc" border="0" cellpadding="10" cellspacing="0" width="100%">
                 <tr>
                   <td width="50" align="center">&#9888;</td>
@@ -2553,8 +2578,33 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
         const calloutStyle = style('#callout');
         const calloutCellStyle = style('#callout-cell');
         const calloutCodeStyle = style('#callout-code');
+        const mdWarningStyle = style('#md-warning');
+        const mdWarningCodeStyle = style('#md-warning-code');
+        const mdCautionStyle = style('#md-caution');
+        const mdCautionCodeStyle = style('#md-caution-code');
+        const mdCautionDirectStyle = style('#md-caution-direct');
         return {
           lightClass: document.querySelector('#callout').classList.contains('markdown-html-light-bg'),
+          mdWarningClass: document.querySelector('#md-warning').classList.contains('markdown-alert-warning'),
+          mdWarningText: document.querySelector('#md-warning').textContent,
+          mdWarningBg: mdWarningStyle.backgroundColor,
+          mdWarningBorderLeftWidth: mdWarningStyle.borderLeftWidth,
+          mdWarningColor: mdWarningStyle.color,
+          mdWarningStrongColor: style('#md-warning-strong').color,
+          mdWarningCodeColor: mdWarningCodeStyle.color,
+          mdWarningCodeBg: mdWarningCodeStyle.backgroundColor,
+          mdCautionClass: document.querySelector('#md-caution').classList.contains('markdown-alert-caution'),
+          mdCautionText: document.querySelector('#md-caution').textContent,
+          mdCautionBg: mdCautionStyle.backgroundColor,
+          mdCautionBorderLeftWidth: mdCautionStyle.borderLeftWidth,
+          mdCautionColor: mdCautionStyle.color,
+          mdCautionStrongColor: style('#md-caution-strong').color,
+          mdCautionCodeColor: mdCautionCodeStyle.color,
+          mdCautionCodeBg: mdCautionCodeStyle.backgroundColor,
+          mdCautionDirectClass: document.querySelector('#md-caution-direct').classList.contains('markdown-alert-caution'),
+          mdCautionDirectText: document.querySelector('#md-caution-direct').textContent,
+          mdCautionDirectBg: mdCautionDirectStyle.backgroundColor,
+          mdCautionDirectStrongColor: style('#md-caution-direct-strong').color,
           previewBg: style('#preview').backgroundColor,
           previewColor: style('#preview').color,
           normalColor: style('#normal-cell').color,
@@ -2576,14 +2626,34 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
     assert metrics["previewColor"] == "rgb(207, 211, 220)", metrics
     assert metrics["normalColor"] == "rgb(207, 211, 220)", metrics
     assert metrics["normalBorderColor"] == "rgb(48, 57, 72)", metrics
-    assert metrics["calloutBg"] == "rgb(74, 59, 10)", metrics
-    assert metrics["calloutCellBg"] == "rgb(74, 59, 10)", metrics
+    assert metrics["mdWarningClass"] is True, metrics
+    assert "[!WARNING]" not in metrics["mdWarningText"], metrics
+    assert metrics["mdWarningBg"] == "rgb(111, 90, 12)", metrics
+    assert metrics["mdWarningBorderLeftWidth"] == "0px", metrics
+    assert metrics["mdWarningColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["mdWarningStrongColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["mdWarningCodeColor"] == "rgb(255, 224, 138)", metrics
+    assert metrics["mdWarningCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
+    assert metrics["mdCautionClass"] is True, metrics
+    assert "[!CAUTION]" not in metrics["mdCautionText"], metrics
+    assert metrics["mdCautionBg"] == "rgb(111, 38, 50)", metrics
+    assert metrics["mdCautionBorderLeftWidth"] == "0px", metrics
+    assert metrics["mdCautionColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["mdCautionStrongColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["mdCautionCodeColor"] == "rgb(255, 224, 138)", metrics
+    assert metrics["mdCautionCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
+    assert metrics["mdCautionDirectClass"] is True, metrics
+    assert "[!CAUTION]" not in metrics["mdCautionDirectText"], metrics
+    assert metrics["mdCautionDirectBg"] == "rgb(111, 38, 50)", metrics
+    assert metrics["mdCautionDirectStrongColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["calloutBg"] == "rgb(111, 90, 12)", metrics
+    assert metrics["calloutCellBg"] == "rgb(111, 90, 12)", metrics
     assert metrics["calloutColor"] == "rgb(228, 232, 238)", metrics
     assert metrics["calloutStrongColor"] == "rgb(228, 232, 238)", metrics
     assert metrics["calloutCodeColor"] == "rgb(255, 224, 138)", metrics
     assert metrics["calloutCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
     assert metrics["calloutCodeBorderColor"] == "rgba(245, 197, 66, 0.24)", metrics
-    assert metrics["calloutBorderColor"] == "rgb(74, 59, 10)", metrics
+    assert metrics["calloutBorderColor"] == "rgb(111, 90, 12)", metrics
     assert metrics["calloutPaddingTop"] == "10px", metrics
 
 
@@ -2628,8 +2698,8 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
     assert metrics["dark"]["preview"] == "rgb(0, 0, 0)", metrics
     assert metrics["dark"]["code"] == "rgb(42, 48, 59)", metrics
     assert metrics["dark"]["code"] != metrics["dark"]["preview"], metrics
-    assert metrics["dark"]["callout"] == "rgb(74, 59, 10)", metrics
-    assert metrics["dark"]["calloutCell"] == "rgb(74, 59, 10)", metrics
+    assert metrics["dark"]["callout"] == "rgb(111, 90, 12)", metrics
+    assert metrics["dark"]["calloutCell"] == "rgb(111, 90, 12)", metrics
     assert metrics["dark"]["calloutText"] == "rgb(228, 232, 238)", metrics
     assert metrics["dark"]["calloutStrong"] == "rgb(228, 232, 238)", metrics
     assert metrics["dark"]["calloutCode"] == "rgb(255, 224, 138)", metrics

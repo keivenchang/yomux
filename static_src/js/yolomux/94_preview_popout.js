@@ -159,6 +159,7 @@ function previewPopoutVariableStyle() {
     '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
     '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
     '--markdown-preview-bg', '--markdown-code-block-bg',
+    '--markdown-alert-caution-light-bg', '--markdown-alert-caution-dark-bg',
     '--markdown-html-dark-bg', '--markdown-html-dark-border', '--markdown-html-dark-text',
     '--markdown-html-dark-link', '--markdown-html-dark-code',
     '--markdown-html-dark-code-bg', '--markdown-html-dark-code-border',
@@ -409,6 +410,58 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     }
     .file-preview-popout-window:not(.editor-theme-light) .markdown-body pre {
       background: var(--markdown-code-block-bg);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert {
+      --markdown-heading: var(--markdown-html-light-text);
+      --markdown-strong: var(--markdown-html-light-text);
+      --markdown-emphasis: var(--markdown-html-light-text);
+      --markdown-link: var(--markdown-html-light-link);
+      --code-inline: var(--markdown-html-light-code);
+      --code-inline-bg: var(--markdown-html-light-code-bg);
+      --code-inline-border: var(--markdown-html-light-code-border);
+      margin: 8px 0;
+      padding: 10px 12px;
+      color: var(--markdown-html-light-text);
+      background: #fff8cc;
+      border: 0;
+      border-radius: var(--radius-control);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert :is(strong, em) {
+      color: var(--markdown-html-light-text);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert code {
+      color: var(--markdown-html-light-code);
+      background: var(--markdown-html-light-code-bg);
+      border-color: var(--markdown-html-light-code-border);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert-caution {
+      background: var(--markdown-alert-caution-light-bg);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) {
+      --markdown-heading: var(--markdown-html-dark-text);
+      --markdown-strong: var(--markdown-html-dark-text);
+      --markdown-emphasis: var(--markdown-html-dark-text);
+      --markdown-link: var(--markdown-html-dark-link);
+      --code-inline: var(--markdown-html-dark-code);
+      --code-inline-bg: var(--markdown-html-dark-code-bg);
+      --code-inline-border: var(--markdown-html-dark-code-border);
+      color: var(--markdown-html-dark-text);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote.markdown-alert-warning {
+      background: var(--markdown-html-dark-bg);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote.markdown-alert-caution {
+      background: var(--markdown-alert-caution-dark-bg);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) {
+      color: var(--markdown-html-dark-text);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) code {
+      color: var(--markdown-html-dark-code);
+      background: var(--markdown-html-dark-code-bg);
+      border-color: var(--markdown-html-dark-code-border);
     }
     .file-preview-popout-window .markdown-body .markdown-html-light-bg,
     .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(th, td),

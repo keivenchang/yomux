@@ -34073,6 +34073,7 @@ function markdownPreviewUrlAllowed(value, tagName) {
   const raw = String(value || '').trim();
   if (!raw) return true;
   if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
+  if (!raw.startsWith('//') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) return true;
   try {
     const base = globalThis.location?.href || 'http://localhost/';
     const url = new URL(raw, base);
@@ -34207,6 +34208,35 @@ function applyMarkdownHtmlBackgroundClasses(root) {
     if (markdownPreviewBgcolorIsLight(element.getAttribute('bgcolor'))) {
       element.classList.add(MARKDOWN_HTML_LIGHT_BG_CLASS);
     }
+  });
+}
+
+const MARKDOWN_ALERT_MARKER_RE = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+
+function removeMarkdownAlertMarker(root) {
+  const showText = globalThis.NodeFilter?.SHOW_TEXT || 4;
+  const walker = document.createTreeWalker(root, showText);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!MARKDOWN_ALERT_MARKER_RE.test(node.nodeValue || '')) continue;
+    node.nodeValue = String(node.nodeValue || '').replace(MARKDOWN_ALERT_MARKER_RE, '');
+    const parent = node.parentElement;
+    if (parent?.matches?.('p') && !String(parent.textContent || '').trim() && parent.children.length === 0) {
+      parent.remove();
+    }
+    return true;
+  }
+  return false;
+}
+
+function applyMarkdownAlertClasses(root) {
+  if (!root?.querySelectorAll) return;
+  root.querySelectorAll('blockquote').forEach(blockquote => {
+    const firstParagraph = blockquote.querySelector(':scope > p') || blockquote.querySelector('p');
+    const marker = String(firstParagraph?.textContent || blockquote.textContent || '').match(MARKDOWN_ALERT_MARKER_RE);
+    if (!marker) return;
+    const type = marker[1].toLowerCase();
+    blockquote.classList.add('markdown-alert', `markdown-alert-${type}`);
+    removeMarkdownAlertMarker(firstParagraph || blockquote);
   });
 }
 
@@ -34705,7 +34735,26 @@ function fallbackMarkdownToHtml(text) {
     const quote = trimmed.match(/^>\s?(.*)$/);
     if (quote) {
       flushParagraph();
-      out.push(`<blockquote><p>${markdownInlineHtml(quote[1])}</p></blockquote>`);
+      const quotedLines = [];
+      while (index < lines.length) {
+        const quoted = lines[index].trim().match(/^>\s?(.*)$/);
+        if (!quoted) break;
+        quotedLines.push(quoted[1]);
+        index += 1;
+      }
+      const groups = [];
+      let current = [];
+      for (const quotedLine of quotedLines) {
+        if (quotedLine.trim()) {
+          current.push(quotedLine);
+          continue;
+        }
+        if (current.length) groups.push(current);
+        current = [];
+      }
+      if (current.length) groups.push(current);
+      out.push(`<blockquote>${groups.map(group => `<p>${group.map(item => markdownInlineHtml(item.trim())).join('<br>')}</p>`).join('')}</blockquote>`);
+      index -= 1;
       continue;
     }
     const task = trimmed.match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
@@ -34755,6 +34804,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
   applyMarkdownHtmlBackgroundClasses(frag);
+  applyMarkdownAlertClasses(frag);
   linkifyBareUrls(frag);
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
@@ -36326,6 +36376,7 @@ function previewPopoutVariableStyle() {
     '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
     '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
     '--markdown-preview-bg', '--markdown-code-block-bg',
+    '--markdown-alert-caution-light-bg', '--markdown-alert-caution-dark-bg',
     '--markdown-html-dark-bg', '--markdown-html-dark-border', '--markdown-html-dark-text',
     '--markdown-html-dark-link', '--markdown-html-dark-code',
     '--markdown-html-dark-code-bg', '--markdown-html-dark-code-border',
@@ -36576,6 +36627,58 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     }
     .file-preview-popout-window:not(.editor-theme-light) .markdown-body pre {
       background: var(--markdown-code-block-bg);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert {
+      --markdown-heading: var(--markdown-html-light-text);
+      --markdown-strong: var(--markdown-html-light-text);
+      --markdown-emphasis: var(--markdown-html-light-text);
+      --markdown-link: var(--markdown-html-light-link);
+      --code-inline: var(--markdown-html-light-code);
+      --code-inline-bg: var(--markdown-html-light-code-bg);
+      --code-inline-border: var(--markdown-html-light-code-border);
+      margin: 8px 0;
+      padding: 10px 12px;
+      color: var(--markdown-html-light-text);
+      background: #fff8cc;
+      border: 0;
+      border-radius: var(--radius-control);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert :is(strong, em) {
+      color: var(--markdown-html-light-text);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert code {
+      color: var(--markdown-html-light-code);
+      background: var(--markdown-html-light-code-bg);
+      border-color: var(--markdown-html-light-code-border);
+    }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert-caution {
+      background: var(--markdown-alert-caution-light-bg);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) {
+      --markdown-heading: var(--markdown-html-dark-text);
+      --markdown-strong: var(--markdown-html-dark-text);
+      --markdown-emphasis: var(--markdown-html-dark-text);
+      --markdown-link: var(--markdown-html-dark-link);
+      --code-inline: var(--markdown-html-dark-code);
+      --code-inline-bg: var(--markdown-html-dark-code-bg);
+      --code-inline-border: var(--markdown-html-dark-code-border);
+      color: var(--markdown-html-dark-text);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote.markdown-alert-warning {
+      background: var(--markdown-html-dark-bg);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote.markdown-alert-caution {
+      background: var(--markdown-alert-caution-dark-bg);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) {
+      color: var(--markdown-html-dark-text);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) code {
+      color: var(--markdown-html-dark-code);
+      background: var(--markdown-html-dark-code-bg);
+      border-color: var(--markdown-html-dark-code-border);
     }
     .file-preview-popout-window .markdown-body .markdown-html-light-bg,
     .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(th, td),

@@ -72,6 +72,7 @@ function markdownPreviewUrlAllowed(value, tagName) {
   const raw = String(value || '').trim();
   if (!raw) return true;
   if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
+  if (!raw.startsWith('//') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) return true;
   try {
     const base = globalThis.location?.href || 'http://localhost/';
     const url = new URL(raw, base);
@@ -206,6 +207,35 @@ function applyMarkdownHtmlBackgroundClasses(root) {
     if (markdownPreviewBgcolorIsLight(element.getAttribute('bgcolor'))) {
       element.classList.add(MARKDOWN_HTML_LIGHT_BG_CLASS);
     }
+  });
+}
+
+const MARKDOWN_ALERT_MARKER_RE = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+
+function removeMarkdownAlertMarker(root) {
+  const showText = globalThis.NodeFilter?.SHOW_TEXT || 4;
+  const walker = document.createTreeWalker(root, showText);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!MARKDOWN_ALERT_MARKER_RE.test(node.nodeValue || '')) continue;
+    node.nodeValue = String(node.nodeValue || '').replace(MARKDOWN_ALERT_MARKER_RE, '');
+    const parent = node.parentElement;
+    if (parent?.matches?.('p') && !String(parent.textContent || '').trim() && parent.children.length === 0) {
+      parent.remove();
+    }
+    return true;
+  }
+  return false;
+}
+
+function applyMarkdownAlertClasses(root) {
+  if (!root?.querySelectorAll) return;
+  root.querySelectorAll('blockquote').forEach(blockquote => {
+    const firstParagraph = blockquote.querySelector(':scope > p') || blockquote.querySelector('p');
+    const marker = String(firstParagraph?.textContent || blockquote.textContent || '').match(MARKDOWN_ALERT_MARKER_RE);
+    if (!marker) return;
+    const type = marker[1].toLowerCase();
+    blockquote.classList.add('markdown-alert', `markdown-alert-${type}`);
+    removeMarkdownAlertMarker(firstParagraph || blockquote);
   });
 }
 
@@ -704,7 +734,26 @@ function fallbackMarkdownToHtml(text) {
     const quote = trimmed.match(/^>\s?(.*)$/);
     if (quote) {
       flushParagraph();
-      out.push(`<blockquote><p>${markdownInlineHtml(quote[1])}</p></blockquote>`);
+      const quotedLines = [];
+      while (index < lines.length) {
+        const quoted = lines[index].trim().match(/^>\s?(.*)$/);
+        if (!quoted) break;
+        quotedLines.push(quoted[1]);
+        index += 1;
+      }
+      const groups = [];
+      let current = [];
+      for (const quotedLine of quotedLines) {
+        if (quotedLine.trim()) {
+          current.push(quotedLine);
+          continue;
+        }
+        if (current.length) groups.push(current);
+        current = [];
+      }
+      if (current.length) groups.push(current);
+      out.push(`<blockquote>${groups.map(group => `<p>${group.map(item => markdownInlineHtml(item.trim())).join('<br>')}</p>`).join('')}</blockquote>`);
+      index -= 1;
       continue;
     }
     const task = trimmed.match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
@@ -754,6 +803,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
   applyMarkdownHtmlBackgroundClasses(frag);
+  applyMarkdownAlertClasses(frag);
   linkifyBareUrls(frag);
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
