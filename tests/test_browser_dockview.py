@@ -939,7 +939,7 @@ def test_dockview_window_bar_working_agent_glyph_uses_shared_pulse(browser, tmp_
     assert metrics["idleHasState"] is False, metrics
     assert metrics["idleDotCount"] == 0, metrics
     assert metrics["workingAnimationName"] == "agent-symbol-glow-cadence", metrics
-    assert metrics["workingOpacity"] == "1", metrics
+    assert 0.4 <= float(metrics["workingOpacity"]) <= 1, metrics
     assert metrics["workingGlowRgb"] == "102 126 248", metrics
 
 

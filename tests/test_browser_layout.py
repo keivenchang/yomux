@@ -2,6 +2,193 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
 
+_CLAUDE_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
+  <rect width="24" height="24" rx="5.5" fill="#cf7554"/>
+  <g fill="#fff7f1">
+    <path d="M11.1 2.4h1.8l1.1 7.9-2 .6-2-.6 1.1-7.9z"/>
+    <path d="m17.8 4.3 1.4 1.1-4.3 6.7-2.1-1.3 5-6.5z"/>
+    <path d="m21.5 10.2.3 1.8-8.2 2-1-2.3 8.9-1.5z"/>
+    <path d="m20.2 16.8-1.1 1.4-6.7-4.3 1.3-2.1 6.5 5z"/>
+    <path d="m13.8 21.5-1.8.3-2-8.2 2.3-1 1.5 8.9z"/>
+    <path d="m6.2 19.7-1.4-1.1 4.3-6.7 2.1 1.3-5 6.5z"/>
+    <path d="m2.5 13.8-.3-1.8 8.2-2 1 2.3-8.9 1.5z"/>
+    <path d="m3.8 7.2 1.1-1.4 6.7 4.3-1.3 2.1-6.5-5z"/>
+    <circle cx="12" cy="12" r="2.2"/>
+  </g>
+</svg>"""
+
+_CODEX_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
+  <path fill="#667ef8" d="M7.3 20.8c-3.1 0-5.7-2.4-5.9-5.5-.2-2.4 1.1-4.6 3.1-5.7C4.8 5.9 7.9 3 11.8 3c3.3 0 6.2 2.2 7 5.4 2.4.7 4 2.8 4 5.4 0 3.2-2.6 5.8-5.8 5.8-.9 1.1-2.2 1.8-3.8 1.8-1.2 0-2.3-.4-3.1-1.1-.8.3-1.8.5-2.8.5z"/>
+  <path fill="#fff" d="M6.4 8.2c.5-.5 1.2-.5 1.7 0l2.8 2.8c.5.5.5 1.2 0 1.7l-2.8 2.8c-.5.5-1.2.5-1.7 0s-.5-1.2 0-1.7l1.9-1.9-1.9-1.9c-.5-.5-.5-1.3 0-1.8zM13 13.2h5.1c.7 0 1.2.5 1.2 1.2s-.5 1.2-1.2 1.2H13c-.7 0-1.2-.5-1.2-1.2s.5-1.2 1.2-1.2z"/>
+</svg>"""
+
+
+def _working_agent_glyph_html(kind, element_id):
+    svg = _CLAUDE_WORKING_ICON_SVG if kind == "claude" else _CODEX_WORKING_ICON_SVG
+    label = "Claude working" if kind == "claude" else "Codex working"
+    return f"""
+      <span class="agent-window-activity agent-window-activity--working" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
+        <span id="{element_id}" class="agent-icon {kind} agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--working agent-window-agent-icon--working heartbeat-pulse" aria-label="{label}" title="{label}">
+          {svg}
+        </span>
+      </span>
+    """
+
+
+def _freeze_agent_glyph_animation(browser, selector, fraction):
+    return browser.execute_async_script(
+        """
+        const selector = arguments[0];
+        const fraction = arguments[1];
+        const done = arguments[2];
+        const element = document.querySelector(selector);
+        if (!element) {
+          done({missing: true, selector});
+          return;
+        }
+        const animations = element.getAnimations({subtree: false});
+        for (const animation of animations) {
+          const timing = animation.effect.getComputedTiming();
+          animation.pause();
+          animation.currentTime = Number(timing.duration || 0) * fraction;
+        }
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          done({
+            selector,
+            animationCount: animations.length,
+            animationName: style.animationName,
+            animationPlayState: style.animationPlayState,
+            opacity: style.opacity,
+            reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+            rect: {left: rect.left, top: rect.top, width: rect.width, height: rect.height},
+          });
+        }));
+        """,
+        selector,
+        fraction,
+    )
+
+
+def _rendered_frame_delta(rest_image, peak_image, dpr, rest_rect, peak_rect):
+    left = max(0, int((min(rest_rect["left"], peak_rect["left"]) - 6) * dpr))
+    top = max(0, int((min(rest_rect["top"], peak_rect["top"]) - 6) * dpr))
+    right = min(rest_image.width, int((max(rest_rect["left"] + rest_rect["width"], peak_rect["left"] + peak_rect["width"]) + 6) * dpr))
+    bottom = min(rest_image.height, int((max(rest_rect["top"] + rest_rect["height"], peak_rect["top"] + peak_rect["height"]) + 6) * dpr))
+    pixels = 0
+    changed = 0
+    strong = 0
+    total_delta = 0
+    max_delta = 0
+    for y in range(top, bottom):
+        for x in range(left, right):
+            rest_pixel = rest_image.getpixel((x, y))
+            peak_pixel = peak_image.getpixel((x, y))
+            delta = sum(abs(left_channel - right_channel) for left_channel, right_channel in zip(rest_pixel, peak_pixel))
+            pixels += 1
+            total_delta += delta
+            max_delta = max(max_delta, delta)
+            if delta >= 25:
+                changed += 1
+            if delta >= 75:
+                strong += 1
+    return {
+        "pixels": pixels,
+        "changed": changed,
+        "strong": strong,
+        "meanDelta": total_delta / max(pixels, 1),
+        "maxDelta": max_delta,
+        "sampleRect": {"left": left, "top": top, "right": right, "bottom": bottom},
+    }
+
+
+def test_working_agent_glyphs_visibly_pulse_in_tabs_windows_and_tabber(browser, tmp_path):
+    page = tmp_path / "working-agent-visible-pulse.html"
+    page.write_text(page_html(f"""
+      <section class="agent-pulse-fixture">
+        <button id="dock-tab" class="pane-tab active">
+          <span class="pane-tab-core">
+            <span class="session-yolo-marker">YO</span>
+            <span class="session-agent-activity-marker">{_working_agent_glyph_html("claude", "dock-claude")}</span>
+            <span class="session-button-prefix">8002b fix: visible Claude</span>
+          </span>
+        </button>
+        <button id="window-button" class="tab tmux-window-button active">
+          <span class="tmux-window-name-label">
+            {_working_agent_glyph_html("claude", "window-claude")}
+            <span class="tmux-window-name-text">0:claude</span>
+          </span>
+        </button>
+        <div id="tabber-claude-row" class="file-tree-row tabber-row selected" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
+          <span class="file-tree-name">
+            <span class="tabber-window-label">
+              {_working_agent_glyph_html("claude", "tabber-claude")}
+              <span class="tabber-window-text">0:claude</span>
+            </span>
+          </span>
+        </div>
+        <div id="tabber-codex-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
+          <span class="file-tree-name">
+            <span class="tabber-window-label">
+              {_working_agent_glyph_html("codex", "tabber-codex")}
+              <span class="tabber-window-text">1:codex</span>
+            </span>
+          </span>
+        </div>
+      </section>
+    """, extra_css="""
+      body {
+        margin: 0;
+        padding: 28px;
+        background: #17270e;
+        color: #e8eef8;
+        font: 18px sans-serif;
+      }
+      .agent-pulse-fixture {
+        display: grid;
+        justify-items: start;
+        gap: 20px;
+      }
+      #dock-tab {
+        width: 360px;
+        height: 30px;
+      }
+      .tmux-window-button {
+        width: max-content;
+      }
+      .file-tree-row.tabber-row {
+        width: 520px;
+        padding: 4px 8px;
+        background: #2c3340;
+      }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+    targets = {
+        "dock-tab Claude": "#dock-claude",
+        "window-bar Claude": "#window-claude",
+        "Tabber Claude": "#tabber-claude",
+        "Tabber Codex": "#tabber-codex",
+    }
+    results = {}
+    for label, selector in targets.items():
+        rest = _freeze_agent_glyph_animation(browser, selector, 0)
+        if rest.get("reducedMotion"):
+            pytest.skip("browser prefers reduced motion")
+        rest_image = browser_screenshot_rgb(browser)
+        peak = _freeze_agent_glyph_animation(browser, selector, 0.5)
+        peak_image = browser_screenshot_rgb(browser)
+        delta = _rendered_frame_delta(rest_image, peak_image, dpr, rest["rect"], peak["rect"])
+        results[label] = {"rest": rest, "peak": peak, "delta": delta}
+        assert rest["animationCount"] >= 1, results
+        assert rest["animationName"] == "agent-symbol-glow-cadence", results
+        assert peak["animationName"] == "agent-symbol-glow-cadence", results
+        assert delta["changed"] >= 250, results
+        assert delta["strong"] >= 160, results
+        assert delta["meanDelta"] >= 80, results
+
+
 def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_path):
     page = tmp_path / "attention-dot-pulse.html"
     page.write_text(page_html("""
