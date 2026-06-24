@@ -2618,11 +2618,14 @@ function renderAutoApproveButton(session, payload) {
     button.textContent = t('brand.marker');
     const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
     const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
-    button.title = enabled
+    const buttonLabel = enabled
       ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
       : locked
         ? t('yolo.buttonOwnedBy', {owner: autoApproveOwnerLabel(payload)})
       : t('yolo.buttonOffForSession', {session: sessionLabel(session), readonly});
+    button.setAttribute('aria-label', buttonLabel);
+    if (button.closest('.tabber-session-tab')) button.removeAttribute('title');
+    else button.title = buttonLabel;
   }
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
   updateTypingIndicator(session);

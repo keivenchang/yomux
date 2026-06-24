@@ -9,6 +9,7 @@ port="${YOLOMUX_DEV1_PORT:-8001}"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_path="${YOLOMUX_DEV1_LOG:-/tmp/yolomux.dev1.8001.log}"
 unit_name="yolomux-dev1-${port}"
+server_args=(--host "$host" --port "$port" --dang --self-signed --dev)
 
 export PATH="${HOME}/.local/bin:${PATH:-}"
 export TERM="${TERM:-xterm-256color}"
@@ -20,7 +21,7 @@ fi
 
 if [[ "${1:-}" == "--help" ]]; then
   printf 'Usage: %s [--print-command]\n' "$0"
-  printf 'Restart YOLOmux dev1 on HTTPS port %s with --dang and --self-signed.\n' "$port"
+  printf 'Restart YOLOmux dev1 on HTTPS port %s with --dang, --self-signed, and --dev.\n' "$port"
   exit 0
 fi
 
@@ -31,7 +32,11 @@ if [[ "${1:-}" == "--print-command" ]]; then
   for item in "${extra_env[@]}"; do
     printf ' %q' "$item"
   done
-  printf ' /usr/bin/python3 %q --host %q --port %q --dang --self-signed\n' "${repo_root}/yolomux.py" "$host" "$port"
+  printf ' /usr/bin/python3 %q' "${repo_root}/yolomux.py"
+  for item in "${server_args[@]}"; do
+    printf ' %q' "$item"
+  done
+  printf '\n'
   exit 0
 fi
 
@@ -52,7 +57,7 @@ systemctl --user stop "$unit_name" 2>/dev/null || true
 stop_port_listener
 if systemd-run --user --quiet --collect --unit="$unit_name" --working-directory="$repo_root" \
   env TERM="$TERM" PYTHONUNBUFFERED="$PYTHONUNBUFFERED" PATH="$PATH" "${extra_env[@]}" \
-  /usr/bin/python3 "${repo_root}/yolomux.py" --host "$host" --port "$port" --dang --self-signed
+  /usr/bin/python3 "${repo_root}/yolomux.py" "${server_args[@]}"
 then
   printf 'Restarted %s on https://localhost:%s/; journal: journalctl --user -u %s -f\n' "$unit_name" "$port" "$unit_name"
   exit 0
@@ -61,7 +66,7 @@ fi
 stop_port_listener
 
 setsid nohup env TERM="$TERM" PYTHONUNBUFFERED="$PYTHONUNBUFFERED" PATH="$PATH" "${extra_env[@]}" \
-  /usr/bin/python3 "${repo_root}/yolomux.py" --host "$host" --port "$port" --dang --self-signed \
+  /usr/bin/python3 "${repo_root}/yolomux.py" "${server_args[@]}" \
   > "$log_path" 2>&1 < /dev/null &
 
 printf 'Restarted %s with fallback pid %s on https://localhost:%s/; log: %s\n' "$unit_name" "$!" "$port" "$log_path"

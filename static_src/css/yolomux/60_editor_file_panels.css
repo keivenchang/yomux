@@ -3511,6 +3511,7 @@ body.editor-theme-light .file-editor-native-video {
   --tabber-level1-color: var(--code-function);
   --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
+  --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
 }
 body.theme-light .file-tree-row.tabber-row {
   --tabber-level0-color: var(--lt-markdown-heading);
@@ -3576,6 +3577,11 @@ body.theme-light .file-tree-row.tabber-row {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
+  --agent-window-icon-size: var(--tabber-agent-icon-size);
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+}
 .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg-hover);
@@ -3602,7 +3608,7 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
   vertical-align: middle;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
-  --agent-window-icon-size: calc(var(--file-explorer-font-size) + 2px);
+  --agent-window-icon-size: var(--tabber-agent-icon-size);
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: 0;

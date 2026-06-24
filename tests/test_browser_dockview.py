@@ -946,13 +946,14 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_glowing_
     assert metrics["idleHasState"] is False, metrics
     assert metrics["idleDotCount"] == 0, metrics
     # Working = static AI symbol + a SEPARATE green ball that glows (side by side, not alternating).
-    # The symbol does not animate; a green working-tone status dot sits beside it and glows via
-    # attention-ring-fade.
+    # The symbol does not animate; a green working-tone status dot sits beside it and glows/flashes
+    # through the shared attention pulse tracks without changing geometry.
     assert metrics["workingAnimationName"] == "none", metrics
     assert float(metrics["workingOpacity"]) == 1, metrics
     assert metrics["workingDotExists"] is True, metrics
     assert metrics["workingDotIsWorkingTone"] is True, metrics
-    assert metrics["workingDotAnimationName"] == "attention-ring-fade", metrics
+    assert "attention-ring-fade" in metrics["workingDotAnimationName"], metrics
+    assert "working-ball-hard-flash" in metrics["workingDotAnimationName"], metrics
 
 
 def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_path):
@@ -1080,16 +1081,16 @@ def test_dockview_working_glyph_shows_static_symbol_and_glowing_green_ball(brows
     assert data["dotPresent"] is True, data
     assert data["dotWorkingTone"] is True, data
     if not data["reducedMotion"]:
-        assert data["dotAnimationName"] == "attention-ring-fade", data
+        assert "attention-ring-fade" in data["dotAnimationName"], data
+        assert "working-ball-hard-flash" in data["dotAnimationName"], data
         assert data["dotIterationCount"] == "infinite", data
         assert data["dotPlayState"] == "running", data
 
 
 def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp_path):
-    # Regression: with prefers-reduced-motion the pulse animation is correctly disabled, but the
-    # working/active glyph must still be visually distinct from an idle glyph (a steady glow ring),
-    # otherwise a user with reduced motion sees a static icon identical to idle and cannot tell an
-    # agent is working. Before the fix, working and idle were byte-identical under reduced motion.
+    # Regression: with prefers-reduced-motion active, the static symbol still stays separate from the
+    # working ball, so a user with reduced motion does not see a working agent collapse into the same
+    # static symbol as idle.
     transcript_sessions = {
         "1": {
             "panes": [

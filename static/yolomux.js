@@ -13081,6 +13081,7 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // collapse state is a persisted COLLAPSED set (default expanded), times come from the activity ledger with
 // parent = max(child), and sort honors the active Finder sort (label for A-Z, mtime for recent).
 // ---------------------------------------------------------------------------
+let tabberRefreshDeferredTimer = null;
 
 function tabberPad(value) {
   return String(value).padStart(5, '0');
@@ -13430,7 +13431,47 @@ function renderTabberTree(groupsEl) {
   syncTabberTreeActiveSelection(container);
 }
 
+function tabberSessionPopoverRefreshIsUnsafe() {
+  const selector = [
+    '.tabber-session-tab.popover-open',
+    '.tabber-session-tab[data-popover-hover-state="pending"]',
+    '.tabber-session-tab[data-popover-hover-state="open"]',
+    '.tabber-session-tab[data-popover-hover-state="closing"]',
+  ].join(', ');
+  for (const tab of document.querySelectorAll(selector)) {
+    const popover = tab.querySelector?.(':scope > .session-popover') || tab.__yolomuxDetachedPopover;
+    if (typeof popoverLifecycleActive === 'function' && typeof popoverStillActive === 'function') {
+      if (popoverLifecycleActive(tab, popover) || popoverStillActive(tab, popover)) return true;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
+function scheduleDeferredTabberRefresh() {
+  if (tabberRefreshDeferredTimer) clearTimeout(tabberRefreshDeferredTimer);
+  const delay = Math.max(
+    Number(popoverHideDelayMs) || 0,
+    Number(tabPopoverShowDelayMs) || 0,
+    Number(tabPopoverFollowDelayMs) || 0,
+    160,
+  );
+  tabberRefreshDeferredTimer = setTimeout(() => {
+    tabberRefreshDeferredTimer = null;
+    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  }, delay);
+}
+
 function refreshTabberPanels() {
+  if (tabberSessionPopoverRefreshIsUnsafe()) {
+    scheduleDeferredTabberRefresh();
+    return;
+  }
+  if (tabberRefreshDeferredTimer) {
+    clearTimeout(tabberRefreshDeferredTimer);
+    tabberRefreshDeferredTimer = null;
+  }
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     const groups = panel.querySelector('[data-file-explorer-changes] .changes-groups');
     if (groups) renderTabberTree(groups);
@@ -19349,16 +19390,15 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
 function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI symbol must pulse on the SAME condition the YO ball spins (sessionYoloIsWorking), so the
-  // two never disagree. Prefer a window literally reporting state==='working'; otherwise, when the session
-  // is working only via the screen-state proxy (screen.key==='working' with no per-window 'working' row),
-  // present the current/first agent window AS working so the symbol pulses instead of vanishing. Routing
-  // both notions of "working" through sessionYoloIsWorking is what fixes the "YO'ing but the AI symbol is
-  // not blinking" bug, where the dock-tab symbol disappeared while the YO ball kept spinning.
+  // The tab's AI status indicator must follow the same working condition as the YO state, while keeping the
+  // Claude/Codex symbol static and putting the glow on the separate green ball. Prefer a window literally
+  // reporting state==='working'; otherwise, when the session is working only via the screen-state proxy
+  // (screen.key==='working' with no per-window 'working' row), present the current/first agent window as
+  // working so the separate ball appears instead of the indicator vanishing.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
   if (!agents.length) return null;
@@ -19926,7 +19966,7 @@ function popoverPairRow(leftLabel, leftValueHtml, rightLabel, rightValueHtml) {
 }
 
 function stripTitleAttrs(html) {
-  return String(html || '').replace(/\s+title="[^"]*"/g, '');
+  return String(html || '').replace(/\s+title=(?:"[^"]*"|'[^']*'|[^\s>]+)/g, '');
 }
 
 function linearInlineHtml(issues) {
@@ -46952,11 +46992,14 @@ function renderAutoApproveButton(session, payload) {
     button.textContent = t('brand.marker');
     const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
     const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
-    button.title = enabled
+    const buttonLabel = enabled
       ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
       : locked
         ? t('yolo.buttonOwnedBy', {owner: autoApproveOwnerLabel(payload)})
       : t('yolo.buttonOffForSession', {session: sessionLabel(session), readonly});
+    button.setAttribute('aria-label', buttonLabel);
+    if (button.closest('.tabber-session-tab')) button.removeAttribute('title');
+    else button.title = buttonLabel;
   }
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
   updateTypingIndicator(session);

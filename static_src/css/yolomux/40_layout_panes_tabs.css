@@ -1729,8 +1729,9 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   width: 14px;
   height: 14px;
 }
-.agent-window-status-dot {
-  margin-inline-start: 1px;
+.tmux-window-button .agent-window-status-dot {
+  margin-inline-start: calc(var(--agent-window-icon-size) * 0.16);
+  margin-inline-end: calc(var(--agent-window-icon-size) * 0.25);
 }
 .tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
 .tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-name-label {

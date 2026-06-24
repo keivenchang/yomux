@@ -1447,6 +1447,23 @@ def test_visible_choice_prompt_text_ignores_claude_tip_question_chrome():
     assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
 
 
+def test_visible_choice_prompt_text_ignores_url_query_output_above_idle_prompt():
+    visible_text = "\n".join([
+        "Ran python3 - <<'PY'",
+        " import re, ssl, urllib.request",
+        " from yolomux_lib import common",
+        " ... +13 lines",
+        " bootstrap_dev= True",
+        " css_href= /static/yolomux.css?",
+        " v=1782321509",
+        "",
+        "❯ ",
+    ])
+
+    assert prompt_detector.visible_choice_prompt_text(visible_text) == ""
+    assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
+
+
 def test_ask_user_question_ui_is_needs_input_not_auto_approved():
     # Claude Code's AskUserQuestion multi-option UI (image 20260602-014). The selected option
     # is box-highlighted (no ❯), and a preview box / "Notes:" / "Chat about this" sit between the options

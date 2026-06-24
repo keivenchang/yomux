@@ -3304,6 +3304,7 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // collapse state is a persisted COLLAPSED set (default expanded), times come from the activity ledger with
 // parent = max(child), and sort honors the active Finder sort (label for A-Z, mtime for recent).
 // ---------------------------------------------------------------------------
+let tabberRefreshDeferredTimer = null;
 
 function tabberPad(value) {
   return String(value).padStart(5, '0');
@@ -3653,7 +3654,47 @@ function renderTabberTree(groupsEl) {
   syncTabberTreeActiveSelection(container);
 }
 
+function tabberSessionPopoverRefreshIsUnsafe() {
+  const selector = [
+    '.tabber-session-tab.popover-open',
+    '.tabber-session-tab[data-popover-hover-state="pending"]',
+    '.tabber-session-tab[data-popover-hover-state="open"]',
+    '.tabber-session-tab[data-popover-hover-state="closing"]',
+  ].join(', ');
+  for (const tab of document.querySelectorAll(selector)) {
+    const popover = tab.querySelector?.(':scope > .session-popover') || tab.__yolomuxDetachedPopover;
+    if (typeof popoverLifecycleActive === 'function' && typeof popoverStillActive === 'function') {
+      if (popoverLifecycleActive(tab, popover) || popoverStillActive(tab, popover)) return true;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
+function scheduleDeferredTabberRefresh() {
+  if (tabberRefreshDeferredTimer) clearTimeout(tabberRefreshDeferredTimer);
+  const delay = Math.max(
+    Number(popoverHideDelayMs) || 0,
+    Number(tabPopoverShowDelayMs) || 0,
+    Number(tabPopoverFollowDelayMs) || 0,
+    160,
+  );
+  tabberRefreshDeferredTimer = setTimeout(() => {
+    tabberRefreshDeferredTimer = null;
+    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  }, delay);
+}
+
 function refreshTabberPanels() {
+  if (tabberSessionPopoverRefreshIsUnsafe()) {
+    scheduleDeferredTabberRefresh();
+    return;
+  }
+  if (tabberRefreshDeferredTimer) {
+    clearTimeout(tabberRefreshDeferredTimer);
+    tabberRefreshDeferredTimer = null;
+  }
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     const groups = panel.querySelector('[data-file-explorer-changes] .changes-groups');
     if (groups) renderTabberTree(groups);

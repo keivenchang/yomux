@@ -1,3 +1,5 @@
+import re
+
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
@@ -49,6 +51,38 @@ def _agent_status_glyph_html(kind, state, element_id):
 
 def _working_agent_glyph_html(kind, element_id):
     return _agent_status_glyph_html(kind, "working", element_id)
+
+
+def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
+    padding = 24
+    left = int((min(rest_rect["left"], peak_rect["left"]) - padding) * dpr)
+    top = int((min(rest_rect["top"], peak_rect["top"]) - padding) * dpr)
+    right = int((max(rest_rect["right"], peak_rect["right"]) + padding) * dpr)
+    bottom = int((max(rest_rect["bottom"], peak_rect["bottom"]) + padding) * dpr)
+    left = max(0, min(image.width - 1, left))
+    right = max(left + 1, min(image.width, right))
+    top = max(0, min(image.height - 1, top))
+    bottom = max(top + 1, min(image.height, bottom))
+
+    def pixel_weight(pixel):
+        r, g, b = pixel[:3]
+        if tone == "green":
+            return max(0, g - max(r, b)) * (g / 255)
+        if tone == "red":
+            return max(0, r - max(g, b)) * (r / 255)
+        if tone == "yellow":
+            return max(0, min(r, g) - b) * ((r + g) / 510)
+        raise AssertionError(f"unknown tone {tone}")
+
+    count = 0
+    energy = 0.0
+    for y in range(top, bottom):
+        for x in range(left, right):
+            weight = pixel_weight(image.getpixel((x, y)))
+            if weight > 0:
+                count += 1
+                energy += weight
+    return {"count": count, "energy": round(energy, 2), "bounds": (left, top, right, bottom)}
 
 
 def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_windows_and_tabber(browser, tmp_path):
@@ -143,7 +177,76 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
         assert info["dotPresent"] is True, results
         assert info["dotWorkingTone"] is True, results
         if not reduced:
-            assert info["dotAnim"] == "attention-ring-fade", results
+            assert "attention-ring-fade" in info["dotAnim"], results
+            assert "working-ball-hard-flash" in info["dotAnim"], results
+
+
+def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
+    page = tmp_path / "working-agent-glow-pixels.html"
+    page.write_text(page_html(f"""
+      <section class="glow-pixel-fixture">
+        <div id="tabber-glow-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
+          <span class="file-tree-name">
+            <span class="tabber-window-label">
+              {_working_agent_glyph_html("codex", "tabber-glow")}
+              <span class="tabber-window-text">0:codex</span>
+            </span>
+          </span>
+        </div>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 80px; background: #101820; color: #e8eef8; font: 18px sans-serif; }
+      .glow-pixel-fixture { display: grid; justify-items: start; gap: 24px; }
+      #tabber-glow-row { width: 320px; padding: 14px 18px; background: #101820; overflow: visible; }
+      #tabber-glow-row .file-tree-name,
+      #tabber-glow-row .tabber-window-label,
+      #tabber-glow-row .agent-window-activity { overflow: visible; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const dot = document.getElementById('tabber-glow-dot');
+        for (const animation of dot.getAnimations()) {
+          const timing = animation.effect?.getTiming?.() || {};
+          const duration = Number(timing.duration) || 0;
+          if (duration > 0) {
+            animation.pause();
+            animation.currentTime = duration * 0.5;
+          }
+        }
+        const rect = dot.getBoundingClientRect();
+        const style = getComputedStyle(dot);
+        return {
+          rect: {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height},
+          animationName: style.animationName,
+          boxShadow: style.boxShadow,
+          filter: style.filter,
+          background: style.backgroundColor,
+          color: style.color,
+          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        };
+        """
+    )
+    assert "attention-ring-fade" in metrics["animationName"] or metrics["reducedMotion"] is True, metrics
+    assert "working-ball-hard-flash" in metrics["animationName"] or metrics["reducedMotion"] is True, metrics
+    assert metrics["boxShadow"] != "none", metrics
+    screenshot = browser_screenshot_rgb(browser)
+    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+    rect = metrics["rect"]
+    left = max(0, min(screenshot.width - 1, int((rect["right"] + 1) * dpr)))
+    right = max(left + 1, min(screenshot.width, int((rect["right"] + 18) * dpr)))
+    top = max(0, min(screenshot.height - 1, int((rect["top"] - 8) * dpr)))
+    bottom = max(top + 1, min(screenshot.height, int((rect["bottom"] + 8) * dpr)))
+    samples = []
+    green_pixels = 0
+    for y in range(top, bottom):
+        for x in range(left, right):
+            pixel = screenshot.getpixel((x, y))
+            if len(samples) < 20:
+                samples.append(pixel)
+            if pixel[1] >= 42 and pixel[1] - pixel[0] >= 10 and pixel[1] - pixel[2] >= 4:
+                green_pixels += 1
+    assert green_pixels >= 6, {"greenPixels": green_pixels, "samples": samples, "rect": rect, "metrics": metrics}
 
 
 def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_path):
@@ -199,6 +302,18 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         const read = id => {
           const icon = document.getElementById(id);
           const dot = document.getElementById(id + '-dot');
+          const dotLiveStyle = getComputedStyle(dot);
+          const dotAnimationName = dotLiveStyle.animationName;
+          const dotAnimationPlayState = dotLiveStyle.animationPlayState;
+          const dotAnimationIterationCount = dotLiveStyle.animationIterationCount;
+          for (const animation of dot.getAnimations()) {
+            const timing = animation.effect?.getTiming?.() || {};
+            const duration = Number(timing.duration) || 0;
+            if (duration > 0) {
+              animation.pause();
+              animation.currentTime = duration * 0.5;
+            }
+          }
           const wrap = icon?.closest('.agent-window-activity');
           const iconRect = icon.getBoundingClientRect();
           const dotRect = dot.getBoundingClientRect();
@@ -207,12 +322,19 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
           const dotStyle = getComputedStyle(dot);
           return {
             wrapDisplay: wrapStyle.display,
+            agentStatusBallSize: wrapStyle.getPropertyValue('--agent-status-ball-size').trim(),
+            dotFontSize: dotStyle.fontSize,
             iconAnimation: iconStyle.animationName,
             iconOpacity: iconStyle.opacity,
-            dotAnimation: dotStyle.animationName,
-            dotPlayState: dotStyle.animationPlayState,
-            dotIterationCount: dotStyle.animationIterationCount,
+            dotAnimation: dotAnimationName,
+            dotPlayState: dotAnimationPlayState,
+            dotIterationCount: dotAnimationIterationCount,
+            dotTransform: dotStyle.transform,
             dotColor: dotStyle.color,
+            dotBackground: dotStyle.backgroundColor,
+            dotBoxShadow: dotStyle.boxShadow,
+            dotWidth: dotRect.width,
+            dotHeight: dotRect.height,
             dotToneWorking: dot.classList.contains('status-indicator--working'),
             dotToneAttention: dot.classList.contains('status-indicator--attention'),
             dotToneCooldown: dot.classList.contains('status-indicator--cooldown'),
@@ -242,43 +364,183 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         assert item["dotLeft"] >= item["iconRight"] - 0.5, (name, metrics)
         assert item["centerDy"] <= 1, (name, metrics)
         if not metrics["reducedMotion"]:
-            assert item["dotAnimation"] == "attention-ring-fade", (name, metrics)
+            assert "attention-ring-fade" in item["dotAnimation"], (name, metrics)
             assert item["dotPlayState"] == "running", (name, metrics)
             assert item["dotIterationCount"] == "infinite", (name, metrics)
+            assert item["dotBoxShadow"] != "none", (name, metrics)
+        assert item["dotWidth"] > 0 and item["dotHeight"] > 0, (name, metrics)
     assert metrics["dockAttention"]["dotToneAttention"] is True, metrics
     assert metrics["infoAttention"]["dotToneAttention"] is True, metrics
     assert metrics["tabberSessionWorking"]["dotToneWorking"] is True, metrics
     assert metrics["tabberWindowCooldown"]["dotToneCooldown"] is True, metrics
-    assert float(metrics["tabberSessionWorking"]["greenGlowAlpha"]) < float(metrics["dockAttention"]["greenGlowAlpha"]), metrics
-    assert float(metrics["tabberSessionWorking"]["greenGlowSize"].rstrip("px")) < float(metrics["dockAttention"]["greenGlowSize"].rstrip("px")), metrics
+    agent_ball_sizes = {metrics[name]["agentStatusBallSize"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")}
+    dot_font_sizes = {metrics[name]["dotFontSize"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")}
+    peak_widths = [metrics[name]["dotWidth"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")]
+    peak_heights = [metrics[name]["dotHeight"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")]
+    transforms = {metrics[name]["dotTransform"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")}
+    assert agent_ball_sizes == {"14px"}, metrics
+    assert dot_font_sizes == {"14px"}, metrics
+    assert max(peak_widths) - min(peak_widths) <= 0.5, metrics
+    assert max(peak_heights) - min(peak_heights) <= 0.5, metrics
+    assert len(transforms) == 1, metrics
 
 
-def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_path):
-    page = tmp_path / "attention-dot-pulse.html"
-    page.write_text(page_html("""
-      <span id="window-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="ask-badge" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK?</span>
+def test_tabber_parent_child_status_balls_share_parent_size_and_phase(browser, tmp_path):
+    page = tmp_path / "tabber-parent-child-status-ball-parity.html"
+    page.write_text(page_html(f"""
+      <section class="tabber-ball-parity-fixture">
+        <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 16px;">
+          <span class="file-tree-name">
+            <span class="tabber-session-tab active" data-tabber-session-chrome="shared">
+              <span class="pane-tab-core">
+                <span class="session-yolo-marker">YO</span>
+                <span class="session-agent-activity-marker">{_working_agent_glyph_html("codex", "tabber-session-working")}</span>
+                <span class="session-button-prefix">8001</span>
+              </span>
+            </span>
+          </span>
+        </div>
+        <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 22px;">
+          <span class="file-tree-name">
+            <span class="tabber-window-label">
+              {_working_agent_glyph_html("codex", "tabber-window-working")}
+              <span class="tabber-window-text">0:codex</span>
+            </span>
+          </span>
+        </div>
+      </section>
     """, extra_css="""
-      :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
-      body { background: #111; color: #ddd; font: 16px sans-serif; padding: 24px; }
+      body { margin: 0; padding: 32px; background: #202633; color: #e8eef8; font: 18px sans-serif; }
+      .tabber-ball-parity-fixture { display: grid; justify-items: start; gap: 16px; }
+      .file-tree-row.tabber-row { width: 620px; padding: 5px 8px; background: #2c3340; overflow: visible; }
+      .file-tree-name,
+      .tabber-session-tab,
+      .tabber-window-label,
+      .agent-window-activity { overflow: visible; }
     """), encoding="utf-8")
     browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
-        const ids = ['window-dot', 'popover-dot', 'tabber-dot', 'ask-badge'];
         const read = id => {
-          const style = getComputedStyle(document.getElementById(id));
+          const icon = document.getElementById(id);
+          const dot = document.getElementById(id + '-dot');
+          const wrap = dot.closest('.agent-window-activity');
+          for (const animation of dot.getAnimations()) {
+            const timing = animation.effect?.getTiming?.() || {};
+            const duration = Number(timing.duration) || 0;
+            if (duration > 0) {
+              animation.pause();
+              animation.currentTime = duration * 0.5;
+            }
+          }
+          void dot.offsetWidth;
+          const iconStyle = getComputedStyle(icon);
+          const wrapStyle = getComputedStyle(wrap);
+          const dotStyle = getComputedStyle(dot);
+          const dotRect = dot.getBoundingClientRect();
+          return {
+            iconSize: iconStyle.width,
+            agentWindowIconSize: wrapStyle.getPropertyValue('--agent-window-icon-size').trim(),
+            agentStatusBallSize: wrapStyle.getPropertyValue('--agent-status-ball-size').trim(),
+            dotFontSize: dotStyle.fontSize,
+            dotFontStretch: dotStyle.fontStretch,
+            animationName: dotStyle.animationName,
+            animationDuration: dotStyle.animationDuration,
+            animationDelay: dotStyle.animationDelay,
+            animationTimingFunction: dotStyle.animationTimingFunction,
+            transform: dotStyle.transform,
+            width: dotRect.width,
+            height: dotRect.height,
+          };
+        };
+        return {
+          parent: read('tabber-session-working'),
+          child: read('tabber-window-working'),
+          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        };
+        """
+    )
+    assert metrics["parent"]["iconSize"] != metrics["child"]["iconSize"], metrics
+    for side in ("parent", "child"):
+        assert metrics[side]["agentStatusBallSize"] == "14px", metrics
+        assert metrics[side]["dotFontSize"] == "14px", metrics
+        assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
+        assert "attention-ring-fade" in metrics[side]["animationName"], metrics
+        assert "working-ball-hard-flash" in metrics[side]["animationName"], metrics
+    assert metrics["parent"]["animationDuration"] == metrics["child"]["animationDuration"], metrics
+    assert metrics["parent"]["animationDelay"] == metrics["child"]["animationDelay"], metrics
+    assert metrics["parent"]["animationTimingFunction"] == metrics["child"]["animationTimingFunction"], metrics
+    assert metrics["parent"]["transform"] == metrics["child"]["transform"], metrics
+    assert abs(metrics["parent"]["width"] - metrics["child"]["width"]) <= 0.5, metrics
+    assert abs(metrics["parent"]["height"] - metrics["child"]["height"]) <= 0.5, metrics
+
+
+def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser, tmp_path):
+    page = tmp_path / "attention-dot-pulse.html"
+    page.write_text(page_html("""
+      <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="window-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="ask-badge" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK?</span>
+    """, extra_css="""
+      :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
+      body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const ids = ['working-dot', 'window-dot', 'popover-dot', 'tabber-dot', 'cooldown-dot', 'ask-badge'];
+        const firstAnimationValue = value => String(value || '').split(',').map(item => item.trim())[0] || '';
+        const pauseAt = (node, fraction) => {
+          const animations = node.getAnimations();
+          for (const animation of animations) {
+            const timing = animation.effect?.getTiming?.() || {};
+            const duration = Number(timing.duration) || 0;
+            const delay = Number(timing.delay) || 0;
+            if (duration > 0) {
+              animation.pause();
+              animation.currentTime = delay + duration * fraction;
+            }
+          }
+          void node.offsetWidth;
+          const style = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return {
+            boxShadow: style.boxShadow,
+            filter: style.filter,
+            color: style.color,
+            backgroundColor: style.backgroundColor,
+            borderTopColor: style.borderTopColor,
+            opacity: style.opacity,
+            transform: style.transform,
+            rect: {width: rect.width, height: rect.height},
+          };
+        };
+        const read = id => {
+          const node = document.getElementById(id);
+          const style = getComputedStyle(node);
+          const rest = pauseAt(node, 1);
+          const peak = pauseAt(node, 0.5);
           return {
             animationName: style.animationName,
+            primaryAnimationName: firstAnimationValue(style.animationName),
             animationPlayState: style.animationPlayState,
+            primaryAnimationPlayState: firstAnimationValue(style.animationPlayState),
             animationIterationCount: style.animationIterationCount,
+            primaryAnimationIterationCount: firstAnimationValue(style.animationIterationCount),
             animationDuration: style.animationDuration,
+            primaryAnimationDuration: firstAnimationValue(style.animationDuration),
             animationDelay: style.animationDelay,
+            primaryAnimationDelay: firstAnimationValue(style.animationDelay),
+            animationTimingFunction: style.animationTimingFunction,
+            primaryAnimationTimingFunction: firstAnimationValue(style.animationTimingFunction),
             borderTopStyle: style.borderTopStyle,
             borderTopWidth: style.borderTopWidth,
             delayVar: style.getPropertyValue('--attention-animation-delay').trim(),
+            rest,
+            peak,
             reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
           };
         };
@@ -288,16 +550,133 @@ def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_
     if metrics["ask-badge"]["reduced"]:
         pytest.skip("browser prefers reduced motion")
     badge = metrics["ask-badge"]
-    for dot_id in ("window-dot", "popover-dot", "tabber-dot"):
+    assert "attention-ring-fade" in badge["animationName"], badge
+    assert badge["rest"]["boxShadow"] != badge["peak"]["boxShadow"], badge
+    for dot_id in ("working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
         dot = metrics[dot_id]
-        assert dot["animationName"] == "attention-ring-fade", {dot_id: dot}
-        assert dot["animationPlayState"] == "running", {dot_id: dot}
-        assert dot["animationIterationCount"] == "infinite", {dot_id: dot}
-        assert dot["animationDuration"] == badge["animationDuration"], {dot_id: dot, "badge": badge}
-        assert dot["animationDelay"] == badge["animationDelay"], {dot_id: dot, "badge": badge}
+        assert dot["primaryAnimationName"] == "attention-ring-fade", {dot_id: dot}
+        assert dot["primaryAnimationPlayState"] == "running", {dot_id: dot}
+        assert dot["primaryAnimationIterationCount"] == "infinite", {dot_id: dot}
+        assert dot["primaryAnimationDuration"] == badge["primaryAnimationDuration"], {dot_id: dot, "badge": badge}
+        assert dot["primaryAnimationDelay"] == badge["primaryAnimationDelay"], {dot_id: dot, "badge": badge}
+        assert dot["primaryAnimationTimingFunction"] == badge["primaryAnimationTimingFunction"], {dot_id: dot, "badge": badge}
         assert dot["delayVar"] == badge["delayVar"] == "-0.42s", {dot_id: dot, "badge": badge}
         assert dot["borderTopStyle"] == "solid", {dot_id: dot}
         assert dot["borderTopWidth"] != "0px", {dot_id: dot}
+        assert dot["rest"]["boxShadow"] != dot["peak"]["boxShadow"], {dot_id: dot}
+        assert dot["rest"]["filter"] != dot["peak"]["filter"], {dot_id: dot}
+        assert abs(dot["rest"]["rect"]["width"] - dot["peak"]["rect"]["width"]) <= 0.5, {dot_id: dot}
+        assert abs(dot["rest"]["rect"]["height"] - dot["peak"]["rect"]["height"]) <= 0.5, {dot_id: dot}
+    assert "working-ball-hard-flash" in metrics["working-dot"]["animationName"], metrics["working-dot"]
+    assert metrics["working-dot"]["rest"]["color"] != metrics["working-dot"]["peak"]["color"], metrics["working-dot"]
+    peak_rgb = [int(float(item)) for item in re.findall(r"\d+(?:\.\d+)?", metrics["working-dot"]["peak"]["color"])[:3]]
+    assert peak_rgb[1] - peak_rgb[0] >= 90 and peak_rgb[1] - peak_rgb[2] >= 70, metrics["working-dot"]
+    for dot_id in ("window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
+        assert abs(metrics["working-dot"]["rest"]["rect"]["width"] - metrics[dot_id]["rest"]["rect"]["width"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["rest"]["rect"]["height"] - metrics[dot_id]["rest"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["peak"]["rect"]["width"] - metrics[dot_id]["peak"]["rect"]["width"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["peak"]["rect"]["height"] - metrics[dot_id]["peak"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+
+    visual_ids = {"working-dot": "green", "window-dot": "red", "cooldown-dot": "yellow"}
+    all_animation_ids = ["working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot", "ask-badge"]
+    sample_rects = """
+      const ids = arguments[0];
+      const fraction = arguments[1];
+      for (const id of ids) {
+        const node = document.getElementById(id);
+        for (const animation of node.getAnimations()) {
+          const timing = animation.effect?.getTiming?.() || {};
+          const duration = Number(timing.duration) || 0;
+          const delay = Number(timing.delay) || 0;
+          if (duration > 0) {
+            animation.pause();
+            animation.currentTime = delay + duration * fraction;
+          }
+        }
+      }
+      void document.body.offsetWidth;
+      return Object.fromEntries(ids.map(id => {
+        const rect = document.getElementById(id).getBoundingClientRect();
+        return [id, {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height}];
+      }));
+    """
+    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+    browser.execute_script(sample_rects, all_animation_ids, 1)
+    rest_rects = browser.execute_script(sample_rects, list(visual_ids), 1)
+    rest_screenshot = browser_screenshot_rgb(browser)
+    browser.execute_script(sample_rects, all_animation_ids, 0.5)
+    peak_rects = browser.execute_script(sample_rects, list(visual_ids), 0.5)
+    peak_screenshot = browser_screenshot_rgb(browser)
+    visual_scores = {}
+    for dot_id, tone in visual_ids.items():
+        rest_score = _status_ball_tone_score(rest_screenshot, dpr, rest_rects[dot_id], peak_rects[dot_id], tone)
+        peak_score = _status_ball_tone_score(peak_screenshot, dpr, rest_rects[dot_id], peak_rects[dot_id], tone)
+        visual_scores[dot_id] = {"rest": rest_score, "peak": peak_score}
+        energy_ratio = 1.8 if dot_id == "working-dot" else 1.25
+        count_delta = 20 if dot_id == "working-dot" else 10
+        assert peak_score["energy"] > rest_score["energy"] * energy_ratio, visual_scores
+        assert peak_score["count"] > rest_score["count"] + count_delta, visual_scores
+
+
+def test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion(browser, tmp_path):
+    page = tmp_path / "attention-dot-reduced-motion.html"
+    page.write_text(page_html("""
+      <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="ask-pill" class="status-indicator session-state-badge status-indicator--text tab-symbol session-state-needs-input session-state-reminder status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK?</span>
+    """, extra_css="""
+      :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
+      body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
+    """), encoding="utf-8")
+    browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
+    try:
+        browser.get(page.as_uri())
+        metrics = browser.execute_script(
+            """
+            const firstAnimationValue = value => String(value || '').split(',').map(item => item.trim())[0] || '';
+            const read = id => {
+              const node = document.getElementById(id);
+              const style = getComputedStyle(node);
+              const firstAnimation = node.getAnimations()[0];
+              const timing = firstAnimation?.effect?.getTiming?.() || {};
+              return {
+                animationName: style.animationName,
+                primaryAnimationName: firstAnimationValue(style.animationName),
+                animationDuration: style.animationDuration,
+                primaryAnimationDuration: firstAnimationValue(style.animationDuration),
+                animationDelay: style.animationDelay,
+                primaryAnimationDelay: firstAnimationValue(style.animationDelay),
+                animationTimingFunction: style.animationTimingFunction,
+                primaryAnimationTimingFunction: firstAnimationValue(style.animationTimingFunction),
+                primaryEffectDuration: Number(timing.duration) || 0,
+                primaryPlayState: firstAnimation?.playState || '',
+              };
+            };
+            return {
+              reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              working: read('working-dot'),
+              attention: read('attention-dot'),
+              ask: read('ask-pill'),
+            };
+            """
+        )
+        assert metrics["reduced"] is True, metrics
+        ask = metrics["ask"]
+        assert ask["primaryAnimationName"] == "attention-ring-fade", metrics
+        assert ask["primaryAnimationDuration"] == "1.55s", metrics
+        assert ask["primaryAnimationDelay"] == "-0.42s", metrics
+        assert ask["primaryEffectDuration"] > 0, metrics
+        for key in ("working", "attention"):
+            dot = metrics[key]
+            assert dot["primaryAnimationName"] == "attention-ring-fade", metrics
+            assert dot["primaryAnimationDuration"] == ask["primaryAnimationDuration"], metrics
+            assert dot["primaryAnimationDelay"] == ask["primaryAnimationDelay"], metrics
+            assert dot["primaryAnimationTimingFunction"] == ask["primaryAnimationTimingFunction"], metrics
+            assert dot["primaryEffectDuration"] == ask["primaryEffectDuration"], metrics
+            assert dot["primaryPlayState"] in {"pending", "running"}, metrics
+        assert "working-ball-hard-flash" in metrics["working"]["animationName"], metrics
+    finally:
+        browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
 
 
 def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(browser, tmp_path):
@@ -372,7 +751,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
     for name, item in metrics.items():
         assert item["rootDisplay"] == "flex", (name, item)
         assert item["iconAnimation"] == "none", (name, item)
-        assert item["dotAnimation"] == "attention-ring-fade", (name, item)
+        assert "attention-ring-fade" in item["dotAnimation"], (name, item)
         assert item["leftGap"] >= -0.5, (name, item)
         assert item["centerDy"] <= 1, (name, item)
         assert item["dotWithinRoot"] is True, (name, item)
@@ -1666,6 +2045,68 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     assert metrics["sessionTabHasTitle"] is False, metrics
     assert metrics["customPopoverPresent"] is True, metrics
     assert metrics["customPopoverRole"] == "tooltip", metrics
+    browser.execute_script("renderAutoApproveButtons();")
+    live_sync_metrics = browser.execute_script(
+        """
+        const visibleChromeTitles = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type] [title]'))
+          .filter(node => !node.closest('.session-popover'))
+          .map(node => node.outerHTML.slice(0, 220));
+        const tabberYoloControls = Array.from(document.querySelectorAll('.tabber-session-tab [data-yolo-session]')).map(node => ({
+          title: node.getAttribute('title') || '',
+          ariaLabel: node.getAttribute('aria-label') || '',
+          pressed: node.getAttribute('aria-pressed') || '',
+        }));
+        return {visibleChromeTitles, tabberYoloControls};
+        """
+    )
+    assert live_sync_metrics["visibleChromeTitles"] == [], live_sync_metrics
+    assert live_sync_metrics["tabberYoloControls"], live_sync_metrics
+    assert all(item["title"] == "" for item in live_sync_metrics["tabberYoloControls"]), live_sync_metrics
+    assert all(item["ariaLabel"] for item in live_sync_metrics["tabberYoloControls"]), live_sync_metrics
+    browser.execute_script(
+        """
+        popoverHideDelayMs = 120;
+        window.__tabberSessionTabBeforeRefresh = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
+        window.__tabberPopoverBeforeRefresh = window.__tabberSessionTabBeforeRefresh?.querySelector(':scope > .session-popover');
+        window.__tabberSessionTabBeforeRefresh.classList.add('popover-open');
+        window.__tabberSessionTabBeforeRefresh.dataset.popoverHoverState = 'open';
+        window.__tabberPopoverBeforeRefresh.classList.add('popover-open');
+        refreshTabberPanels();
+        """
+    )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        setTimeout(done, 260);
+        """
+    )
+    hover_metrics = browser.execute_script(
+        """
+        const tab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
+        const visiblePopovers = Array.from(document.querySelectorAll('.tabber-session-tab.popover-open > .session-popover')).filter(popover => {
+          const style = getComputedStyle(popover);
+          const rect = popover.getBoundingClientRect();
+          return style.visibility === 'visible' && Number.parseFloat(style.opacity) > 0.9 && rect.width > 100 && rect.height > 40;
+        });
+        const visibleChromeTitles = Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type] [title]'))
+          .filter(node => !node.closest('.session-popover'))
+          .map(node => node.outerHTML.slice(0, 220));
+        return {
+          sameTab: tab === window.__tabberSessionTabBeforeRefresh,
+          samePopover: visiblePopovers[0] === window.__tabberPopoverBeforeRefresh,
+          visiblePopoverCount: visiblePopovers.length,
+          hoverState: tab?.dataset?.popoverHoverState || '',
+          tabOpen: tab?.classList?.contains('popover-open') || false,
+          visibleChromeTitles,
+        };
+        """
+    )
+    assert hover_metrics["sameTab"] is True, hover_metrics
+    assert hover_metrics["samePopover"] is True, hover_metrics
+    assert hover_metrics["visiblePopoverCount"] == 1, hover_metrics
+    assert hover_metrics["hoverState"] == "open", hover_metrics
+    assert hover_metrics["tabOpen"] is True, hover_metrics
+    assert hover_metrics["visibleChromeTitles"] == [], hover_metrics
 
 
 def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):

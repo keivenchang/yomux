@@ -414,16 +414,15 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
 function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI symbol must pulse on the SAME condition the YO ball spins (sessionYoloIsWorking), so the
-  // two never disagree. Prefer a window literally reporting state==='working'; otherwise, when the session
-  // is working only via the screen-state proxy (screen.key==='working' with no per-window 'working' row),
-  // present the current/first agent window AS working so the symbol pulses instead of vanishing. Routing
-  // both notions of "working" through sessionYoloIsWorking is what fixes the "YO'ing but the AI symbol is
-  // not blinking" bug, where the dock-tab symbol disappeared while the YO ball kept spinning.
+  // The tab's AI status indicator must follow the same working condition as the YO state, while keeping the
+  // Claude/Codex symbol static and putting the glow on the separate green ball. Prefer a window literally
+  // reporting state==='working'; otherwise, when the session is working only via the screen-state proxy
+  // (screen.key==='working' with no per-window 'working' row), present the current/first agent window as
+  // working so the separate ball appears instead of the indicator vanishing.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
   if (!agents.length) return null;
@@ -991,7 +990,7 @@ function popoverPairRow(leftLabel, leftValueHtml, rightLabel, rightValueHtml) {
 }
 
 function stripTitleAttrs(html) {
-  return String(html || '').replace(/\s+title="[^"]*"/g, '');
+  return String(html || '').replace(/\s+title=(?:"[^"]*"|'[^']*'|[^\s>]+)/g, '');
 }
 
 function linearInlineHtml(issues) {

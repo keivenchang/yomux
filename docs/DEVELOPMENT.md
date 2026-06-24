@@ -105,12 +105,12 @@ Production and development instances can run side-by-side. The project does not 
 | prod | Production checkout, for example `~/yolomux/` | Stable HTTPS port | Stable copy, synced from dev after verification |
 | dev | Any development checkout or git worktree | Non-conflicting HTTPS port | Active development server |
 
-Development servers are HTTPS in normal use. Launch them with `--self-signed --dang` on the port you selected; avoid plain HTTP unless you are testing that path explicitly.
+Development servers are HTTPS in normal use. Launch them with `--self-signed --dang --dev` on the port you selected; avoid plain HTTP unless you are testing that path explicitly. `--dev` enables the browser `/api/dev-reload` stream, so an open tab reloads when `static_build.py` rewrites `static/yolomux.css` or `static/yolomux.js`.
 
 For an ad hoc dev run:
 
 ```bash
-python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang
+python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang --dev
 ```
 
 ### Restart workflow
@@ -121,7 +121,7 @@ For the dev8001 worktree (HTTPS `8001`), use the repo restart owner (`tools/yolo
 tools/yolomux-restart-dev1.sh
 ```
 
-The script defaults to HTTPS `8001`, `--self-signed`, and `--dang`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard instance. Logs go under `/tmp`. For the dev8002/dev8003 worktrees use the generic recipe below (port `8002`/`8003`), not this script.
+The script defaults to HTTPS `8001`, `--self-signed`, `--dang`, and `--dev`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard instance. Logs go under `/tmp`. For the dev8002/dev8003 worktrees use the generic recipe below (port `8002`/`8003`), not this script.
 
 To restart dev8001 in no-auth test mode:
 
@@ -138,7 +138,7 @@ checkout="$HOME/yolomux.dev8003"
 log="/tmp/yolomux-${role}-${port}.log"
 pid="$(ps -eo pid=,args= | awk -v port="$port" '$0 ~ /yolomux.py/ && $0 ~ ("--port " port) {print $1; exit}')"
 if [ -n "$pid" ]; then kill "$pid"; fi
-( cd "$checkout" && nohup env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 python3 -u yolomux.py --host 0.0.0.0 --port "$port" --self-signed --dang > "$log" 2>&1 < /dev/null & )
+( cd "$checkout" && nohup env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 python3 -u yolomux.py --host 0.0.0.0 --port "$port" --self-signed --dang --dev > "$log" 2>&1 < /dev/null & )
 ```
 
 Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string because it can match the launching shell; use a port variable and keep kill and relaunch steps separate; (2) do not use stale local helper scripts that point at a different checkout or port; (3) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code.

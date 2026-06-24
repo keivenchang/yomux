@@ -621,6 +621,15 @@ _INTERRUPTED_QUESTION_RE = re.compile(
 )
 _OPTION_LINE_RE = re.compile(r"^\s*(menu:\s*)?([❯›>]?)\s*(\d+)[.:]\s+(.+?)\s*$", re.IGNORECASE)
 _INLINE_CONFIRMATION_RE = re.compile(r"\?.*(?:\((?:y/n|yes/no)\)|\[(?:y/N|Y/n|yes/no)\])\s*$", re.IGNORECASE)
+_QUERY_URL_OR_PATH_RE = re.compile(r"(?:https?://\S+|(?:^|[\s=])(?:[/~]|\.\.?/)\S+)\?(?:[A-Za-z0-9_.%=&/-]*)?$", re.IGNORECASE)
+_QUESTION_WORD_RE = re.compile(r"\b(?:who|what|when|where|why|how|should|would|could|can|is|are|do|does|did|which|will)\b", re.IGNORECASE)
+
+
+def _is_query_url_or_path_output(line: str) -> bool:
+    stripped = _clean_prompt_block_line(line)
+    if not stripped or not _QUERY_URL_OR_PATH_RE.search(stripped):
+        return False
+    return not _QUESTION_WORD_RE.search(stripped)
 
 
 def _prompt_options(visible_text: str) -> list[dict[str, object]]:
@@ -1311,7 +1320,7 @@ def visible_choice_prompt_text(visible_text: str) -> str:
             break
         if re.match(r"^\s*[❯›>]\s+\S", line):
             break
-        if _QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped):
+        if (_QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped)) and not _is_query_url_or_path_output(stripped):
             return stripped
     return ""
 

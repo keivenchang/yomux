@@ -2401,7 +2401,7 @@ def test_tmux_codex_compact_startup_keeps_box_after_typing(visual_tmux):
 @pytest.mark.e2e
 @pytest.mark.socket
 def test_tmux_claude_startup_cwd_survives_first_mock_submit(visual_tmux):
-    cwd_row = "▘▘ ▝▝    ~/yolomux.dev8002"
+    cwd_row = f"▘▘ ▝▝    ~/{REPO_ROOT.name}"
     session = visual_tmux.launch(
         "claude-startup-submit",
         [sys.executable, "tools/claude.py", "--mock", "-m", "opus", "--effort", "xhigh", "-C", str(REPO_ROOT)],

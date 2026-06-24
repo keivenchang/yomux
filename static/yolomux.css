@@ -2057,6 +2057,7 @@ body.theme-light .latency-meter {
   text-align: center;
   border-radius: 999px;
   opacity: 1;
+  will-change: opacity, filter, box-shadow;
 }
 .status-indicator--dot.heartbeat-pulse {
   --attention-pulse-saturate-rest: 1.04;
@@ -2091,6 +2092,18 @@ body.theme-light .latency-meter {
   animation-iteration-count: infinite;
   animation-direction: normal;
 }
+/* Re-declare the pulse cadence at higher specificity (.status-indicator beats the bare
+   .heartbeat-pulse) so the prefers-reduced-motion rule `.heartbeat-pulse { animation: none }` cannot
+   zero the status balls' timing. Without this the balls freeze under reduced motion while the
+   high-specificity ASK? pillbox keeps pulsing (the balls' animation-name survives but their
+   duration/iteration get reset to 0). Same cadence as the parent; only the specificity differs. */
+.status-indicator.heartbeat-pulse {
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
 .status-indicator--dot.status-indicator--working.heartbeat-pulse {
   --attention-pulse-saturate-rest: 0.96;
   --attention-pulse-saturate-peak: 1.18;
@@ -2104,7 +2117,7 @@ body.theme-light .latency-meter {
   --attention-ring-rest-glow-size: 3px;
   --attention-ring-peak-glow-size: 14px;
   border: 1px solid transparent;
-  animation-name: attention-ring-fade;
+  animation-name: attention-ring-fade, working-ball-hard-flash;
 }
 .status-indicator--dot.status-indicator--attention.heartbeat-pulse,
 .status-indicator--dot.status-indicator--cooldown.heartbeat-pulse {
@@ -2130,6 +2143,7 @@ body.theme-light .latency-meter {
 }
 .agent-window-activity {
   --agent-window-icon-size: 18px;
+  --agent-status-ball-size: 14px;
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   display: inline-flex;
@@ -2151,6 +2165,8 @@ body.theme-light .latency-meter {
 }
 .agent-window-status-dot {
   margin-inline-start: 0;
+  font-family: var(--ui-font);
+  font-stretch: normal;
 }
 /* Agent status = a static AI symbol followed by a separate glowing status ball:
    [symbol][ball]. Working uses a quieter green glow; attention and cooldown keep stronger red/yellow
@@ -2161,14 +2177,13 @@ body.theme-light .latency-meter {
 .agent-window-activity--cooldown {
   --attention-ring-rgb: 245 197 66;
 }
-/* Size the activity ball to the SAME --agent-window-icon-size the agent symbol uses, instead of the
-   surrounding font-size, so the ball is identical across dock tabs, the window bar, and Tabber rows
-   (it used to scale with each surface's font, so the dock-tab ball and Tabber ball came out different
-   sizes). */
+/* Status balls own their size through --agent-status-ball-size instead of inheriting the surrounding
+   surface's icon/font size. The symbol can be compact in a window button while the ball stays identical
+   across dock tabs, Tabber parent rows, Tabber child rows, popovers, and Info Bar buttons. */
 .agent-window-activity--working .agent-window-status-dot,
 .agent-window-activity--attention .agent-window-status-dot,
 .agent-window-activity--cooldown .agent-window-status-dot {
-  font-size: calc(var(--agent-window-icon-size) * 0.82);
+  font-size: var(--agent-status-ball-size);
   line-height: 1;
 }
 .agent-window-agent-icon--active {
@@ -2253,6 +2268,14 @@ body.theme-light .latency-meter {
     border-color: rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-border-peak-alpha, 1));
     box-shadow: 0 0 0 2px rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-outline-alpha, 0.72)), 0 0 var(--attention-ring-peak-glow-size, 26px) rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-glow-alpha, 0.68));
     filter: saturate(var(--attention-pulse-saturate-peak, 1)) brightness(var(--attention-pulse-brightness-peak, 1));
+  }
+}
+@keyframes working-ball-hard-flash {
+  0%, 100% {
+    color: var(--pr-status-passing);
+  }
+  45%, 55% {
+    color: #35f06d;
   }
 }
 .attention-pulse {
@@ -6126,8 +6149,9 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   width: 14px;
   height: 14px;
 }
-.agent-window-status-dot {
-  margin-inline-start: 1px;
+.tmux-window-button .agent-window-status-dot {
+  margin-inline-start: calc(var(--agent-window-icon-size) * 0.16);
+  margin-inline-end: calc(var(--agent-window-icon-size) * 0.25);
 }
 .tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
 .tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-name-label {
@@ -13673,6 +13697,7 @@ body.editor-theme-light .file-editor-native-video {
   --tabber-level1-color: var(--code-function);
   --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
+  --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
 }
 body.theme-light .file-tree-row.tabber-row {
   --tabber-level0-color: var(--lt-markdown-heading);
@@ -13738,6 +13763,11 @@ body.theme-light .file-tree-row.tabber-row {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
+  --agent-window-icon-size: var(--tabber-agent-icon-size);
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+}
 .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg-hover);
@@ -13764,7 +13794,7 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
   vertical-align: middle;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
-  --agent-window-icon-size: calc(var(--file-explorer-font-size) + 2px);
+  --agent-window-icon-size: var(--tabber-agent-icon-size);
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: 0;
