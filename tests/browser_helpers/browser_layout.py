@@ -445,7 +445,7 @@ def pc_controls_fixture_html():
         </div>
         <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
         <div id="test-image-preview" class="file-image-preview-popover" style="top: 220px; left: 24px;"></div>
-        <div class="pane-tab popover-open" style="position: fixed; top: 220px; left: 24px;">
+        <div class="pane-tab session-popover-host popover-open" style="position: fixed; top: 220px; left: 24px;">
           <div id="test-tab-popover" class="session-popover"></div>
         </div>
       """,
@@ -515,7 +515,7 @@ def codemirror_editor_controls_fixture_html():
     css = app_css()
     tabs = "\n".join(
         f"""
-        <div role="button" tabindex="0" class="pane-tab {'active popover-open' if index == 2 else ''}">
+        <div role="button" tabindex="0" class="pane-tab session-popover-host {'active popover-open' if index == 2 else ''}">
           <span class="pane-tab-core"><span class="session-button-name">file-{index}.md</span></span>
           <span class="pane-tab-close pc-window-control pc-close"></span>
           {'''

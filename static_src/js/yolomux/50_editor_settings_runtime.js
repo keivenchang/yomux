@@ -758,6 +758,12 @@ function terminalThemeForSession(session, baseTheme) {
   return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
 }
 
+function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTheme(), mode = globalThemeMode) {
+  if (!container) return;
+  container.dataset.terminalTheme = resolvedTerminalThemeMode(terminalThemeMode, mode);
+  if (container.style) container.style.background = theme.background;
+}
+
 function applyTerminalRuntimeSettings(options = {}) {
   // one theme source for every terminal AND its container, so all panes share the same
   // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
@@ -773,7 +779,7 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.minimumContrastRatio = minContrast;
     item.term.clearTextureAtlas?.();
     refreshTerminal(session);
-    if (item.container?.style) item.container.style.background = theme.background;
+    applyTerminalContainerTheme(item.container, theme);
     if (options.fit !== false) scheduleFit(session);
   }
 }

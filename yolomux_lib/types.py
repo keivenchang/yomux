@@ -35,7 +35,7 @@ class SessionFilesPayload(TypedDict, total=False):
     errors: list[str]
     from_ref: str
     to_ref: str
-    refs_by_repo: dict[str, list[dict[str, str]]]
+    refs_by_repo: dict[str, list[dict[str, Any]]]
 
 
 class AutoApproveState(TypedDict, total=False):

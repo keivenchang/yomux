@@ -1535,8 +1535,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 0;
   max-width: none;
 }
-.pane-tab > .session-popover,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover,
+.session-popover-host > .session-popover,
 .pane-tab-detached-popover {
   position: fixed;
   top: var(--pane-tab-popover-top, 72px);
@@ -1557,12 +1556,10 @@ body.share-replay-shell .share-mirror-stage .app-overlay-root,
 body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   position: absolute;
 }
-.pane-tab.popover-open,
-.file-tree-row.tabber-row .tabber-session-tab.popover-open {
+.session-popover-host.popover-open {
   z-index: var(--z-pane-modal);
 }
-.pane-tab.popover-open > .session-popover,
-.file-tree-row.tabber-row .tabber-session-tab.popover-open > .session-popover,
+.session-popover-host.popover-open > .session-popover,
 .pane-tab-detached-popover.popover-open {
   visibility: visible;
   opacity: 1;
@@ -1570,8 +1567,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   transform: translateY(0);
   transition-delay: 0s;
 }
-.pane-tab > .session-popover::before,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover::before,
+.session-popover-host > .session-popover::before,
 .pane-tab-detached-popover::before {
   content: "";
   position: absolute;
@@ -1582,20 +1578,17 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: block;
   background: transparent;
 }
-.pane-tab > .session-popover.file-popover,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover.file-popover,
+.session-popover-host > .session-popover.file-popover,
 .pane-tab-detached-popover.file-popover {
   width: min(54ch, var(--popover-max-inline-size));
   max-height: min(42vh, var(--pane-tab-popover-max-block-size));
   pointer-events: none;
 }
-.pane-tab.popover-open > .session-popover.file-popover,
-.file-tree-row.tabber-row .tabber-session-tab.popover-open > .session-popover.file-popover,
+.session-popover-host.popover-open > .session-popover.file-popover,
 .pane-tab-detached-popover.popover-open.file-popover {
   pointer-events: auto;
 }
-.pane-tab > .session-popover.file-popover .popover-copy-button,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover.file-popover .popover-copy-button,
+.session-popover-host > .session-popover.file-popover .popover-copy-button,
 .pane-tab-detached-popover.file-popover .popover-copy-button {
   pointer-events: auto;
 }
@@ -1721,15 +1714,13 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   text-overflow: clip;
 }
 .tmux-window-button .agent-window-activity {
-  --agent-window-activity-inline-size: 14px;
-  --agent-window-activity-block-size: 14px;
+  --agent-window-icon-size: 14px;
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: 0;
   margin-inline-end: 1px;
 }
 .tmux-window-button .agent-window-activity .agent-icon {
-  width: 14px;
-  min-width: 14px;
-  height: 14px;
   padding: 0;
   vertical-align: middle;
 }

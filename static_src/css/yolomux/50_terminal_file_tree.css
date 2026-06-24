@@ -16,6 +16,7 @@
   min-width: 0;
   max-width: 100%;
   min-height: 0;
+  --terminal-link-underline: rgb(31 91 148 / 0.88);
   /* No padding: the terminal sits flush to the pane edges so its box meets the resizer directly (the
      old 2px left/right padding showed a dark sliver at the seam). The former `padding-top: 2px` gave a
      small breathing gap below the Info Bar border, but it just wasted vertical real estate — removed
@@ -25,6 +26,15 @@
   overflow: hidden;
   border: 0;
   border-radius: 0;
+}
+.terminal[data-terminal-theme="light"] {
+  --terminal-link-underline: rgb(90 174 245 / 0.84);
+}
+.terminal .xterm-rows span[style*="text-decoration: underline"],
+.terminal .xterm-rows span[style*="text-decoration-line: underline"] {
+  text-decoration-color: var(--terminal-link-underline) !important;
+  text-decoration-thickness: 1px !important;
+  text-underline-offset: 2px !important;
 }
 /* A .panel-overlay-root must NOT be the scroll container — put `overflow:auto` on an INNER child.
    The inactive-pane dim below is a full-bleed ::after (inset 0) on this element; if this element

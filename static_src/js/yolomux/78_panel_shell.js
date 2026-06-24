@@ -560,7 +560,7 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
   const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
-  tab.className = `pane-tab ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
+  tab.className = `pane-tab session-popover-host ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
@@ -837,7 +837,7 @@ function tmuxPaneTabHtml(session, info, state, auto) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(session)})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span></span>`;
 }
 
@@ -1753,10 +1753,14 @@ function updatePanelWindowStepButtons(session, info) {
     ...(panel?.querySelectorAll?.(barSelector) || []),
   ])];
   const html = tmuxWindowBarHtml(session, info, {infoBar: true});
+  let changed = false;
   if (!html) {
-    bars.forEach(bar => bar.remove());
+    bars.forEach(bar => {
+      bar.remove();
+      changed = true;
+    });
     syncTmuxWindowBarOverflow(session);
-    schedulePaneInfoBarMetaOverflowSync(panel);
+    if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   const replacementFromHtml = () => {
@@ -1772,20 +1776,25 @@ function updatePanelWindowStepButtons(session, info) {
     const close = row.querySelector(':scope > .panel-detail-close') || row.querySelector('.panel-detail-close');
     if (close?.parentElement === row) row.insertBefore(replacement, close);
     else row.appendChild(replacement);
+    changed = true;
     return true;
   };
   if (!bars.length) {
     insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
-    schedulePaneInfoBarMetaOverflowSync(panel);
+    if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   bars.forEach(existing => {
+    if (existing.outerHTML === html) return;
     const replacement = replacementFromHtml();
-    if (replacement) existing.replaceWith(replacement);
+    if (replacement) {
+      existing.replaceWith(replacement);
+      changed = true;
+    }
   });
   syncTmuxWindowBarOverflow(session);
-  schedulePaneInfoBarMetaOverflowSync(panel);
+  if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
 }
 
 function agentForPane(info, pane) {

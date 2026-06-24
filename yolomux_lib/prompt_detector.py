@@ -992,6 +992,8 @@ def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool
             in_codex_queued_followup = False
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
             continue
+        if re.match(r"^[❯›>]\s*$", stripped):
+            continue
         if re.match(r"^[❯›>]\s+\S", stripped):
             continue
         if _SHELL_PROMPT_RE.search(stripped):

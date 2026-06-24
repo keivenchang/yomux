@@ -115,6 +115,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
         "static_src/js/yolomux/40_file_explorer_files.js",
+        "static_src/js/yolomux/45_agent_window_activity.js",
         "static_src/js/yolomux/45_file_explorer_actions.js",
         "static_src/js/yolomux/46_file_drop_actions.js",
         "static_src/js/yolomux/50_editor_settings_runtime.js",

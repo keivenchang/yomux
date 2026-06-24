@@ -890,6 +890,11 @@ globalThis.__layoutTestApi = {
   commandPaletteSearchQuery,
   commandPaletteCommandItems,
   commandPaletteItems,
+  invokeCommandPaletteItemForTest(item, event = null) {
+    commandPaletteItemsCache = item ? [item] : [];
+    commandPaletteIndex = 0;
+    return invokeCommandPaletteSelection(event);
+  },
   dedupeFileSearchResults,
   setCommandPaletteStateForTest(mode, query) { commandPaletteMode = mode; commandPaletteQuery = query || ''; },
   commandPaletteMatches,
@@ -1265,6 +1270,8 @@ globalThis.__layoutTestApi = {
   slotForNewTmuxSession,
   slotForSession,
   slotForTabActivation,
+  focusedActivationSlotForTest: focusedActivationSlot,
+  fileEditorActivationSlotForTest: fileEditorActivationSlot,
   simpleCodeSyntaxHtml,
   smallLayoutSlotCandidate,
   slotCanAutoPrune,
@@ -1276,6 +1283,7 @@ globalThis.__layoutTestApi = {
   fileImagePreviewMinShowDelayMs,
   splitPercentForNewItem,
   setInfoBranchSort,
+  sessionNotificationTitleForTest: sessionNotificationTitle,
   handleDropDragOver,
   installFilePathDropTarget,
   showPaneTabDropPreview,
@@ -1324,6 +1332,7 @@ globalThis.__layoutTestApi = {
   tmuxWindowRecords,
   tmuxWindowBarLabelMode,
   tmuxWindowBarHtml,
+  updatePanelInfoBarMetaForTest: updatePanelInfoBarMeta,
   updatePanelWindowStepButtonsForTest: updatePanelWindowStepButtons,
   agentWindowActivityIconForTest: agentWindowActivityIcon,
   agentWindowActivityIconHtmlForStatusForTest: agentWindowActivityIconHtmlForStatus,

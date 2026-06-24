@@ -201,7 +201,6 @@ def git_metadata_base(root_text: str) -> dict[str, Any] | None:
         head = git(["log", "-1", "--pretty=%h %s"], root_text)
         upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root_text)
         status = git(["status", "--short"], root_text)
-        origin_url = git(["config", "--get", "remote.origin.url"], root_text)
         upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
         branch_name = branch.stdout.strip() if branch.returncode == 0 else None
         ahead, behind = git_ahead_behind(root_text, upstream_name)
@@ -217,7 +216,7 @@ def git_metadata_base(root_text: str) -> dict[str, Any] | None:
             "ahead": ahead,
             "behind": behind,
             "status_lines": status_lines,
-            "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
+            "github_repo": github_repo_for_git_remotes(root_text),
             "other_branches": local_branch_inventory(
                 root_text,
                 branch_name,
@@ -432,6 +431,29 @@ def parse_github_remote(remote_url: str) -> dict[str, str] | None:
         "name": name,
         "url": f"https://github.com/{quote(owner)}/{quote(name)}",
     }
+
+def github_repo_for_git_remotes(root_text: str) -> dict[str, str] | None:
+    remotes = git(["config", "--get-regexp", r"^remote\..*\.url$"], root_text)
+    if remotes.returncode != 0:
+        return None
+    candidates: list[tuple[int, int, dict[str, str]]] = []
+    for index, line in enumerate(remotes.stdout.splitlines()):
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, remote_url = parts
+        match = re.match(r"^remote\.(.+)\.url$", key)
+        if not match:
+            continue
+        repo = parse_github_remote(remote_url.strip())
+        if repo is None:
+            continue
+        remote_name = match.group(1)
+        priority = {"origin": 0, "upstream": 1}.get(remote_name, 2)
+        candidates.append((priority, index, repo))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
 
 # a watched-PR entry is either "owner/repo#N" (or "owner/repo/N") or a full GitHub PR URL.
 # An owner/repo segment is a conservative `[A-Za-z0-9._-]+` (GitHub's own allowed set).

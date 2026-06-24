@@ -1037,12 +1037,25 @@ def test_git_recent_refs_exposes_more_than_twenty_commits(tmp_path):
         tracked.write_text(f"{index}\n", encoding="utf-8")
         git(repo, "add", "tracked.txt")
         git(repo, "commit", "-m", f"commit {index}")
+    git(repo, "branch", "main")
+    git(repo, "branch", "same-head")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(repo, "update-ref", "refs/remotes/origin/topic", "HEAD")
 
     refs = session_files.git_recent_refs(repo)
+    head_commit = git(repo, "rev-parse", "HEAD").stdout.strip()
+    head_short = git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
 
     assert refs[0]["ref"] == "HEAD"
-    assert refs[0]["commit"] == git(repo, "rev-parse", "HEAD").stdout.strip()
-    assert refs[0]["short"].endswith("/HEAD")
+    assert refs[0]["commit"] == head_commit
+    assert refs[0]["short"].startswith(f"{head_short}/HEAD")
+    assert "origin/main" in refs[0]["short"]
+    assert "same-head" in refs[0]["short"]
+    assert refs[0]["aliases"][0] == "HEAD"
+    assert {"origin/main", "origin/topic", "main", "same-head"}.issubset(set(refs[0]["aliases"]))
+    head_commit_ref = next(item for item in refs if item["ref"] == head_commit)
+    assert head_commit_ref["short"].startswith(f"{head_short}/origin/main")
+    assert {"origin/main", "origin/topic", "main", "same-head"}.issubset(set(head_commit_ref["aliases"]))
     assert refs[1]["ref"] == "current"
     assert len(refs) >= 27
     assert any(item["subject"] == "commit 0" for item in refs)

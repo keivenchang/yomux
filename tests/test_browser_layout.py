@@ -1293,7 +1293,7 @@ def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
             """
             <script>document.body.className = 'theme-dark';</script>
             <section class="fixture-tabs">
-              <button id="normal-tab" type="button" class="pane-tab popover-open" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 80px;">
+              <button id="normal-tab" type="button" class="pane-tab session-popover-host popover-open" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 80px;">
                 <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
                 <div id="normal-popover" class="session-popover" role="tooltip"><div class="popover-title">Normal</div></div>
               </button>
@@ -1303,7 +1303,7 @@ def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
                 <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="8001" role="treeitem" aria-expanded="true" style="padding-left: 8px;">
                   <span class="file-tree-icon tabber-icon">▾</span>
                   <span class="file-tree-name">
-                    <span id="tabber-tab" class="tabber-session-tab popover-open" data-tabber-session-chrome="shared" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 180px;">
+                    <span id="tabber-tab" class="tabber-session-tab session-popover-host popover-open" data-tabber-session-chrome="shared" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 180px;">
                       <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
                       <div id="tabber-popover" class="session-popover" role="tooltip"><div class="popover-title">Tabber</div></div>
                     </span>

@@ -5568,7 +5568,7 @@ function itemLabel(item) {
 function itemSortNumber(item) {
   const type = tabTypeForItem(item);
   if (type) return type.sortRank;
-  const label = Number(sessionLabel(item));
+  const label = Number(sessionShortcutLabel(item));
   return Number.isFinite(label) ? label : Number.MAX_SAFE_INTEGER;
 }
 
@@ -6607,7 +6607,11 @@ function commandPaletteCommandItems() {
     mtime: commandPalettePaneMtime(item),
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
-    run: () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})),
+    run: () => {
+      if (item === infoItemId) return openInfoSubTab('info');
+      if (isFileExplorerItem(item)) return selectSession(item, {userInitiated: true});
+      return activateTabInExistingPane(item, {preferFocused: true, userInitiated: true});
+    },
     ...extra,
   });
   const fileGroups = new Map();   // path -> [items], in discovery order
@@ -7889,8 +7893,14 @@ function compactNotificationTitle(scope, message) {
   return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
 }
 
+function sessionNotificationScope(session) {
+  const label = sessionLabel(session);
+  const desc = sessionTabDescription(session, transcriptMeta.sessions?.[session]);
+  return desc ? `${label} ${desc}` : label;
+}
+
 function sessionNotificationTitle(session, state) {
-  return compactNotificationTitle(sessionLabel(session), state?.label || '');
+  return compactNotificationTitle(sessionNotificationScope(session), state?.label || '');
 }
 
 function hostNotificationTitle(message) {
@@ -8467,12 +8477,7 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  const detail = tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
-  // A non-numeric tmux session name (e.g. "PA exploration") is shown in the tab label only as its
-  // assigned number (e.g. "9"), so the real name is otherwise invisible. Surface it in the menu/search
-  // detail so a result like label "9" reads "9 · PA exploration · main · …" and is identifiable.
-  if (numericSessionName(item) === null) return detail ? `${item} · ${detail}` : String(item);
-  return detail;
+  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
 }
 
 function commandPaletteTabDetail(item) {
@@ -8499,7 +8504,7 @@ function menuTabRowHtml(item, options = {}) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, yoloWorking: sessionYoloIsWorking(item)})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
 }
 
@@ -13296,130 +13301,6 @@ function ensureTabberSessionFilesFetches() {
   if (!tabberActivityPayload?.agent_windows) fetchTabberActivity();
 }
 
-function agentWindowPathEntries(agent) {
-  const entries = [];
-  const seen = new Set();
-  const addEntry = (value, fallback = {}) => {
-    let path = '';
-    let mtime = Number(fallback.mtime || 0);
-    let git = fallback.git && typeof fallback.git === 'object' ? fallback.git : null;
-    if (value && typeof value === 'object') {
-      path = String(value.path || value.root || '').trim();
-      mtime = Number(value.mtime || mtime || 0);
-      git = value.git && typeof value.git === 'object' ? value.git : git;
-    } else {
-      path = String(value || '').trim();
-    }
-    if (!path || seen.has(path)) return;
-    seen.add(path);
-    entries.push({path, mtime: Number.isFinite(mtime) ? mtime : 0, git});
-  };
-  for (const entry of Array.isArray(agent?.path_entries) ? agent.path_entries : []) addEntry(entry);
-  for (const entry of Array.isArray(agent?.paths) ? agent.paths : []) addEntry(entry, {git: agent?.git});
-  return entries;
-}
-
-function agentWindowPrimaryGit(agent) {
-  if (agent?.git && typeof agent.git === 'object') return agent.git;
-  const entry = agentWindowPathEntries(agent).find(item => item.git && typeof item.git === 'object');
-  return entry?.git || null;
-}
-
-function agentWindowPrimaryPath(agent) {
-  const entry = agentWindowPathEntries(agent).find(item => item.path);
-  return entry?.path || String(agent?.path || '').trim();
-}
-
-function agentWindowPayloadKey(agent) {
-  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
-  const kind = agentWindowKind(agent?.kind);
-  return index !== null && kind ? `${index}:${kind}` : '';
-}
-
-const AGENT_WINDOW_ATTENTION_STATES = new Set(['approval', 'needs-approval', 'needs-input', 'interrupted']);
-
-function agentWindowStateKey(state) {
-  return String(state || '').trim();
-}
-
-function agentWindowIsWorkingState(state) {
-  return agentWindowStateKey(state) === 'working';
-}
-
-function agentWindowIsAttentionState(state) {
-  return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
-}
-
-function agentWindowActivityTone(state) {
-  const key = agentWindowStateKey(state);
-  if (key === 'working') return 'working';
-  if (key === 'cooldown') return 'cooldown';
-  if (key === 'attention') return 'attention';
-  if (key === 'active') return 'active';
-  if (key === 'settled') return 'settled';
-  return 'idle';
-}
-
-function agentWindowStateRank(state) {
-  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[agentWindowStateKey(state)] ?? 9;
-}
-
-function normalizedAgentWindowPayload(agent) {
-  const kind = agentWindowKind(agent?.kind);
-  const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
-  const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
-  const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || agent?.label || kind);
-  const pathEntries = agentWindowPathEntries(agent);
-  const git = agentWindowPrimaryGit(agent);
-  const normalized = {
-    ...agent,
-    kind,
-    window: windowText,
-    window_index: windowIndex,
-    label: String(agent?.label || canonical),
-    window_label: canonical,
-    pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
-    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.active === 'boolean' ? agent.active : agent?.current,
-    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : typeof agent?.active === 'boolean' ? agent.active : agent?.window_active,
-    path: pathEntries[0]?.path || String(agent?.path || ''),
-    paths: pathEntries.map(item => item.path),
-    path_entries: pathEntries,
-    git,
-  };
-  delete normalized.active;
-  return normalized;
-}
-
-function agentWindowPayloadRows(value) {
-  return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
-}
-
-function mergeAgentWindowPayload(base, candidates) {
-  const key = agentWindowPayloadKey(base);
-  const enrich = candidates
-    .map(rows => rows.find(row => agentWindowPayloadKey(row) === key))
-    .find(Boolean) || {};
-  const merged = {...enrich, ...base};
-  if (!agentWindowPathEntries(merged).length && agentWindowPathEntries(enrich).length) {
-    merged.path = enrich.path;
-    merged.paths = enrich.paths;
-    merged.path_entries = enrich.path_entries;
-    merged.git = enrich.git;
-  }
-  if (!(merged.git && typeof merged.git === 'object') && enrich.git && typeof enrich.git === 'object') merged.git = enrich.git;
-  if (typeof merged.current !== 'boolean' && typeof enrich.current === 'boolean') merged.current = enrich.current;
-  if (typeof merged.window_active !== 'boolean' && typeof enrich.window_active === 'boolean') merged.window_active = enrich.window_active;
-  if ((!Number.isFinite(Number(merged.pid)) || Number(merged.pid) <= 0) && Number.isFinite(Number(enrich.pid)) && Number(enrich.pid) > 0) merged.pid = enrich.pid;
-  return normalizedAgentWindowPayload(merged);
-}
-
-function agentWindowPayloadCurrent(agent) {
-  if (typeof agent?.current === 'boolean') return agent.current;
-  if (typeof agent?.window_active === 'boolean') return agent.window_active;
-  if (typeof agent?.active === 'boolean') return agent.active;
-  return null;
-}
-
 function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
   const pathEntries = agentWindowPathEntries(agent);
   return pathEntries
@@ -13431,193 +13312,6 @@ function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
         tabber: {type: 'repo', session, windowIndex, repoRoot: item.path, label: item.path, icon: '📁', branchText},
       };
     });
-}
-
-// Build the Tabber tree + an entriesByDir map keyed by STABLE id-based synthetic node paths
-// (s_<session>/w_<index>/r_<n>). Each entry carries mtime (ledger recency; parents inherit the max
-// child) for the date column + recency sort, and sortName (the human label) for A-Z/Z-A sort.
-function agentWindowKind(value) {
-  const key = String(value || '').trim().toLowerCase();
-  return key === 'claude' || key === 'codex' ? key : '';
-}
-
-function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
-  const kind = agentWindowKind(agentKey);
-  if (!kind) return String(fallback || '').trim();
-  const index = tmuxWindowIndexKey(windowIndex);
-  return index !== null ? `${index}:${kind}` : kind;
-}
-
-function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
-  const statePayload = autoPayload || autoApproveStates.get(session) || {};
-  const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
-    ? tabberActivityPayload.agent_windows[String(session || '')]
-    : null;
-  const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
-  const activityRows = agentWindowPayloadRows(activityPayload);
-  const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  const source = stateRows.length ? stateRows : activityRows.length ? activityRows : infoRows;
-  const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
-    .map(agent => ({
-      kind: agent?.kind || '',
-      state: 'idle',
-      pane_target: agent?.pane_target || '',
-      window_label: agent?.window_label || '',
-      transcript: agent?.transcript || '',
-      transcript_id: agent?.transcript_id || agent?.session_id || agent?.agent_session_id || '',
-      agent_session_id: agent?.agent_session_id || agent?.session_id || '',
-      last_active_ts: 0,
-      idle_since: null,
-    }));
-  return fallback
-    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
-    .filter(agent => agent.kind);
-}
-
-function windowViewModel(session, windowIndex, info = null, autoPayload = null) {
-  const indexKey = tmuxWindowIndexKey(windowIndex);
-  if (indexKey === null) return null;
-  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
-    .find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
-}
-
-function agentWindowStatusForRecord(session, record, info = null) {
-  const indexKey = tmuxWindowIndexKey(record?.index ?? record?.indexText);
-  if (indexKey === null) return null;
-  const rows = sessionAgentWindowStatusPayloads(session, info);
-  return rows.find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
-}
-
-function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
-  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
-  return Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
-}
-
-const agentWindowActivityStates = new Map();
-const agentWindowStoppedTimers = new Map();
-
-function agentWindowActivityTransitionKey(agentKey, options = {}) {
-  const explicit = String(options.transitionKey || '').trim();
-  if (explicit) return explicit;
-  const kind = agentWindowKind(agentKey);
-  if (!kind) return '';
-  const session = String(options.session || '').trim();
-  const windowIndex = tmuxWindowIndexKey(options.window_index ?? options.window);
-  const pane = String(options.pane_target || options.pane || '').trim();
-  return [session, windowIndex ?? '', pane, kind].join(':');
-}
-
-function scheduleAgentWindowStoppedRefresh(key, untilMs) {
-  if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
-  const previous = agentWindowStoppedTimers.get(key);
-  if (previous?.untilMs === untilMs) return;
-  if (previous?.timer) clearTimeout(previous.timer);
-  const delay = Math.max(0, untilMs - Date.now());
-  const timer = setTimeout(() => {
-    const current = agentWindowStoppedTimers.get(key);
-    if (!current || current.untilMs !== untilMs) return;
-    agentWindowStoppedTimers.delete(key);
-    if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
-      renderPanels(activePaneItems());
-    }
-  }, delay);
-  agentWindowStoppedTimers.set(key, {timer, untilMs});
-}
-
-function clearAgentWindowStoppedRefresh(key) {
-  const previous = agentWindowStoppedTimers.get(key);
-  if (previous?.timer) clearTimeout(previous.timer);
-  agentWindowStoppedTimers.delete(key);
-}
-
-function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
-  const kind = agentWindowKind(agentKey);
-  if (!kind) return null;
-  const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
-  const cooldownSeconds = Math.max(0, Number(agentWindowCooldownSeconds) || 0);
-  const transitionKey = agentWindowActivityTransitionKey(kind, options);
-  const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
-  const stateKey = agentWindowStateKey(state);
-  const current = options.current === true || options.window_active === true;
-  if (agentWindowIsAttentionState(stateKey)) {
-    if (transitionKey) {
-      clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: stateKey, seenWorking: previous.seenWorking === true, stoppedAt: Number(previous.stoppedAt) || 0});
-    }
-    return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`};
-  }
-  if (agentWindowIsWorkingState(stateKey)) {
-    if (transitionKey) {
-      clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
-    }
-    return {state: 'working', icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
-  }
-  const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
-  let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
-  const seenWorking = previous.seenWorking === true || stoppedAt > 0;
-  if (!stoppedAt && previous.state === 'working') stoppedAt = nowSeconds;
-  if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
-  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
-  if (seenWorking && stoppedAt > 0) {
-    const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
-    if (cooldownSeconds > 0 && stoppedAgeSeconds < cooldownSeconds) {
-      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + cooldownSeconds) * 1000);
-      return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`};
-    }
-    return null;
-  }
-  if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
-  return null;
-}
-
-function agentWindowStatusDotHtml(item) {
-  if (!item || item.state === 'working') return '';
-  if (!['attention', 'cooldown'].includes(item.state)) return '';
-  const tone = agentWindowActivityTone(item.state);
-  const classes = statusIndicatorDotClasses(
-    tone,
-    'agent-window-activity-icon',
-    'agent-window-status-dot',
-    `agent-window-activity-icon--${item.state}`,
-  );
-  return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
-}
-
-function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
-  const kind = agentWindowKind(agentKey);
-  if (!kind) return '';
-  const item = agentWindowActivityIcon(kind, state, idleSeconds, options);
-  const stateKey = item?.state || 'idle-recent';
-  const label = item?.label || agentLabel(kind);
-  const agentClasses = [
-    'agent-window-activity-icon',
-    'agent-window-agent-icon',
-    `agent-window-activity-icon--${stateKey}`,
-    `agent-window-agent-icon--${stateKey}`,
-    item?.state === 'working' || item?.state === 'active' || item?.state === 'attention' || item?.state === 'cooldown' ? 'heartbeat-pulse' : '',
-  ].filter(Boolean).join(' ');
-  const markerHtml = agentWindowStatusDotHtml(item);
-  const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = tone === 'working' || tone === 'active'
-    ? statusIndicatorToneStyle(tone)
-    : ['attention', 'cooldown'].includes(tone)
-      ? ` style="${agentAlternateAnimationStyle()}"`
-      : '';
-  return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
-}
-
-function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
-  return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
-    session,
-    window: agent?.window,
-    window_index: agent?.window_index,
-    pane: agent?.pane,
-    pane_target: agent?.pane_target,
-    current: agentWindowPayloadCurrent(agent) === true,
-    window_active: agent?.window_active === true,
-    working_stopped_ts: agent?.working_stopped_ts,
-  });
 }
 
 function tmuxWindowAgentStatus(session, record, info = null) {
@@ -13754,7 +13448,7 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
 }
 
 function tabberSessionChromeHtml(data) {
-  const classes = ['tabber-session-tab', data.active === true ? 'active' : ''].filter(Boolean).join(' ');
+  const classes = ['tabber-session-tab', 'session-popover-host', data.active === true ? 'active' : ''].filter(Boolean).join(' ');
   const session = String(data.session || '').trim();
   const info = transcriptMeta.sessions?.[session] || {};
   const state = sessionState(session, info);
@@ -14059,6 +13753,335 @@ function bindTabberPanel(panel) {
     event.preventDefault();
     event.stopPropagation();
     showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY);
+  });
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Shared Claude/Codex tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
+
+function agentWindowPathEntries(agent) {
+  const entries = [];
+  const seen = new Set();
+  const addEntry = (value, fallback = {}) => {
+    let path = '';
+    let mtime = Number(fallback.mtime || 0);
+    let git = fallback.git && typeof fallback.git === 'object' ? fallback.git : null;
+    if (value && typeof value === 'object') {
+      path = String(value.path || value.root || '').trim();
+      mtime = Number(value.mtime || mtime || 0);
+      git = value.git && typeof value.git === 'object' ? value.git : git;
+    } else {
+      path = String(value || '').trim();
+    }
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    entries.push({path, mtime: Number.isFinite(mtime) ? mtime : 0, git});
+  };
+  for (const entry of Array.isArray(agent?.path_entries) ? agent.path_entries : []) addEntry(entry);
+  for (const entry of Array.isArray(agent?.paths) ? agent.paths : []) addEntry(entry, {git: agent?.git});
+  return entries;
+}
+
+function agentWindowPrimaryGit(agent) {
+  if (agent?.git && typeof agent.git === 'object') return agent.git;
+  const entry = agentWindowPathEntries(agent).find(item => item.git && typeof item.git === 'object');
+  return entry?.git || null;
+}
+
+function agentWindowPrimaryPath(agent) {
+  const entry = agentWindowPathEntries(agent).find(item => item.path);
+  return entry?.path || String(agent?.path || '').trim();
+}
+
+function agentWindowPayloadKey(agent) {
+  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const kind = agentWindowKind(agent?.kind);
+  return index !== null && kind ? `${index}:${kind}` : '';
+}
+
+const AGENT_WINDOW_ATTENTION_STATES = new Set(['approval', 'needs-approval', 'needs-input', 'interrupted']);
+
+function agentWindowStateKey(state) {
+  return String(state || '').trim();
+}
+
+function agentWindowIsWorkingState(state) {
+  return agentWindowStateKey(state) === 'working';
+}
+
+function agentWindowIsAttentionState(state) {
+  return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
+}
+
+function agentWindowActivityTone(state) {
+  const key = agentWindowStateKey(state);
+  if (key === 'working') return 'working';
+  if (key === 'cooldown') return 'cooldown';
+  if (key === 'attention') return 'attention';
+  if (key === 'active') return 'active';
+  if (key === 'settled') return 'settled';
+  return 'idle';
+}
+
+function agentWindowStateRank(state) {
+  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[agentWindowStateKey(state)] ?? 9;
+}
+
+function agentWindowKind(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'claude' || key === 'codex' ? key : '';
+}
+
+function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return String(fallback || '').trim();
+  const index = tmuxWindowIndexKey(windowIndex);
+  return index !== null ? `${index}:${kind}` : kind;
+}
+
+function normalizedAgentWindowPayload(agent) {
+  const kind = agentWindowKind(agent?.kind);
+  const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
+  const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
+  const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || agent?.label || kind);
+  const pathEntries = agentWindowPathEntries(agent);
+  const git = agentWindowPrimaryGit(agent);
+  const normalized = {
+    ...agent,
+    kind,
+    window: windowText,
+    window_index: windowIndex,
+    label: String(agent?.label || canonical),
+    window_label: canonical,
+    pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
+    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.active === 'boolean' ? agent.active : agent?.current,
+    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : typeof agent?.active === 'boolean' ? agent.active : agent?.window_active,
+    path: pathEntries[0]?.path || String(agent?.path || ''),
+    paths: pathEntries.map(item => item.path),
+    path_entries: pathEntries,
+    git,
+  };
+  delete normalized.active;
+  return normalized;
+}
+
+function agentWindowPayloadRows(value) {
+  return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
+}
+
+function agentWindowStatusVisualSignature(payload = {}) {
+  const rows = agentWindowPayloadRows(payload?.agent_windows)
+    .map(agent => normalizedAgentWindowPayload(agent))
+    .map(agent => ({
+      kind: agent.kind,
+      window_index: tmuxWindowIndexKey(agent.window_index ?? agent.window),
+      state: agentWindowStateKey(agent.state),
+      current: agentWindowPayloadCurrent(agent) === true,
+      window_active: agent.window_active === true,
+      working_elapsed_seconds: Number.isFinite(Number(agent.working_elapsed_seconds)) ? Math.floor(Number(agent.working_elapsed_seconds)) : null,
+      working_stopped_ts: Number.isFinite(Number(agent.working_stopped_ts)) ? Number(agent.working_stopped_ts) : null,
+      last_active_ts: Number.isFinite(Number(agent.last_active_ts)) ? Number(agent.last_active_ts) : null,
+      idle_since: Number.isFinite(Number(agent.idle_since)) ? Number(agent.idle_since) : null,
+    }))
+    .sort((a, b) => String(a.window_index ?? '').localeCompare(String(b.window_index ?? '')) || a.kind.localeCompare(b.kind));
+  return JSON.stringify(rows);
+}
+
+function mergeAgentWindowPayload(base, candidates) {
+  const key = agentWindowPayloadKey(base);
+  const enrich = candidates
+    .map(rows => rows.find(row => agentWindowPayloadKey(row) === key))
+    .find(Boolean) || {};
+  const merged = {...enrich, ...base};
+  if (!agentWindowPathEntries(merged).length && agentWindowPathEntries(enrich).length) {
+    merged.path = enrich.path;
+    merged.paths = enrich.paths;
+    merged.path_entries = enrich.path_entries;
+    merged.git = enrich.git;
+  }
+  if (!(merged.git && typeof merged.git === 'object') && enrich.git && typeof enrich.git === 'object') merged.git = enrich.git;
+  if (typeof merged.current !== 'boolean' && typeof enrich.current === 'boolean') merged.current = enrich.current;
+  if (typeof merged.window_active !== 'boolean' && typeof enrich.window_active === 'boolean') merged.window_active = enrich.window_active;
+  if ((!Number.isFinite(Number(merged.pid)) || Number(merged.pid) <= 0) && Number.isFinite(Number(enrich.pid)) && Number(enrich.pid) > 0) merged.pid = enrich.pid;
+  return normalizedAgentWindowPayload(merged);
+}
+
+function agentWindowPayloadCurrent(agent) {
+  if (typeof agent?.current === 'boolean') return agent.current;
+  if (typeof agent?.window_active === 'boolean') return agent.window_active;
+  if (typeof agent?.active === 'boolean') return agent.active;
+  return null;
+}
+
+function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
+  const statePayload = autoPayload || autoApproveStates.get(session) || {};
+  const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
+    ? tabberActivityPayload.agent_windows[String(session || '')]
+    : null;
+  const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
+  const activityRows = agentWindowPayloadRows(activityPayload);
+  const infoRows = agentWindowPayloadRows(info?.agent_windows);
+  const source = stateRows.length ? stateRows : activityRows.length ? activityRows : infoRows;
+  const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
+    .map(agent => ({
+      kind: agent?.kind || '',
+      state: 'idle',
+      pane_target: agent?.pane_target || '',
+      window_label: agent?.window_label || '',
+      transcript: agent?.transcript || '',
+      transcript_id: agent?.transcript_id || agent?.session_id || agent?.agent_session_id || '',
+      agent_session_id: agent?.agent_session_id || agent?.session_id || '',
+      last_active_ts: 0,
+      idle_since: null,
+    }));
+  return fallback
+    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
+    .filter(agent => agent.kind);
+}
+
+function windowViewModel(session, windowIndex, info = null, autoPayload = null) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (indexKey === null) return null;
+  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
+}
+
+function agentWindowStatusForRecord(session, record, info = null) {
+  const indexKey = tmuxWindowIndexKey(record?.index ?? record?.indexText);
+  if (indexKey === null) return null;
+  const rows = sessionAgentWindowStatusPayloads(session, info);
+  return rows.find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
+}
+
+function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  return Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
+}
+
+const agentWindowActivityStates = new Map();
+const agentWindowStoppedTimers = new Map();
+
+function agentWindowActivityTransitionKey(agentKey, options = {}) {
+  const explicit = String(options.transitionKey || '').trim();
+  if (explicit) return explicit;
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return '';
+  const session = String(options.session || '').trim();
+  const windowIndex = tmuxWindowIndexKey(options.window_index ?? options.window);
+  const pane = String(options.pane_target || options.pane || '').trim();
+  return [session, windowIndex ?? '', pane, kind].join(':');
+}
+
+function scheduleAgentWindowStoppedRefresh(key, untilMs) {
+  if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
+  const previous = agentWindowStoppedTimers.get(key);
+  if (previous?.untilMs === untilMs) return;
+  if (previous?.timer) clearTimeout(previous.timer);
+  const delay = Math.max(0, untilMs - Date.now());
+  const timer = setTimeout(() => {
+    const current = agentWindowStoppedTimers.get(key);
+    if (!current || current.untilMs !== untilMs) return;
+    agentWindowStoppedTimers.delete(key);
+    if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
+      renderPanels(activePaneItems());
+    }
+  }, delay);
+  agentWindowStoppedTimers.set(key, {timer, untilMs});
+}
+
+function clearAgentWindowStoppedRefresh(key) {
+  const previous = agentWindowStoppedTimers.get(key);
+  if (previous?.timer) clearTimeout(previous.timer);
+  agentWindowStoppedTimers.delete(key);
+}
+
+function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return null;
+  const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
+  const cooldownSeconds = Math.max(0, Number(agentWindowCooldownSeconds) || 0);
+  const transitionKey = agentWindowActivityTransitionKey(kind, options);
+  const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
+  const stateKey = agentWindowStateKey(state);
+  const current = options.current === true || options.window_active === true;
+  if (agentWindowIsAttentionState(stateKey)) {
+    if (transitionKey) {
+      clearAgentWindowStoppedRefresh(transitionKey);
+      agentWindowActivityStates.set(transitionKey, {state: stateKey, seenWorking: previous.seenWorking === true, stoppedAt: Number(previous.stoppedAt) || 0});
+    }
+    return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`};
+  }
+  if (agentWindowIsWorkingState(stateKey)) {
+    if (transitionKey) {
+      clearAgentWindowStoppedRefresh(transitionKey);
+      agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
+    }
+    return {state: 'working', icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
+  }
+  const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
+  let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
+  const seenWorking = previous.seenWorking === true || stoppedAt > 0;
+  if (!stoppedAt && previous.state === 'working') stoppedAt = nowSeconds;
+  if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
+  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
+  if (seenWorking && stoppedAt > 0) {
+    const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
+    if (cooldownSeconds > 0 && stoppedAgeSeconds < cooldownSeconds) {
+      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + cooldownSeconds) * 1000);
+      return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`};
+    }
+    return null;
+  }
+  if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
+  return null;
+}
+
+function agentWindowStatusDotHtml(item) {
+  if (!item || item.state === 'working') return '';
+  if (!['attention', 'cooldown'].includes(item.state)) return '';
+  const tone = agentWindowActivityTone(item.state);
+  const classes = statusIndicatorDotClasses(
+    tone,
+    'agent-window-activity-icon',
+    'agent-window-status-dot',
+    `agent-window-activity-icon--${item.state}`,
+  );
+  return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
+}
+
+function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return '';
+  const item = agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const stateKey = item?.state || 'idle-recent';
+  const label = item?.label || agentLabel(kind);
+  const agentClasses = [
+    'agent-window-activity-icon',
+    'agent-window-agent-icon',
+    `agent-window-activity-icon--${stateKey}`,
+    `agent-window-agent-icon--${stateKey}`,
+    item?.state === 'working' || item?.state === 'active' || item?.state === 'attention' || item?.state === 'cooldown' ? 'heartbeat-pulse' : '',
+  ].filter(Boolean).join(' ');
+  const markerHtml = agentWindowStatusDotHtml(item);
+  const tone = item?.state ? agentWindowActivityTone(item.state) : '';
+  const style = tone === 'working' || tone === 'active'
+    ? statusIndicatorToneStyle(tone)
+    : ['attention', 'cooldown'].includes(tone)
+      ? ` style="${agentAlternateAnimationStyle()}"`
+      : '';
+  return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
+}
+
+function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
+  return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
+    session,
+    window: agent?.window,
+    window_index: agent?.window_index,
+    pane: agent?.pane,
+    pane_target: agent?.pane_target,
+    current: agentWindowPayloadCurrent(agent) === true,
+    window_active: agent?.window_active === true,
+    working_stopped_ts: agent?.working_stopped_ts,
   });
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -18643,6 +18666,12 @@ function terminalThemeForSession(session, baseTheme) {
   return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
 }
 
+function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTheme(), mode = globalThemeMode) {
+  if (!container) return;
+  container.dataset.terminalTheme = resolvedTerminalThemeMode(terminalThemeMode, mode);
+  if (container.style) container.style.background = theme.background;
+}
+
 function applyTerminalRuntimeSettings(options = {}) {
   // one theme source for every terminal AND its container, so all panes share the same
   // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
@@ -18658,7 +18687,7 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.minimumContrastRatio = minContrast;
     item.term.clearTextureAtlas?.();
     refreshTerminal(session);
-    if (item.container?.style) item.container.style.background = theme.background;
+    applyTerminalContainerTheme(item.container, theme);
     if (options.fit !== false) scheduleFit(session);
   }
 }
@@ -19256,9 +19285,8 @@ function metaJoin(parts) {
 
 function sessionNumberNameHtml(session) {
   const label = sessionLabel(session);
-  const name = String(session);
-  const nameHtml = name && name !== label ? `<span class="session-button-name">${esc(name)}</span>` : '';
-  return `<span class="session-button-number">${esc(label)}</span>${nameHtml}`;
+  const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
+  return `<span class="${className}">${esc(label)}</span>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {
@@ -19279,6 +19307,35 @@ function yoloMarkerHtml(session, auto, options = {}) {
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+}
+
+function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
+  const agents = sessionAgentWindowStatusPayloads(session, info, payload)
+    .filter(agent => agentWindowIsWorkingState(agent?.state));
+  return agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0] || null;
+}
+
+function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
+  const payload = options.payload || autoApproveStates.get(session);
+  const workingAgent = sessionWorkingAgentWindowForTab(session, info, payload);
+  if (workingAgent) {
+    const iconHtml = agentWindowActivityIconHtmlForStatus(workingAgent, workingAgent.kind, session);
+    if (iconHtml) {
+      const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
+      const stateText = auto ? t('yolo.state.onHere') : (autoApproveEnabledElsewhere(payload) ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
+      const title = options.toggle && readOnlyMode
+        ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
+        : t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)});
+      return `<span class="session-agent-activity-marker"${toggleAttr} title="${esc(title)}">${iconHtml}</span>`;
+    }
+  }
+  return yoloMarkerHtml(session, auto, {
+    ...options,
+    enabledOnly: options.enabledOnly,
+    yoloWorking: sessionYoloIsWorking(session, payload),
+    payload,
+  });
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
@@ -20692,17 +20749,19 @@ function slotForTabActivation(item) {
   return fileEditorActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
-async function activateTabInExistingPane(item) {
+async function activateTabInExistingPane(item, options = {}) {
   if (!isLayoutItem(item)) return;
   if (isTmuxSession(item)) {
     const ensured = await ensureSession(item);
     if (!ensured) return;
   }
-  const targetSlot = slotForTabActivation(item);
+  const targetSlot = options.preferFocused === true
+    ? (fileEditorActivationSlot() || slotForTabActivation(item))
+    : slotForTabActivation(item);
   if (!targetSlot) return;
   const currentSlot = slotForSession(item);
   if (currentSlot === targetSlot) {
-    activatePaneTab(targetSlot, item);
+    activatePaneTab(targetSlot, item, {userInitiated: options.userInitiated === true});
     return;
   }
   await moveSessionToSlot(item, targetSlot, currentSlot, paneTabs(targetSlot).length);
@@ -21243,12 +21302,17 @@ function sessionForLabel(label) {
   return null;
 }
 
-function sessionLabel(session) {
+function sessionShortcutLabel(session) {
   const assigned = sessionLabelAssignments().get(session);
   if (assigned) return assigned;
   const numeric = numericSessionName(session);
   if (numeric !== null) return String(numeric);
   return String(session);
+}
+
+function sessionLabel(session) {
+  const numeric = numericSessionName(session);
+  return numeric !== null ? String(numeric) : String(session);
 }
 
 function shortText(value, limit = 96) {
@@ -21844,9 +21908,10 @@ function showSessionRenameDialog(session) {
   const overlay = document.createElement('div');
   overlay.className = 'app-modal-overlay session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
+  const titleName = sessionLabel(session);
   overlay.innerHTML = `
     <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
-      <div class="session-rename-title">${esc(t('rename.title', {name: `${sessionLabel(session)} ${session}`}))}</div>
+      <div class="session-rename-title">${esc(t('rename.title', {name: titleName}))}</div>
       <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="${esc(t('rename.inputAria'))}" autocomplete="off">
       <div class="session-rename-error" hidden></div>
       <div class="session-rename-actions">
@@ -22351,6 +22416,23 @@ function terminalAttentionCharIsQuestionSentenceBoundary(source, index) {
   return /[!?？|│—–]/.test(char);
 }
 
+function terminalAttentionCharIsHardQuestionSentenceBoundary(source, index) {
+  const char = source[index];
+  if (char === '.') return terminalAttentionDotIsSentenceBoundary(source, index);
+  return /[!?？|│]/.test(char);
+}
+
+function terminalAttentionDashContinuesNoteSentence(source, index) {
+  let sentenceStart = 0;
+  for (let scan = index - 1; scan >= 0; scan -= 1) {
+    if (terminalAttentionCharIsHardQuestionSentenceBoundary(source, scan)) {
+      sentenceStart = scan + 1;
+      break;
+    }
+  }
+  return /^Note:\s+\S/i.test(source.slice(sentenceStart, index).trimStart());
+}
+
 function terminalAttentionSkipPromptPrefix(source, start) {
   let index = Math.max(0, Number(start) || 0);
   while (/\s/.test(source[index] || '')) index += 1;
@@ -22369,6 +22451,7 @@ function terminalAttentionQuestionSentenceStart(source, questionIndex) {
   let start = 0;
   for (let index = questionIndex - 1; index >= 0; index -= 1) {
     if (terminalAttentionCharIsQuestionSentenceBoundary(source, index)) {
+      if (/[—–]/.test(source[index] || '') && terminalAttentionDashContinuesNoteSentence(source, index)) continue;
       start = index + 1;
       break;
     }
@@ -22421,6 +22504,12 @@ function terminalAttentionQuestionRangeStartsOnMatchRow(context, range, start) {
   return Boolean(rangeSource?.record && rangeSource.record === matchSource?.record);
 }
 
+function terminalAttentionQuestionRangeHasNoteLead(context, range, start) {
+  if (!context || !range || range.start >= start) return false;
+  const lead = String(context.text || '').slice(range.start, start);
+  return /^Note:\s+\S/i.test(lead.trimStart()) && /[—–]\s*$/.test(lead);
+}
+
 function terminalAttentionQuestionCandidateTexts(questionTexts) {
   const seen = new Set();
   const candidates = [];
@@ -22466,14 +22555,17 @@ function terminalAttentionSpanSegments(item, rows, candidate) {
     if (start < 0) continue;
     const containingRange = terminalAttentionContainingQuestionRange(context, start, needle.length);
     const expandsWrappedFragment = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start);
+    const expandsNoteLead = terminalAttentionQuestionRangeHasNoteLead(context, containingRange, start);
     const mayExpandRange = containingRange && (
       terminalAttentionQuestionRangeStartsOnMatchRow(context, containingRange, start)
       || expandsWrappedFragment
+      || expandsNoteLead
     );
     const expandsRange = containingRange && (
       containingRange.start < start
       || containingRange.length > needle.length
       || expandsWrappedFragment
+      || expandsNoteLead
     );
     const range = containingRange && mayExpandRange && expandsRange ? containingRange : null;
     const highlightStart = range?.start ?? start;
@@ -25830,7 +25922,7 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
   const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
-  tab.className = `pane-tab ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
+  tab.className = `pane-tab session-popover-host ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
@@ -26107,7 +26199,7 @@ function tmuxPaneTabHtml(session, info, state, auto) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(session)})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span></span>`;
 }
 
@@ -27023,10 +27115,14 @@ function updatePanelWindowStepButtons(session, info) {
     ...(panel?.querySelectorAll?.(barSelector) || []),
   ])];
   const html = tmuxWindowBarHtml(session, info, {infoBar: true});
+  let changed = false;
   if (!html) {
-    bars.forEach(bar => bar.remove());
+    bars.forEach(bar => {
+      bar.remove();
+      changed = true;
+    });
     syncTmuxWindowBarOverflow(session);
-    schedulePaneInfoBarMetaOverflowSync(panel);
+    if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   const replacementFromHtml = () => {
@@ -27042,20 +27138,25 @@ function updatePanelWindowStepButtons(session, info) {
     const close = row.querySelector(':scope > .panel-detail-close') || row.querySelector('.panel-detail-close');
     if (close?.parentElement === row) row.insertBefore(replacement, close);
     else row.appendChild(replacement);
+    changed = true;
     return true;
   };
   if (!bars.length) {
     insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
-    schedulePaneInfoBarMetaOverflowSync(panel);
+    if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   bars.forEach(existing => {
+    if (existing.outerHTML === html) return;
     const replacement = replacementFromHtml();
-    if (replacement) existing.replaceWith(replacement);
+    if (replacement) {
+      existing.replaceWith(replacement);
+      changed = true;
+    }
   });
   syncTmuxWindowBarOverflow(session);
-  schedulePaneInfoBarMetaOverflowSync(panel);
+  if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
 }
 
 function agentForPane(info, pane) {
@@ -30688,10 +30789,11 @@ function diffRefSuggestions(repo) {
           if (item?.date) existing.date = item.date;
           if (item?.author) existing.author = item.author;
           if (item?.commit) existing.commit = item.commit;
+          if (Array.isArray(item?.aliases)) existing.aliases = item.aliases.slice();
         }
         continue;
       }
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
       seen.add(ref);
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
@@ -30726,10 +30828,11 @@ function fileDiffRefHistoryItems(path) {
         if (item?.date) existing.date = item.date;
         if (item?.author) existing.author = item.author;
         if (item?.commit) existing.commit = item.commit;
+        if (Array.isArray(item?.aliases)) existing.aliases = item.aliases.slice();
       }
       continue;
     }
-    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
+    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
     seen.add(ref);
     if (suggestions.length >= diffRefSuggestionLimit) break;
   }
@@ -30746,18 +30849,16 @@ function fileDiffRefHistorySignature(path) {
   return state.gitHistory.map(item => `${item?.ref || ''}:${item?.date || ''}`).join('|');
 }
 
-function diffRefOptionLabel(item, separator = ' - ') {
-  return [item?.short || '', item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
-}
-
-function diffRefItemMetaText(item) {
+function diffRefItemDateText(item) {
   const ts = Number(item?.date || 0);
   if (!ts) return '';
   const d = new Date(ts * 1000);
   const p = n => String(n).padStart(2, '0');
-  const dateStr = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  const author = String(item?.author || '').trim().split(/\s+/)[0] || '';
-  return author ? `${dateStr} ${author}` : dateStr;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function diffRefItemAuthorText(item) {
+  return String(item?.author || '').trim().split(/\s+/)[0] || '';
 }
 
 function diffRefShaLike(value) {
@@ -30771,9 +30872,44 @@ function diffRefItemCommitId(item) {
   return diffRefShaLike(ref) ? ref.toLowerCase() : '';
 }
 
+function diffRefDisplayAliases(item) {
+  const aliases = [];
+  const addAlias = value => {
+    const alias = cleanDiffRef(value, '');
+    if (!alias || alias === 'current' || diffRefShaLike(alias) || aliases.includes(alias)) return;
+    aliases.push(alias);
+  };
+  if (item?.ref === 'HEAD') addAlias('HEAD');
+  else addAlias(item?.ref);
+  const shortParts = cleanDiffRef(item?.short, '').split(/\s+/);
+  if (shortParts[0]?.includes('/')) {
+    addAlias(shortParts[0].slice(shortParts[0].indexOf('/') + 1));
+  }
+  shortParts.slice(1).forEach(addAlias);
+  (Array.isArray(item?.aliases) ? item.aliases : []).forEach(addAlias);
+  return aliases;
+}
+
+function diffRefDisplayShort(item) {
+  const short = cleanDiffRef(item?.short, '') || cleanDiffRef(item?.ref, '');
+  const aliases = diffRefDisplayAliases(item);
+  if (!aliases.length) return short;
+  let base = short.split(/\s+/)[0].split('/')[0];
+  if (!diffRefShaLike(base)) {
+    const commit = diffRefItemCommitId(item);
+    base = commit ? commit.slice(0, 7) : base;
+  }
+  if (!diffRefShaLike(base)) return short;
+  return `${base}/${aliases[0]}${aliases.length > 1 ? ` ${aliases.slice(1).join(' ')}` : ''}`;
+}
+
+function diffRefOptionLabel(item, separator = ' - ') {
+  return [diffRefDisplayShort(item), item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
+}
+
 function mergeDiffRefSameCommitAlias(primary, duplicate) {
-  const aliases = new Set(Array.isArray(primary.aliases) ? primary.aliases : []);
-  for (const value of [duplicate?.ref, duplicate?.short, ...(Array.isArray(duplicate?.aliases) ? duplicate.aliases : [])]) {
+  const aliases = new Set(diffRefDisplayAliases(primary));
+  for (const value of diffRefDisplayAliases(duplicate)) {
     const alias = cleanDiffRef(value, '');
     if (alias && alias !== primary.ref && alias !== primary.short) aliases.add(alias);
   }
@@ -30823,9 +30959,11 @@ function diffRefSameCommit(value, candidate) {
 function diffRefOptionMatches(value, item) {
   const normalized = cleanDiffRef(value, '');
   const short = cleanDiffRef(item?.short, '');
-  const aliases = Array.isArray(item?.aliases) ? item.aliases : [];
+  const displayShort = cleanDiffRef(diffRefDisplayShort(item), '');
+  const aliases = diffRefDisplayAliases(item);
   return diffRefSameCommit(normalized, item?.ref)
     || diffRefSameCommit(normalized, item?.short)
+    || normalized === displayShort
     || normalized === short
     || aliases.some(alias => diffRefSameCommit(normalized, alias) || normalized === cleanDiffRef(alias, ''))
     || normalized === diffRefOptionLabel(item)
@@ -30868,7 +31006,7 @@ function diffRefPopoverItems(value, options = {}) {
     ? suggestions
     : suggestions.filter(item => {
       const label = diffRefOptionLabel(item).toLowerCase();
-      const search = [item?.ref, item?.short, item?.subject, label].filter(Boolean).join(' ').toLowerCase();
+      const search = [item?.ref, item?.short, diffRefDisplayShort(item), item?.subject, label, ...diffRefDisplayAliases(item)].filter(Boolean).join(' ').toLowerCase();
       return diffRefOptionMatches(query, item) || search.includes(query);
     });
   return matches.slice(0, maxItems);
@@ -30891,7 +31029,7 @@ function diffRefToSuggestions(fromRef = diffRefFrom, repo, path = '') {
 function diffRefInputDisplayValue(value, suggestions) {
   const ref = cleanDiffRef(value, '');
   const match = (Array.isArray(suggestions) ? suggestions : []).find(item => diffRefOptionMatches(ref, item));
-  return match?.short || ref;
+  return match ? diffRefDisplayShort(match) : ref;
 }
 
 function diffRefInputHtml(options = {}) {
@@ -31000,12 +31138,12 @@ function renderDiffRefPopover(input, options = {}) {
   }
   popover.innerHTML = items.map((item, index) => {
     const active = index === diffRefPopoverActiveIndex;
-    const ref = item?.short || item?.ref || '';
+    const ref = diffRefDisplayShort(item) || item?.ref || '';
     const subject = item?.subject || item?.ref || '';
     const label = diffRefOptionLabel(item);
-    const metaText = diffRefItemMetaText(item);
-    const metaHtml = metaText ? `<span class="diff-ref-suggestion-meta">${esc(metaText)}</span>` : '';
-    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span>${metaHtml}</button>`;
+    const dateText = diffRefItemDateText(item);
+    const authorText = diffRefItemAuthorText(item);
+    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span><span class="diff-ref-suggestion-date">${esc(dateText)}</span><span class="diff-ref-suggestion-author">${esc(authorText)}</span></button>`;
   }).join('');
   positionDiffRefPopover(input, context.compact);
   popover.hidden = false;
@@ -46039,6 +46177,7 @@ function startTerminal(session) {
   }
   container.innerHTML = '';
   const size = shareHostTerminalSize(session) || estimateTerminalSize(container);
+  const baseTheme = terminalThemeForGlobalTheme();
   const term = new TerminalCtor({
     cols: size.cols,
     rows: size.rows,
@@ -46050,7 +46189,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode && !shareWriteMode,
-    theme: terminalThemeForSession(session),
+    theme: terminalThemeForSession(session, baseTheme),
     minimumContrastRatio: terminalMinimumContrastRatio(),
     // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
     allowProposedApi: true,
@@ -46062,7 +46201,7 @@ function startTerminal(session) {
   applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
-  if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
+  applyTerminalContainerTheme(container, baseTheme);
   installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
@@ -46631,6 +46770,18 @@ function paneInfoBarScrollTiming(distancePx) {
   };
 }
 
+function setStylePropertyIfChanged(style, name, value) {
+  if (!style) return;
+  const next = String(value);
+  if (style.getPropertyValue?.(name) === next) return;
+  style.setProperty?.(name, next);
+}
+
+function removeStylePropertyIfPresent(style, name) {
+  if (!style?.getPropertyValue?.(name)) return;
+  style.removeProperty?.(name);
+}
+
 function paneInfoBarMetaNodes(root = document) {
   if (!root) return [];
   const nodes = [];
@@ -46639,34 +46790,38 @@ function paneInfoBarMetaNodes(root = document) {
   return [...new Set(nodes)];
 }
 
-function ensurePaneInfoBarResizeObserver(meta) {
+function observePaneInfoBarResizeTarget(target) {
+  if (!target || !paneInfoBarResizeObserver) return;
+  if (target._paneInfoBarResizeObserved === true) return;
+  target._paneInfoBarResizeObserved = true;
+  paneInfoBarResizeObserver.observe(target);
+}
+
+function ensurePaneInfoBarResizeObserver(meta, viewport = null, text = null) {
   if (!meta || typeof window === 'undefined' || typeof window.ResizeObserver !== 'function') return;
   if (!paneInfoBarResizeObserver) {
     paneInfoBarResizeObserver = new ResizeObserver(entries => {
       for (const entry of entries || []) schedulePaneInfoBarMetaOverflowSync(entry?.target?.closest?.('.pane-info-bar') || entry?.target || document);
     });
   }
-  if (meta._paneInfoBarResizeObserved === true) return;
-  meta._paneInfoBarResizeObserved = true;
-  paneInfoBarResizeObserver.observe(meta);
+  observePaneInfoBarResizeTarget(meta);
   const bar = meta.closest?.('.pane-info-bar');
-  if (bar && bar._paneInfoBarResizeObserved !== true) {
-    bar._paneInfoBarResizeObserved = true;
-    paneInfoBarResizeObserver.observe(bar);
-  }
+  observePaneInfoBarResizeTarget(bar);
+  observePaneInfoBarResizeTarget(viewport);
+  observePaneInfoBarResizeTarget(text);
 }
 
 function syncPaneInfoBarMetaOverflow(root = document) {
   for (const meta of paneInfoBarMetaNodes(root)) {
-    ensurePaneInfoBarResizeObserver(meta);
     const viewport = meta.querySelector?.('.pane-info-bar-scroll-viewport');
     const text = viewport?.querySelector?.('.pane-info-bar-scroll-text');
+    ensurePaneInfoBarResizeObserver(meta, viewport, text);
     if (!viewport || !text) {
       meta.classList?.remove?.('pane-info-bar-meta-overflow');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-distance');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-offset');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-duration');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-timing');
       continue;
     }
     const viewportWidth = Number(viewport.clientWidth || viewport.getBoundingClientRect?.().width || 0);
@@ -46675,32 +46830,41 @@ function syncPaneInfoBarMetaOverflow(root = document) {
     const overflowing = distance > 1;
     meta.classList?.toggle?.('pane-info-bar-meta-overflow', overflowing);
     if (overflowing) {
-      const scrollTiming = paneInfoBarScrollTiming(distance);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-distance', `${distance}px`);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-offset', `${-distance}px`);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-duration', `${scrollTiming.totalSeconds.toFixed(2)}s`);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-timing', scrollTiming.timing);
+      const previousDistance = Number.parseFloat(meta.style?.getPropertyValue?.('--pane-info-bar-scroll-distance') || '');
+      const scrollDistance = Number.isFinite(previousDistance) && previousDistance > 0 && Math.abs(previousDistance - distance) <= 4
+        ? previousDistance
+        : distance;
+      const scrollTiming = paneInfoBarScrollTiming(scrollDistance);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-distance', `${scrollDistance}px`);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-offset', `${-scrollDistance}px`);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-duration', `${scrollTiming.totalSeconds.toFixed(2)}s`);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-timing', scrollTiming.timing);
     } else {
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-distance');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-offset');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-duration');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-timing');
     }
   }
 }
 
 function schedulePaneInfoBarMetaOverflowSync(root = document) {
   const run = () => syncPaneInfoBarMetaOverflow(root);
-  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => {
+    run();
+    requestAnimationFrame(run);
+  });
   else setTimeout(run, 0);
 }
 
 function updatePanelInfoBarMeta(session, info) {
   const meta = document.getElementById(`meta-${session}`);
   if (!meta) return;
-  meta.innerHTML = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
+  const html = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
+  const changed = meta.innerHTML !== html;
+  if (changed) meta.innerHTML = html;
   meta.removeAttribute('title');
-  schedulePaneInfoBarMetaOverflowSync(meta);
+  if (changed) schedulePaneInfoBarMetaOverflowSync(meta);
 }
 
 function updatePanelHeader(session, info) {

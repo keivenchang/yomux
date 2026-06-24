@@ -287,31 +287,33 @@ async function runShareThemeSuite() {
       loaded: true,
       errors: [],
       refs_by_repo: {'/repo/app': [
-        {ref: 'HEAD', short: 'abc123d/HEAD', subject: 'current head commit', commit: 'abc123def4567890'},
-        {ref: 'abc123def4567890', short: 'abc123d', subject: 'current head commit'},
+        {ref: 'HEAD', short: 'abc123d/HEAD origin/main main', subject: 'current head commit', commit: 'abc123def4567890', aliases: ['HEAD', 'origin/main', 'main']},
+        {ref: 'abc123def4567890', short: 'abc123d/origin/main main', subject: 'current head commit', aliases: ['origin/main', 'main']},
         {ref: '9876543210000000', short: '9876543', subject: 'older commit'},
       ]},
       repos: [{repo: '/repo/app', count: 0, touched_count: 0, added: 0, removed: 0, from_ref: 'HEAD', to_ref: 'current'}],
       files: [],
     });
     const collapsedHeadRefs = api.diffRefFromSuggestions('/repo/app');
-    assert.deepEqual(collapsedHeadRefs.map(item => item.short), ['abc123d/HEAD', '9876543'], 'Differ FROM refs collapse duplicate HEAD and head-SHA entries into one labeled ref');
+    assert.deepEqual(collapsedHeadRefs.map(item => item.short), ['abc123d/HEAD origin/main main', '9876543'], 'Differ FROM refs collapse duplicate HEAD and head-SHA entries into one labeled ref');
+    assert.deepEqual(collapsedHeadRefs[0].aliases, ['HEAD', 'origin/main', 'main'], 'Differ FROM refs preserve all same-commit aliases on the collapsed HEAD row');
+    assert.deepEqual(api.diffRefPopoverItems('origin/main', {compact: true, suggestions: collapsedHeadRefs}).map(item => item.short), ['abc123d/HEAD origin/main main'], 'Differ ref popup searches same-commit branch aliases');
     assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: collapsedHeadRefs, showAll: true}).some(item => item.short === 'abc123d'), false, 'Differ ref popup does not keep the duplicate short-SHA row for HEAD');
     const collapsedDifferHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD")[^>]*>/.test(collapsedDifferHtml), 'Differ comparison row shows the collapsed short-SHA/HEAD label');
+    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD origin\/main main")[^>]*>/.test(collapsedDifferHtml), 'Differ comparison row shows the collapsed short-SHA/HEAD label and same-commit branch aliases');
     const historyHeadPath = '/repo/app/src/history-head.md';
     api.setOpenFileStateForTest(historyHeadPath, {
       kind: 'text',
       gitTracked: true,
       gitHasHistory: true,
       gitHistory: [
-        {ref: 'HEAD', short: 'abc123d/HEAD', subject: 'current head commit', commit: 'abc123def4567890'},
-        {ref: 'abc123def4567890', short: 'abc123d', subject: 'current head commit'},
+        {ref: 'HEAD', short: 'abc123d/HEAD origin/main main', subject: 'current head commit', commit: 'abc123def4567890', aliases: ['HEAD', 'origin/main', 'main']},
+        {ref: 'abc123def4567890', short: 'abc123d/origin/main main', subject: 'current head commit', aliases: ['origin/main', 'main']},
         {ref: '9876543210000000', short: '9876543', subject: 'older commit'},
       ],
     });
     const collapsedEditorRefs = api.diffRefControlsHtml({compact: true, repo: '/repo/app', path: historyHeadPath});
-    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD")[^>]*>/.test(collapsedEditorRefs), 'Diff Editor ref toolbar shows the same collapsed short-SHA/HEAD label');
+    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD origin\/main main")[^>]*>/.test(collapsedEditorRefs), 'Diff Editor ref toolbar shows the same collapsed short-SHA/HEAD label and same-commit branch aliases');
     assert.equal((collapsedEditorRefs.match(/abc123d(?!\/HEAD)/g) || []).length, 0, 'Diff Editor ref toolbar does not show a separate duplicate short-SHA label for HEAD');
     const manyDiffRefs = Array.from({length: 120}, (_, index) => ({ref: `${String(index).padStart(7, 'a')}abcdef`, short: `r${index}`, subject: `commit ${index}`}));
     const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -1722,6 +1724,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*var\(--z-sticky-pane-head\)[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
     assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
     assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
+    assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*grid-template-columns:\s*minmax\(18ch,\s*32ch\)\s*minmax\(0,\s*1fr\)\s*16ch\s*minmax\(8ch,\s*18ch\)/.test(preferencesCss), 'diff-ref popup aligns ref, subject, date, and author as separate columns');
+    assert.ok(changedFilesSource.includes('diff-ref-suggestion-date') && changedFilesSource.includes('diff-ref-suggestion-author'), 'diff-ref popup renders date and author in separate cells so both columns line up');
     assert.ok(/const minWidth = Math\.min\(compact \? 880 : 960, viewportWidth - 16\)/.test(changedFilesSource), 'diff-ref popup reserves enough width for normal 80-character commit subjects');
     assert.ok(/const maxWidth = compact \? 1040 : 1120/.test(changedFilesSource), 'diff-ref popup width is capped for the viewport without truncating normal subjects');
     assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in dark mode');

@@ -207,10 +207,11 @@ function diffRefSuggestions(repo) {
           if (item?.date) existing.date = item.date;
           if (item?.author) existing.author = item.author;
           if (item?.commit) existing.commit = item.commit;
+          if (Array.isArray(item?.aliases)) existing.aliases = item.aliases.slice();
         }
         continue;
       }
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
       seen.add(ref);
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
@@ -245,10 +246,11 @@ function fileDiffRefHistoryItems(path) {
         if (item?.date) existing.date = item.date;
         if (item?.author) existing.author = item.author;
         if (item?.commit) existing.commit = item.commit;
+        if (Array.isArray(item?.aliases)) existing.aliases = item.aliases.slice();
       }
       continue;
     }
-    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || ''});
+    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
     seen.add(ref);
     if (suggestions.length >= diffRefSuggestionLimit) break;
   }
@@ -265,18 +267,16 @@ function fileDiffRefHistorySignature(path) {
   return state.gitHistory.map(item => `${item?.ref || ''}:${item?.date || ''}`).join('|');
 }
 
-function diffRefOptionLabel(item, separator = ' - ') {
-  return [item?.short || '', item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
-}
-
-function diffRefItemMetaText(item) {
+function diffRefItemDateText(item) {
   const ts = Number(item?.date || 0);
   if (!ts) return '';
   const d = new Date(ts * 1000);
   const p = n => String(n).padStart(2, '0');
-  const dateStr = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  const author = String(item?.author || '').trim().split(/\s+/)[0] || '';
-  return author ? `${dateStr} ${author}` : dateStr;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function diffRefItemAuthorText(item) {
+  return String(item?.author || '').trim().split(/\s+/)[0] || '';
 }
 
 function diffRefShaLike(value) {
@@ -290,9 +290,44 @@ function diffRefItemCommitId(item) {
   return diffRefShaLike(ref) ? ref.toLowerCase() : '';
 }
 
+function diffRefDisplayAliases(item) {
+  const aliases = [];
+  const addAlias = value => {
+    const alias = cleanDiffRef(value, '');
+    if (!alias || alias === 'current' || diffRefShaLike(alias) || aliases.includes(alias)) return;
+    aliases.push(alias);
+  };
+  if (item?.ref === 'HEAD') addAlias('HEAD');
+  else addAlias(item?.ref);
+  const shortParts = cleanDiffRef(item?.short, '').split(/\s+/);
+  if (shortParts[0]?.includes('/')) {
+    addAlias(shortParts[0].slice(shortParts[0].indexOf('/') + 1));
+  }
+  shortParts.slice(1).forEach(addAlias);
+  (Array.isArray(item?.aliases) ? item.aliases : []).forEach(addAlias);
+  return aliases;
+}
+
+function diffRefDisplayShort(item) {
+  const short = cleanDiffRef(item?.short, '') || cleanDiffRef(item?.ref, '');
+  const aliases = diffRefDisplayAliases(item);
+  if (!aliases.length) return short;
+  let base = short.split(/\s+/)[0].split('/')[0];
+  if (!diffRefShaLike(base)) {
+    const commit = diffRefItemCommitId(item);
+    base = commit ? commit.slice(0, 7) : base;
+  }
+  if (!diffRefShaLike(base)) return short;
+  return `${base}/${aliases[0]}${aliases.length > 1 ? ` ${aliases.slice(1).join(' ')}` : ''}`;
+}
+
+function diffRefOptionLabel(item, separator = ' - ') {
+  return [diffRefDisplayShort(item), item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
+}
+
 function mergeDiffRefSameCommitAlias(primary, duplicate) {
-  const aliases = new Set(Array.isArray(primary.aliases) ? primary.aliases : []);
-  for (const value of [duplicate?.ref, duplicate?.short, ...(Array.isArray(duplicate?.aliases) ? duplicate.aliases : [])]) {
+  const aliases = new Set(diffRefDisplayAliases(primary));
+  for (const value of diffRefDisplayAliases(duplicate)) {
     const alias = cleanDiffRef(value, '');
     if (alias && alias !== primary.ref && alias !== primary.short) aliases.add(alias);
   }
@@ -342,9 +377,11 @@ function diffRefSameCommit(value, candidate) {
 function diffRefOptionMatches(value, item) {
   const normalized = cleanDiffRef(value, '');
   const short = cleanDiffRef(item?.short, '');
-  const aliases = Array.isArray(item?.aliases) ? item.aliases : [];
+  const displayShort = cleanDiffRef(diffRefDisplayShort(item), '');
+  const aliases = diffRefDisplayAliases(item);
   return diffRefSameCommit(normalized, item?.ref)
     || diffRefSameCommit(normalized, item?.short)
+    || normalized === displayShort
     || normalized === short
     || aliases.some(alias => diffRefSameCommit(normalized, alias) || normalized === cleanDiffRef(alias, ''))
     || normalized === diffRefOptionLabel(item)
@@ -387,7 +424,7 @@ function diffRefPopoverItems(value, options = {}) {
     ? suggestions
     : suggestions.filter(item => {
       const label = diffRefOptionLabel(item).toLowerCase();
-      const search = [item?.ref, item?.short, item?.subject, label].filter(Boolean).join(' ').toLowerCase();
+      const search = [item?.ref, item?.short, diffRefDisplayShort(item), item?.subject, label, ...diffRefDisplayAliases(item)].filter(Boolean).join(' ').toLowerCase();
       return diffRefOptionMatches(query, item) || search.includes(query);
     });
   return matches.slice(0, maxItems);
@@ -410,7 +447,7 @@ function diffRefToSuggestions(fromRef = diffRefFrom, repo, path = '') {
 function diffRefInputDisplayValue(value, suggestions) {
   const ref = cleanDiffRef(value, '');
   const match = (Array.isArray(suggestions) ? suggestions : []).find(item => diffRefOptionMatches(ref, item));
-  return match?.short || ref;
+  return match ? diffRefDisplayShort(match) : ref;
 }
 
 function diffRefInputHtml(options = {}) {
@@ -519,12 +556,12 @@ function renderDiffRefPopover(input, options = {}) {
   }
   popover.innerHTML = items.map((item, index) => {
     const active = index === diffRefPopoverActiveIndex;
-    const ref = item?.short || item?.ref || '';
+    const ref = diffRefDisplayShort(item) || item?.ref || '';
     const subject = item?.subject || item?.ref || '';
     const label = diffRefOptionLabel(item);
-    const metaText = diffRefItemMetaText(item);
-    const metaHtml = metaText ? `<span class="diff-ref-suggestion-meta">${esc(metaText)}</span>` : '';
-    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span>${metaHtml}</button>`;
+    const dateText = diffRefItemDateText(item);
+    const authorText = diffRefItemAuthorText(item);
+    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span><span class="diff-ref-suggestion-date">${esc(dateText)}</span><span class="diff-ref-suggestion-author">${esc(authorText)}</span></button>`;
   }).join('');
   positionDiffRefPopover(input, context.compact);
   popover.hidden = false;

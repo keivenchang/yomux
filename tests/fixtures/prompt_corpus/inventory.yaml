@@ -933,6 +933,9 @@ parity_groups:
   - agent: claude
     case_name: working_visible_counter
     file: captures/working_visible_counter__claude-code-2.1.183_20260620.yaml
+  - agent: claude
+    case_name: working_empty_prompt_below_counter
+    file: captures/working_empty_prompt_below_counter__claude-code-2.1.186_20260623.yaml
   - agent: codex
     case_name: working_command_counter
     file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml

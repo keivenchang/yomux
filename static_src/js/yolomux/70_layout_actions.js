@@ -322,17 +322,19 @@ function slotForTabActivation(item) {
   return fileEditorActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
-async function activateTabInExistingPane(item) {
+async function activateTabInExistingPane(item, options = {}) {
   if (!isLayoutItem(item)) return;
   if (isTmuxSession(item)) {
     const ensured = await ensureSession(item);
     if (!ensured) return;
   }
-  const targetSlot = slotForTabActivation(item);
+  const targetSlot = options.preferFocused === true
+    ? (fileEditorActivationSlot() || slotForTabActivation(item))
+    : slotForTabActivation(item);
   if (!targetSlot) return;
   const currentSlot = slotForSession(item);
   if (currentSlot === targetSlot) {
-    activatePaneTab(targetSlot, item);
+    activatePaneTab(targetSlot, item, {userInitiated: options.userInitiated === true});
     return;
   }
   await moveSessionToSlot(item, targetSlot, currentSlot, paneTabs(targetSlot).length);
@@ -873,12 +875,17 @@ function sessionForLabel(label) {
   return null;
 }
 
-function sessionLabel(session) {
+function sessionShortcutLabel(session) {
   const assigned = sessionLabelAssignments().get(session);
   if (assigned) return assigned;
   const numeric = numericSessionName(session);
   if (numeric !== null) return String(numeric);
   return String(session);
+}
+
+function sessionLabel(session) {
+  const numeric = numericSessionName(session);
+  return numeric !== null ? String(numeric) : String(session);
 }
 
 function shortText(value, limit = 96) {
@@ -1474,9 +1481,10 @@ function showSessionRenameDialog(session) {
   const overlay = document.createElement('div');
   overlay.className = 'app-modal-overlay session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
+  const titleName = sessionLabel(session);
   overlay.innerHTML = `
     <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
-      <div class="session-rename-title">${esc(t('rename.title', {name: `${sessionLabel(session)} ${session}`}))}</div>
+      <div class="session-rename-title">${esc(t('rename.title', {name: titleName}))}</div>
       <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="${esc(t('rename.inputAria'))}" autocomplete="off">
       <div class="session-rename-error" hidden></div>
       <div class="session-rename-actions">
@@ -1981,6 +1989,23 @@ function terminalAttentionCharIsQuestionSentenceBoundary(source, index) {
   return /[!?？|│—–]/.test(char);
 }
 
+function terminalAttentionCharIsHardQuestionSentenceBoundary(source, index) {
+  const char = source[index];
+  if (char === '.') return terminalAttentionDotIsSentenceBoundary(source, index);
+  return /[!?？|│]/.test(char);
+}
+
+function terminalAttentionDashContinuesNoteSentence(source, index) {
+  let sentenceStart = 0;
+  for (let scan = index - 1; scan >= 0; scan -= 1) {
+    if (terminalAttentionCharIsHardQuestionSentenceBoundary(source, scan)) {
+      sentenceStart = scan + 1;
+      break;
+    }
+  }
+  return /^Note:\s+\S/i.test(source.slice(sentenceStart, index).trimStart());
+}
+
 function terminalAttentionSkipPromptPrefix(source, start) {
   let index = Math.max(0, Number(start) || 0);
   while (/\s/.test(source[index] || '')) index += 1;
@@ -1999,6 +2024,7 @@ function terminalAttentionQuestionSentenceStart(source, questionIndex) {
   let start = 0;
   for (let index = questionIndex - 1; index >= 0; index -= 1) {
     if (terminalAttentionCharIsQuestionSentenceBoundary(source, index)) {
+      if (/[—–]/.test(source[index] || '') && terminalAttentionDashContinuesNoteSentence(source, index)) continue;
       start = index + 1;
       break;
     }
@@ -2051,6 +2077,12 @@ function terminalAttentionQuestionRangeStartsOnMatchRow(context, range, start) {
   return Boolean(rangeSource?.record && rangeSource.record === matchSource?.record);
 }
 
+function terminalAttentionQuestionRangeHasNoteLead(context, range, start) {
+  if (!context || !range || range.start >= start) return false;
+  const lead = String(context.text || '').slice(range.start, start);
+  return /^Note:\s+\S/i.test(lead.trimStart()) && /[—–]\s*$/.test(lead);
+}
+
 function terminalAttentionQuestionCandidateTexts(questionTexts) {
   const seen = new Set();
   const candidates = [];
@@ -2096,14 +2128,17 @@ function terminalAttentionSpanSegments(item, rows, candidate) {
     if (start < 0) continue;
     const containingRange = terminalAttentionContainingQuestionRange(context, start, needle.length);
     const expandsWrappedFragment = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start);
+    const expandsNoteLead = terminalAttentionQuestionRangeHasNoteLead(context, containingRange, start);
     const mayExpandRange = containingRange && (
       terminalAttentionQuestionRangeStartsOnMatchRow(context, containingRange, start)
       || expandsWrappedFragment
+      || expandsNoteLead
     );
     const expandsRange = containingRange && (
       containingRange.start < start
       || containingRange.length > needle.length
       || expandsWrappedFragment
+      || expandsNoteLead
     );
     const range = containingRange && mayExpandRange && expandsRange ? containingRange : null;
     const highlightStart = range?.start ?? start;

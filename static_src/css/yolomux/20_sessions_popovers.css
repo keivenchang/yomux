@@ -139,24 +139,17 @@
 .heartbeat-pulse {
   transform-origin: center;
   animation-duration: var(--pulse-duration);
-  animation-timing-function: var(--pulse-easing);
-}
-.status-indicator--dot.status-indicator--working.heartbeat-pulse {
-  animation-name: attention-ring-fade;
-  animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
   animation-timing-function: var(--pulse-easing);
   animation-iteration-count: infinite;
   animation-direction: normal;
+}
+.status-indicator--dot.status-indicator--working.heartbeat-pulse {
+  animation-name: attention-ring-fade;
 }
 .status-indicator--dot.status-indicator--attention.heartbeat-pulse {
   border: 1px solid transparent;
   animation-name: attention-ring-fade;
-  animation-duration: var(--pulse-duration);
-  animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 .status-indicator--settled {
   color: var(--agent-inactive-marker-bg);
@@ -176,8 +169,9 @@
   color: var(--accent-gold);
 }
 .agent-window-activity {
+  --agent-window-icon-size: 18px;
   --agent-window-activity-inline-size: 24px;
-  --agent-window-activity-block-size: 18px;
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
   --agent-alternate-pulse-duration: calc(var(--pulse-duration) * 2);
   --agent-alternate-animation-delay: var(--attention-animation-delay, 0s);
   display: inline-flex;
@@ -188,7 +182,14 @@
   vertical-align: middle;
 }
 .agent-window-activity .agent-icon {
+  width: var(--agent-window-icon-size);
+  min-width: var(--agent-window-icon-size);
+  height: var(--agent-window-icon-size);
   margin: 0;
+}
+.agent-window-activity .agent-icon svg {
+  width: var(--agent-window-icon-size);
+  height: var(--agent-window-icon-size);
 }
 .agent-window-status-dot {
   margin-inline-start: 0;
@@ -219,11 +220,6 @@
 .agent-window-agent-icon--active {
   --agent-working-glow-rgb: 226 238 248;
   animation-name: agent-symbol-glow-cadence;
-  animation-duration: var(--pulse-duration);
-  animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 .agent-window-agent-icon--working.agent-icon.codex,
 .agent-window-agent-icon--active.agent-icon.codex {
@@ -238,18 +234,12 @@
   animation-name: agent-symbol-status-alternate;
   animation-duration: var(--agent-alternate-pulse-duration);
   animation-delay: var(--agent-alternate-animation-delay, var(--attention-animation-delay, 0s));
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 .agent-window-activity--attention .agent-window-status-dot.status-indicator,
 .agent-window-activity--cooldown .agent-window-status-dot.status-indicator {
   animation-name: agent-status-dot-alternate;
   animation-duration: var(--agent-alternate-pulse-duration);
   animation-delay: var(--agent-alternate-animation-delay, var(--attention-animation-delay, 0s));
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 @keyframes agent-symbol-glow-cadence {
   0%, 100% {
@@ -420,6 +410,18 @@
 }
 .session-yolo-marker[data-auto-session] {
   cursor: pointer;
+}
+.session-agent-activity-marker {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.session-agent-activity-marker[data-auto-session] {
+  cursor: pointer;
+}
+.session-agent-activity-marker .agent-window-activity {
+  margin-inline-start: 0;
 }
 .panel-session-label .session-yolo-marker {
   min-width: max(17px, calc(var(--ui-font-size) + 5px));

@@ -2063,24 +2063,17 @@ body.theme-light .latency-meter {
 .heartbeat-pulse {
   transform-origin: center;
   animation-duration: var(--pulse-duration);
-  animation-timing-function: var(--pulse-easing);
-}
-.status-indicator--dot.status-indicator--working.heartbeat-pulse {
-  animation-name: attention-ring-fade;
-  animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
   animation-timing-function: var(--pulse-easing);
   animation-iteration-count: infinite;
   animation-direction: normal;
+}
+.status-indicator--dot.status-indicator--working.heartbeat-pulse {
+  animation-name: attention-ring-fade;
 }
 .status-indicator--dot.status-indicator--attention.heartbeat-pulse {
   border: 1px solid transparent;
   animation-name: attention-ring-fade;
-  animation-duration: var(--pulse-duration);
-  animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 .status-indicator--settled {
   color: var(--agent-inactive-marker-bg);
@@ -2100,8 +2093,9 @@ body.theme-light .latency-meter {
   color: var(--accent-gold);
 }
 .agent-window-activity {
+  --agent-window-icon-size: 18px;
   --agent-window-activity-inline-size: 24px;
-  --agent-window-activity-block-size: 18px;
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
   --agent-alternate-pulse-duration: calc(var(--pulse-duration) * 2);
   --agent-alternate-animation-delay: var(--attention-animation-delay, 0s);
   display: inline-flex;
@@ -2112,7 +2106,14 @@ body.theme-light .latency-meter {
   vertical-align: middle;
 }
 .agent-window-activity .agent-icon {
+  width: var(--agent-window-icon-size);
+  min-width: var(--agent-window-icon-size);
+  height: var(--agent-window-icon-size);
   margin: 0;
+}
+.agent-window-activity .agent-icon svg {
+  width: var(--agent-window-icon-size);
+  height: var(--agent-window-icon-size);
 }
 .agent-window-status-dot {
   margin-inline-start: 0;
@@ -2143,11 +2144,6 @@ body.theme-light .latency-meter {
 .agent-window-agent-icon--active {
   --agent-working-glow-rgb: 226 238 248;
   animation-name: agent-symbol-glow-cadence;
-  animation-duration: var(--pulse-duration);
-  animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 .agent-window-agent-icon--working.agent-icon.codex,
 .agent-window-agent-icon--active.agent-icon.codex {
@@ -2162,18 +2158,12 @@ body.theme-light .latency-meter {
   animation-name: agent-symbol-status-alternate;
   animation-duration: var(--agent-alternate-pulse-duration);
   animation-delay: var(--agent-alternate-animation-delay, var(--attention-animation-delay, 0s));
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 .agent-window-activity--attention .agent-window-status-dot.status-indicator,
 .agent-window-activity--cooldown .agent-window-status-dot.status-indicator {
   animation-name: agent-status-dot-alternate;
   animation-duration: var(--agent-alternate-pulse-duration);
   animation-delay: var(--agent-alternate-animation-delay, var(--attention-animation-delay, 0s));
-  animation-timing-function: var(--pulse-easing);
-  animation-iteration-count: infinite;
-  animation-direction: normal;
 }
 @keyframes agent-symbol-glow-cadence {
   0%, 100% {
@@ -2344,6 +2334,18 @@ body.theme-light .latency-meter {
 }
 .session-yolo-marker[data-auto-session] {
   cursor: pointer;
+}
+.session-agent-activity-marker {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.session-agent-activity-marker[data-auto-session] {
+  cursor: pointer;
+}
+.session-agent-activity-marker .agent-window-activity {
+  margin-inline-start: 0;
 }
 .panel-session-label .session-yolo-marker {
   min-width: max(17px, calc(var(--ui-font-size) + 5px));
@@ -3182,7 +3184,7 @@ body.theme-light .branch-link {
   min-width: 0;
   height: 24px;
   display: grid;
-  grid-template-columns: minmax(7ch, 9ch) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(18ch, 32ch) minmax(0, 1fr) 16ch minmax(8ch, 18ch);
   align-items: center;
   gap: 8px;
   padding: 0 6px;
@@ -3202,8 +3204,10 @@ body.theme-light .branch-link {
 }
 .diff-ref-suggestion-option:hover .diff-ref-suggestion-subject,
 .diff-ref-suggestion-option.active .diff-ref-suggestion-subject,
-.diff-ref-suggestion-option:hover .diff-ref-suggestion-meta,
-.diff-ref-suggestion-option.active .diff-ref-suggestion-meta {
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-date,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-date,
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-author,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-author {
   color: var(--text);
   opacity: 0.95;
 }
@@ -3217,12 +3221,18 @@ body.theme-light .branch-link {
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
   color: var(--muted);
 }
-.diff-ref-suggestion-meta {
+.diff-ref-suggestion-date,
+.diff-ref-suggestion-author {
   min-width: 0;
   font: 500 var(--ui-font-size-2xs)/1 var(--mono-font);
   color: var(--muted);
   opacity: 0.7;
-  justify-self: end;
+}
+.diff-ref-suggestion-date {
+  justify-self: start;
+}
+.diff-ref-suggestion-author {
+  justify-self: start;
 }
 .diff-ref-suggestion-empty {
   padding: 5px 7px;
@@ -5919,8 +5929,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 0;
   max-width: none;
 }
-.pane-tab > .session-popover,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover,
+.session-popover-host > .session-popover,
 .pane-tab-detached-popover {
   position: fixed;
   top: var(--pane-tab-popover-top, 72px);
@@ -5941,12 +5950,10 @@ body.share-replay-shell .share-mirror-stage .app-overlay-root,
 body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   position: absolute;
 }
-.pane-tab.popover-open,
-.file-tree-row.tabber-row .tabber-session-tab.popover-open {
+.session-popover-host.popover-open {
   z-index: var(--z-pane-modal);
 }
-.pane-tab.popover-open > .session-popover,
-.file-tree-row.tabber-row .tabber-session-tab.popover-open > .session-popover,
+.session-popover-host.popover-open > .session-popover,
 .pane-tab-detached-popover.popover-open {
   visibility: visible;
   opacity: 1;
@@ -5954,8 +5961,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   transform: translateY(0);
   transition-delay: 0s;
 }
-.pane-tab > .session-popover::before,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover::before,
+.session-popover-host > .session-popover::before,
 .pane-tab-detached-popover::before {
   content: "";
   position: absolute;
@@ -5966,20 +5972,17 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: block;
   background: transparent;
 }
-.pane-tab > .session-popover.file-popover,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover.file-popover,
+.session-popover-host > .session-popover.file-popover,
 .pane-tab-detached-popover.file-popover {
   width: min(54ch, var(--popover-max-inline-size));
   max-height: min(42vh, var(--pane-tab-popover-max-block-size));
   pointer-events: none;
 }
-.pane-tab.popover-open > .session-popover.file-popover,
-.file-tree-row.tabber-row .tabber-session-tab.popover-open > .session-popover.file-popover,
+.session-popover-host.popover-open > .session-popover.file-popover,
 .pane-tab-detached-popover.popover-open.file-popover {
   pointer-events: auto;
 }
-.pane-tab > .session-popover.file-popover .popover-copy-button,
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover.file-popover .popover-copy-button,
+.session-popover-host > .session-popover.file-popover .popover-copy-button,
 .pane-tab-detached-popover.file-popover .popover-copy-button {
   pointer-events: auto;
 }
@@ -6105,15 +6108,13 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   text-overflow: clip;
 }
 .tmux-window-button .agent-window-activity {
-  --agent-window-activity-inline-size: 14px;
-  --agent-window-activity-block-size: 14px;
+  --agent-window-icon-size: 14px;
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: 0;
   margin-inline-end: 1px;
 }
 .tmux-window-button .agent-window-activity .agent-icon {
-  width: 14px;
-  min-width: 14px;
-  height: 14px;
   padding: 0;
   vertical-align: middle;
 }
@@ -6400,6 +6401,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-width: 0;
   max-width: 100%;
   min-height: 0;
+  --terminal-link-underline: rgb(31 91 148 / 0.88);
   /* No padding: the terminal sits flush to the pane edges so its box meets the resizer directly (the
      old 2px left/right padding showed a dark sliver at the seam). The former `padding-top: 2px` gave a
      small breathing gap below the Info Bar border, but it just wasted vertical real estate — removed
@@ -6409,6 +6411,15 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   overflow: hidden;
   border: 0;
   border-radius: 0;
+}
+.terminal[data-terminal-theme="light"] {
+  --terminal-link-underline: rgb(90 174 245 / 0.84);
+}
+.terminal .xterm-rows span[style*="text-decoration: underline"],
+.terminal .xterm-rows span[style*="text-decoration-line: underline"] {
+  text-decoration-color: var(--terminal-link-underline) !important;
+  text-decoration-thickness: 1px !important;
+  text-underline-offset: 2px !important;
 }
 /* A .panel-overlay-root must NOT be the scroll container — put `overflow:auto` on an INNER child.
    The inactive-pane dim below is a full-bleed ::after (inset 0) on this element; if this element
@@ -11586,8 +11597,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   min-width: 0;
 }
 .file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline .diff-ref-input {
-  width: 17ch;
-  max-width: 19ch;
+  width: clamp(17ch, 24vw, 32ch);
+  max-width: min(34ch, 42vw);
   margin: 0 2px;
   vertical-align: baseline;
   font-size: var(--ui-font-size-xs);
@@ -12157,6 +12168,7 @@ body.editor-theme-light .file-editor-content {
    toolbar line BELOW the tab strip instead of cramming the tabs. */
 .file-editor-toolbar {
   position: relative;
+  container-type: inline-size;
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
@@ -12203,7 +12215,7 @@ body.editor-theme-light .file-editor-content {
   align-items: center;
   flex: 0 1 auto;
   min-width: max-content;
-  max-width: min(56vw, 340px);
+  max-width: min(50vw, 300px);
   overflow: visible;
 }
 .file-editor-diff-ref-panel[hidden] {
@@ -12219,6 +12231,25 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
   width: 17ch;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input[data-diff-ref-to],
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input[data-diff-ref-to] {
+  width: 9ch;
+}
+@container (min-width: 900px) {
+  .file-editor-diff-ref-panel {
+    max-width: min(72vw, 620px);
+  }
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
+    width: clamp(17ch, 18vw, 34ch);
+    max-width: min(34ch, 32vw);
+  }
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input[data-diff-ref-to],
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input[data-diff-ref-to] {
+    width: clamp(12ch, 14vw, 28ch);
+    max-width: min(28ch, 28vw);
+  }
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset {
   width: 22px;
@@ -13470,7 +13501,8 @@ body.editor-theme-light .file-editor-native-video {
 .file-drag-more,
 .diff-ref-suggestion-ref,
 .diff-ref-suggestion-subject,
-.diff-ref-suggestion-meta,
+.diff-ref-suggestion-date,
+.diff-ref-suggestion-author,
 .changes-comparison-title,
 .changes-repo-title,
 .preferences-path-value,
@@ -13595,23 +13627,17 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
   vertical-align: middle;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
-  --agent-window-activity-inline-size: calc(var(--file-explorer-font-size) + 2px);
-  --agent-window-activity-block-size: calc(var(--file-explorer-font-size) + 2px);
+  --agent-window-icon-size: calc(var(--file-explorer-font-size) + 2px);
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: 0;
   margin-inline-end: 1px;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-icon {
   flex: 0 0 auto;
-  width: calc(var(--file-explorer-font-size) + 2px);
-  min-width: calc(var(--file-explorer-font-size) + 2px);
-  height: calc(var(--file-explorer-font-size) + 2px);
   margin: 0;
   padding: 0;
   vertical-align: middle;
-}
-.file-tree-row.tabber-row .tabber-window-label .agent-icon svg {
-  width: calc(var(--file-explorer-font-size) + 2px);
-  height: calc(var(--file-explorer-font-size) + 2px);
 }
 .file-tree-row.tabber-row .tabber-window-text {
   min-width: 0;

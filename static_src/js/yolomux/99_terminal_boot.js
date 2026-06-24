@@ -2385,6 +2385,7 @@ function startTerminal(session) {
   }
   container.innerHTML = '';
   const size = shareHostTerminalSize(session) || estimateTerminalSize(container);
+  const baseTheme = terminalThemeForGlobalTheme();
   const term = new TerminalCtor({
     cols: size.cols,
     rows: size.rows,
@@ -2396,7 +2397,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode && !shareWriteMode,
-    theme: terminalThemeForSession(session),
+    theme: terminalThemeForSession(session, baseTheme),
     minimumContrastRatio: terminalMinimumContrastRatio(),
     // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
     allowProposedApi: true,
@@ -2408,7 +2409,7 @@ function startTerminal(session) {
   applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
-  if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
+  applyTerminalContainerTheme(container, baseTheme);
   installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
@@ -2977,6 +2978,18 @@ function paneInfoBarScrollTiming(distancePx) {
   };
 }
 
+function setStylePropertyIfChanged(style, name, value) {
+  if (!style) return;
+  const next = String(value);
+  if (style.getPropertyValue?.(name) === next) return;
+  style.setProperty?.(name, next);
+}
+
+function removeStylePropertyIfPresent(style, name) {
+  if (!style?.getPropertyValue?.(name)) return;
+  style.removeProperty?.(name);
+}
+
 function paneInfoBarMetaNodes(root = document) {
   if (!root) return [];
   const nodes = [];
@@ -2985,34 +2998,38 @@ function paneInfoBarMetaNodes(root = document) {
   return [...new Set(nodes)];
 }
 
-function ensurePaneInfoBarResizeObserver(meta) {
+function observePaneInfoBarResizeTarget(target) {
+  if (!target || !paneInfoBarResizeObserver) return;
+  if (target._paneInfoBarResizeObserved === true) return;
+  target._paneInfoBarResizeObserved = true;
+  paneInfoBarResizeObserver.observe(target);
+}
+
+function ensurePaneInfoBarResizeObserver(meta, viewport = null, text = null) {
   if (!meta || typeof window === 'undefined' || typeof window.ResizeObserver !== 'function') return;
   if (!paneInfoBarResizeObserver) {
     paneInfoBarResizeObserver = new ResizeObserver(entries => {
       for (const entry of entries || []) schedulePaneInfoBarMetaOverflowSync(entry?.target?.closest?.('.pane-info-bar') || entry?.target || document);
     });
   }
-  if (meta._paneInfoBarResizeObserved === true) return;
-  meta._paneInfoBarResizeObserved = true;
-  paneInfoBarResizeObserver.observe(meta);
+  observePaneInfoBarResizeTarget(meta);
   const bar = meta.closest?.('.pane-info-bar');
-  if (bar && bar._paneInfoBarResizeObserved !== true) {
-    bar._paneInfoBarResizeObserved = true;
-    paneInfoBarResizeObserver.observe(bar);
-  }
+  observePaneInfoBarResizeTarget(bar);
+  observePaneInfoBarResizeTarget(viewport);
+  observePaneInfoBarResizeTarget(text);
 }
 
 function syncPaneInfoBarMetaOverflow(root = document) {
   for (const meta of paneInfoBarMetaNodes(root)) {
-    ensurePaneInfoBarResizeObserver(meta);
     const viewport = meta.querySelector?.('.pane-info-bar-scroll-viewport');
     const text = viewport?.querySelector?.('.pane-info-bar-scroll-text');
+    ensurePaneInfoBarResizeObserver(meta, viewport, text);
     if (!viewport || !text) {
       meta.classList?.remove?.('pane-info-bar-meta-overflow');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-distance');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-offset');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-duration');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-timing');
       continue;
     }
     const viewportWidth = Number(viewport.clientWidth || viewport.getBoundingClientRect?.().width || 0);
@@ -3021,32 +3038,41 @@ function syncPaneInfoBarMetaOverflow(root = document) {
     const overflowing = distance > 1;
     meta.classList?.toggle?.('pane-info-bar-meta-overflow', overflowing);
     if (overflowing) {
-      const scrollTiming = paneInfoBarScrollTiming(distance);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-distance', `${distance}px`);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-offset', `${-distance}px`);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-duration', `${scrollTiming.totalSeconds.toFixed(2)}s`);
-      meta.style?.setProperty?.('--pane-info-bar-scroll-timing', scrollTiming.timing);
+      const previousDistance = Number.parseFloat(meta.style?.getPropertyValue?.('--pane-info-bar-scroll-distance') || '');
+      const scrollDistance = Number.isFinite(previousDistance) && previousDistance > 0 && Math.abs(previousDistance - distance) <= 4
+        ? previousDistance
+        : distance;
+      const scrollTiming = paneInfoBarScrollTiming(scrollDistance);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-distance', `${scrollDistance}px`);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-offset', `${-scrollDistance}px`);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-duration', `${scrollTiming.totalSeconds.toFixed(2)}s`);
+      setStylePropertyIfChanged(meta.style, '--pane-info-bar-scroll-timing', scrollTiming.timing);
     } else {
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
-      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-distance');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-offset');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-duration');
+      removeStylePropertyIfPresent(meta.style, '--pane-info-bar-scroll-timing');
     }
   }
 }
 
 function schedulePaneInfoBarMetaOverflowSync(root = document) {
   const run = () => syncPaneInfoBarMetaOverflow(root);
-  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => {
+    run();
+    requestAnimationFrame(run);
+  });
   else setTimeout(run, 0);
 }
 
 function updatePanelInfoBarMeta(session, info) {
   const meta = document.getElementById(`meta-${session}`);
   if (!meta) return;
-  meta.innerHTML = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
+  const html = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
+  const changed = meta.innerHTML !== html;
+  if (changed) meta.innerHTML = html;
   meta.removeAttribute('title');
-  schedulePaneInfoBarMetaOverflowSync(meta);
+  if (changed) schedulePaneInfoBarMetaOverflowSync(meta);
 }
 
 function updatePanelHeader(session, info) {

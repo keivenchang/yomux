@@ -124,21 +124,21 @@ async function runEditorPreviewSuite() {
     const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
     const treeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-    const fileTreeSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
     assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === 'working'[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === 'idle'[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/activity-dot status tones are centralized in one shared parent helper');
     assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK? badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'ASK? status labels inherit shared status-indicator tone behavior without badge text-transform');
-    assert.ok(/function agentWindowStatusDotHtml\(item\)[\s\S]*const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(fileTreeSource), 'tmux window status dots inherit shared dot behavior through the shared activity-tone helper');
+    assert.ok(/function agentWindowStatusDotHtml\(item\)[\s\S]*const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(activitySource), 'tmux window status dots inherit shared dot behavior through the shared activity-tone helper');
     assert.ok(/sessionPopoverAgentWindowRowHtml\(agent[\s\S]*agentWindowActivityIconHtmlForStatus\(agent, agent\.kind/.test(popoverSource), 'session popover agent rows reuse the shared activity glyph/status renderer');
     assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK?/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
     assert.ok(/\.status-indicator--dot\s*\{[^}]*color:\s*var\(--muted\)/.test(sessionsCss), 'circle status markers inherit dot color/shape from the shared parent modifier');
-    assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'heartbeat indicators share one pulse timing parent');
+    assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-delay:\s*var\(--attention-animation-delay, 0s\)[^}]*animation-timing-function:\s*var\(--pulse-easing\)[^}]*animation-iteration-count:\s*infinite[^}]*animation-direction:\s*normal/.test(sessionsCss), 'heartbeat indicators share one pulse cadence parent');
     assert.ok(/\.status-indicator--dot\s*\{[^}]*border-radius:\s*999px[\s\S]*opacity:\s*1/.test(sessionsCss), 'circle status markers stay fully opaque while their glow pulses');
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(sessionsCss), 'pulsing dots opt into a brightness channel so the pulse remains visible on active accent backgrounds');
-    assert.ok(/\.agent-window-agent-icon--working,[\s\S]*\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence[\s\S]*animation-duration:\s*var\(--pulse-duration\)[\s\S]*animation-delay:\s*var\(--attention-animation-delay/.test(sessionsCss), 'working and active agent glyphs inherit the same phased cadence as ASK?');
+    assert.ok(/\.agent-window-agent-icon--working,[\s\S]*\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'working and active agent glyphs inherit the same phased cadence as ASK? through .heartbeat-pulse');
     assert.ok(/@keyframes agent-symbol-glow-cadence\s*\{[\s\S]*0%, 100%[\s\S]*45%, 55%/.test(sessionsCss), 'working glyph glow uses the same rest/peak timing stops as ASK?');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-alternate-pulse-duration:\s*calc\(var\(--pulse-duration\) \* 2\)/.test(sessionsCss), 'alternating agent glyph/dot cycles are two normal pulse beats long');
     assert.ok(/\.agent-window-activity--attention \.agent-window-agent-icon,[\s\S]*\.agent-window-activity--cooldown \.agent-window-agent-icon\s*\{[\s\S]*animation-name:\s*agent-symbol-status-alternate[\s\S]*animation-duration:\s*var\(--agent-alternate-pulse-duration\)[\s\S]*animation-delay:\s*var\(--agent-alternate-animation-delay, var\(--attention-animation-delay/.test(sessionsCss), 'ASK?/cooldown agent glyphs alternate with the status dot on the two-beat cadence');
@@ -167,7 +167,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation:\s*metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), 'metadata pulse no longer has a hardcoded duration');
     assert.equal(/900ms ease-in-out infinite alternate|metadata-badge-pulse 1\.4s/.test(sessionsCss), false, 'old hardcoded pulse durations are gone from session/popover CSS');
     assert.ok(/\.file-tree-date\s*\{[\s\S]*border:\s*1px solid transparent[\s\S]*border-radius:\s*5px/.test(treeCss), 'recency date cells have a visible border target for the shared attention-ring animation');
-    assert.equal(/file-tree-recency-pulse/.test(treeCss + fileTreeSource), false, 'the old standalone file-tree recency pulse is gone');
+    assert.equal(/file-tree-recency-pulse/.test(treeCss + activitySource), false, 'the old standalone file-tree recency pulse is gone');
     assert.equal(/10s ease-out/.test(treeCss), false, 'recency no longer uses the old one-shot ten-second pulse');
     assert.ok((tokensCss.match(/--file-tree-recency-hot:\s*var\(--file-tree-recency-max-contrast\);/g) || []).length >= 2, 'plain hot recency uses the shared max-contrast token in dark and light themes');
     assert.equal(/--file-tree-recency-hot:\s*var\(--bad\)/.test(tokensCss), false, 'plain hot recency is not red; red is ASK?-only');
@@ -787,6 +787,21 @@ async function runEditorPreviewSuite() {
     assert.ok(/class="pane-info-bar-controls"[\s\S]*meta-repo-switch/.test(paneInfoBarMetaHtml), 'Info Bar repo selector is rendered in a fixed controls slot');
     assert.ok(/pane-info-bar-controls[\s\S]*pane-info-bar-scroll-viewport/.test(paneInfoBarMetaHtml), 'Info Bar scroll viewport starts after the fixed repo selector');
     assert.ok(/pane-info-bar-scroll-viewport[\s\S]*keivenchang\/DIS-2239__parity-commit-link-frontend-crates[\s\S]*DIS-2239 In Review[\s\S]*fix\(performance\): repair v1 PARITY commit \+ case-doc links after/.test(paneInfoBarMetaHtml), 'Info Bar branch, issue state, and title live inside the scroll viewport');
+    const idempotentInfoBarApi = loadYolomux('', ['info-scroll']);
+    const idempotentMeta = idempotentInfoBarApi.testElementForId('meta-info-scroll');
+    let idempotentMetaHtml = '';
+    let idempotentMetaWrites = 0;
+    Object.defineProperty(idempotentMeta, 'innerHTML', {
+      get() { return idempotentMetaHtml; },
+      set(value) {
+        idempotentMetaWrites += 1;
+        idempotentMetaHtml = String(value || '');
+      },
+    });
+    idempotentInfoBarApi.updatePanelInfoBarMetaForTest('info-scroll', longMetaInfo);
+    assert.equal(idempotentMetaWrites, 1, 'Info Bar writes metadata the first time');
+    idempotentInfoBarApi.updatePanelInfoBarMetaForTest('info-scroll', longMetaInfo);
+    assert.equal(idempotentMetaWrites, 1, 'unchanged Info Bar metadata is not reinserted and does not restart scrolling');
     api.setTranscriptInfoForTest('1', {panes: windowPanes});
     const controls = api.panelControlsHtml('1');
     assert.equal(controls.includes('data-tmux-window-bar="1"'), false, 'DOIT.53 P1: tmux pane header controls do not render the window bar');
@@ -823,7 +838,11 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.pane-info-bar-meta\.pane-info-bar-meta-overflow \.pane-info-bar-scroll-text\s*\{[\s\S]*animation-name:\s*pane-info-bar-scroll[\s\S]*animation-delay:\s*0s[\s\S]*animation-timing-function:\s*var\(--pane-info-bar-scroll-timing\)[\s\S]*animation-direction:\s*normal/.test(yoloCss), 'overflowing Info Bar metadata holds at the start, scrolls forward, holds at the end, then repeats');
     assert.ok(/@keyframes pane-info-bar-scroll\s*\{[\s\S]*transform:\s*translateX\(var\(--pane-info-bar-scroll-offset\)\)/.test(yoloCss), 'Info Bar metadata scroll uses a precomputed negative offset that animates in browsers');
     assert.equal(yoloCss.includes('translateX(calc(-1 * var(--pane-info-bar-scroll-distance)))'), false, 'Info Bar metadata scroll does not use unsupported calc multiplication in transform');
-    assert.ok(source.includes("'--pane-info-bar-scroll-offset', `${-distance}px`"), 'Info Bar overflow sync stores the negative transform offset');
+    assert.ok(source.includes("'--pane-info-bar-scroll-offset', `${-scrollDistance}px`"), 'Info Bar overflow sync stores the negative transform offset');
+    assert.ok(source.includes('observePaneInfoBarResizeTarget(text)'), 'Info Bar overflow sync observes text width changes from font/layout updates');
+    assert.ok(source.includes('Math.abs(previousDistance - distance) <= 4'), 'Info Bar scroll keeps the same animation track through tiny layout jitter');
+    assert.ok(source.includes('if (changed) schedulePaneInfoBarMetaOverflowSync(meta)'), 'unchanged Info Bar metadata does not reschedule and restart scrolling on every metadata poll');
+    assert.ok(source.includes('if (existing.outerHTML === html) return;'), 'unchanged Info Bar tmux window buttons are not replaced and do not reset sibling scrolling');
     assert.equal(/\.pane-info-bar-meta\.pane-info-bar-meta-overflow \.pane-info-bar-scroll-text\s*\{[\s\S]*animation-direction:\s*alternate/.test(yoloCss), false, 'overflowing Info Bar metadata does not reverse-scroll back to the start');
     assert.ok(source.includes('const PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS = 3'), 'Info Bar metadata scroll holds the beginning for three seconds');
     assert.ok(source.includes('const PANE_INFO_BAR_SCROLL_END_HOLD_SECONDS = 2'), 'Info Bar metadata scroll holds the end for two seconds');
@@ -1322,9 +1341,20 @@ async function runEditorPreviewSuite() {
     assert.equal(body.includes('container: attentionAlerts'), false, 'attention notifications do not use the global fixed stack');
     assert.ok(source.includes('function compactNotificationTitle('), 'notification/toast titles use one compact title helper');
     assert.ok(body.includes('sessionNotificationTitle(session, state)'), 'attention toasts use the compact session notification title');
+    assert.ok(source.includes('function sessionNotificationScope(session)'), 'session attention notifications enrich the compact scope through one helper');
+    assert.ok(source.includes('sessionTabDescription(session, transcriptMeta.sessions?.[session])'), 'session attention notifications include the same concise description used by tabs');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}'), false, 'attention notifications drop verbose host-prefixed titles');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${message}'), false, 'watched-PR browser notifications drop verbose host-prefixed titles');
     assert.ok(source.includes("compactNotificationTitle(sessionLabel(session), 'terminal')"), 'terminal connection toasts use the compact session title');
+    const notificationApi = loadYolomux('', ['1']);
+    notificationApi.setTranscriptInfoForTest('1', {
+      selected_pane: {current_path: '/home/test/yolomux.dev8001'},
+      project: {
+        git: {branch: 'keivenchang/DIS-2239__notify-title-desc', root: '/home/test/yolomux.dev8001'},
+        pull_request: {number: 10851, title: 'fix: show attention notification description'},
+      },
+    });
+    assert.equal(notificationApi.sessionNotificationTitleForTest('1', {label: 'Needs input'}), 'YOLOmux[1 fix: show attention notification description] Needs input', 'attention notification title includes session number plus tab description');
     assert.ok(source.includes("localizedHtml('terminal.connection.reconnectingStatus'"), 'terminal reconnect status is i18n-keyed');
     assert.ok(source.includes("t('terminal.connection.reconnectingToast'"), 'terminal reconnect toast is i18n-keyed');
     assert.ok(source.includes("terminalNotConnectedHtml(session)"), 'terminal-not-connected statuses share the localized helper');
@@ -1525,13 +1555,22 @@ async function runEditorPreviewSuite() {
     assert.equal(/session-yolo-marker[^"]*active[^"]*working/.test(genericWorkingHtml), false, 'generic working state does not pulse YO marker');
 
     api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}});
-    const workingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
-    assert.ok(/session-yolo-marker[^"]*active[^"]*working/.test(workingHtml), 'visible screen working pulses active YO marker');
+    const fallbackWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
+    assert.ok(/session-yolo-marker[^"]*active[^"]*working/.test(fallbackWorkingHtml), 'visible screen working falls back to the YO marker when no agent window is attributed');
 
-    api.setAutoApproveStateForTest('4', {enabled: false, screen: {key: 'working'}});
+    api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}, agent_windows: [
+      {kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude', current: true, window_active: true},
+    ]});
+    const workingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(workingHtml), 'working Claude session tabs show the glowing Claude glyph instead of the YO marker');
+    assert.equal(/session-yolo-marker/.test(workingHtml), false, 'working Claude session tabs do not show the yellow YO marker');
+
+    api.setAutoApproveStateForTest('4', {enabled: false, screen: {key: 'working'}, agent_windows: [
+      {kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude', current: true, window_active: true},
+    ]});
     const autoOffWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
-    assert.ok(/session-yolo-marker[^"]*\bworking\b/.test(autoOffWorkingHtml), 'a working agent spins its YO ball even when auto-approve is off');
-    assert.equal(/session-yolo-marker[^"]*\bactive\b/.test(autoOffWorkingHtml), false, 'an auto-off working marker is not rendered as active');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(autoOffWorkingHtml), 'working Claude session tabs keep the glowing Claude glyph even when auto-approve is off');
+    assert.equal(/session-yolo-marker/.test(autoOffWorkingHtml), false, 'auto-off working Claude tabs do not fall back to the YO marker');
     const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
     // the YO ball spins ONLY when .working, and at the slow rotation setting (not a fast
     // hardcoded value); there is NO ambient idle-rotation rule, so an idle marker is static.
@@ -1974,6 +2013,24 @@ async function runEditorPreviewSuite() {
     api.setCommandPaletteStateForTest('files', 'cut over');
     const visibleRows = api.commandPaletteRankItems(api.commandPaletteItems(), 'cut over').slice(0, 60);
     assert.ok(visibleRows.some(item => item.targetItem === '4'), 'Cmd-P searching cut over shows the matching pane');
+  });
+
+  await testAsync('Shift-Cmd-P opens tabs in the focused pane', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots.left = api.paneStateWithTabs([api.prefsItemId], api.prefsItemId);
+    slots.slot1 = api.paneStateWithTabs(['2'], '2');
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+    api.setLayoutSlotsForTest(slots);
+    api.setFocusedPanelItem('2');
+    api.setCommandPaletteStateForTest('command', 'preferences');
+
+    assert.equal(api.fileEditorActivationSlotForTest(), 'slot1', 'setup: focused pane is the activation target');
+    const tabItem = api.commandPaletteItems().find(item => item.key === `tab:${api.prefsItemId}`);
+    assert.ok(tabItem, 'Shift-Cmd-P exposes existing tabs');
+    await api.invokeCommandPaletteItemForTest(tabItem);
+
+    assert.deepStrictEqual(canonical(api.currentSlots().slot1), {tabs: ['2', api.prefsItemId], active: api.prefsItemId}, 'Shift-Cmd-P moves the tab into the focused pane instead of jumping to its old pane');
   });
 
   test('t@6801', () => {
@@ -2687,12 +2744,20 @@ async function runEditorPreviewSuite() {
   test('t@7036', () => {
     const api = loadYolomux();
     const linkProviderSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const terminalCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const runtimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     const providerStart = linkProviderSource.indexOf('function installTerminalLinkProvider');
     const providerEnd = linkProviderSource.indexOf('function terminalCellDimensions', providerStart);
     const providerSource = linkProviderSource.slice(providerStart, providerEnd);
     assert.ok(/activate: \(\) => \{\}/.test(linkProviderSource), 'xterm link decorations have an explicit no-op left-click handler');
     assert.ok(/decorations: \{underline: true, pointerCursor: false\}/.test(linkProviderSource), 'terminal URL/file references are visibly underlined without showing a left-click pointer affordance');
     assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
+    assert.ok(/function applyTerminalContainerTheme\(container[\s\S]*dataset\.terminalTheme = resolvedTerminalThemeMode\(terminalThemeMode, mode\)[\s\S]*style\.background = theme\.background/.test(runtimeSource), 'terminal containers carry the resolved terminal theme used by xterm link underline colors');
+    assert.ok(/applyTerminalContainerTheme\(container, baseTheme\)/.test(terminalBootSource), 'new terminal containers get the same theme marker as live theme updates');
+    assert.ok(/\.terminal\s*\{[\s\S]*--terminal-link-underline:\s*rgb\(31 91 148 \/ 0\.88\)/.test(terminalCss), 'dark terminal link underlines use subtle dark blue');
+    assert.ok(/\.terminal\[data-terminal-theme="light"\]\s*\{[\s\S]*--terminal-link-underline:\s*rgb\(90 174 245 \/ 0\.84\)/.test(terminalCss), 'light terminal link underlines use subtle light blue');
+    assert.ok(/\.terminal \.xterm-rows span\[style\*="text-decoration: underline"\],[\s\S]*span\[style\*="text-decoration-line: underline"\]\s*\{[\s\S]*text-decoration-color:\s*var\(--terminal-link-underline\) !important[\s\S]*text-decoration-thickness:\s*1px !important[\s\S]*text-underline-offset:\s*2px !important/.test(terminalCss), 'xterm hover-underlined URL/file spans inherit the terminal-theme blue underline');
     const first = 'https://claude.com/cai/oauth/authorize?client_id=abc123&scope=org%3Acreate_a';
     const continuations = [
       'pi_key+user%3Aprofile+user%3Ainference&redirect_uri=http%3A%2F%2FlocalhostABCDEF',
@@ -3036,6 +3101,53 @@ async function runEditorPreviewSuite() {
     ], 'version-like dots do not split the question sentence');
   });
 
+  test('ASK? note-prefixed wrapped question highlights the entire sentence', () => {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
+    const container = api.testElementForId('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 1900, height: 100, right: 1900, bottom: 100};
+    const xtermRows = new TestElement('xterm-note-question-rows');
+    xtermRows.className = 'xterm-rows';
+    xtermRows.rect = {left: 0, top: 0, width: 1900, height: 100, right: 1900, bottom: 100};
+    const firstRow = 'Note: the scratch sglang-localdev container + ~/dynamo/vllm-0.23.0 worktree are still up from the capture';
+    const secondRow = 'work — want me to tear those down now that both PRs are in?';
+    const questionText = 'want me to tear those down now that both PRs are in?';
+    const visibleRows = [firstRow, secondRow, '1. Yes', '2. No'].map((text, index) => {
+      const row = new TestElement(`note-question-row-${index}`);
+      row.textContent = text;
+      row.rect = {left: 0, top: index * 20, width: 1900, height: 20, right: 1900, bottom: (index + 1) * 20};
+      xtermRows.appendChild(row);
+      return row;
+    });
+    container.appendChild(xtermRows);
+    api.registerTerminalForTest('1', {
+      cols: firstRow.length,
+      rows: 6,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setAutoApproveStateForTest('1', {
+      enabled: true,
+      screen: {key: 'needs-input', text: questionText, question_text: questionText},
+      prompt: {visible: false},
+    });
+
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'note-prefixed question payload paints the whole visible sentence');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), true, 'the leading Note row is part of the highlighted sentence');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'the wrapped question row is highlighted too');
+    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), false, 'option rows are not marked');
+    const overlays = container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]');
+    assert.deepStrictEqual(canonical(overlays.map(overlay => ({
+      top: overlay.style.top,
+      left: overlay.style.left,
+      width: overlay.style.width,
+    }))), [
+      {top: '0px', left: '0px', width: `${firstRow.length * 10}px`},
+      {top: '20px', left: '0px', width: `${secondRow.length * 10}px`},
+    ], 'overlay expands backward through the Note prefix and covers the full wrapped sentence');
+  });
+
   // (no false merge): even an unterminated URL-looking row cannot absorb a flush-left continuation when
   // it did not reach the terminal edge.
   test('t@7052', () => {
@@ -3324,7 +3436,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*\{dark:\s*'#ffea00',\s*light:\s*'#9a6700'\}/.test(source), 'active-terminal cursor: bright yellow cursor color lives in the shared UI color parent with a light-mode variant');
     assert.ok(/function terminalThemeForSession[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColorForTheme\(theme\)\}/.test(source), 'active-terminal cursor: the focused session gets the configured cursor color, others keep theme default');
     assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the configured cursor color');
-    assert.ok(/theme: terminalThemeForSession\(session\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession');
+    assert.ok(/theme: terminalThemeForSession\(session, baseTheme\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession');
     assert.ok(/function updatePanelInactiveOverlays[\s\S]*?refreshActiveTerminalCursor\(\)/.test(source), 'active-terminal cursor: focus changes refresh the cursor color (refreshActiveTerminalCursor)');
   });
 
@@ -3792,7 +3904,9 @@ async function runEditorPreviewSuite() {
       assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
       assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');
       assert.equal(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*38px/.test(css), false, 'editor info bar: compact diff refs are not hard-capped before the /HEAD suffix');
-      assert.ok(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*17ch/.test(css), 'editor info bar: compact diff refs can show sha/HEAD labels');
+      assert.ok(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*clamp\(17ch,\s*18vw,\s*34ch\)/.test(css), 'editor info bar: compact diff refs can show sha/HEAD labels');
+      assert.ok(/\.file-editor-toolbar\s*\{[^}]*container-type:\s*inline-size/.test(css), 'editor info bar: FROM/TO/reset expansion keys off toolbar width, not the browser viewport');
+      assert.ok(/@container \(min-width: 900px\)\s*\{[\s\S]*\.file-editor-diff-ref-panel\s*\{[^}]*max-width:\s*min\(72vw,\s*620px\)/.test(css), 'editor info bar: FROM/TO/reset panel has enough width for branch aliases on desktop toolbars');
       assert.ok(/\.file-tab-parent\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'duplicate file-tab parent suffix is styled as compact muted metadata');
       assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*start/.test(css), 'Preferences selects/text inputs are left-aligned from the shared inset');
       assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(css), 'Preferences number inputs are left-aligned from the shared inset');
@@ -4306,7 +4420,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/api\.onWillDrop\(event => \{[\s\S]*const edgeReorder = dockviewTabEdgeReorderIntent\(event\)[\s\S]*moveSessionToSlot\(edgeReorder\.item, edgeReorder\.targetSlot, edgeReorder\.sourceSlot, edgeReorder\.insertIndex\)/.test(dockviewSrc), 'Dockview manually reorders edge tabs dragged onto their adjacent neighbor');
     assert.ok(/function dockviewInstallTabPointerReorderFallback\(\)[\s\S]*document\.addEventListener\('pointerup', finish, true\)[\s\S]*document\.addEventListener\('mouseup', finish, true\)/.test(dockviewSrc), 'Dockview edge-tab reorder fallback listens to both pointer and mouse release paths');
     assert.ok(/function dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewTabForPoint[\s\S]*dockviewAdjacentEdgeTabInsertIndex[\s\S]*moveSessionToSlot\(state\.item, targetSlot, targetSlot, currentInsertIndex\)/.test(dockviewSrc), 'Dockview edge-tab pointer fallback reorders against the tab under the release point');
-    assert.ok(/\.pane-tab > \.session-popover,\s*\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed/.test(css), 'Dockview and Tabber tab hover popovers use the shared fixed-position tab popover surface');
+    assert.ok(/\.session-popover-host > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed/.test(css), 'Dockview and Tabber tab hover popovers use the shared fixed-position tab popover surface');
+    assert.ok(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8').includes('pane-tab session-popover-host'), 'normal pane tabs opt into the shared popover host class');
     assert.ok(/body\.share-replay-shell \.share-mirror-stage \.app-overlay-root,[\s\S]*body\.share-replay-shell \.share-mirror-stage \.pane-tab-detached-popover\s*\{[\s\S]*position:\s*absolute/.test(css), 'YO!share replay positions detached tab popovers inside the transformed app root instead of the viewer viewport');
     assert.ok(/function bindPaneTabPopover\(tab, session\)[\s\S]*tab\.classList\?\.contains\('dockview-pane-tab'\)[\s\S]*detachPaneTabPopover\(tab, popover\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'Dockview tab hover popovers detach from the clipped Dockview tab scroller');
     assert.ok(/function preserveDockviewDockedFileExplorerSplit\(next, previous = layoutSlots\)[\s\S]*dockviewLayoutContentSignature\(next\) === dockviewLayoutContentSignature\(previous\)[\s\S]*return/.test(dockviewSrc), 'Dockview lets sash-only Finder/Differ resize updates change the root split pct');

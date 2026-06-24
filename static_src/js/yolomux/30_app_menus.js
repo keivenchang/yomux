@@ -176,12 +176,7 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  const detail = tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
-  // A non-numeric tmux session name (e.g. "PA exploration") is shown in the tab label only as its
-  // assigned number (e.g. "9"), so the real name is otherwise invisible. Surface it in the menu/search
-  // detail so a result like label "9" reads "9 · PA exploration · main · …" and is identifiable.
-  if (numericSessionName(item) === null) return detail ? `${item} · ${detail}` : String(item);
-  return detail;
+  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
 }
 
 function commandPaletteTabDetail(item) {
@@ -208,7 +203,7 @@ function menuTabRowHtml(item, options = {}) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, yoloWorking: sessionYoloIsWorking(item)})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
 }
 

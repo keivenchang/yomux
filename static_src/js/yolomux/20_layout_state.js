@@ -1128,7 +1128,7 @@ function itemLabel(item) {
 function itemSortNumber(item) {
   const type = tabTypeForItem(item);
   if (type) return type.sortRank;
-  const label = Number(sessionLabel(item));
+  const label = Number(sessionShortcutLabel(item));
   return Number.isFinite(label) ? label : Number.MAX_SAFE_INTEGER;
 }
 
@@ -2167,7 +2167,11 @@ function commandPaletteCommandItems() {
     mtime: commandPalettePaneMtime(item),
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
-    run: () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})),
+    run: () => {
+      if (item === infoItemId) return openInfoSubTab('info');
+      if (isFileExplorerItem(item)) return selectSession(item, {userInitiated: true});
+      return activateTabInExistingPane(item, {preferFocused: true, userInitiated: true});
+    },
     ...extra,
   });
   const fileGroups = new Map();   // path -> [items], in discovery order
@@ -3449,8 +3453,14 @@ function compactNotificationTitle(scope, message) {
   return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
 }
 
+function sessionNotificationScope(session) {
+  const label = sessionLabel(session);
+  const desc = sessionTabDescription(session, transcriptMeta.sessions?.[session]);
+  return desc ? `${label} ${desc}` : label;
+}
+
 function sessionNotificationTitle(session, state) {
-  return compactNotificationTitle(sessionLabel(session), state?.label || '');
+  return compactNotificationTitle(sessionNotificationScope(session), state?.label || '');
 }
 
 function hostNotificationTitle(message) {

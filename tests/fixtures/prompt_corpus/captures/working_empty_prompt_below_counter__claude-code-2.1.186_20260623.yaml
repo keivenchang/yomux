@@ -1,0 +1,65 @@
+agent: claude
+capture_date: '2026-06-23'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-23T21:52:00+00:00'
+case_name: working_empty_prompt_below_counter
+claude_version: 2.1.186 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.186 (Claude Code)
+client_version_slug: claude-code-2.1.186
+codex_version: ''
+cursor:
+  character: ' '
+  current_command: claude
+  pane_in_mode: false
+  x: 2
+  y: 27
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: RUN
+  composer_key: empty
+  reason_code: busy
+  screen_key: working
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Claude working status counter with an empty composer prompt below it
+fixture_id: working_empty_prompt_below_counter__claude-code-2.1.186_20260623
+fixture_scenario: working_empty_prompt_below_counter
+id: working_empty_prompt_below_counter__claude-code-2.1.186_20260623
+raw_capture: |
+  This is a documented tradeoff, not a recent break — but it is a genuine correctness gap. Two ways forward:
+  1. Keep it allowlisted (status quo): eager streaming UX, accept that truncated calls surface with empty/partial
+  args.
+  2. Make the eager parser retract/drop at finish() a call whose args never closed — matching the v1 DSML "drop
+  truncated-mid-value" baseline. This costs some eagerness (you'd hold back a call until its </invoke> arrives, or
+  emit a retraction), but fixes 5.c/5.e.
+
+  Want me to prototype option 2 in deepseek_v4 (and qwen3_coder has the same shape), or leave the divergence
+  allowlisted?
+
+  ✻ Brewed for 5m 28s
+
+  ❯ we need to conform to v1 batch behavior. Do it.
+
+  ● On it — conform the v2 stream parser to the v1 "drop truncated-mid-value" baseline. Let me read the DSv4 parser
+  to understand its FSM and where calls get committed.
+
+  Ran 2 shell commands
+
+  ● The DSv4 parser is dsml.rs. Let me read it to understand the FSM and emission points.
+
+  Reading 1 file…
+  ⎿  parsers_v2/src/tool_calling/dsml.rs
+
+  · Puzzling… (2m 19s · ↓ 3.9k tokens · almost done thinking with xhigh effort)
+
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯ 
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
+source: real Claude Code 2.1.186 working capture from tmux 2:0.0 with an empty composer prompt below the status counter
+styled_capture: ''

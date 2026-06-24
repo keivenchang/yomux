@@ -432,7 +432,7 @@ async function runTabberSuite() {
     const dragCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(dragSrc.includes('minimumContrastRatio: terminalMinimumContrastRatio()'), '#32: terminal creation sets minimumContrastRatio');
     assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
-    assert.ok(/item\.container\.style\.background = theme\.background/.test(dragSrc), '#32: all terminal containers share one theme background');
+    assert.ok(/applyTerminalContainerTheme\(item\.container, theme\)/.test(dragSrc), '#32: all terminal containers share one theme background');
     assert.ok(/body\.theme-light \.topbar-search\s*\{[^}]*background/.test(dragCss), '#33: the topbar search blends in light mode (no dark pill)');
     // The topbar is neutral at rest and switches to the green tab-strip color only on hover/focus.
     assert.ok(/\.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'topbar bg is neutral at rest');
@@ -1154,13 +1154,15 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.pane-tab-core\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*inline-size:\s*100%/.test(css), 'TR3: shared tab chrome stretches inside the Tabber row wrapper');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto/.test(css), 'A4/TR1: the shared session number prefix stays visible before detail truncation');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*text-overflow:\s*ellipsis/.test(css), 'A4/TR1: the shared tab detail truncates inside the stretched Tabber label');
-    assert.ok(/\.pane-tab > \.session-popover,\s*\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-pane-modal\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover surface as real tabs');
-    assert.ok(/\.pane-tab\.popover-open > \.session-popover,\s*\.file-tree-row\.tabber-row \.tabber-session-tab\.popover-open > \.session-popover,\s*\.pane-tab-detached-popover\.popover-open\s*\{[\s\S]*visibility:\s*visible[\s\S]*opacity:\s*1/.test(css), 'TR2: Tabber session popovers open through the same visibility selector as real tabs');
+    assert.ok(/\.session-popover-host > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-pane-modal\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover surface as real tabs');
+    assert.ok(/\.session-popover-host\.popover-open > \.session-popover,\s*\.pane-tab-detached-popover\.popover-open\s*\{[\s\S]*visibility:\s*visible[\s\S]*opacity:\s*1/.test(css), 'TR2: Tabber session popovers open through the same visibility selector as real tabs');
+    assert.ok(source.includes("'tabber-session-tab', 'session-popover-host'"), 'TR2: Tabber session tabs opt into the shared popover host class');
     assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*width:\s*min\(420px/.test(css), false, 'TR2: Tabber does not keep a divergent one-off popover width');
     assert.equal(source.includes("tabber: {type: 'loading'"), false, 'Tabber no longer renders a client-side touched-path loading row');
     assert.ok(source.includes('function tabberLookbackControlHtml()') && source.includes('data-tabber-lookback'), 'Tabber renders a dedicated touched-path lookback control');
     assert.ok(/function setTabberSessionFileLookbackHours\(hours, options = \{\}\)[\s\S]*clearTabberSessionFilesStates\(\)[\s\S]*fetchTabberActivity\(\)/.test(source), 'changing Tabber lookback reloads the cached activity agent-window records');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font through the shared activity-size variable');
+    assert.ok(/\.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*var\(--agent-window-icon-size\)[\s\S]*height:\s*var\(--agent-window-icon-size\)/.test(css), 'shared agent process icons inherit width and height from the shared activity-size variable');
     assert.ok(/\.file-tree-row\.tabber-row \.file-tree-date\s*\{[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(css), 'Tabber keeps the recency column reserved at narrow widths');
     assert.ok(/\.file-tree-date\s*\{[\s\S]*font-size:\s*max\(var\(--ui-font-size-2xs\), calc\(var\(--file-explorer-font-size\) - 1px\)\)[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC7: recency/status text uses a larger row-scale font and end ellipsis');
     assert.ok(/row\.classList\.toggle\('tabber-status-long', data\.type === 'window' && \/\^\(working for\|ASK\\\?\)\//.test(source), 'SC1: Tabber marks long working/ASK status rows without affecting plain ago rows');
@@ -1324,11 +1326,20 @@ async function runTabberSuite() {
     sortedApi.setFileExplorerTreeSortModeForTest('za');
     const windowLabels = sortedApi.buildTabberTree().entriesByDir.get('/s_1').map(row => row.tabber.label);
     assert.deepEqual(windowLabels, ['0:codex', '1:claude', '2:bash'], 'TS2: tmux window rows stay in tmux index order regardless of Tabber sort mode');
+    const renamedSessionApi = loadYolomux('', ['1', '2', '8002b']);
+    renamedSessionApi.setTranscriptInfoForTest('8002b', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude'}]});
+    const renamedSessionHtml = renamedSessionApi.tmuxPaneTabHtml('8002b', renamedSessionApi.transcriptInfoForTest('8002b'), null, false);
+    assert.equal(renamedSessionApi.itemLabel('8002b'), '8002b', 'renamed non-numeric tmux sessions use the tmux name as the visible label');
+    assert.equal(renamedSessionApi.resolveLayoutItem('9'), '8002b', 'the old shortcut label still resolves to the renamed session');
+    assert.ok(renamedSessionHtml.includes('session-button-name') && renamedSessionHtml.includes('>8002b<'), 'renamed tmux tab chrome shows the real session name');
+    assert.equal(/session-button-number">9<\/span>/.test(renamedSessionHtml), false, 'renamed tmux tab chrome does not prepend the stale shortcut label');
+    const renamedSessionRow = renamedSessionApi.tabberRenderedRowsForTest().find(row => row.type === 'session' && row.title.split('\n')[0] === '8002b');
+    assert.ok(renamedSessionRow?.nameHtml.includes('>8002b<'), 'Tabber session rows inherit the same renamed-session tab chrome');
 
     // Render guard: real labels (never synthetic node names); active window marked; absolute path rows present.
     const rows = api.tabberRenderedRowsForTest();
     assert.equal(rows.some(r => /^[swrf]_\d/.test(r.name)), false, 'rows show human labels, not synthetic node names (got ' + JSON.stringify(rows.map(r => r.name).slice(0, 8)) + ')');
-    assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-tab') && r.nameHtml.includes('pane-tab-core') && r.nameHtml.includes('session-yolo-marker') && r.nameHtml.includes('session-button-prefix') && r.nameHtml.includes('tab-inline-detail')), 'A1/A2/TR1: session rows render the real tab chrome inside the stretched Tabber row');
+    assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-tab') && r.nameHtml.includes('pane-tab-core') && r.nameHtml.includes('session-agent-activity-marker') && r.nameHtml.includes('agent-icon claude') && r.nameHtml.includes('session-button-prefix') && r.nameHtml.includes('tab-inline-detail')), 'A1/A2/TR1: working Claude session rows render the real tab chrome with the shared glowing agent glyph');
     assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('data-action="pane-tab-auto-approve"')), 'TR2: Tabber session rows expose the same YO auto-approve action as real tabs');
     assert.equal(rows.some(r => r.type !== 'session' && r.nameHtml.includes('tabber-session-tab')), false, 'A1: window/repo/loading/non-tmux Tabber rows do not get the session tab treatment');
     const activeSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '1');
@@ -1398,7 +1409,7 @@ async function runTabberSuite() {
     assert.equal(noDateTabberRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, '', 'Tabber None mode hides timestamp recency styling');
     api.setFileTreeRecencyNowForTest(null);
     api.setFileExplorerTreeDateModeForTest('relative');
-    assert.ok(activeSessionRow.nameHtml.includes('class="tabber-session-tab active"'), 'A5: the current tmux session label reads as an active tab');
+    assert.ok(/class="[^"]*\btabber-session-tab\b[^"]*\bactive\b/.test(activeSessionRow.nameHtml), 'A5: the current tmux session label reads as an active tab');
     assert.ok(activeSessionRow.nameHtml.includes('data-tabber-session-chrome="shared"'), 'TR5: the session row marks the shared chrome path');
     assert.equal(inactiveSessionRow.classes.includes('tabber-active-session'), false, 'A5: inactive tmux sessions do not get the active-session class');
     assert.equal(inactiveSessionRow.ariaCurrent, '', 'A5: inactive tmux sessions do not expose aria-current');

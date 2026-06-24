@@ -260,6 +260,26 @@ fixtures:
   id: working_visible_counter__claude-code-2.1.183_20260620
   scenario: working_visible_counter
   source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105442Z.yaml
+- agent: claude
+  capture_date: '2026-06-23'
+  case_name: working_empty_prompt_below_counter
+  client_name: Claude Code
+  client_version: 2.1.186 (Claude Code)
+  client_version_slug: claude-code-2.1.186
+  description: Claude working status counter remains working when an empty composer prompt is visible below it
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: RUN
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_empty_prompt_below_counter__claude-code-2.1.186_20260623.yaml
+  id: working_empty_prompt_below_counter__claude-code-2.1.186_20260623
+  scenario: working_empty_prompt_below_counter
+  source: real Claude Code 2.1.186 working capture from tmux 2:0.0 with an empty composer prompt below the status counter
 - agent: codex
   capture_date: '2026-06-20'
   case_name: choice_question

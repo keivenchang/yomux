@@ -1444,8 +1444,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   min-width: 0;
 }
 .file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline .diff-ref-input {
-  width: 17ch;
-  max-width: 19ch;
+  width: clamp(17ch, 24vw, 32ch);
+  max-width: min(34ch, 42vw);
   margin: 0 2px;
   vertical-align: baseline;
   font-size: var(--ui-font-size-xs);
@@ -2015,6 +2015,7 @@ body.editor-theme-light .file-editor-content {
    toolbar line BELOW the tab strip instead of cramming the tabs. */
 .file-editor-toolbar {
   position: relative;
+  container-type: inline-size;
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
@@ -2061,7 +2062,7 @@ body.editor-theme-light .file-editor-content {
   align-items: center;
   flex: 0 1 auto;
   min-width: max-content;
-  max-width: min(56vw, 340px);
+  max-width: min(50vw, 300px);
   overflow: visible;
 }
 .file-editor-diff-ref-panel[hidden] {
@@ -2077,6 +2078,25 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
   width: 17ch;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input[data-diff-ref-to],
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input[data-diff-ref-to] {
+  width: 9ch;
+}
+@container (min-width: 900px) {
+  .file-editor-diff-ref-panel {
+    max-width: min(72vw, 620px);
+  }
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
+    width: clamp(17ch, 18vw, 34ch);
+    max-width: min(34ch, 32vw);
+  }
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input[data-diff-ref-to],
+  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input[data-diff-ref-to] {
+    width: clamp(12ch, 14vw, 28ch);
+    max-width: min(28ch, 28vw);
+  }
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset {
   width: 22px;
@@ -3328,7 +3348,8 @@ body.editor-theme-light .file-editor-native-video {
 .file-drag-more,
 .diff-ref-suggestion-ref,
 .diff-ref-suggestion-subject,
-.diff-ref-suggestion-meta,
+.diff-ref-suggestion-date,
+.diff-ref-suggestion-author,
 .changes-comparison-title,
 .changes-repo-title,
 .preferences-path-value,
@@ -3453,23 +3474,17 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
   vertical-align: middle;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
-  --agent-window-activity-inline-size: calc(var(--file-explorer-font-size) + 2px);
-  --agent-window-activity-block-size: calc(var(--file-explorer-font-size) + 2px);
+  --agent-window-icon-size: calc(var(--file-explorer-font-size) + 2px);
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: 0;
   margin-inline-end: 1px;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-icon {
   flex: 0 0 auto;
-  width: calc(var(--file-explorer-font-size) + 2px);
-  min-width: calc(var(--file-explorer-font-size) + 2px);
-  height: calc(var(--file-explorer-font-size) + 2px);
   margin: 0;
   padding: 0;
   vertical-align: middle;
-}
-.file-tree-row.tabber-row .tabber-window-label .agent-icon svg {
-  width: calc(var(--file-explorer-font-size) + 2px);
-  height: calc(var(--file-explorer-font-size) + 2px);
 }
 .file-tree-row.tabber-row .tabber-window-text {
   min-width: 0;

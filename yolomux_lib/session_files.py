@@ -461,27 +461,74 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
     return [base or git_diff_base(repo)], True, ""
 
 
-def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
-    result = git(["log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an"], cwd=str(repo), timeout=5.0)
-    refs = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
+def git_decoration_aliases(decorations: str, *, include_head: bool = False) -> list[str]:
+    aliases: list[str] = ["HEAD"] if include_head else []
+    for raw in decorations.split(","):
+        for part in raw.strip().split(" -> "):
+            alias = part.strip()
+            if alias.startswith("tag: "):
+                alias = alias.removeprefix("tag: ").strip()
+            if alias.startswith("refs/heads/"):
+                alias = alias.removeprefix("refs/heads/")
+            elif alias.startswith("refs/remotes/"):
+                alias = alias.removeprefix("refs/remotes/")
+            if alias == "HEAD" and not include_head:
+                continue
+            if not alias or alias == "origin/HEAD" or alias in aliases:
+                continue
+            aliases.append(alias)
+
+    def sort_key(alias: str) -> tuple[int, str]:
+        if alias == "HEAD":
+            return (0, alias)
+        if alias in {"origin/main", "origin/master"}:
+            return (1, alias)
+        if alias in {"main", "master"}:
+            return (2, alias)
+        if alias.startswith("origin/"):
+            return (3, alias)
+        return (4, alias)
+
+    return sorted(aliases, key=sort_key)
+
+
+def git_ref_label(short_sha: str, aliases: list[str]) -> str:
+    if not aliases:
+        return short_sha
+    return f"{short_sha}/{aliases[0]}{' ' + ' '.join(aliases[1:]) if len(aliases) > 1 else ''}"
+
+
+def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, Any]]:
+    result = git([
+        "log",
+        "--decorate=short",
+        f"--max-count={max(1, min(limit, 200))}",
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an%x1f%D",
+    ], cwd=str(repo), timeout=5.0)
+    refs: list[dict[str, Any]] = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
     if result.returncode != 0:
         return refs
     seen = {"current", "HEAD"}
     head_commit_seen = False
     for line in result.stdout.splitlines():
-        parts = line.split("\x1f", 4)
+        parts = line.split("\x1f", 5)
         if len(parts) < 3 or not parts[0] or parts[0] in seen:
             continue
-        entry: dict[str, str] = {"ref": parts[0], "short": parts[1], "subject": parts[2]}
+        aliases = git_decoration_aliases(parts[5] if len(parts) >= 6 else "")
+        entry: dict[str, Any] = {"ref": parts[0], "short": git_ref_label(parts[1], aliases), "subject": parts[2]}
+        if aliases:
+            entry["aliases"] = aliases
         if len(parts) >= 5:
             entry["date"] = parts[3]
             entry["author"] = parts[4]
         if not head_commit_seen:
+            head_aliases = git_decoration_aliases(parts[5] if len(parts) >= 6 else "", include_head=True)
             refs[0] = {
                 **refs[0],
-                "short": f"{parts[1]}/HEAD",
+                "short": git_ref_label(parts[1], head_aliases),
                 "subject": parts[2],
                 "commit": parts[0],
+                "aliases": head_aliases,
             }
             if len(parts) >= 5:
                 refs[0]["date"] = parts[3]
@@ -904,7 +951,7 @@ def session_files_payload_for_info(
 
     files: list[dict[str, Any]] = []
     repo_payloads: list[dict[str, Any]] = []
-    refs_by_repo: dict[str, list[dict[str, str]]] = {}
+    refs_by_repo: dict[str, list[dict[str, Any]]] = {}
     for repo_text in sorted(repos):
         repo = Path(repo_text)
         # C6: resolve this repo's effective FROM/TO — its own override if present, else the global scalar.
@@ -1067,7 +1114,7 @@ def session_files_payload(
 
     files: list[dict[str, Any]] = []
     repos: dict[str, dict[str, Any]] = {}
-    refs_by_repo: dict[str, list[dict[str, str]]] = {}
+    refs_by_repo: dict[str, list[dict[str, Any]]] = {}
     errors: list[str] = []
     warnings: list[str] = []
     for info in infos.values():

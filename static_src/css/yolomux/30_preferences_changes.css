@@ -238,7 +238,7 @@
   min-width: 0;
   height: 24px;
   display: grid;
-  grid-template-columns: minmax(7ch, 9ch) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(18ch, 32ch) minmax(0, 1fr) 16ch minmax(8ch, 18ch);
   align-items: center;
   gap: 8px;
   padding: 0 6px;
@@ -258,8 +258,10 @@
 }
 .diff-ref-suggestion-option:hover .diff-ref-suggestion-subject,
 .diff-ref-suggestion-option.active .diff-ref-suggestion-subject,
-.diff-ref-suggestion-option:hover .diff-ref-suggestion-meta,
-.diff-ref-suggestion-option.active .diff-ref-suggestion-meta {
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-date,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-date,
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-author,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-author {
   color: var(--text);
   opacity: 0.95;
 }
@@ -273,12 +275,18 @@
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
   color: var(--muted);
 }
-.diff-ref-suggestion-meta {
+.diff-ref-suggestion-date,
+.diff-ref-suggestion-author {
   min-width: 0;
   font: 500 var(--ui-font-size-2xs)/1 var(--mono-font);
   color: var(--muted);
   opacity: 0.7;
-  justify-self: end;
+}
+.diff-ref-suggestion-date {
+  justify-self: start;
+}
+.diff-ref-suggestion-author {
+  justify-self: start;
 }
 .diff-ref-suggestion-empty {
   padding: 5px 7px;

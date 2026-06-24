@@ -298,6 +298,41 @@ def test_feature_branch_can_use_head_subject_pr_hint():
     assert pr["source"] == "head-subject"
 
 
+def test_git_inventory_uses_github_upstream_when_origin_is_local(monkeypatch, tmp_path):
+    # Linked worktrees often use a local origin and the real GitHub repository as upstream; PR lookup
+    # must still resolve the current branch by head branch instead of dropping all GitHub metadata.
+    repo = tmp_path / "frontend-crates2"
+    _init_repo(repo)
+    branch = "keivenchang/DIS-2267__dsv4-drop-truncated-calls"
+    _git(repo, "checkout", "-b", branch)
+    (repo / "fix.rs").write_text("fix\n", encoding="utf-8")
+    _git(repo, "add", "fix.rs")
+    _git(repo, "commit", "-m", "fix(parsers-v2): drop DSv4 tool calls truncated mid-call to match v1 batch")
+    local_origin = tmp_path / "frontend-crates"
+    local_origin.mkdir()
+    _git(repo, "remote", "add", "origin", str(local_origin))
+    _git(repo, "remote", "add", "upstream", "git@github.com:ai-dynamo/frontend-crates.git")
+
+    queries = []
+
+    def fake_by_branch(github_repo, queried_branch, cache, allow_network=True):
+        queries.append((github_repo, queried_branch, allow_network))
+        return {"number": 79, "state": "open", "source": "github-api", "title": "fix(parsers-v2): drop DSv4 calls"}
+
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", fake_by_branch)
+
+    git_data = metadata.git_inventory(str(repo))
+    pr = metadata.project_pull_request(git_data, MetadataCache(), allow_network=True)
+
+    assert git_data["github_repo"] == {
+        "owner": "ai-dynamo",
+        "name": "frontend-crates",
+        "url": "https://github.com/ai-dynamo/frontend-crates",
+    }
+    assert pr["number"] == 79
+    assert queries == [(git_data["github_repo"], branch, True)]
+
+
 def test_metadata_public_helpers_remain_available_after_client_split():
     assert github_checks_unknown()["state"] == "unknown"
     assert extract_linear_ids("OPS-123 is linked to INFRA-44 and OPS-123") == ["OPS-123", "INFRA-44"]

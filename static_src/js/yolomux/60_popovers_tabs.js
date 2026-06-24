@@ -393,9 +393,8 @@ function metaJoin(parts) {
 
 function sessionNumberNameHtml(session) {
   const label = sessionLabel(session);
-  const name = String(session);
-  const nameHtml = name && name !== label ? `<span class="session-button-name">${esc(name)}</span>` : '';
-  return `<span class="session-button-number">${esc(label)}</span>${nameHtml}`;
+  const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
+  return `<span class="${className}">${esc(label)}</span>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {
@@ -416,6 +415,35 @@ function yoloMarkerHtml(session, auto, options = {}) {
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+}
+
+function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
+  const agents = sessionAgentWindowStatusPayloads(session, info, payload)
+    .filter(agent => agentWindowIsWorkingState(agent?.state));
+  return agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0] || null;
+}
+
+function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
+  const payload = options.payload || autoApproveStates.get(session);
+  const workingAgent = sessionWorkingAgentWindowForTab(session, info, payload);
+  if (workingAgent) {
+    const iconHtml = agentWindowActivityIconHtmlForStatus(workingAgent, workingAgent.kind, session);
+    if (iconHtml) {
+      const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
+      const stateText = auto ? t('yolo.state.onHere') : (autoApproveEnabledElsewhere(payload) ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
+      const title = options.toggle && readOnlyMode
+        ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
+        : t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)});
+      return `<span class="session-agent-activity-marker"${toggleAttr} title="${esc(title)}">${iconHtml}</span>`;
+    }
+  }
+  return yoloMarkerHtml(session, auto, {
+    ...options,
+    enabledOnly: options.enabledOnly,
+    yoloWorking: sessionYoloIsWorking(session, payload),
+    payload,
+  });
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
