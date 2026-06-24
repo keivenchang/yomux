@@ -899,7 +899,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*color:\s*var\(--bad\)[\s\S]*text-shadow:\s*0 0 0 var\(--bad\), 0 0 6px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\.85\)/.test(yoloCss), 'active ASK? window dots keep the saturated red attention color instead of the active-control white halo');
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(yoloCss), 'active tmux window activity dots inherit the shared brightness pulse in the built CSS');
     assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux window buttons have no per-agent tint CSS');
-    assert.ok(source.includes("agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown initializes from the Performance preference');
+    assert.ok(source.includes("agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown initializes from the persisted setting');
     assert.ok(source.includes("agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown live-updates from settings changes');
     assert.ok(source.includes("if (key === 'cooldown') return 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
     assert.ok(yoloCss.includes('.status-indicator--cooldown') && yoloCss.includes('var(--accent-gold)'), 'cooldown dot uses the shared theme-aware yellow/gold token');

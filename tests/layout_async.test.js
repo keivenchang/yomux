@@ -1518,6 +1518,40 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const hiddenToolOutput = 'hidden tool output '.repeat(20000);
+      let chatBody = null;
+      api.applyYoagentConversationPayloadForTest({
+        messages: [{
+          role: 'assistant',
+          content: 'short visible answer',
+          auxiliaryText: hiddenToolOutput,
+          auxiliaryPreview: hiddenToolOutput.slice(0, 2000),
+          streamItems: [{kind: 'tool', text: hiddenToolOutput}],
+          createdAt: '2026-06-24T20:00:00Z',
+        }],
+      });
+      api.setFetchForTest((url, options = {}) => {
+        if (String(url) === '/api/yoagent/chat') {
+          chatBody = JSON.parse(String(options.body || '{}'));
+          return Promise.resolve(jsonResponse({
+            answer: 'ok',
+            backend: 'codex',
+            backend_used: 'codex',
+            conversation: {messages: [{role: 'user', content: 'hello?'}, {role: 'assistant', content: 'ok'}]},
+          }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      await api.sendYoagentChatMessageForTest('hello?');
+      const encodedBody = JSON.stringify(chatBody || {});
+      assert.equal(chatBody.message, 'hello?', 'YO!agent chat still sends the current prompt');
+      assert.equal(Object.prototype.hasOwnProperty.call(chatBody, 'history'), false, 'YO!agent chat relies on server-side transcript history instead of reposting browser messages');
+      assert.ok(encodedBody.length < 2048, 'YO!agent chat request stays small even when prior visible messages carry hidden stream/tool data');
+      assert.equal(encodedBody.includes('hidden tool output'), false, 'hidden stream/tool details are not serialized into the chat request');
+    }
+
+    {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           availableAgents: [],

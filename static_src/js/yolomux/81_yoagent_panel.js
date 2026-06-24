@@ -1388,7 +1388,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
     const payload = await apiFetchJson('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, history: yoagentMessages.slice(-11, -1), locale: i18nActiveLocaleId(), request_id: requestId, stream_id: streamId}),
+      body: JSON.stringify({message: text, locale: i18nActiveLocaleId(), request_id: requestId, stream_id: streamId}),
       signal: controller?.signal,
     });
     if (yoagentActiveChatRequest?.id !== requestId) return;
