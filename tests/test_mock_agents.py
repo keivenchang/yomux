@@ -2,6 +2,7 @@ import io
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ if str(TOOLS_DIR) not in sys.path:
 import mock_agent_common  # noqa: E402
 
 PROMPT_CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "prompt_corpus"
+VISUAL_TMUX_SESSION_PREFIX = "test-mock-visual"
 
 
 def load_structured_fixture(path):
@@ -195,6 +197,116 @@ def cleanup_mockcase(tmp_path):
         session_file.unlink()
     if socket_file.exists():
         socket_file.unlink()
+
+
+def visual_tmux_socket_path():
+    worker = re.sub(r"[^A-Za-z0-9_.-]", "-", os.environ.get("PYTEST_XDIST_WORKER", "main"))
+    socket_base = Path("/tmp") / f"yolomux-{VISUAL_TMUX_SESSION_PREFIX}-{os.getuid()}-{worker}"
+    socket_base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return socket_base / "s"
+
+
+def cleanup_visual_test_sessions(tmux_binary, socket_path):
+    listed = tmux_cmd(tmux_binary, socket_path, "list-sessions", "-F", "#{session_name}", timeout=3)
+    if listed.returncode != 0:
+        return
+    for session in listed.stdout.splitlines():
+        if session.startswith("test-"):
+            tmux_cmd(tmux_binary, socket_path, "kill-session", "-t", session, timeout=3)
+
+
+class VisualTmuxHarness:
+    def __init__(self, tmux_binary, socket_path):
+        self.tmux_binary = tmux_binary
+        self.socket_path = socket_path
+        self.sessions = []
+
+    def launch(self, purpose, command, *, width=103, height=58):
+        session = f"{VISUAL_TMUX_SESSION_PREFIX}-{purpose}-{uuid.uuid4().hex[:8]}"
+        shell_command = f"cd {shlex.quote(str(REPO_ROOT))} && exec {shlex.join(command)}"
+        created = tmux_cmd(
+            self.tmux_binary,
+            self.socket_path,
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            str(width),
+            "-y",
+            str(height),
+            shell_command,
+            timeout=8,
+        )
+        assert created.returncode == 0, created.stderr or created.stdout
+        self.sessions.append(session)
+        return session
+
+    def capture(self, session, *, scrollback=False):
+        command = ["capture-pane", "-p", "-t", f"{session}:"]
+        if scrollback:
+            command.extend(["-S", "-2000"])
+        return tmux_cmd(self.tmux_binary, self.socket_path, *command, timeout=5).stdout or ""
+
+    def send_keys(self, session, *keys):
+        sent = tmux_cmd(self.tmux_binary, self.socket_path, "send-keys", "-t", f"{session}:", *keys, timeout=5)
+        assert sent.returncode == 0, sent.stderr or sent.stdout
+
+    def wait_until(self, session, predicate, *, timeout=15):
+        deadline = time.monotonic() + timeout
+        last = ""
+        while time.monotonic() < deadline:
+            last = self.capture(session)
+            if predicate(last):
+                return True, last
+            time.sleep(0.2)
+        return False, last
+
+
+@pytest.fixture
+def visual_tmux(monkeypatch):
+    tmux_binary = shutil.which("tmux")
+    if not tmux_binary:
+        pytest.skip("tmux is not installed")
+    socket_path = visual_tmux_socket_path()
+    cleanup_visual_test_sessions(tmux_binary, socket_path)
+    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    harness = VisualTmuxHarness(tmux_binary, socket_path)
+    try:
+        yield harness
+    finally:
+        for session in reversed(harness.sessions):
+            tmux_cmd(tmux_binary, socket_path, "kill-session", "-t", session, timeout=3)
+        cleanup_visual_test_sessions(tmux_binary, socket_path)
+        tmux_cmd(tmux_binary, socket_path, "kill-server", timeout=3)
+        shutil.rmtree(socket_path.parent, ignore_errors=True)
+
+
+def extract_first_box(pane):
+    lines = pane.splitlines()
+    for start, line in enumerate(lines):
+        if line.startswith("╭"):
+            for end in range(start + 1, len(lines)):
+                if lines[end].startswith("╰"):
+                    return lines[start:end + 1]
+    return []
+
+
+def assert_no_startup_ellipsis(box):
+    startup_text = "\n".join(box)
+    assert "..." not in startup_text
+    assert "…" not in startup_text
+
+
+def expected_codex_startup_box(model, effort, directory):
+    rows = [
+        " >_ OpenAI Codex (v0.142.0)",
+        "",
+        f" model:     {model} {effort}   /model to change",
+        f" directory: {directory}",
+    ]
+    inner = max(45, *(len(row) for row in rows))
+    return ["╭" + ("─" * inner) + "╮", *(f"│{row:<{inner}}│" for row in rows), "╰" + ("─" * inner) + "╯"]
 
 
 def test_mock_fixture_list_reports_cursor_status(monkeypatch, capsys):
@@ -738,6 +850,34 @@ def test_plain_codex_run_fixtures_enter_live_working_state(monkeypatch):
     assert state.get("codex_working_base_seconds") == "81"
     assert "Implement the detector corpus" not in second_render
     assert "• Working (1m 21s • esc to interrupt)" in mock_agent_common.ANSI_RE.sub("", second_render)
+
+
+def test_codex_working_refresh_updates_only_status_row_on_steady_tick(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+
+    start_row, _line_count, render_key = mock_agent_common.refresh_codex_working_block(81)
+    output.truncate(0)
+    output.seek(0)
+    mock_agent_common.refresh_codex_working_block(
+        81.12,
+        previous_key=render_key,
+        previous_start_row=start_row,
+    )
+
+    rendered = output.getvalue()
+    working_row = start_row + 1
+    prompt_row = start_row + 4
+    assert "Working" in mock_agent_common.ANSI_RE.sub("", rendered)
+    assert f"\x1b[{working_row};1H\x1b[2K" in rendered
+    assert f"\x1b[{prompt_row};1H\x1b[2K" not in rendered
 
 
 def test_plain_claude_working_fixture_replaces_captured_footer(monkeypatch):
@@ -1407,7 +1547,7 @@ def test_codex_tiny_tty_startup_drops_box_before_fixed_footer_scrolls(monkeypatc
     monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.5")
     monkeypatch.setattr(mock_agent_common, "EFFORT", "xhigh")
     monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
-    monkeypatch.setattr(mock_agent_common, "VERSION", "0.141.0")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "0.142.0")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 11)
     monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
@@ -1440,26 +1580,27 @@ def test_codex_short_tty_startup_drops_tip_but_keeps_box(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.5")
     monkeypatch.setattr(mock_agent_common, "EFFORT", "xhigh")
     monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
-    monkeypatch.setattr(mock_agent_common, "VERSION", "0.141.0")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "0.142.0")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
     monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
+    state: dict[str, str] = {}
 
-    mock_agent_common.print_codex_startup()
-    mock_agent_common.render_live_composer("", 0, state={})
+    mock_agent_common.print_codex_startup(state)
+    assert state["codex_startup_inline_composer"] == "1"
+    mock_agent_common.render_live_composer("", 0, state=state)
 
     rendered = output.getvalue()
     assert rendered.startswith("\x1b7\x1b[r\x1b8╭")
     assert "\x1b[H\x1b[J" not in rendered
     assert "Tip: New Use /fast" not in rendered
     assert "╭" in rendered and "╰" in rendered
-    assert rendered.index("╰") < rendered.index("\x1b[9;1H\x1b[2K")
-    assert '\x1b[10;1H\x1b[2K› \x1b[2mExplain this codebase\x1b[0m' in rendered
-    assert "\x1b[12;1H\x1b[2K  gpt-5.5 xhigh · ~/yolomux.dev8002" in rendered
-    assert rendered.endswith("\x1b[10;3H\x1b7\x1b[1;8r\x1b8")
+    assert "Explain this codebase" not in rendered
+    assert "\x1b[9;1H\x1b[2K" not in rendered
+    assert state["codex_startup_inline_composer"] == "1"
 
 
-def test_codex_compact_startup_clears_before_first_submitted_prompt(monkeypatch):
+def test_codex_tty_startup_reserves_footer_rows_after_tip(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
             return True
@@ -1474,25 +1615,88 @@ def test_codex_compact_startup_clears_before_first_submitted_prompt(monkeypatch)
     monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.5")
     monkeypatch.setattr(mock_agent_common, "EFFORT", "xhigh")
     monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
-    monkeypatch.setattr(mock_agent_common, "VERSION", "0.141.0")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "0.142.0")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 103)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 58)
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
+    state: dict[str, str] = {}
+
+    mock_agent_common.print_codex_startup(state)
+    mock_agent_common.render_live_composer("", 0, state=state)
+
+    rendered = output.getvalue()
+    footer_top = mock_agent_common.live_composer_footer_top("", False, state)
+    footer_clear = f"\x1b[{footer_top};1H\x1b[2K"
+    reserve_gap = rendered.split("Tip: New Use /fast", 1)[1].split(footer_clear, 1)[0]
+    assert "│ >_ OpenAI Codex (v0.142.0)                  │" in rendered
+    assert "│                                             │" in rendered
+    assert "│ model:     gpt-5.5 xhigh   /model to change │" in rendered
+    assert "│ directory: ~/yolomux.dev8002                │" in rendered
+    assert "╰─────────────────────────────────────────────╯" in rendered
+    assert footer_clear in rendered
+    assert reserve_gap.count("\n") >= len(mock_agent_common.codex_composer_footer_lines()) + 1
+
+
+def test_codex_startup_expands_for_long_model_without_ellipsis(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            raise OSError
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "medium")
+    monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "0.142.0")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 103)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 58)
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
+
+    mock_agent_common.print_codex_startup({})
+
+    rendered = output.getvalue()
+    assert "…" not in rendered
+    assert " model:     gpt-5.4-mini medium   /model to change" in rendered
+
+
+def test_codex_compact_startup_preserves_box_before_first_submitted_prompt(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            raise OSError
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "codex")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "›")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.5")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "xhigh")
+    monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "0.142.0")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
     monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
     state: dict[str, str] = {}
 
     mock_agent_common.print_codex_startup(state)
-    assert state["codex_clear_startup_on_first_input"] == "1"
+    assert state["codex_startup_inline_composer"] == "1"
 
-    mock_agent_common.finish_live_composer("what time is it?", state)
+    mock_agent_common.render_inline_composer("what time is it?", len("what time is it?"), state=state)
 
     rendered = output.getvalue()
-    clear_index = rendered.index("\x1b[1;1H\x1b[2K")
     prompt_index = rendered.rindex("› what time is it?")
-    assert clear_index < prompt_index
-    assert "codex_clear_startup_on_first_input" not in state
+    assert "\x1b[1;1H\x1b[2K" not in rendered
+    assert rendered.index("╰") < prompt_index
+    assert state["codex_startup_inline_composer"] == "1"
 
 
-def test_codex_compact_startup_clears_before_first_typed_prompt(monkeypatch):
+def test_codex_compact_startup_preserves_box_before_first_typed_prompt(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
             return True
@@ -1518,7 +1722,7 @@ def test_codex_compact_startup_clears_before_first_typed_prompt(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "MODEL", "gpt-5.5")
     monkeypatch.setattr(mock_agent_common, "EFFORT", "xhigh")
     monkeypatch.setattr(mock_agent_common, "AGENT_PRODUCT_NAME", "OpenAI Codex")
-    monkeypatch.setattr(mock_agent_common, "VERSION", "0.141.0")
+    monkeypatch.setattr(mock_agent_common, "VERSION", "0.142.0")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
     monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
@@ -1527,18 +1731,16 @@ def test_codex_compact_startup_clears_before_first_typed_prompt(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "read_key", lambda timeout=0.12: next(keys))
 
     mock_agent_common.print_codex_startup(state)
-    assert state["codex_clear_startup_on_first_input"] == "1"
+    assert state["codex_startup_inline_composer"] == "1"
 
     user_input = mock_agent_common.read_live_composer(state)
 
     rendered = output.getvalue()
     assert user_input == "mock"
-    clear_index = rendered.index("\x1b[1;1H\x1b[2K")
     prompt_index = rendered.rindex("› mock")
-    assert "Explain this codebase" not in rendered[:clear_index]
-    assert rendered.index("╰") < clear_index
-    assert clear_index < prompt_index
-    assert "codex_clear_startup_on_first_input" not in state
+    assert "\x1b[1;1H\x1b[2K" not in rendered
+    assert rendered.index("╰") < rendered.index("Explain this codebase") < prompt_index
+    assert "codex_startup_inline_composer" not in state
 
 
 def test_codex_prompt_and_working_text_match_current_cli(monkeypatch):
@@ -2079,6 +2281,93 @@ def test_claude_startup_redraws_header_after_tiny_tty_grows(monkeypatch):
     assert "\x1b[1;1H" not in output.getvalue()
     assert "claude_startup_header_pending" not in state
     assert state["claude_startup_header_visible"] == "1"
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_codex_startup_box_matches_requested_shape_and_survives_first_submit(visual_tmux):
+    expected_box = expected_codex_startup_box("gpt-5.5", "xhigh", "~")
+    session = visual_tmux.launch(
+        "codex-startup",
+        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
+        width=103,
+        height=58,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: "OpenAI Codex (v0.142.0)" in text and "› Explain this codebase" in text)
+    assert booted, pane
+    assert extract_first_box(pane) == expected_box
+    assert_no_startup_ellipsis(expected_box)
+
+    visual_tmux.send_keys(session, "bogus", "Enter")
+    answered, pane = visual_tmux.wait_until(session, lambda text: "I don't know how to handle \"bogus\"" in text)
+    assert answered, pane
+    assert expected_box == extract_first_box(visual_tmux.capture(session, scrollback=True))
+    assert "› bogus" in pane
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_codex_startup_expands_long_model_row_without_ellipsis(visual_tmux):
+    session = visual_tmux.launch(
+        "codex-long-model",
+        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.4-mini", "--effort", "medium", "-C", str(REPO_ROOT)],
+        width=103,
+        height=58,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: "gpt-5.4-mini medium" in text and "/model to change" in text)
+    assert booted, pane
+    box = extract_first_box(pane)
+    assert box == expected_codex_startup_box("gpt-5.4-mini", "medium", "~/yolomux.dev8002")
+    assert_no_startup_ellipsis(box)
+    assert len({len(line) for line in box}) == 1
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_codex_compact_startup_keeps_box_after_typing(visual_tmux):
+    expected_box = expected_codex_startup_box("gpt-5.5", "xhigh", "~")
+    session = visual_tmux.launch(
+        "codex-compact",
+        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
+        width=80,
+        height=12,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: "OpenAI Codex (v0.142.0)" in text and "› Explain this codebase" in text)
+    assert booted, pane
+    assert extract_first_box(pane) == expected_box
+
+    visual_tmux.send_keys(session, "mock")
+    typed, pane = visual_tmux.wait_until(session, lambda text: "› mock" in text)
+    assert typed, pane
+    assert extract_first_box(pane) == expected_box
+    assert pane.index("╰─────────────────────────────────────────────╯") < pane.index("› mock")
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_codex_working_spinner_keeps_single_visual_working_block_while_typing(visual_tmux):
+    session = visual_tmux.launch(
+        "codex-working",
+        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
+        width=103,
+        height=30,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: "› Explain this codebase" in text)
+    assert booted, pane
+    visual_tmux.send_keys(session, "mock working_spinner", "Enter")
+    working, pane = visual_tmux.wait_until(session, lambda text: "• Working (" in text and "esc to interrupt" in text)
+    assert working, pane
+    assert pane.count("• Working (") == 1
+
+    visual_tmux.send_keys(session, "queued follow-up")
+    queued, pane = visual_tmux.wait_until(session, lambda text: "› queued follow-up" in text and "• Working (" in text)
+    assert queued, pane
+    assert pane.count("• Working (") == 1
+    assert "esc to interrupt" in pane
 
 
 @pytest.mark.e2e

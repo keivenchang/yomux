@@ -230,7 +230,7 @@ def configure_codex_mock(
         agent_display_name="Codex",
         agent_product_name="OpenAI Codex",
         history_file="~/.cache/yolomux/mock_codex_history",
-        version="0.141.0",
+        version="0.142.0",
         model=model,
         effort=effort,
         model_line=f"{model} {effort} · API Usage Billing",
@@ -585,12 +585,20 @@ def print_welcome_box() -> None:
 
 
 def print_codex_startup(state: dict[str, str] | None = None) -> None:
-    inner = 47
+    box_lines = [
+        f" >_ {AGENT_PRODUCT_NAME} (v{VERSION})",
+        "",
+        f" model:     {MODEL} {EFFORT}   /model to change",
+        f" directory: {display_cwd()}",
+    ]
+    if CODEX_DANGER_FULL_ACCESS:
+        box_lines.append(" permissions: YOLO mode")
+    inner = max(45, *(visible_len(line) for line in box_lines))
 
     def box_line(text: str = "") -> str:
-        return "│" + clipped(text, inner) + "│"
+        return "│" + pad_cell(text, inner) + "│"
 
-    box_line_count = 6 + (1 if CODEX_DANGER_FULL_ACCESS else 0)
+    box_line_count = len(box_lines) + 2
     footer_line_count = len(codex_composer_footer_lines())
     launch_context_line_count = 1
     include_box = True
@@ -599,6 +607,7 @@ def print_codex_startup(state: dict[str, str] | None = None) -> None:
     if state is not None:
         state.pop("codex_clear_startup_on_first_input", None)
         state.pop("codex_clear_startup_on_first_submit", None)
+        state.pop("codex_startup_inline_composer", None)
     if sys.stdout.isatty():
         # The wrapper owns a fixed footer even when launched from a shell prompt.
         # Short-pane budgeting must leave room for both that footer and the command
@@ -614,7 +623,7 @@ def print_codex_startup(state: dict[str, str] | None = None) -> None:
             and available_startup_rows >= warning_line_count + box_line_count + 3
         )
         if state is not None and include_box and not include_tip:
-            state["codex_clear_startup_on_first_input"] = "1"
+            state["codex_startup_inline_composer"] = "1"
         reset_terminal_scroll_region(preserve_cursor=True)
 
     if include_warnings:
@@ -623,13 +632,11 @@ def print_codex_startup(state: dict[str, str] | None = None) -> None:
         print()
     if include_box:
         print("╭" + ("─" * inner) + "╮")
-        print(box_line(f" >_ {AGENT_PRODUCT_NAME} (v{VERSION})"))
-        print(box_line())
-        print(box_line(f" model:       {MODEL} {EFFORT}   /model to change"))
-        print(box_line(f" directory:   {display_cwd()}"))
-        if CODEX_DANGER_FULL_ACCESS:
-            print(box_line(" permissions: YOLO mode"))
+        for line in box_lines:
+            print(box_line(line))
         print("╰" + ("─" * inner) + "╯")
+        if sys.stdout.isatty() and not include_tip:
+            print()
     if include_tip:
         print()
         print("  Tip: New Use /fast to enable our fastest inference with increased plan usage.")
@@ -638,6 +645,11 @@ def print_codex_startup(state: dict[str, str] | None = None) -> None:
         print("⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this")
         print("  invocation.")
         print()
+    if sys.stdout.isatty() and include_tip:
+        # Startup is printed into the existing scrollback, so its last rows can
+        # naturally land inside the footer-owned rows. Move it above that area
+        # before the fixed composer starts clearing/repainting the footer.
+        sys.stdout.write("\n" * footer_line_count)
     if not sys.stdout.isatty():
         print()
         print(f"{PROMPT_GLYPH} {live_composer_suggestion()}")
@@ -760,6 +772,33 @@ def codex_working_block_start_row(line_count: int = 7) -> int:
     return max(1, terminal_height() - line_count + 1)
 
 
+def codex_working_block_static_key(
+    text: str = "",
+    cursor: int = 0,
+    background: bool = False,
+    queued_messages: list[str] | None = None,
+) -> tuple[object, ...]:
+    queued_messages = queued_messages or []
+    line_count = len(codex_working_block_lines(0, text, cursor, background, queued_messages))
+    return (
+        terminal_width(),
+        terminal_height(),
+        codex_working_block_start_row(line_count),
+        line_count,
+        text,
+        cursor,
+        background,
+        tuple(queued_messages),
+    )
+
+
+def update_codex_working_status_line(seconds: float, start_row: int, background: bool = False) -> None:
+    working_row = min(terminal_height(), max(1, start_row + 1))
+    display = codex_working_display_line(seconds, background)
+    sys.stdout.write(f"\x1b7\x1b[{working_row};1H\x1b[2K{display}\x1b8")
+    sys.stdout.flush()
+
+
 def write_codex_working_block(
     seconds: float,
     text: str = "",
@@ -788,6 +827,50 @@ def write_codex_working_block(
     sys.stdout.write(f"\x1b7\x1b[1;{bottom}r\x1b8")
     sys.stdout.flush()
     return start_row, len(lines)
+
+
+def refresh_codex_working_block(
+    seconds: float,
+    text: str = "",
+    cursor: int = 0,
+    background: bool = False,
+    queued_messages: list[str] | None = None,
+    previous_key: tuple[object, ...] | None = None,
+    previous_start_row: int | None = None,
+) -> tuple[int, int, tuple[object, ...]]:
+    queued_messages = queued_messages or []
+    key = codex_working_block_static_key(text, cursor, background, queued_messages)
+    if key == previous_key and previous_start_row is not None:
+        update_codex_working_status_line(seconds, previous_start_row, background)
+        return previous_start_row, int(key[3]), key
+    start_row, line_count = write_codex_working_block(seconds, text, cursor, background, queued_messages)
+    return start_row, line_count, key
+
+
+def remember_codex_working_render_state(state: dict[str, str], start_row: int, line_count: int) -> None:
+    state["codex_working_start_row"] = str(start_row)
+    state["codex_working_line_count"] = str(line_count)
+    state["codex_working_terminal_width"] = str(terminal_width())
+    state["codex_working_terminal_height"] = str(terminal_height())
+
+
+def restore_codex_working_render_state(state: dict[str, str]) -> tuple[int | None, int]:
+    try:
+        start_row = int(state.get("codex_working_start_row", "") or "")
+    except ValueError:
+        start_row = None
+    try:
+        line_count = int(state.get("codex_working_line_count", "7") or 7)
+    except ValueError:
+        line_count = 7
+    return start_row, max(1, line_count)
+
+
+def codex_working_render_state_matches_terminal(state: dict[str, str]) -> bool:
+    return (
+        state.get("codex_working_terminal_width") == str(terminal_width())
+        and state.get("codex_working_terminal_height") == str(terminal_height())
+    )
 
 
 def clear_codex_working_block(start_row: int | None = None, line_count: int = 7, restore_footer: bool = True) -> None:
@@ -888,6 +971,7 @@ def print_codex_working(seconds: float, background: bool = False) -> str:
     queued_text = ""
     queued_cursor = 0
     queued_messages: list[str] = []
+    render_key: tuple[object, ...] | None = None
     old_settings = None
     if sys.stdin.isatty():
         old_settings = termios.tcgetattr(sys.stdin.fileno())
@@ -896,12 +980,14 @@ def print_codex_working(seconds: float, background: bool = False) -> str:
         for i in range(total_ticks + 1):
             queued_text, queued_cursor, queued_messages = drain_codex_queued_input(queued_text, queued_cursor, queued_messages)
             elapsed = min(seconds, i * tick)
-            start_row, line_count = write_codex_working_block(
+            start_row, line_count, render_key = refresh_codex_working_block(
                 elapsed,
                 queued_text,
                 queued_cursor,
                 background,
                 queued_messages,
+                render_key,
+                start_row,
             )
             if i < total_ticks:
                 time.sleep(tick)
@@ -1003,7 +1089,8 @@ def start_codex_live_working_mock(state: dict[str, str], case: dict[str, object]
     state["codex_working_cursor"] = "0"
     state["codex_working_queued"] = ""
     if sys.stdout.isatty():
-        write_codex_working_block(float(state["codex_working_base_seconds"]))
+        start_row, line_count = write_codex_working_block(float(state["codex_working_base_seconds"]))
+        remember_codex_working_render_state(state, start_row, line_count)
         sys.stdout.flush()
 
 
@@ -1212,8 +1299,8 @@ def handle_claude_live_working_tty(state: dict[str, str]) -> None:
 
 def handle_codex_live_working_tty(state: dict[str, str]) -> None:
     old_settings = termios.tcgetattr(sys.stdin.fileno())
-    start_row = None
-    line_count = 7
+    start_row, line_count = restore_codex_working_render_state(state)
+    render_key: tuple[object, ...] | None = None
     try:
         tty.setraw(sys.stdin.fileno())
         while state.get("pending") in {"codex-working", "codex-goal-active"}:
@@ -1224,7 +1311,17 @@ def handle_codex_live_working_tty(state: dict[str, str]) -> None:
             queued_raw = state.get("codex_working_queued", state.get("codex_goal_active_queued", ""))
             queued_messages = [message for message in queued_raw.split("\n") if message]
             elapsed = base_seconds + max(0, time.time() - started_at)
-            start_row, line_count = write_codex_working_block(elapsed, text, cursor, queued_messages=queued_messages)
+            if render_key is None and start_row is not None and codex_working_render_state_matches_terminal(state):
+                render_key = codex_working_block_static_key(text, cursor, queued_messages=queued_messages)
+            start_row, line_count, render_key = refresh_codex_working_block(
+                elapsed,
+                text,
+                cursor,
+                queued_messages=queued_messages,
+                previous_key=render_key,
+                previous_start_row=start_row,
+            )
+            remember_codex_working_render_state(state, start_row, line_count)
             ready, _write, _error = select.select([sys.stdin.fileno()], [], [], 0.12)
             if not ready:
                 continue
@@ -2018,6 +2115,9 @@ def composer_render_parts(text: str, cursor: int, armed_exit: bool = False, stat
 
 def render_live_composer(text: str, cursor: int, armed_exit: bool = False, state: dict[str, str] | None = None) -> None:
     if PERMISSION_STYLE == "codex":
+        if codex_startup_inline_composer_pending(state, text):
+            remember_live_composer_terminal_size(state)
+            return
         footer_top = clear_live_composer_footer(text, armed_exit, state)
         footer_lines = codex_composer_footer_lines(text, cursor, armed_exit, state)
         prompt_row, _status_start, _status_lines = live_composer_layout(armed_exit, state)
@@ -2076,7 +2176,7 @@ def maybe_redraw_live_composer_for_resize(
 ) -> bool:
     if state is None or not live_composer_terminal_size_changed(state):
         return False
-    if not inline_composer and codex_startup_waiting_for_first_input(state, text):
+    if not inline_composer and codex_startup_inline_composer_pending(state, text):
         remember_live_composer_terminal_size(state)
         return False
     reset_terminal_scroll_region(preserve_cursor=True)
@@ -2196,13 +2296,10 @@ def clear_codex_startup_on_first_input(state: dict[str, str] | None = None) -> b
     return True
 
 
-def codex_startup_waiting_for_first_input(state: dict[str, str] | None = None, text: str = "") -> bool:
+def codex_startup_inline_composer_pending(state: dict[str, str] | None = None, text: str = "") -> bool:
     if PERMISSION_STYLE != "codex" or state is None or text:
         return False
-    return (
-        state.get("codex_clear_startup_on_first_input") == "1"
-        or state.get("codex_clear_startup_on_first_submit") == "1"
-    )
+    return state.get("codex_startup_inline_composer") == "1"
 
 
 def prepare_output_above_live_composer_footer(state: dict[str, str] | None = None) -> None:
@@ -2266,25 +2363,26 @@ def history_item(index: int) -> str:
 
 
 def read_live_composer(state: dict[str, str] | None = None) -> str:
-    set_output_region_above_live_composer(state=state, preserve_cursor=True)
     text = ""
     if state is not None:
         text = state.pop("composer_prefill", "")
     cursor = len(text)
+    inline_composer = codex_startup_inline_composer_pending(state, text)
+    if not inline_composer:
+        set_output_region_above_live_composer(state=state, preserve_cursor=True)
     history_count = readline.get_current_history_length()
     history_index = history_count + 1
     draft = ""
-    inline_composer = False
     needs_render = True
     old_settings = termios.tcgetattr(sys.stdin.fileno())
     try:
         tty.setraw(sys.stdin.fileno())
         while True:
             armed_exit = bool(state and state.get("last_ctrl_c_at"))
-            if text and clear_codex_startup_on_first_input(state):
+            if text and not inline_composer and clear_codex_startup_on_first_input(state):
                 needs_render = True
             if needs_render:
-                if not inline_composer and codex_startup_waiting_for_first_input(state, text):
+                if not inline_composer and codex_startup_inline_composer_pending(state, text):
                     remember_live_composer_terminal_size(state)
                 else:
                     render_pending_claude_startup_header(state)
@@ -2316,6 +2414,9 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
             if key in {"\r", "\n"}:
                 if inline_composer:
                     finish_inline_composer(text, state)
+                    if state is not None and text.strip():
+                        state.pop("codex_startup_inline_composer", None)
+                        set_output_region_above_live_composer(state=state, preserve_cursor=True)
                 else:
                     finish_live_composer(text, state)
                 if text.strip():
