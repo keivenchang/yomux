@@ -812,6 +812,20 @@ VISIBLE_AGENT_WORKING_CASES = [
     ),
     pytest.param(
         "\n".join([
+            "• Wrote it to /tmp/DOIT.optimize_slow_api_calls.md.",
+            "",
+            "────────────────────────────────────────────────────────────────",
+            "",
+            "› Find and fix a bug in @filename",
+            "",
+            "  gpt-5.5 xhigh · ~                                      Goal achieved (3m)",
+        ]),
+        False,
+        "idle",
+        id="codex-goal-achieved-with-idle-composer",
+    ),
+    pytest.param(
+        "\n".join([
             "○ Working (33m 05s · esc to interrupt)",
             "╭────────────────────────────────────────────╮",
             "│ Use /skills to list available skills       │",
