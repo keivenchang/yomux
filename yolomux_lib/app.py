@@ -725,10 +725,11 @@ class TmuxWebtermApp:
         self.session_files_cache: dict[tuple[Any, ...], tuple[float, tuple[dict[str, Any], HTTPStatus]]] = {}
         self.session_files_refreshing_cache_keys: set[tuple[Any, ...]] = set()
         self.tabber_activity_cache_lock = threading.RLock()
-        self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = (time.monotonic(), self.build_activity_payload())
+        self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = None
         self.tabber_activity_cache_refreshing = False
         self.tabber_activity_cache_warmer_thread: threading.Thread | None = None
         self.tabber_activity_cache_warmer_running = False
+        self.warm_start_session_files_payload_cache()
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
         self.tmux_signal_event_watcher: TmuxSignalEventWatcher | None = None
         self.tmux_snapshot_history_lock = threading.RLock()
@@ -3092,6 +3093,15 @@ class TmuxWebtermApp:
             lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
         )
         return copy.deepcopy(payload)
+
+    def warm_start_session_files_payload_cache(self) -> None:
+        sessions, _errors = discover_sessions(self.sessions)
+        agent_infos: dict[str, SessionInfo] = {}
+        for session in self.sessions:
+            info = sessions.get(session)
+            if info is not None and info.agents:
+                agent_infos[session] = info
+        self.cached_session_files_payloads_for_infos(agent_infos)
 
     def cached_session_files_payloads_for_infos(
         self,

@@ -2509,6 +2509,140 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
     assert metrics["after"]["rejections"] == [], metrics
 
 
+def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser, tmp_path):
+    page = tmp_path / "preview-yellow-callout.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof renderEditorPreviewPane === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_script(
+        """
+        document.body.classList.remove('theme-light', 'editor-theme-light');
+        document.body.classList.add('theme-dark', 'editor-theme-dark');
+        window.marked = {
+          parse() {
+            return `
+              <table id="normal"><tr><td id="normal-cell">Normal dark preview table</td></tr></table>
+              <table id="callout" bgcolor="#fff8cc" border="0" cellpadding="10" cellspacing="0" width="100%">
+                <tr>
+                  <td width="50" align="center">&#9888;</td>
+                  <td id="callout-cell">There is no one way.<br><br><strong id="callout-strong">IMPORTANT NOTE:</strong> run <code id="callout-code">gpu-info</code> before continuing.</td>
+                </tr>
+              </table>
+            `;
+          },
+        };
+        const path = '/home/test/repo/CALLOUT.md';
+        const content = 'legacy html callout';
+        setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'markdown'});
+        const container = document.createElement('div');
+        container.className = 'file-editor-content';
+        container.style.position = 'static';
+        container.style.width = '900px';
+        container.style.height = '520px';
+        const preview = document.createElement('article');
+        preview.id = 'preview';
+        preview.className = 'file-editor-preview-pane-panel markdown-body';
+        preview.style.position = 'static';
+        container.append(preview);
+        document.querySelector('#grid').replaceChildren(container);
+        renderEditorPreviewPane(preview, path, content, {context: 'preview'});
+        document.querySelectorAll('.markdown-html-light-bg').forEach(element => element.classList.remove('markdown-html-light-bg'));
+        const style = selector => getComputedStyle(document.querySelector(selector));
+        const calloutStyle = style('#callout');
+        const calloutCellStyle = style('#callout-cell');
+        const calloutCodeStyle = style('#callout-code');
+        return {
+          lightClass: document.querySelector('#callout').classList.contains('markdown-html-light-bg'),
+          previewBg: style('#preview').backgroundColor,
+          previewColor: style('#preview').color,
+          normalColor: style('#normal-cell').color,
+          normalBorderColor: style('#normal-cell').borderTopColor,
+          calloutBg: calloutStyle.backgroundColor,
+          calloutCellBg: calloutCellStyle.backgroundColor,
+          calloutColor: calloutCellStyle.color,
+          calloutStrongColor: style('#callout-strong').color,
+          calloutCodeColor: calloutCodeStyle.color,
+          calloutCodeBg: calloutCodeStyle.backgroundColor,
+          calloutCodeBorderColor: calloutCodeStyle.borderTopColor,
+          calloutBorderColor: calloutCellStyle.borderTopColor,
+          calloutPaddingTop: calloutCellStyle.paddingTop,
+        };
+        """
+    )
+    assert metrics["lightClass"] is False, metrics
+    assert metrics["previewBg"] == "rgb(0, 0, 0)", metrics
+    assert metrics["previewColor"] == "rgb(207, 211, 220)", metrics
+    assert metrics["normalColor"] == "rgb(207, 211, 220)", metrics
+    assert metrics["normalBorderColor"] == "rgb(48, 57, 72)", metrics
+    assert metrics["calloutBg"] == "rgb(74, 59, 10)", metrics
+    assert metrics["calloutCellBg"] == "rgb(74, 59, 10)", metrics
+    assert metrics["calloutColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["calloutStrongColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["calloutCodeColor"] == "rgb(255, 224, 138)", metrics
+    assert metrics["calloutCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
+    assert metrics["calloutCodeBorderColor"] == "rgba(245, 197, 66, 0.24)", metrics
+    assert metrics["calloutBorderColor"] == "rgb(74, 59, 10)", metrics
+    assert metrics["calloutPaddingTop"] == "10px", metrics
+
+
+def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(browser, tmp_path):
+    page = tmp_path / "preview-code-block-bg.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{app_css()}</style></head>
+        <body class="theme-dark editor-theme-dark">
+          <div class="file-editor-content">
+            <article id="preview" class="file-editor-preview-pane-panel markdown-body" style="position: static">
+              <table id="callout" bgcolor="#fff8cc">
+                <tr><td id="callout-cell"><strong id="callout-strong">IMPORTANT NOTE:</strong> run <code id="callout-code">gpu-info</code>.</td></tr>
+              </table>
+              <pre id="code-block"><code>echo hello</code></pre>
+            </article>
+          </div>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const preview = document.querySelector('#preview');
+        const pre = document.querySelector('#code-block');
+        const read = () => ({
+          preview: getComputedStyle(preview).backgroundColor,
+          code: getComputedStyle(pre).backgroundColor,
+          callout: getComputedStyle(document.querySelector('#callout')).backgroundColor,
+          calloutCell: getComputedStyle(document.querySelector('#callout-cell')).backgroundColor,
+          calloutText: getComputedStyle(document.querySelector('#callout-cell')).color,
+          calloutStrong: getComputedStyle(document.querySelector('#callout-strong')).color,
+          calloutCode: getComputedStyle(document.querySelector('#callout-code')).color,
+          calloutCodeBg: getComputedStyle(document.querySelector('#callout-code')).backgroundColor,
+        });
+        const dark = read();
+        document.body.classList.remove('theme-dark', 'editor-theme-dark');
+        document.body.classList.add('theme-light', 'editor-theme-light');
+        const light = read();
+        return {dark, light};
+        """
+    )
+    assert metrics["dark"]["preview"] == "rgb(0, 0, 0)", metrics
+    assert metrics["dark"]["code"] == "rgb(42, 48, 59)", metrics
+    assert metrics["dark"]["code"] != metrics["dark"]["preview"], metrics
+    assert metrics["dark"]["callout"] == "rgb(74, 59, 10)", metrics
+    assert metrics["dark"]["calloutCell"] == "rgb(74, 59, 10)", metrics
+    assert metrics["dark"]["calloutText"] == "rgb(228, 232, 238)", metrics
+    assert metrics["dark"]["calloutStrong"] == "rgb(228, 232, 238)", metrics
+    assert metrics["dark"]["calloutCode"] == "rgb(255, 224, 138)", metrics
+    assert metrics["dark"]["calloutCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
+    assert metrics["light"]["preview"] == "rgb(255, 246, 223)", metrics
+    assert metrics["light"]["code"] == "rgb(246, 248, 250)", metrics
+    assert metrics["light"]["callout"] == "rgb(255, 248, 204)", metrics
+    assert metrics["light"]["calloutText"] == "rgb(17, 24, 39)", metrics
+    assert metrics["light"]["calloutStrong"] == "rgb(17, 24, 39)", metrics
+    assert metrics["light"]["calloutCode"] == "rgb(164, 14, 38)", metrics
+    assert metrics["light"]["calloutCodeBg"] == "rgb(255, 241, 214)", metrics
+
+
 def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     page = tmp_path / "preview-popout-sync.html"
     page.write_text(

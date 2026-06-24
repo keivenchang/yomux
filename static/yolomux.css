@@ -408,6 +408,20 @@
   --lt-code-inline: #a40e26;
   --lt-code-inline-bg: #fff1d6;
   --lt-code-inline-border: #d8a657;
+  --markdown-preview-bg: #000000;
+  --markdown-code-block-bg: #2a303b;
+  --markdown-html-light-text: #111827;
+  --markdown-html-light-link: #075985;
+  --markdown-html-light-code: #a40e26;
+  --markdown-html-light-code-bg: #fff1d6;
+  --markdown-html-light-code-border: #d8a657;
+  --markdown-html-dark-bg: #4a3b0a;
+  --markdown-html-dark-border: #4a3b0a;
+  --markdown-html-dark-text: #e4e8ee;
+  --markdown-html-dark-link: #7ee9ff;
+  --markdown-html-dark-code: #ffe08a;
+  --markdown-html-dark-code-bg: rgba(245, 197, 66, 0.14);
+  --markdown-html-dark-code-border: rgba(245, 197, 66, 0.24);
   --lt-code-block-bg: #f3f4f6;
   --lt-code-block-border: #e4e7ec;
   --lt-code-block-text: #1f2328;
@@ -10950,6 +10964,10 @@ body.editor-theme-light .file-editor-image {
   line-height: 1.35;
 }
 .file-editor-preview-pane[hidden] { display: none; }
+body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane.markdown-body,
+body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-panel.markdown-body {
+  background: var(--markdown-preview-bg);
+}
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
   margin: 10px 0 5px;
   font-weight: 600;
@@ -10976,7 +10994,7 @@ body.editor-theme-light .file-editor-image {
   font-family: var(--mono-font);
   font-size: 0.9em;
 }
-.markdown-body pre { background: #0b0e14; border: 1px solid var(--line); border-radius: var(--radius-control); padding: 6px 8px; overflow: auto; margin: 6px 0; }
+.markdown-body pre { background: var(--markdown-code-block-bg); border: 1px solid var(--line); border-radius: var(--radius-control); padding: 6px 8px; overflow: auto; margin: 6px 0; }
 /* Light mode: the near-black code block is a dark box on the light app
    chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
    transcript summary) — the file-editor preview's `pre` is handled separately under
@@ -11180,6 +11198,71 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .markdown-body table { border-collapse: collapse; margin: 8px 0; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
 .markdown-body th { background: var(--panel2); }
+.markdown-body .markdown-html-light-bg,
+.markdown-body table.markdown-html-light-bg :is(th, td),
+.markdown-body table[bgcolor],
+.markdown-body table[bgcolor] :is(th, td),
+.markdown-body :is(th, td)[bgcolor] {
+  --markdown-heading: var(--markdown-html-light-text);
+  --markdown-strong: var(--markdown-html-light-text);
+  --markdown-emphasis: var(--markdown-html-light-text);
+  --markdown-link: var(--markdown-html-light-link);
+  --code-inline: var(--markdown-html-light-code);
+  --code-inline-bg: var(--markdown-html-light-code-bg);
+  --code-inline-border: var(--markdown-html-light-code-border);
+  color: var(--markdown-html-light-text) !important;
+  border-color: transparent;
+}
+.markdown-body :is(th, td).markdown-html-light-bg,
+.markdown-body table.markdown-html-light-bg :is(th, td),
+.markdown-body table[bgcolor] :is(th, td),
+.markdown-body :is(th, td)[bgcolor] {
+  padding: 10px;
+}
+.markdown-body .markdown-html-light-bg :is(strong, em),
+.markdown-body table.markdown-html-light-bg :is(strong, em),
+.markdown-body table[bgcolor] :is(strong, em),
+.markdown-body :is(th, td)[bgcolor] :is(strong, em) {
+  color: var(--markdown-html-light-text);
+}
+.markdown-body .markdown-html-light-bg code,
+.markdown-body table.markdown-html-light-bg code,
+.markdown-body table[bgcolor] code,
+.markdown-body :is(th, td)[bgcolor] code {
+  color: var(--markdown-html-light-code);
+  background: var(--markdown-html-light-code-bg);
+  border-color: var(--markdown-html-light-code-border);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg,
+body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(th, td),
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor],
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] :is(th, td),
+body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] {
+  --markdown-heading: var(--markdown-html-dark-text);
+  --markdown-strong: var(--markdown-html-dark-text);
+  --markdown-emphasis: var(--markdown-html-dark-text);
+  --markdown-link: var(--markdown-html-dark-link);
+  --code-inline: var(--markdown-html-dark-code);
+  --code-inline-bg: var(--markdown-html-dark-code-bg);
+  --code-inline-border: var(--markdown-html-dark-code-border);
+  color: var(--markdown-html-dark-text) !important;
+  background: var(--markdown-html-dark-bg) !important;
+  border-color: var(--markdown-html-dark-border);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg :is(strong, em),
+body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(strong, em),
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] :is(strong, em),
+body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
+  color: var(--markdown-html-dark-text);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg code,
+body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg code,
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] code,
+body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] code {
+  color: var(--markdown-html-dark-code);
+  background: var(--markdown-html-dark-code-bg);
+  border-color: var(--markdown-html-dark-code-border);
+}
 .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {

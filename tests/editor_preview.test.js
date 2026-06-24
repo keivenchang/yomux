@@ -106,6 +106,38 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('beta rollout finished'), 'run history summaries render');
   });
 
+  test('Markdown preview HTML bgcolor callouts adapt to editor theme', () => {
+    const previewCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
+    const markdownSource = fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8');
+    const popoutSource = fs.readFileSync('static_src/js/yolomux/94_preview_popout.js', 'utf8');
+    for (const source of [previewCss, popoutSource]) {
+      assert.ok(source.includes('.markdown-html-light-bg'), 'light bgcolor callouts get scoped preview styling');
+      assert.ok(source.includes('table[bgcolor]'), 'legacy bgcolor tables are styled even when existing preview DOM has no renderer-added class');
+      assert.ok(source.includes('--markdown-strong: var(--markdown-html-light-text)'), 'light callouts force dark bold text instead of dark-theme text');
+      assert.ok(source.includes('--code-inline: var(--markdown-html-light-code)'), 'yellow callouts reuse stable light inline-code ink');
+      assert.ok(source.includes('border-color: transparent'), 'yellow borderless callouts do not inherit the dark table grid');
+      assert.ok(source.includes('--markdown-html-dark-bg'), 'dark editor preview turns light bgcolor callouts into a dark highlight');
+      assert.ok(source.includes('--markdown-html-dark-text'), 'dark bgcolor callout override keeps text readable on the dark highlight');
+    }
+    assert.ok(markdownSource.includes("const MARKDOWN_HTML_LIGHT_BG_CLASS = 'markdown-html-light-bg'"), 'renderer owns the shared light-bg class name');
+    assert.ok(markdownSource.includes("root.querySelectorAll('table[bgcolor], th[bgcolor], td[bgcolor]')"), 'renderer inspects legacy HTML bgcolor tables and cells');
+    assert.ok(/markdownPreviewBgcolorIsLight\(value\)[\s\S]*>= 0\.58/.test(markdownSource), 'renderer only marks light bgcolor surfaces');
+  });
+
+  test('Markdown preview code blocks use grayer dark background while light mode keeps light panels', () => {
+    const tokensCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    const previewCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
+    const popoutSource = fs.readFileSync('static_src/js/yolomux/94_preview_popout.js', 'utf8');
+    assert.ok(tokensCss.includes('--markdown-preview-bg: #000000;'), 'dark Markdown Preview surface is pitch black');
+    assert.ok(tokensCss.includes('--markdown-code-block-bg: #2a303b;'), 'dark code-block background uses a visibly lighter neutral block surface');
+    assert.ok(/body:not\(\.editor-theme-light\) \.file-editor-content \.file-editor-preview-pane\.markdown-body,[\s\S]*\.file-editor-preview-pane-panel\.markdown-body\s*\{[\s\S]*background:\s*var\(--markdown-preview-bg\);/.test(previewCss), 'dark file-editor Markdown Preview panes use the pitch-black preview token');
+    assert.ok(previewCss.includes('.markdown-body pre { background: var(--markdown-code-block-bg);'), 'Markdown Preview code blocks use the shared dark background token');
+    assert.ok(/body\.editor-theme-light \.file-editor-content \.markdown-body pre\s*\{[\s\S]*background:\s*var\(--lt-panel\);/.test(previewCss), 'light editor preview keeps the existing light code-block background');
+    assert.ok(popoutSource.includes('.file-preview-popout-window:not(.editor-theme-light) .markdown-body'), 'dark preview pop-outs use the same Markdown surface override');
+    assert.ok(popoutSource.includes("'--markdown-preview-bg', '--markdown-code-block-bg'"), 'preview pop-outs copy Markdown preview surface tokens');
+    assert.ok(popoutSource.includes("'--markdown-html-dark-bg', '--markdown-html-dark-border', '--markdown-html-dark-text'"), 'preview pop-outs copy dark callout tokens');
+  });
+
   test('Finder/Differ/Tabber recency brightness and pulse apply in Ago and Date modes', () => {
     const api = loadYolomux('', ['1']);
     const nowMs = 2_000_000;

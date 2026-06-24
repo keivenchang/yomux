@@ -1083,6 +1083,7 @@ def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
     }
     monkeypatch.setattr(app_module, "AutoApproveWorker", FakeAutoApproveWorker)
     monkeypatch.setattr(app_module, "tmux_has_exact_session", lambda session: session == "6")
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: signal_payload)
     monkeypatch.setattr(webapp, "prompt_and_screen_status", lambda *args, **kwargs: (app_module.normalized_prompt_state(), {"key": "idle", "text": ""}))

@@ -34161,6 +34161,55 @@ function sanitizeMarkdownPreviewHtml(html) {
   return template.content;
 }
 
+const MARKDOWN_HTML_LIGHT_BG_CLASS = 'markdown-html-light-bg';
+const MARKDOWN_PREVIEW_NAMED_BGCOLORS = {
+  white: [255, 255, 255],
+  yellow: [255, 255, 0],
+  lightyellow: [255, 255, 224],
+  lemonchiffon: [255, 250, 205],
+  cornsilk: [255, 248, 220],
+  ivory: [255, 255, 240],
+  beige: [245, 245, 220],
+};
+
+function markdownPreviewBgcolorRgb(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (MARKDOWN_PREVIEW_NAMED_BGCOLORS[raw]) return MARKDOWN_PREVIEW_NAMED_BGCOLORS[raw];
+  const match = raw.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) return null;
+  const hex = match[1];
+  if (hex.length === 3) {
+    return Array.from(hex, digit => parseInt(`${digit}${digit}`, 16));
+  }
+  return [
+    parseInt(hex.slice(0, 2), 16),
+    parseInt(hex.slice(2, 4), 16),
+    parseInt(hex.slice(4, 6), 16),
+  ];
+}
+
+function markdownPreviewLinearColorChannel(channel) {
+  const value = Number(channel) / 255;
+  return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function markdownPreviewBgcolorIsLight(value) {
+  const rgb = markdownPreviewBgcolorRgb(value);
+  if (!rgb) return false;
+  const [red, green, blue] = rgb.map(markdownPreviewLinearColorChannel);
+  return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue) >= 0.58;
+}
+
+function applyMarkdownHtmlBackgroundClasses(root) {
+  if (!root?.querySelectorAll) return;
+  root.querySelectorAll('table[bgcolor], th[bgcolor], td[bgcolor]').forEach(element => {
+    if (markdownPreviewBgcolorIsLight(element.getAttribute('bgcolor'))) {
+      element.classList.add(MARKDOWN_HTML_LIGHT_BG_CLASS);
+    }
+  });
+}
+
 // turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
 // marked's GFM autolink missing them (e.g. when per-line source anchors are interleaved). Skips text
 // already inside <a>/<code>/<pre> so existing links and code samples are untouched. Reuses
@@ -34705,6 +34754,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
+  applyMarkdownHtmlBackgroundClasses(frag);
   linkifyBareUrls(frag);
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
@@ -36275,6 +36325,10 @@ function previewPopoutVariableStyle() {
     '--lt-panel', '--lt-panel2', '--lt-markdown-heading', '--lt-markdown-heading-bg',
     '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
     '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
+    '--markdown-preview-bg', '--markdown-code-block-bg',
+    '--markdown-html-dark-bg', '--markdown-html-dark-border', '--markdown-html-dark-text',
+    '--markdown-html-dark-link', '--markdown-html-dark-code',
+    '--markdown-html-dark-code-bg', '--markdown-html-dark-code-border',
     '--markdown-heading', '--markdown-heading-bg', '--markdown-link', '--markdown-strong',
     '--markdown-emphasis', '--code-inline', '--code-inline-bg', '--code-inline-border',
     '--code-keyword', '--code-control', '--code-atom', '--code-string', '--code-number', '--code-variable',
@@ -36509,6 +36563,84 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     .file-preview-popout-window .markdown-body {
       color: var(--text, #111827);
       background: transparent;
+    }
+    .file-preview-popout-window:not(.editor-theme-light) {
+      background: var(--markdown-preview-bg, #000000);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .file-preview-popout-title {
+      background: var(--markdown-preview-bg, #000000);
+      box-shadow: 0 1px 0 var(--markdown-preview-bg, #000000);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body {
+      background: var(--markdown-preview-bg, #000000);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body pre {
+      background: var(--markdown-code-block-bg);
+    }
+    .file-preview-popout-window .markdown-body .markdown-html-light-bg,
+    .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(th, td),
+    .file-preview-popout-window .markdown-body table[bgcolor],
+    .file-preview-popout-window .markdown-body table[bgcolor] :is(th, td),
+    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] {
+      --markdown-heading: var(--markdown-html-light-text);
+      --markdown-strong: var(--markdown-html-light-text);
+      --markdown-emphasis: var(--markdown-html-light-text);
+      --markdown-link: var(--markdown-html-light-link);
+      --code-inline: var(--markdown-html-light-code);
+      --code-inline-bg: var(--markdown-html-light-code-bg);
+      --code-inline-border: var(--markdown-html-light-code-border);
+      color: var(--markdown-html-light-text) !important;
+      border-color: transparent;
+    }
+    .file-preview-popout-window .markdown-body :is(th, td).markdown-html-light-bg,
+    .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(th, td),
+    .file-preview-popout-window .markdown-body table[bgcolor] :is(th, td),
+    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] {
+      padding: 10px;
+    }
+    .file-preview-popout-window .markdown-body .markdown-html-light-bg :is(strong, em),
+    .file-preview-popout-window .markdown-body table.markdown-html-light-bg :is(strong, em),
+    .file-preview-popout-window .markdown-body table[bgcolor] :is(strong, em),
+    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
+      color: var(--markdown-html-light-text);
+    }
+    .file-preview-popout-window .markdown-body .markdown-html-light-bg code,
+    .file-preview-popout-window .markdown-body table.markdown-html-light-bg code,
+    .file-preview-popout-window .markdown-body table[bgcolor] code,
+    .file-preview-popout-window .markdown-body :is(th, td)[bgcolor] code {
+      color: var(--markdown-html-light-code);
+      background: var(--markdown-html-light-code-bg);
+      border-color: var(--markdown-html-light-code-border);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body .markdown-html-light-bg,
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table.markdown-html-light-bg :is(th, td),
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor],
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor] :is(th, td),
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body :is(th, td)[bgcolor] {
+      --markdown-heading: var(--markdown-html-dark-text);
+      --markdown-strong: var(--markdown-html-dark-text);
+      --markdown-emphasis: var(--markdown-html-dark-text);
+      --markdown-link: var(--markdown-html-dark-link);
+      --code-inline: var(--markdown-html-dark-code);
+      --code-inline-bg: var(--markdown-html-dark-code-bg);
+      --code-inline-border: var(--markdown-html-dark-code-border);
+      color: var(--markdown-html-dark-text) !important;
+      background: var(--markdown-html-dark-bg) !important;
+      border-color: var(--markdown-html-dark-border);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body .markdown-html-light-bg :is(strong, em),
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table.markdown-html-light-bg :is(strong, em),
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor] :is(strong, em),
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
+      color: var(--markdown-html-dark-text);
+    }
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body .markdown-html-light-bg code,
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table.markdown-html-light-bg code,
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body table[bgcolor] code,
+    .file-preview-popout-window:not(.editor-theme-light) .markdown-body :is(th, td)[bgcolor] code {
+      color: var(--markdown-html-dark-code);
+      background: var(--markdown-html-dark-code-bg);
+      border-color: var(--markdown-html-dark-code-border);
     }
     .file-preview-popout-window .markdown-body pre code.hljs {
       color: var(--editor-scheme-fg, inherit) !important;

@@ -160,6 +160,55 @@ function sanitizeMarkdownPreviewHtml(html) {
   return template.content;
 }
 
+const MARKDOWN_HTML_LIGHT_BG_CLASS = 'markdown-html-light-bg';
+const MARKDOWN_PREVIEW_NAMED_BGCOLORS = {
+  white: [255, 255, 255],
+  yellow: [255, 255, 0],
+  lightyellow: [255, 255, 224],
+  lemonchiffon: [255, 250, 205],
+  cornsilk: [255, 248, 220],
+  ivory: [255, 255, 240],
+  beige: [245, 245, 220],
+};
+
+function markdownPreviewBgcolorRgb(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (MARKDOWN_PREVIEW_NAMED_BGCOLORS[raw]) return MARKDOWN_PREVIEW_NAMED_BGCOLORS[raw];
+  const match = raw.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) return null;
+  const hex = match[1];
+  if (hex.length === 3) {
+    return Array.from(hex, digit => parseInt(`${digit}${digit}`, 16));
+  }
+  return [
+    parseInt(hex.slice(0, 2), 16),
+    parseInt(hex.slice(2, 4), 16),
+    parseInt(hex.slice(4, 6), 16),
+  ];
+}
+
+function markdownPreviewLinearColorChannel(channel) {
+  const value = Number(channel) / 255;
+  return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function markdownPreviewBgcolorIsLight(value) {
+  const rgb = markdownPreviewBgcolorRgb(value);
+  if (!rgb) return false;
+  const [red, green, blue] = rgb.map(markdownPreviewLinearColorChannel);
+  return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue) >= 0.58;
+}
+
+function applyMarkdownHtmlBackgroundClasses(root) {
+  if (!root?.querySelectorAll) return;
+  root.querySelectorAll('table[bgcolor], th[bgcolor], td[bgcolor]').forEach(element => {
+    if (markdownPreviewBgcolorIsLight(element.getAttribute('bgcolor'))) {
+      element.classList.add(MARKDOWN_HTML_LIGHT_BG_CLASS);
+    }
+  });
+}
+
 // turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
 // marked's GFM autolink missing them (e.g. when per-line source anchors are interleaved). Skips text
 // already inside <a>/<code>/<pre> so existing links and code samples are untouched. Reuses
@@ -704,6 +753,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
+  applyMarkdownHtmlBackgroundClasses(frag);
   linkifyBareUrls(frag);
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
