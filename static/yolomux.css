@@ -10963,7 +10963,7 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
   font-family: var(--mono-font);
   font-size: 0.9em;
 }
-.markdown-body pre { background: var(--markdown-code-block-bg); border: 1px solid var(--line); border-radius: var(--radius-control); padding: 6px 8px; overflow: auto; margin: 6px 0; }
+.markdown-body pre { background: var(--markdown-code-block-bg); border: 1px solid var(--line); border-radius: var(--radius-control); padding: 4px 8px; overflow: auto; margin: 4px 0; }
 /* Light mode: the near-black code block is a dark box on the light app
    chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
    transcript summary) — the file-editor preview's `pre` is handled separately under
@@ -10981,6 +10981,11 @@ body.theme-light .summary-preview pre {
 }
 .markdown-body pre code.hljs {
   color: var(--editor-scheme-fg, inherit) !important;
+  background: transparent !important;
+  border: 0;
+  display: inline;
+  overflow: visible;
+  padding: 0;
 }
 .markdown-body pre code .hljs-comment,
 .markdown-body pre code .hljs-quote {
@@ -11172,8 +11177,8 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   --code-inline: var(--markdown-html-light-code);
   --code-inline-bg: var(--markdown-html-light-code-bg);
   --code-inline-border: var(--markdown-html-light-code-border);
-  margin: 8px 0;
-  padding: 10px 12px;
+  margin: 6px 0;
+  padding: 8px 10px;
   color: var(--markdown-html-light-text);
   background: #fff8cc;
   border: 0;
@@ -11181,6 +11186,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
 .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
+.markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) { margin-block: 2px; }
 .markdown-body blockquote.markdown-alert :is(strong, em) { color: var(--markdown-html-light-text); }
 .markdown-body blockquote.markdown-alert code {
   color: var(--markdown-html-light-code);
@@ -11353,7 +11359,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   border-top-color: var(--lt-line);
 }
 .markdown-source-anchor {
-  display: inline-block;
+  display: none;
   width: 0;
   height: 0;
   overflow: hidden;

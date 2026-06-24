@@ -398,6 +398,12 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       color: var(--text, #111827);
       background: transparent;
     }
+    .file-preview-popout-window .markdown-source-anchor {
+      display: none;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+    }
     .file-preview-popout-window:not(.editor-theme-light) {
       background: var(--markdown-preview-bg, #000000);
     }
@@ -419,8 +425,8 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       --code-inline: var(--markdown-html-light-code);
       --code-inline-bg: var(--markdown-html-light-code-bg);
       --code-inline-border: var(--markdown-html-light-code-border);
-      margin: 8px 0;
-      padding: 10px 12px;
+      margin: 6px 0;
+      padding: 8px 10px;
       color: var(--markdown-html-light-text);
       background: #fff8cc;
       border: 0;
@@ -428,6 +434,9 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     }
     .file-preview-popout-window .markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
     .file-preview-popout-window .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
+    .file-preview-popout-window .markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) {
+      margin-block: 2px;
+    }
     .file-preview-popout-window .markdown-body blockquote.markdown-alert :is(strong, em) {
       color: var(--markdown-html-light-text);
     }
@@ -530,6 +539,11 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     }
     .file-preview-popout-window .markdown-body pre code.hljs {
       color: var(--editor-scheme-fg, inherit) !important;
+      background: transparent !important;
+      border: 0;
+      display: inline;
+      overflow: visible;
+      padding: 0;
     }
     .file-preview-popout-window .markdown-body pre code .hljs-comment,
     .file-preview-popout-window .markdown-body pre code .hljs-quote {

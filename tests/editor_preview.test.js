@@ -119,10 +119,14 @@ async function runEditorPreviewSuite() {
       assert.ok(source.includes('--markdown-html-dark-bg'), 'dark editor preview turns light bgcolor callouts into a dark highlight');
       assert.ok(source.includes('--markdown-html-dark-text'), 'dark bgcolor callout override keeps text readable on the dark highlight');
       assert.ok(source.includes('blockquote.markdown-alert-warning'), 'Markdown warning blockquotes use the same preview warning styling');
+      assert.ok(/pre code\.hljs[\s\S]*padding:\s*0;/.test(source), 'highlight.js code blocks keep compact preview padding even when the CDN stylesheet loads later');
+      assert.ok(/\.markdown-source-anchor\s*\{[\s\S]*display:\s*none;/.test(source), 'source-line anchors do not create blank line boxes inside alerts');
     }
     assert.ok(markdownSource.includes("const MARKDOWN_HTML_LIGHT_BG_CLASS = 'markdown-html-light-bg'"), 'renderer owns the shared light-bg class name');
     assert.ok(markdownSource.includes('MARKDOWN_ALERT_MARKER_RE'), 'renderer recognizes Markdown alert markers like [!WARNING]');
     assert.ok(markdownSource.includes("blockquote.classList.add('markdown-alert', `markdown-alert-${type}`)"), 'renderer classes Markdown alert blockquotes by alert type');
+    assert.ok(markdownSource.includes('trimMarkdownCodeBlockEdgeNewlines(frag)'), 'renderer trims edge newlines from preview code blocks before highlighting');
+    assert.ok(markdownSource.includes('removeMarkdownAlertLeadingBreaks(parent)'), 'renderer removes marker-only alert line breaks so callouts do not start with a blank row');
     assert.ok(markdownSource.includes("root.querySelectorAll('table[bgcolor], th[bgcolor], td[bgcolor]')"), 'renderer inspects legacy HTML bgcolor tables and cells');
     assert.ok(/markdownPreviewBgcolorIsLight\(value\)[\s\S]*>= 0\.58/.test(markdownSource), 'renderer only marks light bgcolor surfaces');
   });

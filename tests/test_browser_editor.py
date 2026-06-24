@@ -2533,6 +2533,10 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
         """
         document.body.classList.remove('theme-light', 'editor-theme-light');
         document.body.classList.add('theme-dark', 'editor-theme-dark');
+        const highlightCss = document.createElement('style');
+        highlightCss.textContent = 'pre code.hljs { display: block; overflow-x: auto; padding: 1em; }';
+        document.head.append(highlightCss);
+        window.hljs = {highlightElement(block) { block.classList.add('hljs'); }};
         window.marked = {
           parse() {
             return `
@@ -2544,7 +2548,23 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
               <blockquote id="md-caution">
                 <p>[!CAUTION] Do not skip.</p>
                 <p><strong id="md-caution-strong">IMPORTANT NOTE:</strong> read <code id="md-caution-code">OSS and OSRB</code> before continuing.</p>
+                <pre><code id="md-caution-block-code">
+oss scan
+</code></pre>
               </blockquote>
+              <blockquote id="md-caution-break">
+                <p>[!CAUTION]<br><strong id="md-caution-break-strong">Familiarity with Docker is absolutely necessary.</strong></p>
+              </blockquote>
+              <blockquote id="md-caution-list">
+                <p>[!CAUTION]<br><strong id="md-caution-list-strong">Familiarity with Docker is absolutely necessary.</strong> At minimum, understand Docker basics.</p>
+                <ul id="md-caution-list-items">
+                  <li>Docker images are static snapshots.</li>
+                  <li>Runtime containers are live instances.</li>
+                </ul>
+              </blockquote>
+              <pre id="edge-pre"><code id="edge-code">
+python -V
+</code></pre>
               <blockquote id="md-caution-direct">
                 [!CAUTION]<br>
                 <strong id="md-caution-direct-strong">IMPORTANT NOTE:</strong> protect the GPU.
@@ -2574,7 +2594,24 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
         document.querySelector('#grid').replaceChildren(container);
         renderEditorPreviewPane(preview, path, content, {context: 'preview'});
         document.querySelectorAll('.markdown-html-light-bg').forEach(element => element.classList.remove('markdown-html-light-bg'));
+        const alertSourceAnchor = document.createElement('span');
+        alertSourceAnchor.className = 'markdown-source-anchor';
+        alertSourceAnchor.dataset.sourceLine = '1';
+        document.querySelector('#md-caution-list').append(alertSourceAnchor);
         const style = selector => getComputedStyle(document.querySelector(selector));
+        const firstVisibleNode = selector => {
+          const element = document.querySelector(selector);
+          for (const node of element.childNodes) {
+            if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim()) return '#text';
+            if (node.nodeType === Node.ELEMENT_NODE && !node.classList.contains('markdown-source-anchor')) return node.tagName;
+          }
+          return '';
+        };
+        const tailGap = (containerSelector, lastSelector) => {
+          const containerRect = document.querySelector(containerSelector).getBoundingClientRect();
+          const lastRect = document.querySelector(lastSelector).getBoundingClientRect();
+          return Math.round(containerRect.bottom - lastRect.bottom);
+        };
         const calloutStyle = style('#callout');
         const calloutCellStyle = style('#callout-cell');
         const calloutCodeStyle = style('#callout-code');
@@ -2582,6 +2619,7 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
         const mdWarningCodeStyle = style('#md-warning-code');
         const mdCautionStyle = style('#md-caution');
         const mdCautionCodeStyle = style('#md-caution-code');
+        const mdCautionBreakStyle = style('#md-caution-break');
         const mdCautionDirectStyle = style('#md-caution-direct');
         return {
           lightClass: document.querySelector('#callout').classList.contains('markdown-html-light-bg'),
@@ -2601,10 +2639,25 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
           mdCautionStrongColor: style('#md-caution-strong').color,
           mdCautionCodeColor: mdCautionCodeStyle.color,
           mdCautionCodeBg: mdCautionCodeStyle.backgroundColor,
+          mdCautionBlockCodeText: document.querySelector('#md-caution-block-code').textContent,
+          mdCautionBreakClass: document.querySelector('#md-caution-break').classList.contains('markdown-alert-caution'),
+          mdCautionBreakText: document.querySelector('#md-caution-break').textContent,
+          mdCautionBreakBg: mdCautionBreakStyle.backgroundColor,
+          mdCautionBreakFirstVisibleNode: firstVisibleNode('#md-caution-break > p'),
+          mdCautionListClass: document.querySelector('#md-caution-list').classList.contains('markdown-alert-caution'),
+          mdCautionListText: document.querySelector('#md-caution-list').textContent,
+          mdCautionListFirstVisibleNode: firstVisibleNode('#md-caution-list > p'),
+          mdCautionListTailGap: tailGap('#md-caution-list', '#md-caution-list-items'),
+          alertSourceAnchorDisplay: style('#md-caution-list > .markdown-source-anchor').display,
+          edgeCodeText: document.querySelector('#edge-code').textContent,
+          edgeCodePaddingTop: style('#edge-code').paddingTop,
+          edgeCodeDisplay: style('#edge-code').display,
+          edgePreTailGap: tailGap('#edge-pre', '#edge-code'),
           mdCautionDirectClass: document.querySelector('#md-caution-direct').classList.contains('markdown-alert-caution'),
           mdCautionDirectText: document.querySelector('#md-caution-direct').textContent,
           mdCautionDirectBg: mdCautionDirectStyle.backgroundColor,
           mdCautionDirectStrongColor: style('#md-caution-direct-strong').color,
+          mdCautionDirectFirstVisibleNode: firstVisibleNode('#md-caution-direct'),
           previewBg: style('#preview').backgroundColor,
           previewColor: style('#preview').color,
           normalColor: style('#normal-cell').color,
@@ -2642,10 +2695,25 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
     assert metrics["mdCautionStrongColor"] == "rgb(228, 232, 238)", metrics
     assert metrics["mdCautionCodeColor"] == "rgb(255, 224, 138)", metrics
     assert metrics["mdCautionCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
+    assert metrics["mdCautionBlockCodeText"] == "oss scan", metrics
+    assert metrics["mdCautionBreakClass"] is True, metrics
+    assert "[!CAUTION]" not in metrics["mdCautionBreakText"], metrics
+    assert metrics["mdCautionBreakBg"] == "rgb(111, 38, 50)", metrics
+    assert metrics["mdCautionBreakFirstVisibleNode"] == "STRONG", metrics
+    assert metrics["mdCautionListClass"] is True, metrics
+    assert "[!CAUTION]" not in metrics["mdCautionListText"], metrics
+    assert metrics["mdCautionListFirstVisibleNode"] == "STRONG", metrics
+    assert metrics["mdCautionListTailGap"] <= 12, metrics
+    assert metrics["alertSourceAnchorDisplay"] == "none", metrics
+    assert metrics["edgeCodeText"] == "python -V", metrics
+    assert metrics["edgeCodePaddingTop"] == "0px", metrics
+    assert metrics["edgeCodeDisplay"] == "inline", metrics
+    assert metrics["edgePreTailGap"] <= 8, metrics
     assert metrics["mdCautionDirectClass"] is True, metrics
     assert "[!CAUTION]" not in metrics["mdCautionDirectText"], metrics
     assert metrics["mdCautionDirectBg"] == "rgb(111, 38, 50)", metrics
     assert metrics["mdCautionDirectStrongColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["mdCautionDirectFirstVisibleNode"] == "STRONG", metrics
     assert metrics["calloutBg"] == "rgb(111, 90, 12)", metrics
     assert metrics["calloutCellBg"] == "rgb(111, 90, 12)", metrics
     assert metrics["calloutColor"] == "rgb(228, 232, 238)", metrics

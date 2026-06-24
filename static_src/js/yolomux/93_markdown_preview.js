@@ -210,15 +210,50 @@ function applyMarkdownHtmlBackgroundClasses(root) {
   });
 }
 
+function trimMarkdownCodeBlockEdgeNewlines(root) {
+  if (!root?.querySelectorAll) return;
+  root.querySelectorAll('pre > code').forEach(block => {
+    const text = String(block.textContent || '');
+    const trimmed = text.replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, '');
+    if (trimmed !== text) block.textContent = trimmed;
+  });
+}
+
 const MARKDOWN_ALERT_MARKER_RE = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+
+function markdownAlertSpacingNodeIsInvisible(node) {
+  if (!node) return false;
+  if (node.nodeType === 3) return !String(node.nodeValue || '').trim();
+  if (node.nodeType === 1) return node.classList?.contains?.('markdown-source-anchor');
+  return false;
+}
+
+function markdownAlertHasVisiblePreviousSibling(node) {
+  for (let sibling = node?.previousSibling; sibling; sibling = sibling.previousSibling) {
+    if (!markdownAlertSpacingNodeIsInvisible(sibling)) return true;
+  }
+  return false;
+}
+
+function removeMarkdownAlertLeadingBreaks(container) {
+  for (let child = container?.firstChild; child;) {
+    const isLeadingBreak = child.nodeType === 1 && child.tagName === 'BR';
+    if (!isLeadingBreak && !markdownAlertSpacingNodeIsInvisible(child)) break;
+    const next = child.nextSibling;
+    child.remove();
+    child = next;
+  }
+}
 
 function removeMarkdownAlertMarker(root) {
   const showText = globalThis.NodeFilter?.SHOW_TEXT || 4;
   const walker = document.createTreeWalker(root, showText);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (!MARKDOWN_ALERT_MARKER_RE.test(node.nodeValue || '')) continue;
+    const hadVisibleBefore = markdownAlertHasVisiblePreviousSibling(node);
     node.nodeValue = String(node.nodeValue || '').replace(MARKDOWN_ALERT_MARKER_RE, '');
     const parent = node.parentElement;
+    if (parent && !hadVisibleBefore) removeMarkdownAlertLeadingBreaks(parent);
     if (parent?.matches?.('p') && !String(parent.textContent || '').trim() && parent.children.length === 0) {
       parent.remove();
     }
@@ -802,6 +837,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
+  trimMarkdownCodeBlockEdgeNewlines(frag);
   applyMarkdownHtmlBackgroundClasses(frag);
   applyMarkdownAlertClasses(frag);
   linkifyBareUrls(frag);
