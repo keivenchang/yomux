@@ -606,6 +606,10 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         const code = makePanel('/home/test/repo/app.py', {kind: 'text', mtime: 16, size: 64, content: 'print("hello")\\n', original: 'print("hello")\\n', dirty: false, language: 'python'});
         const text = makePanel('/home/test/repo/notes.txt', {kind: 'text', mtime: 17, size: 24, content: 'plain notes\\n', original: 'plain notes\\n', dirty: false, language: 'text'});
         const unsupported = makePanel('/home/test/repo/archive.bin', {kind: 'too-large', size: 999999, maxBytes: 1024, error: 'binary preview blocked'});
+        const initialPngSrc = png.panel.querySelector('.file-editor-image-panel img.file-editor-image')?.getAttribute('src') || '';
+        setFileState('/home/test/repo/assets/photo.png', {kind: 'image', mtime: 11, mtime_ns: 11000000001, size: 1234, content: '', original: '', dirty: false});
+        renderFileEditorPanel(png.panel, png.item);
+        const refreshedPngImage = png.panel.querySelector('.file-editor-image-panel img.file-editor-image');
         const imageInfo = ({panel}) => {
           const img = panel.querySelector('.file-editor-image-panel img.file-editor-image');
           return {
@@ -678,6 +682,11 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
             text: unsupported.panel.textContent || '',
             modeControlHidden: unsupported.panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
           },
+          pngRefresh: {
+            before: initialPngSrc,
+            after: refreshedPngImage?.getAttribute('src') || '',
+            version: png.panel.querySelector('.file-editor-image-panel')?.dataset.imageVersion || '',
+          },
           errors: window.__bootErrors,
           rejections: window.__bootRejections,
         };
@@ -696,6 +705,9 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         assert metrics[key]["zoomWheel"] == "1", metrics
         assert metrics[key]["zoomPan"] == "1", metrics
     assert "photo.png" in metrics["png"]["src"], metrics
+    assert metrics["pngRefresh"]["before"].endswith("&v=11"), metrics
+    assert metrics["pngRefresh"]["after"].endswith("&v=11000000001"), metrics
+    assert metrics["pngRefresh"]["version"] == "11000000001", metrics
     assert "animation.apng" in metrics["apng"]["src"], metrics
     assert "photo.jpg" in metrics["jpg"]["src"], metrics
     assert "spinner.gif" in metrics["gif"]["src"], metrics

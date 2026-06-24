@@ -428,6 +428,8 @@ async function runEditorPreviewSuite() {
     assert.equal(api.editorWrapValue(false), 'off');
     assert.equal(api.editorWrapValue(true), 'soft');
     assert.equal(api.rawFileUrl('/repo/app/a b.txt', {v: 7}), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&v=7');
+    assert.equal(api.rawFileUrl('/repo/app/image.png', {v: api.fileEditorImageVersionForTest({mtime: 7, mtime_ns: 7000000001, size: 1234})}), '/api/fs/raw?path=%2Frepo%2Fapp%2Fimage.png&v=7000000001');
+    assert.equal(api.fileEditorImageVersionForTest({mtime: 7, size: 1234}), '7');
     assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
     assert.deepStrictEqual({...api.markdownPreviewImageTarget('.uploads/pasted image.png', '/repo/docs/note.md')}, {
       src: '/api/fs/raw?path=%2Frepo%2Fdocs%2F.uploads%2Fpasted%20image.png',

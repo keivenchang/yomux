@@ -576,6 +576,7 @@ globalThis.__layoutTestApi = {
   normalizeFileEditorSaveContentForTest: normalizeFileEditorSaveContent,
   fileEditorTextMetricsForTest: fileEditorTextMetrics,
   fileEditorCountStatusTextForTest: fileEditorCountStatusText,
+  fileEditorImageVersionForTest: fileEditorImageVersion,
   updateCodeMirrorCursorStatusForTest: updateCodeMirrorCursorStatus,
   codeMirrorSearchMatches,
   codeMirrorSearchMatchSummary,

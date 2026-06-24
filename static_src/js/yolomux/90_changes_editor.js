@@ -3120,9 +3120,13 @@ function disconnectFileEditorImageObserver(imagePane) {
   if (typeof disconnectPreviewZoomSurface === 'function') disconnectPreviewZoomSurface(imagePane, {resetClasses: true});
 }
 
+function fileEditorImageVersion(state) {
+  return String(state?.mtime_ns || state?.mtime || state?.size || 0);
+}
+
 function renderFileEditorImagePane(imagePane, path, state, status) {
   if (!imagePane) return;
-  const version = String(state.mtime || state.size || 0);
+  const version = fileEditorImageVersion(state);
   const sameImage = imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version;
   const zoomOptions = previewZoomOptionsForKind('imagePane', {path});
   let img = sameImage ? imagePane.querySelector('img.file-editor-image') : null;
