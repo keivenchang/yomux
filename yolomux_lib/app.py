@@ -33,6 +33,7 @@ from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
 from . import common
+from . import file_index
 from . import filesystem
 from . import session_files
 from . import yolo_rules
@@ -51,10 +52,17 @@ from .activity_summary import yoagent_question_requests_work_next
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
+from .background_owner import BACKGROUND_ROLE_SEARCH_INDEX
+from .background_owner import BACKGROUND_ROLE_SESSION_FILES
+from .background_owner import BACKGROUND_ROLE_TABBER_ACTIVITY
+from .background_owner import BACKGROUND_ROLE_WATCH_ROOTS
+from .background_owner import BackgroundOwnerRegistry
+from .background_owner import DisabledBackgroundOwner
 from .atomic_file import atomic_write_text
 from .atomic_file import file_lock
 from .cache import MISS as CACHE_MISS
 from .cache import TtlCache
+from .client_events import CLIENT_EVENT_TYPES
 from .client_events import ClientEventBroker
 from .activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
@@ -208,9 +216,11 @@ METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
 SESSION_FILES_CACHE_MAX_ITEMS = 64
-SESSION_FILES_CACHE_SECONDS = 5.0
+SESSION_FILES_CACHE_SECONDS = 30.0
 SESSION_FILES_CACHE_VERSION = 1
 SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
+TABBER_ACTIVITY_CACHE_VERSION = 1
+TABBER_ACTIVITY_CACHE_DIR = common.STATE_DIR / "activity-cache"
 SESSION_FILES_BATCH_MAX_WORKERS = 8
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
@@ -224,8 +234,8 @@ SHARE_DEBUG_PROFILE_EVENT_LIMIT = 100
 SHARE_DEBUG_PROFILE_LOG_DIR = Path(os.environ.get("YOLOMUX_SHARE_DEBUG_DIR", "/tmp/yolomux-share-debug"))
 SHARE_DEBUG_PROFILE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|bearer)", re.I)
 SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
-SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
-SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = 1.009
+SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 10.0
+SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = 10.0
 TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
 TMUX_SIGNAL_ACTIVITY_WINDOW_SECONDS = 120.0
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
@@ -233,6 +243,32 @@ SERVER_ACTIVITY_HEARTBEAT_ROTATE_SECONDS = 3600.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
 CLIENT_WATCH_ROOT_LIMIT = 128
 CLIENT_WATCH_FILE_LIMIT = 128
+BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
+BACKGROUND_CLIENT_EVENT_TYPES = frozenset({"background_owner_changed", "background_refresh_done"})
+BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
+BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS = 0.2
+CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
+    "activity_age_seconds",
+    "activity_ts",
+    "compute_ms",
+    "display_elapsed_seconds",
+    "generated_at",
+    "history_bytes",
+    "history_size",
+    "last_counter_seen_at",
+    "observed_ts",
+    "screen_text",
+    "session_activity_ts",
+    "session_last_attached_ts",
+    "status_counter_advanced",
+    "status_elapsed_seconds",
+    "status_identity",
+    "status_line",
+    "status_marker",
+    "status_tokens",
+    "title",
+    "working_elapsed_seconds",
+})
 DIRECTORY_WATCH_ENTRY_LIMIT = 512
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
@@ -726,10 +762,10 @@ class TmuxWebtermApp:
         self.session_files_refreshing_cache_keys: set[tuple[Any, ...]] = set()
         self.tabber_activity_cache_lock = threading.RLock()
         self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = None
+        self.tabber_activity_cache_source_signature = ""
         self.tabber_activity_cache_refreshing = False
         self.tabber_activity_cache_warmer_thread: threading.Thread | None = None
         self.tabber_activity_cache_warmer_running = False
-        self.warm_start_session_files_payload_cache()
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
         self.tmux_signal_event_watcher: TmuxSignalEventWatcher | None = None
         self.tmux_snapshot_history_lock = threading.RLock()
@@ -769,6 +805,7 @@ class TmuxWebtermApp:
         self.client_watch_thread: threading.Thread | None = None
         self.client_watch_running = False
         self.client_watch_wake_event = threading.Event()
+        self.client_watch_stop_event = threading.Event()
         self.client_event_next_signature_poll_at = 0.0
         self.client_event_next_file_poll_at = 0.0
         self.client_event_next_background_file_poll_at = 0.0
@@ -821,6 +858,11 @@ class TmuxWebtermApp:
         self.run_history_store = RunHistoryStore(RUN_HISTORY_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
         self.control_server.start()
+        self.background_owner: BackgroundOwnerRegistry | DisabledBackgroundOwner = DisabledBackgroundOwner()
+        file_index.set_background_owner_checker(self.background_can_run)
+        file_index.set_background_owner_refresh_requester(self.request_background_refresh)
+        file_index.set_background_owner_bytes_recorder(self.record_background_search_index_bytes_written)
+        file_index.set_background_owner_done_notifier(self.publish_background_refresh_done)
 
     def require_known_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus] | None:
         # The standard "unknown session -> 404" guard. Decorated handlers use requires_known_session();
@@ -828,6 +870,90 @@ class TmuxWebtermApp:
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         return None
+
+    def start_background_owner(self, port: int | None = None) -> bool:
+        self.background_owner = BackgroundOwnerRegistry(
+            control_socket=str(self.control_server.path),
+            port=port,
+            project_root=str(PROJECT_ROOT),
+            on_demote=self.demote_background_owner,
+        )
+        file_index.set_background_owner_checker(self.background_can_run)
+        acquired = self.background_owner.start()
+        if acquired:
+            status = self.background_owner.status_payload()
+            transition = str(status.get("last_transition") or "acquired")
+            if transition == "takeover":
+                self.log_event(None, "background_owner_takeover", "Background owner moved to this server", status.get("last_transition_details", {}))
+            else:
+                self.log_event(None, "background_owner_acquired", "Background owner acquired by this server", status.get("generation", {}))
+            self.warm_start_session_files_payload_cache()
+            self.warm_start_tabber_activity_cache()
+            self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
+        elif self.background_owner.status == "blocked_by_unreachable_owner":
+            self.log_event(None, "background_owner_blocked", "Background owner takeover blocked", self.background_owner.status_payload())
+        return acquired
+
+    def background_can_run(self, role: str) -> bool:
+        return self.background_owner.can_run(role)
+
+    def background_owner_status_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
+        return self.background_owner.status_payload(), HTTPStatus.OK
+
+    def demote_background_owner(self) -> None:
+        with self.tabber_activity_cache_lock:
+            self.tabber_activity_cache_warmer_running = False
+            self.tabber_activity_cache_refreshing = False
+        with self.session_files_cache_lock:
+            self.session_files_refreshing_cache_keys.clear()
+        file_index.clear_memory_indexes()
+        self.publish_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
+
+    def background_release_owner(self, requester: dict[str, Any]) -> dict[str, Any]:
+        was_owner = self.background_owner.is_owner()
+        self.background_owner.release_owner("control_release")
+        if was_owner:
+            self.log_event(None, "background_owner_released", "Background owner released for another server", {"requester": requester})
+        return {"ok": True, "owner": False, "status": self.background_owner.status_payload()}
+
+    def background_refresh_should_fallback(self, result: dict[str, Any]) -> bool:
+        return bool(result.get("fallback"))
+
+    def record_background_avoided_recompute(self, role: str) -> None:
+        recorder = getattr(self.background_owner, "record_avoided_recompute", None)
+        if callable(recorder):
+            recorder(role)
+
+    def record_background_follower_stale_read(self, role: str) -> None:
+        recorder = getattr(self.background_owner, "record_follower_stale_read", None)
+        if callable(recorder):
+            recorder(role)
+
+    def record_background_search_index_bytes_written(self, byte_count: int) -> None:
+        recorder = getattr(self.background_owner, "record_search_index_bytes_written", None)
+        if callable(recorder):
+            recorder(byte_count)
+
+    def record_background_fallback(self, role: str, result: dict[str, Any], payload: dict[str, Any] | None = None) -> None:
+        recorder = getattr(self.background_owner, "record_fallback", None)
+        if callable(recorder):
+            recorder(role)
+        self.log_event(None, "background_refresh_fallback", "Background owner refresh fallback engaged", {"role": role, "result": result, "payload": payload or {}})
+
+    def request_background_refresh(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if hasattr(self.background_owner, "request_owner_refresh"):
+            result = self.background_owner.request_owner_refresh(role, payload or {})
+        else:
+            self.background_owner.record_refresh_request(role)
+            result = {"ok": False, "accepted": False, "role": role, "fallback": False}
+        if result.get("local_owner"):
+            if not result.get("coalesced"):
+                self.log_event(None, "background_refresh_started", "Background refresh accepted by local owner", {"role": role, "payload": payload or {}})
+        elif self.background_refresh_should_fallback(result):
+            self.record_background_fallback(role, result, payload)
+        if result.get("coalesced"):
+            return result
+        return result
 
     def refresh_sessions(self, maintenance: bool = True) -> list[str]:
         sessions, error = list_tmux_session_names()
@@ -1833,11 +1959,97 @@ class TmuxWebtermApp:
             event_payload.setdefault("compute_ms", round(max(0.0, compute_ms), 1))
         return self.client_events.publish(event_type, event_payload)
 
+    def shared_background_client_event_record(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "id": uuid.uuid4().hex,
+            "time": time.time(),
+            "type": event_type,
+            "payload": dict(payload),
+            "source": self.background_owner.owner_payload(),
+        }
+
+    def write_shared_background_client_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        record = self.shared_background_client_event_record(event_type, payload)
+        with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
+            try:
+                manifest = json.loads(BACKGROUND_CLIENT_EVENTS_PATH.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError):
+                manifest = {}
+            raw_events = manifest.get("events") if isinstance(manifest, dict) else []
+            events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
+            events.append(record)
+            events = events[-BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT:]
+            payload_text = json.dumps({"version": 1, "events": events}, sort_keys=True, separators=(",", ":")) + "\n"
+            atomic_write_text(BACKGROUND_CLIENT_EVENTS_PATH, payload_text, mode=0o600)
+        return record
+
+    def notify_background_client_event_followers(self, event_type: str, payload: dict[str, Any], shared_event: dict[str, Any]) -> None:
+        source = self.background_owner.owner_payload()
+        source_generation = str(source.get("generation_id") or "")
+        request = {
+            "action": "background_client_event",
+            "event_type": event_type,
+            "payload": payload,
+            "shared_event": shared_event,
+            "requester": source,
+        }
+        for record in self.background_owner.live_generation_records():
+            if str(record.get("generation_id") or "") == source_generation:
+                continue
+            if not str(record.get("control_socket") or ""):
+                continue
+            send_yolomux_control_request(record, request, timeout=BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS)
+
+    def publish_background_client_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        trigger: str = "background-refresh",
+        cache: str | None = "ready",
+    ) -> dict[str, Any]:
+        if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
+            return self.publish_client_event(event_type, payload, trigger=trigger, cache=cache)
+        event = self.publish_client_event(event_type, payload, trigger=trigger, cache=cache)
+        event_payload = event.get("payload") if isinstance(event, dict) else {}
+        shared_event = self.write_shared_background_client_event(event_type, event_payload if isinstance(event_payload, dict) else {})
+        self.notify_background_client_event_followers(event_type, event_payload if isinstance(event_payload, dict) else {}, shared_event)
+        return event
+
+    def publish_background_refresh_done(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        event_payload = {"role": role}
+        event_payload.update(payload or {})
+        return self.publish_background_client_event("background_refresh_done", event_payload, trigger="background-refresh", cache="ready")
+
+    def handle_background_client_event(self, request: dict[str, Any]) -> dict[str, Any]:
+        event_type = str(request.get("event_type") or "")
+        if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
+            return {"ok": False, "error": f"unsupported background client event: {event_type}"}
+        raw_payload = request.get("payload")
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        event = self.publish_client_event(event_type, payload, trigger="background-fanout", cache="ready")
+        return {"ok": True, "accepted": True, "event": {"id": event.get("id"), "type": event_type}}
+
     def client_event_payload_signature(self, payload: Any) -> str:
         try:
             return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         except (TypeError, ValueError):
             return str(payload)
+
+    def stable_client_event_signature_payload(self, payload: Any) -> Any:
+        if isinstance(payload, dict):
+            return {
+                key: self.stable_client_event_signature_payload(value)
+                for key, value in payload.items()
+                if key not in CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS
+            }
+        if isinstance(payload, list):
+            return [self.stable_client_event_signature_payload(item) for item in payload]
+        return payload
+
+    def stable_client_event_payload_signature(self, payload: Any) -> str:
+        return self.client_event_payload_signature(self.stable_client_event_signature_payload(payload))
 
     def performance_setting_ms_as_seconds(self, key: str, minimum: float, maximum: float) -> float:
         default = float(DEFAULT_PERFORMANCE_SETTINGS[key])
@@ -2422,6 +2634,18 @@ class TmuxWebtermApp:
     def filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
         return tuple((root, filesystem_watch_signature(root)) for root in self.filesystem_roots_for_watch(sessions))
 
+    def request_watch_roots_owner_refresh(self, roots: list[str], reason: str) -> None:
+        if not roots:
+            return
+        self.record_background_avoided_recompute(BACKGROUND_ROLE_WATCH_ROOTS)
+        self.request_background_refresh(BACKGROUND_ROLE_WATCH_ROOTS, {"reason": reason, "roots": roots[:CLIENT_WATCH_ROOT_LIMIT]})
+
+    def follower_filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
+        roots = self.filesystem_roots_for_watch(sessions)
+        self.request_watch_roots_owner_refresh(roots, "poll")
+        with self.client_watch_lock:
+            return self.client_watch_filesystem_signature or (("watch-roots", "follower"),)
+
     def files_for_watch(self) -> list[str]:
         return self.client_watch_files_snapshot()[:CLIENT_WATCH_FILE_LIMIT]
 
@@ -2556,7 +2780,11 @@ class TmuxWebtermApp:
                 )
             self.publish_context_items_ready_events(trigger="watch_state")
             self.publish_activity_summary_ready_events(trigger="watch_state")
-            self.publish_filesystem_ready_event(self.client_watch_roots_snapshot(), trigger="watch_state")
+            roots = self.client_watch_roots_snapshot()
+            if self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
+                self.publish_filesystem_ready_event(roots, trigger="watch_state")
+            else:
+                self.request_watch_roots_owner_refresh(roots, "watch_state")
             self.publish_session_files_ready_events(trigger="watch_state")
         finally:
             with self.client_watch_lock:
@@ -2566,7 +2794,10 @@ class TmuxWebtermApp:
         sessions, _errors = discover_sessions(self.sessions)
         settings_signature = self.settings_watch_signature()
         transcripts_signature = self.transcripts_watch_signature(sessions)
-        filesystem_signature = self.filesystem_roots_watch_signature(sessions)
+        if self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
+            filesystem_signature = self.filesystem_roots_watch_signature(sessions)
+        else:
+            filesystem_signature = self.follower_filesystem_roots_watch_signature(sessions)
         events: list[str] = []
         with self.client_watch_lock:
             initialized = self.client_watch_initialized
@@ -2590,21 +2821,15 @@ class TmuxWebtermApp:
             events.append("settings_changed")
         if transcripts_changed:
             self.clear_transcript_caches()
-            started = time.perf_counter()
-            payload = self.build_transcripts_payload()
-            self.set_transcripts_payload_cache(payload)
-            payload_signature = self.client_event_payload_signature(payload)
-            with self.client_watch_lock:
-                self.client_watch_transcripts_payload_signature = payload_signature
             self.publish_client_event(
                 "transcripts_changed",
-                {"signature": transcripts_signature, "data": payload},
+                {"signature": transcripts_signature, "refresh": True},
                 cache="refresh",
-                compute_ms=(time.perf_counter() - started) * 1000,
             )
             events.append("transcripts_changed")
             events.extend(self.publish_context_items_ready_events(trigger="transcripts_changed"))
             events.extend(self.publish_activity_summary_ready_events(trigger="transcripts_changed"))
+            events.extend(self.publish_session_files_ready_events(trigger="transcripts_changed"))
         if filesystem_changed:
             roots = self.filesystem_roots_for_watch(sessions)
             change_summary = filesystem_change_summary(previous_filesystem_signature, filesystem_signature)
@@ -2728,10 +2953,12 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         payload, status = self.auto_approve_status()
         event_payload = {"status": int(status), "data": payload}
-        signature = self.client_event_payload_signature(event_payload)
+        signature = self.stable_client_event_payload_signature(event_payload)
         with self.client_watch_lock:
             previous = self.client_watch_auto_approve_signature
             self.client_watch_auto_approve_signature = signature
+        if not previous:
+            return []
         if previous == signature:
             return []
         self.publish_client_event(
@@ -2746,10 +2973,12 @@ class TmuxWebtermApp:
     def poll_tmux_signals_client_event_once(self) -> list[str]:
         started = time.perf_counter()
         payload = self.tmux_signal_snapshot(force=True)
-        signature = self.client_event_payload_signature(self.tmux_signal_signature_payload(payload))
+        signature = self.stable_client_event_payload_signature(self.tmux_signal_signature_payload(payload))
         with self.client_watch_lock:
             previous = self.client_watch_tmux_signal_signature
             self.client_watch_tmux_signal_signature = signature
+        if not previous:
+            return []
         if previous == signature:
             return []
         self.publish_client_event(
@@ -2793,6 +3022,8 @@ class TmuxWebtermApp:
         with self.client_watch_lock:
             previous = self.client_watch_watched_prs_signature
             self.client_watch_watched_prs_signature = signature
+        if not previous:
+            return []
         if previous == signature:
             return []
         self.publish_client_event(
@@ -2805,14 +3036,37 @@ class TmuxWebtermApp:
         return ["watched_prs_changed"]
 
     def start_client_event_watcher(self) -> None:
-        self.start_tmux_signal_event_watcher()
+        now = time.monotonic()
         with self.client_watch_lock:
             if self.client_watch_running:
                 return
+            self.client_watch_stop_event.clear()
+            self.client_event_next_auto_poll_at = max(self.client_event_next_auto_poll_at, now + self.server_auto_approve_event_poll_seconds())
+            self.client_event_next_tmux_signal_poll_at = max(self.client_event_next_tmux_signal_poll_at, now + self.server_tmux_signal_event_poll_seconds())
             self.client_watch_running = True
-        worker = threading.Thread(target=self.client_event_watch_loop, daemon=True)
+        self.start_tmux_signal_event_watcher()
+        worker = threading.Thread(target=self.client_event_watch_loop, name="client-event-watch", daemon=True)
         self.client_watch_thread = worker
         worker.start()
+
+    def stop_client_event_watcher(self) -> None:
+        self.stop_tmux_signal_event_watcher()
+        self.client_watch_stop_event.set()
+        self.client_watch_wake_event.set()
+        thread = self.client_watch_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        with self.client_watch_lock:
+            if self.client_watch_thread is thread:
+                self.client_watch_thread = None
+            self.client_watch_running = False
+
+    def stop_client_event_watcher_if_idle(self) -> bool:
+        with self.client_events.lock:
+            if self.client_events.subscribers:
+                return False
+        self.stop_client_event_watcher()
+        return True
 
     def start_client_directory_poll(self) -> bool:
         with self.client_watch_lock:
@@ -2833,34 +3087,40 @@ class TmuxWebtermApp:
                 self.client_directory_poll_running = False
 
     def client_event_watch_loop(self) -> None:
-        while True:
-            try:
-                now = time.monotonic()
-                if now >= self.client_event_next_file_poll_at:
-                    self.poll_client_file_events_once()
-                    self.client_event_next_file_poll_at = now + self.server_event_poll_seconds()
-                if now >= self.client_event_next_background_file_poll_at:
-                    self.poll_client_background_file_events_once()
-                    self.client_event_next_background_file_poll_at = now + self.server_background_file_event_poll_seconds()
-                if now >= self.client_event_next_signature_poll_at:
-                    self.client_event_next_signature_poll_at = now + self.server_directory_event_poll_seconds()
-                    self.start_client_directory_poll()
-                if now >= self.client_event_next_auto_poll_at:
-                    self.poll_auto_approve_client_event_once()
-                    self.client_event_next_auto_poll_at = now + self.server_auto_approve_event_poll_seconds()
-                if now >= self.client_event_next_tmux_signal_poll_at:
-                    self.poll_tmux_signals_client_event_once()
-                    self.client_event_next_tmux_signal_poll_at = now + self.server_tmux_signal_event_poll_seconds()
-                if now >= self.client_event_next_watched_pr_poll_at:
-                    self.poll_watched_prs_client_event_once()
-                    self.client_event_next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
-                if now >= self.client_event_next_yoagent_job_poll_at:
-                    self.poll_yoagent_jobs_once()
-                    self.client_event_next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
-            except (OSError, RuntimeError, ValueError) as exc:
-                self.log_event(None, "client_event_watch_error", f"client event watch failed: {exc}", {})
-            if self.client_watch_wake_event.wait(self.client_event_watch_sleep_seconds(time.monotonic())):
-                self.client_watch_wake_event.clear()
+        try:
+            while not self.client_watch_stop_event.is_set():
+                try:
+                    now = time.monotonic()
+                    if now >= self.client_event_next_file_poll_at:
+                        self.poll_client_file_events_once()
+                        self.client_event_next_file_poll_at = now + self.server_event_poll_seconds()
+                    if now >= self.client_event_next_background_file_poll_at:
+                        self.poll_client_background_file_events_once()
+                        self.client_event_next_background_file_poll_at = now + self.server_background_file_event_poll_seconds()
+                    if now >= self.client_event_next_signature_poll_at:
+                        self.client_event_next_signature_poll_at = now + self.server_directory_event_poll_seconds()
+                        self.start_client_directory_poll()
+                    if now >= self.client_event_next_auto_poll_at:
+                        self.poll_auto_approve_client_event_once()
+                        self.client_event_next_auto_poll_at = now + self.server_auto_approve_event_poll_seconds()
+                    if now >= self.client_event_next_tmux_signal_poll_at:
+                        self.poll_tmux_signals_client_event_once()
+                        self.client_event_next_tmux_signal_poll_at = now + self.server_tmux_signal_event_poll_seconds()
+                    if now >= self.client_event_next_watched_pr_poll_at:
+                        self.poll_watched_prs_client_event_once()
+                        self.client_event_next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
+                    if now >= self.client_event_next_yoagent_job_poll_at:
+                        self.poll_yoagent_jobs_once()
+                        self.client_event_next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self.log_event(None, "client_event_watch_error", f"client event watch failed: {exc}", {})
+                if self.client_watch_wake_event.wait(self.client_event_watch_sleep_seconds(time.monotonic())):
+                    self.client_watch_wake_event.clear()
+        finally:
+            with self.client_watch_lock:
+                if self.client_watch_thread is threading.current_thread():
+                    self.client_watch_thread = None
+                self.client_watch_running = False
 
     def cache_set_limited(self, cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
         cache[key] = value
@@ -2891,6 +3151,13 @@ class TmuxWebtermApp:
         key_text = json.dumps(key, sort_keys=True, separators=(",", ":"), default=str)
         signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
         return SESSION_FILES_CACHE_DIR / f"{signature}.json", signature
+
+    def session_files_disk_manifest_path(self, signature: str) -> Path:
+        return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
+
+    def session_files_payload_signature(self, payload: dict[str, Any]) -> str:
+        payload_text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
 
     def set_session_files_memory_cache(
         self,
@@ -2930,6 +3197,18 @@ class TmuxWebtermApp:
             stored_at_wall = float(record.get("stored_at", 0.0))
         except (TypeError, ValueError):
             return None
+        payload_signature = str(record.get("payload_signature") or self.session_files_payload_signature(payload))
+        manifest_path = self.session_files_disk_manifest_path(signature)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            manifest = None
+        if isinstance(manifest, dict) and manifest.get("version") == SESSION_FILES_CACHE_VERSION and manifest.get("signature") == signature and manifest.get("payload_signature") == payload_signature:
+            try:
+                status = HTTPStatus(int(manifest.get("status", int(status))))
+                stored_at_wall = float(manifest.get("stored_at", stored_at_wall))
+            except (TypeError, ValueError):
+                pass
         age_seconds = max(0.0, time.time() - stored_at_wall)
         fresh = max_age_seconds is None or age_seconds <= max_age_seconds
         if not fresh and not allow_stale:
@@ -2944,14 +3223,45 @@ class TmuxWebtermApp:
         payload: dict[str, Any],
         status: HTTPStatus,
     ) -> None:
+        payload_signature = self.session_files_payload_signature(payload)
+        payload_changed = True
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            existing = None
+        if isinstance(existing, dict) and existing.get("version") == SESSION_FILES_CACHE_VERSION and existing.get("signature") == signature:
+            existing_payload = existing.get("payload")
+            existing_payload_signature = str(existing.get("payload_signature") or "")
+            if not existing_payload_signature and isinstance(existing_payload, dict):
+                existing_payload_signature = self.session_files_payload_signature(existing_payload)
+            try:
+                existing_status = int(existing.get("status", int(status)))
+            except (TypeError, ValueError):
+                existing_status = -1
+            payload_changed = existing_payload_signature != payload_signature or existing_status != int(status)
+        stored_at = time.time()
         record = {
             "version": SESSION_FILES_CACHE_VERSION,
             "signature": signature,
-            "stored_at": time.time(),
+            "stored_at": stored_at,
             "status": int(status),
+            "payload_signature": payload_signature,
             "payload": payload,
         }
-        atomic_write_text(path, json.dumps(record, sort_keys=True, separators=(",", ":")), mode=0o600)
+        if payload_changed:
+            atomic_write_text(path, json.dumps(record, sort_keys=True, separators=(",", ":")), mode=0o600)
+        manifest = {
+            "version": SESSION_FILES_CACHE_VERSION,
+            "signature": signature,
+            "stored_at": stored_at,
+            "status": int(status),
+            "payload_signature": payload_signature,
+            "payload_changed": payload_changed,
+            "owner": self.background_owner.status_payload().get("generation", {}),
+            "refresh_status": "ready",
+            "last_error": "",
+        }
+        atomic_write_text(self.session_files_disk_manifest_path(signature), json.dumps(manifest, sort_keys=True, separators=(",", ":")), mode=0o600)
 
     def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: dict[str, Any], status: HTTPStatus) -> None:
         path, signature = self.session_files_disk_cache_path(key)
@@ -3028,6 +3338,7 @@ class TmuxWebtermApp:
         to_ref: str | None,
         repo_refs: dict[str, dict[str, str]] | None,
     ) -> None:
+        self.log_event(None, "background_refresh_started", "Session-files background refresh started", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": session or "", "cache_key": repr(cache_key)})
         try:
             self.compute_session_files_cache_entry(
                 cache_key,
@@ -3041,6 +3352,8 @@ class TmuxWebtermApp:
                     include_cross_session_attribution=not bool(session),
                 ),
             )
+            self.log_event(None, "background_refresh_done", "Session-files background refresh finished", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": session or "", "cache_key": repr(cache_key)})
+            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {"session": session or "", "cache_key": repr(cache_key)})
         finally:
             with self.session_files_cache_lock:
                 self.session_files_refreshing_cache_keys.discard(cache_key)
@@ -3054,16 +3367,22 @@ class TmuxWebtermApp:
         to_ref: str | None,
         repo_refs: dict[str, dict[str, str]] | None,
     ) -> None:
+        self.log_event(None, "background_refresh_started", "Session-files background refresh started", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": info.session, "cache_key": repr(cache_key)})
         try:
             self.compute_session_files_cache_entry(
                 cache_key,
                 lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
             )
+            self.log_event(None, "background_refresh_done", "Session-files background refresh finished", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": info.session, "cache_key": repr(cache_key)})
+            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session, "cache_key": repr(cache_key)})
         finally:
             with self.session_files_cache_lock:
                 self.session_files_refreshing_cache_keys.discard(cache_key)
 
     def start_session_files_cache_refresh(self, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": repr(cache_key)})
+            return False
         with self.session_files_cache_lock:
             if cache_key in self.session_files_refreshing_cache_keys:
                 return False
@@ -3086,8 +3405,28 @@ class TmuxWebtermApp:
         if cached:
             payload, _status, fresh, _age = cached
             if not fresh:
-                self.start_session_files_cache_refresh(key, self.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
+                if self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+                    self.start_session_files_cache_refresh(key, self.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
+                else:
+                    self.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
+                    refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session, "cache_key": repr(key)})
+                    self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+                    if self.background_refresh_should_fallback(refresh_result):
+                        payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                            key,
+                            lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
+                        )
             return payload
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session, "cache_key": repr(key)})
+            self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+            if self.background_refresh_should_fallback(refresh_result):
+                payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                    key,
+                    lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
+                )
+                return copy.deepcopy(payload)
+            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
         payload, _status, _hit, _age = self.compute_session_files_cache_entry(
             key,
             lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
@@ -3095,13 +3434,22 @@ class TmuxWebtermApp:
         return copy.deepcopy(payload)
 
     def warm_start_session_files_payload_cache(self) -> None:
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"reason": "warm-start"})
+            return
         sessions, _errors = discover_sessions(self.sessions)
-        agent_infos: dict[str, SessionInfo] = {}
         for session in self.sessions:
             info = sessions.get(session)
             if info is not None and info.agents:
-                agent_infos[session] = info
-        self.cached_session_files_payloads_for_infos(agent_infos)
+                key = self.session_files_cache_key("payload", {session: info}, session, 24.0, None, None, None)
+                self.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
+
+    def warm_start_tabber_activity_cache(self) -> None:
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warm-start"})
+            return
+        source_signature = self.tabber_activity_source_signature()
+        self.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=24.0, source_signature=source_signature)
 
     def cached_session_files_payloads_for_infos(
         self,
@@ -3116,6 +3464,11 @@ class TmuxWebtermApp:
         if len(infos) == 1:
             session, info = next(iter(infos.items()))
             return {session: self.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)}
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            return {
+                session: self.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+                for session, info in infos.items()
+            }
         payloads: dict[str, dict[str, Any]] = {}
         with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(infos)), thread_name_prefix="session-files-warm") as executor:
             futures = {
@@ -3150,28 +3503,89 @@ class TmuxWebtermApp:
                 "refresh_seconds": max_age,
             }
             if not fresh:
-                refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
-                cache_meta["refreshing"] = refreshing
+                if self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+                    refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
+                    cache_meta["refreshing"] = refreshing
+                else:
+                    self.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
+                    refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": session or "", "cache_key": repr(cache_key)})
+                    self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+                    if self.background_refresh_should_fallback(refresh_result):
+                        payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
+                            cache_key,
+                            lambda: session_files.session_files_payload(
+                                session,
+                                infos,
+                                hours,
+                                from_ref=from_ref,
+                                to_ref=to_ref,
+                                repo_refs=repo_refs,
+                                include_cross_session_attribution=not bool(session),
+                            ),
+                        )
+                        cache_meta = {
+                            "hit": cache_hit,
+                            "stale": False,
+                            "age_seconds": round(age_seconds, 3),
+                            "refresh_seconds": max_age,
+                            "fallback": True,
+                        }
+                    else:
+                        cache_meta["refreshing_elsewhere"] = True
         else:
-            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
-                cache_key,
-                lambda: session_files.session_files_payload(
-                    session,
-                    infos,
-                    hours,
-                    from_ref=from_ref,
-                    to_ref=to_ref,
-                    repo_refs=repo_refs,
-                    include_cross_session_attribution=not bool(session),
-                ),
-            )
-            cache_meta = {
-                "hit": cache_hit,
-                "stale": False,
-                "age_seconds": round(age_seconds, 3),
-                "refresh_seconds": max_age,
-                "refreshing": False,
-            }
+            if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+                refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": session or "", "cache_key": repr(cache_key)})
+                self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+                if self.background_refresh_should_fallback(refresh_result):
+                    payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
+                        cache_key,
+                        lambda: session_files.session_files_payload(
+                            session,
+                            infos,
+                            hours,
+                            from_ref=from_ref,
+                            to_ref=to_ref,
+                            repo_refs=repo_refs,
+                            include_cross_session_attribution=not bool(session),
+                        ),
+                    )
+                    cache_meta = {
+                        "hit": cache_hit,
+                        "stale": False,
+                        "age_seconds": round(age_seconds, 3),
+                        "refresh_seconds": max_age,
+                        "fallback": True,
+                    }
+                else:
+                    payload = {"session": session or "", "files": [], "repos": [], "errors": []}
+                    status = HTTPStatus.OK
+                    cache_meta = {
+                        "hit": False,
+                        "stale": True,
+                        "age_seconds": None,
+                        "refresh_seconds": max_age,
+                        "refreshing_elsewhere": True,
+                    }
+            else:
+                payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
+                    cache_key,
+                    lambda: session_files.session_files_payload(
+                        session,
+                        infos,
+                        hours,
+                        from_ref=from_ref,
+                        to_ref=to_ref,
+                        repo_refs=repo_refs,
+                        include_cross_session_attribution=not bool(session),
+                    ),
+                )
+                cache_meta = {
+                    "hit": cache_hit,
+                    "stale": False,
+                    "age_seconds": round(age_seconds, 3),
+                    "refresh_seconds": max_age,
+                    "refreshing": False,
+                }
         payload = copy.deepcopy(payload)
         payload["errors"] = [*(extra_errors or []), *payload.get("errors", [])]
         payload["cache"] = cache_meta
@@ -3256,7 +3670,8 @@ class TmuxWebtermApp:
             payload = self.refresh_tabber_activity_cache()
             agents = payload.get("agents") if isinstance(payload, dict) else []
             return copy.deepcopy(agents) if isinstance(agents, list) else []
-        cached = self.get_tabber_activity_cache(self.tabber_activity_refresh_seconds(), allow_stale=True)
+        source_signature = self.tabber_activity_source_signature()
+        cached = self.get_tabber_activity_cache(self.tabber_activity_refresh_seconds(), allow_stale=True, source_signature=source_signature)
         if cached:
             payload, _fresh, _age_seconds = cached
             agents = payload.get("agents") if isinstance(payload, dict) else []
@@ -3272,6 +3687,7 @@ class TmuxWebtermApp:
         project: dict[str, Any],
         files_payload: dict[str, Any],
         summary: dict[str, Any],
+        recent_events: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         selected = info.selected_pane
         agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
@@ -3293,7 +3709,7 @@ class TmuxWebtermApp:
             "recent_paths": build_recent_agents_payload({session: info}, [session], session_files_by_session={session: files_payload}),
             "latest_summary": truncate_text(latest_summary, 1200),
             "latest_summary_updated_ts": max(0.0, self.float_value(rolling.get("updated_ts"), 0.0)),
-            "recent_events": self.event_log.tail(session=session, limit=5),
+            "recent_events": recent_events if recent_events is not None else self.event_log.tail(session=session, limit=5),
             "project": project,
         }
 
@@ -3310,6 +3726,7 @@ class TmuxWebtermApp:
         ordered_summaries: list[dict[str, Any]] = []
         session_files_by_session: dict[str, dict[str, Any]] = {}
         session_info: dict[str, Any] = {}
+        recent_events_by_session = self.event_log.tail_many([session for session in ordered_sessions if session in sessions], limit=5)
         with self.activity_summary_lock:
             if force:
                 self.activity_summary_cache.clear()
@@ -3332,7 +3749,14 @@ class TmuxWebtermApp:
                 self.attach_yoagent_session_summary(session, summary)
                 summaries[session] = summary
                 ordered_summaries.append(summary)
-                session_info[session] = self.activity_session_info_payload(session, info, project, files_payload, summary)
+                session_info[session] = self.activity_session_info_payload(
+                    session,
+                    info,
+                    project,
+                    files_payload,
+                    summary,
+                    recent_events=recent_events_by_session.get(session, []),
+                )
             for session in list(self.activity_summary_cache):
                 if session not in sessions:
                     self.activity_summary_cache.pop(session, None)
@@ -4104,36 +4528,196 @@ class TmuxWebtermApp:
             "session_file_hours": bounded_hours,
         }
 
-    def set_tabber_activity_cache(self, payload: dict[str, Any]) -> None:
-        with self.tabber_activity_cache_lock:
-            self.tabber_activity_cache = (time.monotonic(), copy.deepcopy(payload))
+    def tabber_activity_source_signature(self, session_scope: Any = "configured") -> str:
+        session_names, _scope_errors, scope = self.activity_session_names(session_scope)
+        sessions, _errors = discover_sessions(session_names)
+        rows = []
+        for session in sorted(session_names):
+            info = sessions.get(session)
+            if info is None:
+                rows.append((session, None))
+                continue
+            selected_path = info.selected_pane.current_path if info.selected_pane and info.selected_pane.current_path else ""
+            rows.append((
+                session,
+                selected_path,
+                tuple((agent.kind or "", agent.cwd or "", agent.transcript or "", agent.session_id or "") for agent in info.agents),
+            ))
+        key_text = json.dumps({"scope": scope, "sessions": rows}, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(key_text.encode("utf-8")).hexdigest()
 
-    def get_tabber_activity_cache(self, max_age_seconds: float, allow_stale: bool = True) -> tuple[dict[str, Any], bool, float] | None:
+    def tabber_activity_cache_disk_path(self, hours: float, source_signature: str = "") -> tuple[Path, str]:
+        key_text = json.dumps(
+            {
+                "kind": "tabber-activity",
+                "hours": session_files.bounded_session_files_hours(hours),
+                "source_signature": source_signature,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
+        return TABBER_ACTIVITY_CACHE_DIR / f"{signature}.json", signature
+
+    def tabber_activity_cache_manifest_path(self, signature: str) -> Path:
+        return TABBER_ACTIVITY_CACHE_DIR / f"{signature}.manifest.json"
+
+    def read_tabber_activity_disk_cache(
+        self,
+        hours: float,
+        max_age_seconds: float | None = None,
+        allow_stale: bool = True,
+        source_signature: str = "",
+    ) -> tuple[dict[str, Any], bool, float] | None:
+        path, signature = self.tabber_activity_cache_disk_path(hours, source_signature)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        if record.get("version") != TABBER_ACTIVITY_CACHE_VERSION or record.get("signature") != signature:
+            return None
+        if str(record.get("source_signature") or "") != source_signature:
+            return None
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        payload_signature = str(record.get("payload_signature") or self.session_files_payload_signature(payload))
+        manifest_path = self.tabber_activity_cache_manifest_path(signature)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            manifest = None
+        try:
+            stored_at_wall = float(record.get("stored_at", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if isinstance(manifest, dict) and manifest.get("version") == TABBER_ACTIVITY_CACHE_VERSION and manifest.get("signature") == signature and manifest.get("payload_signature") == payload_signature and str(manifest.get("source_signature") or "") == source_signature:
+            try:
+                stored_at_wall = float(manifest.get("stored_at", stored_at_wall))
+            except (TypeError, ValueError):
+                pass
+        cached_hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+        if cached_hours != session_files.bounded_session_files_hours(hours):
+            return None
+        age_seconds = max(0.0, time.time() - stored_at_wall)
+        fresh = max_age_seconds is None or age_seconds <= max_age_seconds
+        if not fresh and not allow_stale:
+            return None
+        self.set_tabber_activity_cache(payload, stored_at=time.monotonic() - age_seconds, write_disk=False, source_signature=source_signature)
+        return copy.deepcopy(payload), fresh, age_seconds
+
+    def write_tabber_activity_disk_cache_unlocked(self, path: Path, signature: str, payload: dict[str, Any], source_signature: str) -> None:
+        payload_signature = self.session_files_payload_signature(payload)
+        payload_changed = True
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            existing = None
+        if isinstance(existing, dict) and existing.get("version") == TABBER_ACTIVITY_CACHE_VERSION and existing.get("signature") == signature:
+            if str(existing.get("source_signature") or "") != source_signature:
+                existing = None
+        if isinstance(existing, dict) and existing.get("version") == TABBER_ACTIVITY_CACHE_VERSION and existing.get("signature") == signature:
+            existing_payload = existing.get("payload")
+            existing_payload_signature = str(existing.get("payload_signature") or "")
+            if not existing_payload_signature and isinstance(existing_payload, dict):
+                existing_payload_signature = self.session_files_payload_signature(existing_payload)
+            payload_changed = existing_payload_signature != payload_signature
+        stored_at = time.time()
+        record = {
+            "version": TABBER_ACTIVITY_CACHE_VERSION,
+            "signature": signature,
+            "source_signature": source_signature,
+            "stored_at": stored_at,
+            "payload_signature": payload_signature,
+            "payload": payload,
+        }
+        if payload_changed:
+            atomic_write_text(path, json.dumps(record, sort_keys=True, separators=(",", ":")), mode=0o600)
+        manifest = {
+            "version": TABBER_ACTIVITY_CACHE_VERSION,
+            "signature": signature,
+            "source_signature": source_signature,
+            "stored_at": stored_at,
+            "payload_signature": payload_signature,
+            "payload_changed": payload_changed,
+            "owner": self.background_owner.status_payload().get("generation", {}),
+            "refresh_status": "ready",
+            "last_error": "",
+        }
+        atomic_write_text(self.tabber_activity_cache_manifest_path(signature), json.dumps(manifest, sort_keys=True, separators=(",", ":")), mode=0o600)
+
+    def write_tabber_activity_disk_cache(self, payload: dict[str, Any], source_signature: str = "") -> None:
+        if not source_signature:
+            source_signature = self.tabber_activity_source_signature()
+        hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+        path, signature = self.tabber_activity_cache_disk_path(hours, source_signature)
+        try:
+            with file_lock(path, dir_mode=0o700):
+                self.write_tabber_activity_disk_cache_unlocked(path, signature, payload, source_signature)
+        except OSError as exc:
+            logger.warning("failed to write tabber activity cache %s: %s", path, exc)
+
+    def set_tabber_activity_cache(self, payload: dict[str, Any], stored_at: float | None = None, write_disk: bool = True, source_signature: str = "") -> None:
+        if write_disk and not source_signature:
+            source_signature = self.tabber_activity_source_signature()
+        with self.tabber_activity_cache_lock:
+            self.tabber_activity_cache = (time.monotonic() if stored_at is None else stored_at, copy.deepcopy(payload))
+            self.tabber_activity_cache_source_signature = source_signature
+        if write_disk:
+            self.write_tabber_activity_disk_cache(payload, source_signature=source_signature)
+
+    def get_tabber_activity_cache(self, max_age_seconds: float, allow_stale: bool = True, hours: float | None = None, source_signature: str = "") -> tuple[dict[str, Any], bool, float] | None:
         now = time.monotonic()
+        bounded_hours = session_files.bounded_session_files_hours(24.0 if hours is None else hours)
+        stale_cached: tuple[dict[str, Any], bool, float] | None = None
         with self.tabber_activity_cache_lock:
             cached = self.tabber_activity_cache
-            if cached is None:
-                return None
-            stored_at, payload = cached
-            age_seconds = max(0.0, now - stored_at)
-            fresh = age_seconds <= max_age_seconds
-            if not fresh and not allow_stale:
-                return None
-            return copy.deepcopy(payload), fresh, age_seconds
+            if cached is not None:
+                stored_at, payload = cached
+                cached_hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+                if cached_hours == bounded_hours and (not source_signature or self.tabber_activity_cache_source_signature == source_signature):
+                    age_seconds = max(0.0, now - stored_at)
+                    fresh = age_seconds <= max_age_seconds
+                    if fresh:
+                        return copy.deepcopy(payload), True, age_seconds
+                    stale_cached = (copy.deepcopy(payload), False, age_seconds)
+        disk_cached = self.read_tabber_activity_disk_cache(bounded_hours, max_age_seconds=max_age_seconds, allow_stale=allow_stale, source_signature=source_signature)
+        if disk_cached and (stale_cached is None or disk_cached[2] <= stale_cached[2]):
+            return disk_cached
+        if stale_cached is not None and allow_stale:
+            return stale_cached
+        return None
 
     def refresh_tabber_activity_cache(self, hours: Any = 24.0) -> dict[str, Any]:
-        payload = self.build_activity_payload(hours=hours)
-        self.set_tabber_activity_cache(payload)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        source_signature = self.tabber_activity_source_signature()
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "refresh"})
+            cached = self.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=bounded_hours, source_signature=source_signature)
+            if cached:
+                payload, _fresh, _age = cached
+                return payload
+            return {"activity": {}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": bounded_hours}
+        payload = self.build_activity_payload(hours=bounded_hours)
+        self.set_tabber_activity_cache(payload, source_signature=source_signature)
         return payload
 
     def run_tabber_activity_cache_refresh(self) -> None:
         try:
+            self.log_event(None, "background_refresh_started", "Tabber activity background refresh started", {"role": BACKGROUND_ROLE_TABBER_ACTIVITY})
             self.refresh_tabber_activity_cache()
+            self.log_event(None, "background_refresh_done", "Tabber activity background refresh finished", {"role": BACKGROUND_ROLE_TABBER_ACTIVITY})
+            self.publish_background_refresh_done(BACKGROUND_ROLE_TABBER_ACTIVITY)
         finally:
             with self.tabber_activity_cache_lock:
                 self.tabber_activity_cache_refreshing = False
 
     def start_tabber_activity_cache_refresh(self) -> bool:
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "async-refresh"})
+            return False
         with self.tabber_activity_cache_lock:
             if self.tabber_activity_cache_refreshing:
                 return False
@@ -4143,6 +4727,9 @@ class TmuxWebtermApp:
         return True
 
     def start_tabber_activity_cache_warmer(self) -> bool:
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warmer"})
+            return False
         with self.tabber_activity_cache_lock:
             if self.tabber_activity_cache_warmer_running:
                 return False
@@ -4155,6 +4742,8 @@ class TmuxWebtermApp:
     def tabber_activity_cache_warmer_loop(self) -> None:
         try:
             while True:
+                if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                    return
                 started = time.monotonic()
                 try:
                     self.refresh_tabber_activity_cache()
@@ -4170,13 +4759,14 @@ class TmuxWebtermApp:
     def activity_payload(self, hours: Any = 24.0) -> tuple[dict[str, Any], HTTPStatus]:
         refresh_seconds = self.tabber_activity_refresh_seconds()
         bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
-        cached = self.get_tabber_activity_cache(refresh_seconds, allow_stale=True)
+        source_signature = self.tabber_activity_source_signature()
+        cached = self.get_tabber_activity_cache(refresh_seconds, allow_stale=True, hours=bounded_hours, source_signature=source_signature)
         if cached:
             payload, fresh, age_seconds = cached
             cached_hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
             if cached_hours != bounded_hours:
                 payload = self.build_activity_payload(hours=bounded_hours)
-                self.set_tabber_activity_cache(payload)
+                self.set_tabber_activity_cache(payload, source_signature=source_signature)
                 payload = copy.deepcopy(payload)
                 payload["cache"] = {
                     "hit": False,
@@ -4193,10 +4783,59 @@ class TmuxWebtermApp:
                 "refresh_seconds": refresh_seconds,
             }
             if not fresh:
-                payload["cache"]["refreshing"] = self.start_tabber_activity_cache_refresh()
+                if self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                    payload["cache"]["refreshing"] = self.start_tabber_activity_cache_refresh()
+                else:
+                    self.record_background_follower_stale_read(BACKGROUND_ROLE_TABBER_ACTIVITY)
+                    refresh_result = self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload-stale"})
+                    self.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
+                    if self.background_refresh_should_fallback(refresh_result):
+                        payload = self.build_activity_payload(hours=bounded_hours)
+                        self.set_tabber_activity_cache(payload, source_signature=source_signature)
+                        payload = copy.deepcopy(payload)
+                        payload["cache"] = {
+                            "hit": False,
+                            "stale": False,
+                            "age_seconds": 0,
+                            "refresh_seconds": refresh_seconds,
+                            "fallback": True,
+                        }
+                    else:
+                        payload["cache"]["refreshing_elsewhere"] = True
+            return payload, HTTPStatus.OK
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            refresh_result = self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})
+            self.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
+            if self.background_refresh_should_fallback(refresh_result):
+                payload = self.build_activity_payload(hours=bounded_hours)
+                self.set_tabber_activity_cache(payload, source_signature=source_signature)
+                payload = copy.deepcopy(payload)
+                payload["cache"] = {
+                    "hit": False,
+                    "stale": False,
+                    "age_seconds": 0,
+                    "refresh_seconds": refresh_seconds,
+                    "fallback": True,
+                }
+                return payload, HTTPStatus.OK
+            payload = {
+                "activity": {},
+                "agents": [],
+                "agent_windows": {},
+                "errors": [],
+                "session_scope": "configured",
+                "session_file_hours": bounded_hours,
+                "cache": {
+                    "hit": False,
+                    "stale": True,
+                    "age_seconds": None,
+                    "refresh_seconds": refresh_seconds,
+                    "refreshing_elsewhere": True,
+                },
+            }
             return payload, HTTPStatus.OK
         payload = self.build_activity_payload(hours=bounded_hours)
-        self.set_tabber_activity_cache(payload)
+        self.set_tabber_activity_cache(payload, source_signature=source_signature)
         payload = copy.deepcopy(payload)
         payload["cache"] = {
             "hit": False,
@@ -4442,6 +5081,19 @@ class TmuxWebtermApp:
             session = request.get("session")
             requester = request.get("requester")
             return self.disable_auto_approve_for_takeover(session, requester if isinstance(requester, dict) else {})
+        if action == "background_release_owner":
+            requester = request.get("requester")
+            return self.background_release_owner(requester if isinstance(requester, dict) else {})
+        if action == "background_status":
+            return {"ok": True, "status": self.background_owner.status_payload()}
+        if action == "background_ping":
+            return {"ok": True, "status": self.background_owner.status_payload()}
+        if action == "background_client_event":
+            return self.handle_background_client_event(request)
+        if action == "background_refresh":
+            role = str(request.get("role") or "")
+            self.request_background_refresh(role, request if isinstance(request, dict) else {})
+            return {"ok": True, "accepted": True, "role": role}
         return {"ok": False, "error": f"unknown action: {action}"}
 
     def disable_auto_approve_for_takeover(self, session: Any, requester: dict[str, Any]) -> dict[str, Any]:
@@ -4718,6 +5370,9 @@ class TmuxWebtermApp:
         }
 
     def warm_metadata_cache_async(self, sessions: dict[str, SessionInfo]) -> None:
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "metadata-warm"})
+            return
         with self.metadata_warm_lock:
             if self.metadata_warm_running:
                 return
@@ -6061,5 +6716,6 @@ class TmuxWebtermApp:
                 worker.stop()
             self.auto_workers.clear()
             self.auto_worker_session_map().clear()
+        self.background_owner.stop()
         self.close_yoagent_codex_app_server()
         self.control_server.stop()

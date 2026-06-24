@@ -226,6 +226,30 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             exclude_path=paths._path_is_secret,
             exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
         )
+        if not index.ready and not file_index.background_owner_can_build():
+            refresh_result = file_index.request_background_owner_refresh({"root": str(root), "query": str(query or ""), "reason": "search-index-missing"})
+            if not refresh_result.get("fallback"):
+                return {
+                    "root": str(root),
+                    "root_realpath": os.path.realpath(root),
+                    "query": str(query or ""),
+                    "limit": max_results,
+                    "truncated": False,
+                    "files": [],
+                    "index_state": "follower",
+                    "refreshing_elsewhere": True,
+                }
+        if not index.ready and not file_index.background_owner_can_build() and not tokens:
+            return {
+                "root": str(root),
+                "root_realpath": os.path.realpath(root),
+                "query": str(query or ""),
+                "limit": max_results,
+                "truncated": False,
+                "files": [],
+                "index_state": "follower-fallback-skipped",
+                "refreshing_elsewhere": False,
+            }
         if tokens and index.ready:
             def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
                 sort_key = _search_entry_sort_key(Path(path_str), rel, tokens)
@@ -354,11 +378,14 @@ def index_status(raw_root: str) -> dict[str, Any]:
         ready = bool(index.ready)
         building = bool(index.building)
         built_at = float(index.built_at or 0.0)
-        count = len(index.entries)
+        metadata_ready = bool(index.disk_metadata_ready)
+        count = len(index.entries) if ready else int(index.disk_entry_count)
         truncated = bool(index.truncated)
     # C11: report the real state so the Finder badge shows indexing/indexed honestly instead of guessing
     # (which made the badge flicker). `state` is the single field the UI keys on.
     state = "ready" if ready else ("building" if building else "missing")
+    if not ready and not building and not file_index.background_owner_can_build():
+        state = "follower"
     return {
         "root": str(root),
         "root_realpath": os.path.realpath(root),
@@ -369,6 +396,8 @@ def index_status(raw_root: str) -> dict[str, Any]:
         "age": (time.time() - built_at) if built_at else None,
         "truncated": truncated,
         "state": state,
+        "ready_elsewhere": state == "follower" and metadata_ready,
+        "refreshing_elsewhere": state == "follower",
     }
 
 

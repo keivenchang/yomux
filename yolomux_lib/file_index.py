@@ -15,6 +15,7 @@ import fcntl
 import hashlib
 import json
 import os
+import sqlite3
 import stat
 import threading
 import time
@@ -31,8 +32,13 @@ MAX_INDEX_FILES = 400_000
 # Serve from the index immediately; rebuild in the background once it is older
 # than this (stale-while-revalidate), which also prunes deleted files.
 INDEX_TTL_SECONDS = 120.0
-# C11: bump when the on-disk JSON shape changes so old/incompatible indexes rebuild for a clear reason.
-INDEX_FORMAT_VERSION = 2
+# C11: bump when the on-disk storage shape changes so old/incompatible indexes rebuild for a clear reason.
+INDEX_FORMAT_VERSION = 3
+_BACKGROUND_OWNER_CHECKER: Callable[[str], bool] | None = None
+_BACKGROUND_OWNER_REFRESH_REQUESTER: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
+_BACKGROUND_OWNER_BYTES_RECORDER: Callable[[int], None] | None = None
+_BACKGROUND_OWNER_DONE_NOTIFIER: Callable[[str, dict[str, Any]], None] | None = None
+SEARCH_INDEX_ROLE = "search-index"
 
 
 def _skip_signature(skip_dirs: set[str], exclude_signature: str = "") -> str:
@@ -53,6 +59,8 @@ class RootIndex:
         self.ready = False
         self.building = False
         self.truncated = False
+        self.disk_metadata_ready = False
+        self.disk_entry_count = 0
         self.signature = ""
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
@@ -63,9 +71,66 @@ _REGISTRY: dict[str, RootIndex] = {}
 _REGISTRY_LOCK = threading.Lock()
 
 
+def clear_memory_indexes() -> None:
+    with _REGISTRY_LOCK:
+        _REGISTRY.clear()
+
+
+def set_background_owner_checker(checker: Callable[[str], bool] | None) -> None:
+    global _BACKGROUND_OWNER_CHECKER
+    _BACKGROUND_OWNER_CHECKER = checker
+
+
+def set_background_owner_refresh_requester(requester: Callable[[str, dict[str, Any]], dict[str, Any]] | None) -> None:
+    global _BACKGROUND_OWNER_REFRESH_REQUESTER
+    _BACKGROUND_OWNER_REFRESH_REQUESTER = requester
+
+
+def set_background_owner_bytes_recorder(recorder: Callable[[int], None] | None) -> None:
+    global _BACKGROUND_OWNER_BYTES_RECORDER
+    _BACKGROUND_OWNER_BYTES_RECORDER = recorder
+
+
+def set_background_owner_done_notifier(notifier: Callable[[str, dict[str, Any]], None] | None) -> None:
+    global _BACKGROUND_OWNER_DONE_NOTIFIER
+    _BACKGROUND_OWNER_DONE_NOTIFIER = notifier
+
+
+def background_owner_can_build() -> bool:
+    if _BACKGROUND_OWNER_CHECKER is None:
+        return True
+    return bool(_BACKGROUND_OWNER_CHECKER(SEARCH_INDEX_ROLE))
+
+
+def request_background_owner_refresh(payload: dict[str, Any]) -> dict[str, Any]:
+    if _BACKGROUND_OWNER_REFRESH_REQUESTER is None:
+        return {"ok": False, "accepted": False, "fallback": False, "error": "no background owner refresh requester"}
+    return _BACKGROUND_OWNER_REFRESH_REQUESTER(SEARCH_INDEX_ROLE, payload)
+
+
+def record_search_index_bytes_written(byte_count: int) -> None:
+    if _BACKGROUND_OWNER_BYTES_RECORDER is not None:
+        _BACKGROUND_OWNER_BYTES_RECORDER(byte_count)
+
+
+def notify_background_owner_done(payload: dict[str, Any]) -> None:
+    if _BACKGROUND_OWNER_DONE_NOTIFIER is not None:
+        _BACKGROUND_OWNER_DONE_NOTIFIER(SEARCH_INDEX_ROLE, payload)
+
+
 def _index_disk_path(root: Path) -> Path:
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    return INDEX_DIR / f"{digest}.sqlite3"
+
+
+def _legacy_index_json_path(root: Path) -> Path:
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
     return INDEX_DIR / f"{digest}.json"
+
+
+def _index_manifest_path(root: Path) -> Path:
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    return INDEX_DIR / f"{digest}.manifest.json"
 
 
 def _build_lock_path(root: Path) -> Path:
@@ -135,39 +200,164 @@ def walk_root(
     return entries, truncated
 
 
+def _entries_signature(entries: list[IndexEntry]) -> str:
+    digest = hashlib.sha256()
+    for path_str, name, rel, size, mtime in entries:
+        digest.update(str(path_str).encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        digest.update(str(name).encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        digest.update(str(rel).encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        digest.update(str(int(size)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(int(mtime)).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _sqlite_paths(root: Path) -> list[Path]:
+    path = _index_disk_path(root)
+    return [path, Path(f"{path}-wal"), Path(f"{path}-shm")]
+
+
+def _sqlite_storage_size(root: Path) -> int:
+    total = 0
+    for path in _sqlite_paths(root):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _connect_sqlite_index(root: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(_index_disk_path(root), timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS entries ("
+        "ord INTEGER PRIMARY KEY, "
+        "path TEXT NOT NULL, "
+        "name TEXT NOT NULL, "
+        "relative_path TEXT NOT NULL, "
+        "size INTEGER NOT NULL, "
+        "mtime INTEGER NOT NULL)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS entries_name_idx ON entries(name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS entries_relative_path_idx ON entries(relative_path)")
+    conn.execute(f"PRAGMA user_version={INDEX_FORMAT_VERSION}")
+
+
+def _replace_sqlite_metadata(conn: sqlite3.Connection, metadata: dict[str, str]) -> None:
+    conn.executemany(
+        "INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        sorted(metadata.items()),
+    )
+
+
+def _replace_sqlite_entries(conn: sqlite3.Connection, entries: list[IndexEntry]) -> None:
+    conn.execute("DELETE FROM entries")
+    conn.executemany(
+        "INSERT INTO entries(ord, path, name, relative_path, size, mtime) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            (ordinal, str(path_str), str(name), str(rel), int(size), int(mtime))
+            for ordinal, (path_str, name, rel, size, mtime) in enumerate(entries)
+        ),
+    )
+
+
+def _write_manifest(root: Path, metadata: dict[str, str]) -> None:
+    manifest = {
+        "version": INDEX_FORMAT_VERSION,
+        "storage": "sqlite",
+        "skip_signature": metadata["skip_signature"],
+        "root": metadata["root"],
+        "built_at": float(metadata["built_at"]),
+        "truncated": metadata["truncated"] == "1",
+        "entry_count": int(metadata["entry_count"]),
+        "entries_signature": metadata["entries_signature"],
+    }
+    manifest_tmp = _index_manifest_path(root).with_suffix(".manifest.json.tmp")
+    manifest_tmp.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    manifest_tmp.replace(_index_manifest_path(root))
+
+
 def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "") -> None:
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": INDEX_FORMAT_VERSION,
-            "skip_signature": _skip_signature(skip_dirs, exclude_signature),
+        signature = _skip_signature(skip_dirs, exclude_signature)
+        entries_signature = _entries_signature(ri.entries)
+        metadata = {
+            "version": str(INDEX_FORMAT_VERSION),
+            "storage": "sqlite",
+            "skip_signature": signature,
             "root": str(ri.root),
-            "built_at": ri.built_at,
-            "truncated": ri.truncated,
-            "entries": ri.entries,
+            "built_at": repr(float(ri.built_at)),
+            "truncated": "1" if ri.truncated else "0",
+            "entry_count": str(len(ri.entries)),
+            "entries_signature": entries_signature,
         }
-        tmp = _index_disk_path(ri.root).with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(_index_disk_path(ri.root))
-    except OSError:
+        previous = _load_disk_metadata(ri.root, skip_dirs, exclude_signature)
+        before_size = _sqlite_storage_size(ri.root)
+        with _connect_sqlite_index(ri.root) as conn:
+            _ensure_sqlite_schema(conn)
+            db_metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            entries_unchanged = (
+                previous is not None
+                and db_metadata.get("version") == str(INDEX_FORMAT_VERSION)
+                and db_metadata.get("storage") == "sqlite"
+                and db_metadata.get("skip_signature") == signature
+                and db_metadata.get("root") == str(ri.root)
+                and db_metadata.get("entries_signature") == entries_signature
+            )
+            _replace_sqlite_metadata(conn, metadata)
+            if not entries_unchanged:
+                _replace_sqlite_entries(conn, ri.entries)
+        _write_manifest(ri.root, metadata)
+        after_size = _sqlite_storage_size(ri.root)
+        record_search_index_bytes_written(max(0, after_size - before_size) if entries_unchanged else after_size)
+    except (OSError, sqlite3.DatabaseError):
         pass
 
 
-def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> tuple[list[IndexEntry], float, bool] | None:
+def _load_disk_metadata(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> dict[str, Any] | None:
+    if not _index_disk_path(root).exists():
+        return None
     try:
-        raw = json.loads(_index_disk_path(root).read_text(encoding="utf-8"))
+        raw = json.loads(_index_manifest_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict) or raw.get("root") != str(root):
         return None
-    # C11: reject indexes from an older format or a different skip-dir set so they rebuild cleanly.
-    if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("skip_signature") != _skip_signature(skip_dirs, exclude_signature):
+    if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("storage") != "sqlite" or raw.get("skip_signature") != _skip_signature(skip_dirs, exclude_signature):
         return None
-    entries_raw = raw.get("entries")
-    if not isinstance(entries_raw, list):
+    return raw
+
+
+def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> tuple[list[IndexEntry], float, bool] | None:
+    try:
+        with sqlite3.connect(_index_disk_path(root), timeout=30.0) as conn:
+            _ensure_sqlite_schema(conn)
+            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            if metadata.get("root") != str(root):
+                return None
+            if metadata.get("version") != str(INDEX_FORMAT_VERSION) or metadata.get("storage") != "sqlite" or metadata.get("skip_signature") != _skip_signature(skip_dirs, exclude_signature):
+                return None
+            rows = conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY ord").fetchall()
+    except (OSError, sqlite3.DatabaseError):
         return None
-    entries = [tuple(item) for item in entries_raw if isinstance(item, list) and len(item) == 5]
-    return entries, float(raw.get("built_at") or 0.0), bool(raw.get("truncated"))
+    entries = [(str(path), str(name), str(rel), int(size), int(mtime)) for path, name, rel, size, mtime in rows]
+    try:
+        built_at = float(metadata.get("built_at") or 0.0)
+    except ValueError:
+        built_at = 0.0
+    return entries, built_at, metadata.get("truncated") == "1"
 
 
 def _run_build(
@@ -196,6 +386,8 @@ def _run_build(
             with ri.lock:
                 ri.entries, ri.built_at, ri.truncated = disk
                 ri.signature = expected_signature
+                ri.disk_entry_count = len(ri.entries)
+                ri.disk_metadata_ready = True
                 ri.ready = True
                 ri.building = False
             return
@@ -209,11 +401,19 @@ def _run_build(
             ri.truncated = truncated
             ri.built_at = time.time()
             ri.signature = expected_signature
+            ri.disk_entry_count = len(ri.entries)
+            ri.disk_metadata_ready = True
             ri.ready = True
             ri.building = False
         _persist(ri, skip_dirs, exclude_signature)
         # C11: a fresh build supersedes any prior unindex, so clear the tombstone.
         _clear_tombstone(ri.root)
+        notify_background_owner_done({
+            "root": str(ri.root),
+            "entries": len(ri.entries),
+            "truncated": ri.truncated,
+            "state": "ready",
+        })
     finally:
         if lock_fd is not None:
             try:
@@ -259,16 +459,45 @@ def ensure_index(
         if ri is None:
             ri = RootIndex(root)
             _REGISTRY[key] = ri
-            disk = _load_disk(root, skip_dirs, exclude_signature)
-            if disk is not None:
-                ri.entries, ri.built_at, ri.truncated = disk
+            if background_owner_can_build():
+                disk = _load_disk(root, skip_dirs, exclude_signature)
+                if disk is not None:
+                    ri.entries, ri.built_at, ri.truncated = disk
+                    ri.disk_entry_count = len(ri.entries)
+                    ri.disk_metadata_ready = True
+                    ri.signature = expected_signature
+                    ri.ready = True
+            else:
+                metadata = _load_disk_metadata(root, skip_dirs, exclude_signature)
+                if metadata is not None:
+                    try:
+                        ri.built_at = float(metadata.get("built_at") or 0.0)
+                        ri.disk_entry_count = int(metadata.get("entry_count") or 0)
+                    except (TypeError, ValueError):
+                        ri.built_at = 0.0
+                        ri.disk_entry_count = 0
+                    ri.truncated = bool(metadata.get("truncated"))
+                    ri.disk_metadata_ready = True
+                    ri.signature = expected_signature
+        elif not background_owner_can_build() and not ri.ready:
+            metadata = _load_disk_metadata(root, skip_dirs, exclude_signature)
+            if metadata is not None:
+                try:
+                    ri.built_at = float(metadata.get("built_at") or 0.0)
+                    ri.disk_entry_count = int(metadata.get("entry_count") or 0)
+                except (TypeError, ValueError):
+                    ri.built_at = 0.0
+                    ri.disk_entry_count = 0
+                ri.truncated = bool(metadata.get("truncated"))
+                ri.disk_metadata_ready = True
                 ri.signature = expected_signature
-                ri.ready = True
     with ri.lock:
         if ri.ready and ri.signature != expected_signature:
             ri.entries = []
             ri.ready = False
             ri.built_at = 0.0
+            ri.disk_metadata_ready = False
+            ri.disk_entry_count = 0
             ri.signature = ""
     # C11: if another process unindexed this root after our copy was built, drop the stale in-memory
     # index so we stop serving deleted-file results (a later explicit access rebuilds and clears the tomb).
@@ -278,7 +507,9 @@ def ensure_index(
             ri.entries = []
             ri.ready = False
             ri.built_at = 0.0
-    if not ri.ready or (time.time() - ri.built_at) > INDEX_TTL_SECONDS:
+            ri.disk_metadata_ready = False
+            ri.disk_entry_count = 0
+    if background_owner_can_build() and (not ri.ready or (time.time() - ri.built_at) > INDEX_TTL_SECONDS):
         _start_build(ri, skip_dirs, exclude_path=exclude_path, exclude_signature=exclude_signature)
     return ri
 
@@ -354,6 +585,13 @@ def unindex(root: Path) -> None:
         pass
     except OSError:
         pass
+    for path in _sqlite_paths(root)[1:]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         _tombstone_path(root).write_text(str(time.time()), encoding="utf-8")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import socket
@@ -10,6 +11,7 @@ import sys
 from pathlib import Path
 
 from .app import TmuxWebtermApp
+from .background_owner import read_background_owner_debug_status
 from .common import AUTH_CONFIG_DISPLAY_PATH
 from .common import SERVER_HOSTNAME
 from .common import STATE_DIR
@@ -54,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cert", type=Path, default=None, help="TLS certificate PEM path")
     parser.add_argument("--key", type=Path, default=None, help="TLS private key PEM path")
     parser.add_argument("--print-transcripts", action="store_true")
+    parser.add_argument("--print-background-owner", action="store_true", help="print the shared background-owner status JSON and exit")
     parser.add_argument(
         "--dev",
         action="store_true",
@@ -204,6 +207,11 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
     return 1 if payload["errors"] else 0
 
 
+def print_background_owner_status() -> int:
+    print(json.dumps(read_background_owner_debug_status(), sort_keys=True, indent=2))
+    return 0
+
+
 def print_auth_setup_error() -> None:
     print(
         f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.",
@@ -222,6 +230,8 @@ def print_auth_setup_error() -> None:
 def main() -> int:
     args = parse_args()
     warn_unavailable_agent_commands_once()
+    if args.print_background_owner:
+        return print_background_owner_status()
     try:
         tls_context, tls_message = tls_context_for_args(args)
     except (OSError, RuntimeError, ValueError, ssl.SSLError) as error:
@@ -240,6 +250,7 @@ def main() -> int:
         finally:
             app.stop_auto_approve_all()
 
+    app.start_background_owner(port=args.port)
     server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
     if hasattr(app, "start_yoagent_backend_prewarm"):
         app.start_yoagent_backend_prewarm(reason="server_start")

@@ -14,6 +14,9 @@ from typing import Any
 CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "activity_summary_ready",
     "auto_approve_changed",
+    "background_owner_changed",
+    "background_refresh_done",
+    "background_refresh_requested",
     "context_changed",
     "context_items_ready",
     "files_changed",

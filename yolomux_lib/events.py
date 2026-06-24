@@ -167,24 +167,77 @@ class EventLog:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         return event
 
+    def _reverse_lines(self) -> Any:
+        chunk_size = 65536
+        pending = b""
+        with self.path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            while position > 0:
+                step = min(chunk_size, position)
+                position -= step
+                handle.seek(position)
+                data = handle.read(step) + pending
+                lines = data.split(b"\n")
+                pending = lines[0]
+                for line in reversed(lines[1:]):
+                    if line:
+                        yield line.decode("utf-8", errors="replace")
+            if pending:
+                yield pending.decode("utf-8", errors="replace")
+
+    def _reverse_events(self) -> Any:
+        for line in self._reverse_lines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                yield event
+
+    @staticmethod
+    def _event_matches_session(event: dict[str, Any], session: str | None) -> bool:
+        return not session or event.get("session") in {session, ""}
+
     def tail(self, session: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
-        keep: collections.deque[dict[str, Any]] = collections.deque(maxlen=bounded_limit)
+        keep: list[dict[str, Any]] = []
         try:
-            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    if session and event.get("session") not in {session, ""}:
-                        continue
-                    keep.append(event)
+            for event in self._reverse_events():
+                if not self._event_matches_session(event, session):
+                    continue
+                keep.append(event)
+                if len(keep) >= bounded_limit:
+                    break
         except OSError:
             return []
-        return list(keep)
+        return list(reversed(keep))
+
+    def tail_many(self, sessions: list[str] | tuple[str, ...] | set[str], limit: int = 100) -> dict[str, list[dict[str, Any]]]:
+        bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
+        ordered_sessions = [str(session) for session in sessions if str(session)]
+        remaining = set(ordered_sessions)
+        keep = {session: [] for session in ordered_sessions}
+        if not ordered_sessions:
+            return keep
+        try:
+            for event in self._reverse_events():
+                event_session = str(event.get("session") or "")
+                matched = ordered_sessions if event_session == "" else [event_session]
+                for session in matched:
+                    if session not in remaining:
+                        continue
+                    if event_session and event_session != session:
+                        continue
+                    keep[session].append(event)
+                    if len(keep[session]) >= bounded_limit:
+                        remaining.discard(session)
+                if not remaining:
+                    break
+        except OSError:
+            return {session: [] for session in ordered_sessions}
+        return {session: list(reversed(events)) for session, events in keep.items()}
+
 
     def search(self, query: str, session: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         needle = query.strip().lower()

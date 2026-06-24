@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from http import HTTPStatus
 
 from yolomux_lib import events as events_module
@@ -10,6 +11,13 @@ from yolomux_lib.common import SessionInfo
 from yolomux_lib.events import EventLog
 from yolomux_lib.events import RunHistoryStore
 from yolomux_lib.metadata import MetadataCache
+
+
+def write_event_lines(path, events):
+    path.write_text(
+        "\n".join(json.dumps(event) if isinstance(event, dict) else str(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
 
 
 def make_app(tmp_path, sessions=("s1",)):
@@ -52,6 +60,76 @@ def test_event_log_append_uses_process_lock(monkeypatch, tmp_path):
 
     assert calls == [events_module.fcntl.LOCK_EX, events_module.fcntl.LOCK_UN]
     assert (tmp_path / ".events.jsonl.lock").exists()
+
+
+def test_event_log_tail_preserves_session_global_filtering_and_bounds(tmp_path):
+    path = tmp_path / "events.jsonl"
+    write_event_lines(path, [
+        {"time": "1", "session": "s1", "type": "note", "message": "s1 old"},
+        "{not json",
+        {"time": "2", "session": "", "type": "note", "message": "global old"},
+        ["not", "an", "event"],
+        {"time": "3", "session": "s2", "type": "note", "message": "s2 event"},
+        {"time": "4", "session": "s1", "type": "note", "message": "s1 new"},
+        {"time": "5", "session": "", "type": "note", "message": "global new"},
+        {"time": "6", "session": "s1", "type": "note", "message": "s1 final"},
+    ])
+    log = EventLog(path)
+
+    assert [event["message"] for event in log.tail(session="s1", limit=3)] == ["s1 new", "global new", "s1 final"]
+    assert [event["message"] for event in log.tail(session="s2", limit=2)] == ["s2 event", "global new"]
+    assert [event["message"] for event in log.tail(limit=3)] == ["s1 new", "global new", "s1 final"]
+    assert [event["message"] for event in log.tail(session="s1", limit=0)] == ["s1 final"]
+
+
+def test_event_log_tail_timing_regression_stops_before_old_history(monkeypatch, tmp_path):
+    path = tmp_path / "events.jsonl"
+    old_events = [
+        {"time": str(index), "session": "s1", "type": "note", "message": f"slow old {index}"}
+        for index in range(200)
+    ]
+    recent_events = [
+        {"time": "201", "session": "s1", "type": "note", "message": "recent 1"},
+        {"time": "202", "session": "s1", "type": "note", "message": "recent 2"},
+        {"time": "203", "session": "s1", "type": "note", "message": "recent 3"},
+    ]
+    write_event_lines(path, [*old_events, *recent_events])
+    log = EventLog(path)
+    real_loads = events_module.json.loads
+
+    def timing_loads(raw):
+        if "slow old" in str(raw):
+            time.sleep(0.003)
+        return real_loads(raw)
+
+    monkeypatch.setattr(events_module.json, "loads", timing_loads)
+
+    started = time.perf_counter()
+    messages = [event["message"] for event in log.tail(session="s1", limit=3)]
+    elapsed = time.perf_counter() - started
+
+    assert messages == ["recent 1", "recent 2", "recent 3"]
+    assert elapsed < 0.25
+
+
+def test_event_log_tail_many_matches_per_session_tail(tmp_path):
+    path = tmp_path / "events.jsonl"
+    write_event_lines(path, [
+        {"time": "1", "session": "s1", "type": "note", "message": "s1 old"},
+        {"time": "2", "session": "", "type": "note", "message": "global old"},
+        {"time": "3", "session": "s2", "type": "note", "message": "s2 old"},
+        {"time": "4", "session": "s1", "type": "note", "message": "s1 new"},
+        {"time": "5", "session": "s2", "type": "note", "message": "s2 new"},
+        {"time": "6", "session": "", "type": "note", "message": "global new"},
+    ])
+    log = EventLog(path)
+
+    tails = log.tail_many(["s1", "s2"], limit=3)
+
+    assert tails["s1"] == log.tail(session="s1", limit=3)
+    assert tails["s2"] == log.tail(session="s2", limit=3)
+    assert [event["message"] for event in tails["s1"]] == ["global old", "s1 new", "global new"]
+    assert [event["message"] for event in tails["s2"]] == ["s2 old", "s2 new", "global new"]
 
 
 def test_search_payload_combines_events_and_current_summaries(tmp_path):

@@ -306,6 +306,11 @@ def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
     ))
 
 
+def get_background_status(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_app_result(request.server.app.background_owner_status_payload())
+
+
 def get_yoagent_skills(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_json(request.server.app.yoagent_skills_payload())
@@ -926,6 +931,7 @@ CORE_ROUTES = (
     Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core"),
     Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
+    Route("GET", "/api/background/status", "readonly", get_background_status, group="core"),
     Route("GET", "/api/auto-approve", "readonly", get_auto_approve, group="core"),
     Route("GET", "/api/notify", "readonly", get_notify, group="core"),
     Route("GET", "/api/settings", "readonly", get_settings, group="core"),

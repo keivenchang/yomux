@@ -1,4 +1,5 @@
 import argparse
+import json
 import socket
 import subprocess
 import threading
@@ -54,6 +55,15 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     assert args.sessions == ["1,2", "ant"]
     assert args.dangerously_yolo is True
     assert args.self_signed is True
+    assert args.print_background_owner is False
+
+
+def test_print_background_owner_status_outputs_json(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": {"port": 8003}, "generations": []})
+
+    assert cli.print_background_owner_status() == 0
+
+    assert json.loads(capsys.readouterr().out) == {"current_owner": {"port": 8003}, "generations": []}
 
 
 def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
@@ -67,6 +77,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         cert=None,
         key=None,
         print_transcripts=False,
+        print_background_owner=False,
         dev=False,
     )
 
@@ -77,6 +88,10 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
 
         def restore_auto_approve(self):
             return []
+
+        def start_background_owner(self, port=None):
+            captured["background_owner_port"] = port
+            return True
 
         def start_yoagent_backend_prewarm(self, **kwargs):
             captured["yoagent_prewarm"] = kwargs
@@ -112,6 +127,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["address"] == ("0.0.0.0", 19001)
     assert captured["tls_context"] is None
     assert captured["dev"] is False  # dev mode off by default
+    assert captured["background_owner_port"] == 19001
     assert captured["yoagent_prewarm"] == {"reason": "server_start"}
     assert captured["served"] is True
     assert captured["stopped"] is True

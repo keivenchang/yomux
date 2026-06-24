@@ -2319,7 +2319,7 @@ def test_tmux_codex_startup_expands_long_model_row_without_ellipsis(visual_tmux)
     booted, pane = visual_tmux.wait_until(session, lambda text: "gpt-5.4-mini medium" in text and "/model to change" in text)
     assert booted, pane
     box = extract_first_box(pane)
-    assert box == expected_codex_startup_box("gpt-5.4-mini", "medium", "~/yolomux.dev8002")
+    assert box == expected_codex_startup_box("gpt-5.4-mini", "medium", f"~/{REPO_ROOT.name}")
     assert_no_startup_ellipsis(box)
     assert len({len(line) for line in box}) == 1
 

@@ -3395,6 +3395,17 @@ function installReconnectResyncHandlers() {
   });
 }
 
+let initialAppShellPainted = false;
+
+function paintInitialAppShell() {
+  if (initialAppShellPainted) return;
+  renderSessionButtons();
+  renderPanels([], {prune: false});
+  seedVisualActivePaneItem(activeSessions);
+  updatePanelInactiveOverlays();
+  initialAppShellPainted = true;
+}
+
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installReconnectResyncHandlers();
@@ -3436,6 +3447,7 @@ async function boot() {
     });
   }
   bindClipboardPaste();
+  paintInitialAppShell();
   if (!shareViewMode) {
     await refreshTranscripts({refreshAuto: false});
   } else {
@@ -3443,10 +3455,7 @@ async function boot() {
     transcriptMetaLoaded = true;
     await refreshTranscripts({refreshAuto: false, refreshActivity: false});
   }
-  renderSessionButtons();
-  renderPanels([], {prune: false});
   installYolomuxFontMetricRefresh();
-  seedVisualActivePaneItem(activeSessions);
   updatePanelInactiveOverlays();
   if (shareViewMode) {
     const bootstrapUiState = shareBootstrap?.uiState && typeof shareBootstrap.uiState === 'object' ? shareBootstrap.uiState : {};
@@ -3682,6 +3691,8 @@ function handleClientPushEvent(type, payload = {}) {
   if (type === 'transcripts_changed') {
     if (payload.data) {
       applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    } else {
+      refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events transcript refresh failed', error));
     }
     return;
   }

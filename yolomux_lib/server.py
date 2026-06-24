@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import codecs
 import copy
+import gzip
 import hashlib
 import html
 import json
@@ -204,12 +205,76 @@ SHARE_INPUT_INTENT_COMMAND_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 MAX_FS_BATCH_REQUESTS = 64
 TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
+STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
+STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
+STATIC_GZIP_MIN_BYTES = 1024
+STATIC_GZIP_CONTENT_TYPES = {
+    "application/javascript",
+    "application/json",
+    "text/css",
+    "text/html",
+    "text/plain",
+}
 
 
 def content_disposition_attachment(raw_path: str) -> str:
     name = Path(str(raw_path or "")).name or "download"
     safe = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";", "/"} else "_" for char in name).strip()
     return f'attachment; filename="{safe or "download"}"'
+
+
+def content_type_base(content_type: str) -> str:
+    return str(content_type or "").split(";", 1)[0].strip().lower()
+
+
+def static_content_type_supports_gzip(content_type: str) -> bool:
+    base = content_type_base(content_type)
+    return base in STATIC_GZIP_CONTENT_TYPES or base.startswith("text/")
+
+
+def accept_encoding_allows_gzip(accept_encoding: str | None) -> bool:
+    gzip_q: float | None = None
+    wildcard_q: float | None = None
+    for raw_part in str(accept_encoding or "").split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        token, *raw_params = part.split(";")
+        encoding = token.strip().lower()
+        if encoding not in {"gzip", "*"}:
+            continue
+        q = 1.0
+        for raw_param in raw_params:
+            name, separator, value = raw_param.strip().partition("=")
+            if separator and name.strip().lower() == "q":
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+        if encoding == "gzip":
+            gzip_q = q
+        else:
+            wildcard_q = q
+    if gzip_q is not None:
+        return gzip_q > 0
+    return bool(wildcard_q is not None and wildcard_q > 0)
+
+
+def static_asset_cache_control(request_path: str) -> str:
+    qs = parse_qs(urlparse(request_path or "").query)
+    if any(str(value).strip() for value in qs.get("v", [])):
+        return STATIC_CACHE_CONTROL_VERSIONED
+    return STATIC_CACHE_CONTROL_UNVERSIONED
+
+
+def static_asset_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
+    if (
+        len(data) >= STATIC_GZIP_MIN_BYTES
+        and static_content_type_supports_gzip(content_type)
+        and accept_encoding_allows_gzip(accept_encoding)
+    ):
+        return gzip.compress(data, compresslevel=6, mtime=0), "gzip"
+    return data, None
 
 
 def clamp_pty_dimension(value: int) -> int:
@@ -1437,6 +1502,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_auth_cookie_if_needed()
         self.end_headers()
         subscriber_id, subscriber_queue = self.server.app.client_events.subscribe()
+        if hasattr(self.server.app, "start_client_event_watcher"):
+            self.server.app.start_client_event_watcher()
         try:
             self.write_sse_json("ready", {"time": time.time()})
             while True:
@@ -1450,6 +1517,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         finally:
             self.server.app.client_events.unsubscribe(subscriber_id)
+            if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
+                self.server.app.stop_client_event_watcher_if_idle()
 
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1728,15 +1797,20 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         except OSError as exc:
             self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", static_asset_cache_control(self.path))
+        if static_content_type_supports_gzip(content_type):
+            self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(body)
 
     def write_static_head(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
@@ -1744,10 +1818,20 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.NOT_FOUND)
             self.end_headers()
             return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(path.stat().st_size))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", static_asset_cache_control(self.path))
+        if static_content_type_supports_gzip(content_type):
+            self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
         self.end_headers()
 
@@ -2305,15 +2389,13 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_pointer_stop = threading.Event()
         if hasattr(self.app, "start_tabber_activity_cache_warmer"):
             self.app.start_tabber_activity_cache_warmer()
-        if hasattr(self.app, "start_client_event_watcher"):
-            self.app.start_client_event_watcher()
         if hasattr(self.app, "start_update_check_thread"):
             self.app.start_update_check_thread()
 
     def server_close(self) -> None:
         self.share_pointer_stop.set()
-        if hasattr(self.app, "stop_tmux_signal_event_watcher"):
-            self.app.stop_tmux_signal_event_watcher()
+        if hasattr(self.app, "stop_client_event_watcher"):
+            self.app.stop_client_event_watcher()
         super().server_close()
 
     def record_host_pty_dimensions(self, session: str, rows: int, cols: int) -> None:

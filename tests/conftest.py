@@ -29,6 +29,7 @@ for _env_var, _prefix in (("YOLOMUX_CONFIG_DIR", "yolomux-test-config-"), ("YOLO
 
 
 from yolomux_lib import app as app_module
+from yolomux_lib import file_index
 
 
 SLOWEST_FIRST_TESTS = (
@@ -102,6 +103,21 @@ def local_socket_capability() -> tuple[bool, str]:
         return _SOCKET_AVAILABILITY
     _SOCKET_AVAILABILITY = (True, "")
     return _SOCKET_AVAILABILITY
+
+
+@pytest.fixture(autouse=True)
+def isolated_file_index_background_hooks():
+    file_index.set_background_owner_checker(None)
+    file_index.set_background_owner_refresh_requester(None)
+    file_index.set_background_owner_bytes_recorder(None)
+    file_index.set_background_owner_done_notifier(None)
+    file_index.clear_memory_indexes()
+    yield
+    file_index.set_background_owner_checker(None)
+    file_index.set_background_owner_refresh_requester(None)
+    file_index.set_background_owner_bytes_recorder(None)
+    file_index.set_background_owner_done_notifier(None)
+    file_index.clear_memory_indexes()
 
 
 def pytest_collection_modifyitems(config, items):
