@@ -33656,7 +33656,14 @@ function createFileEditorPanel(item) {
     const path = controls?.dataset?.diffRefPath || '';
     setRepoDiffRefs(repo, 'HEAD', 'current', {path});
   });
-  panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'preview'));
+  const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+  previewPane?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, fileEditorPreviewScrollSyncSource(panel)));
+  previewPane?.addEventListener('toggle', event => {
+    if (event.target?.matches?.('details')) scheduleFileEditorPreviewLayoutSync(panel);
+  }, true);
+  previewPane?.addEventListener('load', event => {
+    if (event.target?.matches?.('img.markdown-preview-image, img.mermaid-preview-image')) scheduleFileEditorPreviewLayoutSync(panel);
+  }, true);
   renderFileEditorPanel(panel, item);
   return panel;
 }
@@ -38439,7 +38446,28 @@ function syntaxLanguageForPath(path) {
 function previewSourceLineAnchors(previewPane) {
   return Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
     .map(element => ({element, line: Number(element.dataset.sourceLine)}))
-    .filter(item => Number.isFinite(item.line) && item.line > 0);
+    .filter(item => Number.isFinite(item.line) && item.line > 0 && previewSourceAnchorIsRendered(item.element));
+}
+
+function detailsSummaryElement(details) {
+  return Array.from(details?.children || []).find(child => String(child?.tagName || '').toLowerCase() === 'summary') || null;
+}
+
+function elementHiddenByClosedDetails(element) {
+  for (let details = element?.closest?.('details'); details; details = details.parentElement?.closest?.('details')) {
+    if (details.open) continue;
+    const summary = detailsSummaryElement(details);
+    if (!summary || !summary.contains(element)) return true;
+  }
+  return false;
+}
+
+function previewSourceAnchorIsRendered(element) {
+  if (!element || elementHiddenByClosedDetails(element)) return false;
+  const rects = element.getClientRects?.();
+  if (rects && rects.length > 0) return true;
+  const rect = element.getBoundingClientRect?.();
+  return Boolean(rect && (rect.width > 0 || rect.height > 0));
 }
 
 function previewAnchorForSourceLine(previewPane, sourceLine) {
@@ -38501,6 +38529,126 @@ function previewSourceLineForScroll(previewPane) {
     best = item;
   }
   return best.line;
+}
+
+function clampScrollTop(element, value) {
+  const max = Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
+  return Math.min(max, Math.max(0, Number(value || 0)));
+}
+
+const fileEditorSplitScrollFocusRatio = 0.5;
+
+function editorScrollEdgeTarget(from, to) {
+  const maxFrom = Math.max(0, Number(from?.scrollHeight || 0) - Number(from?.clientHeight || 0));
+  const maxTo = Math.max(0, Number(to?.scrollHeight || 0) - Number(to?.clientHeight || 0));
+  const current = Math.max(0, Number(from?.scrollTop || 0));
+  const edgeSnap = Math.max(2, Math.ceil(Number(from?.clientHeight || 0) * 0.01));
+  if (maxTo <= 0 || current <= edgeSnap) return 0;
+  if (maxFrom <= edgeSnap || current >= maxFrom - edgeSnap) return maxTo;
+  return null;
+}
+
+function previewScrollAnchors(previewPane) {
+  return previewSourceLineAnchors(previewPane)
+    .map(item => ({...item, top: scrollTopForPreviewElement(previewPane, item.element)}))
+    .sort((a, b) => a.line - b.line || a.top - b.top);
+}
+
+function sourcePositionForEditorScroll(cmView) {
+  if (!cmView?.scrollDOM || !cmView.state?.doc) return null;
+  try {
+    const y = Math.max(0, Number(cmView.scrollDOM.scrollTop || 0)) + (Math.max(1, Number(cmView.scrollDOM.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
+    const block = cmView.lineBlockAtHeight(y);
+    const line = cmView.state.doc.lineAt(block.from).number;
+    const height = Math.max(1, Number(block.height || 0));
+    const fraction = Math.min(1, Math.max(0, (y - Number(block.top || 0)) / height));
+    return {line: line + fraction};
+  } catch (_) {
+    return null;
+  }
+}
+
+function sourcePositionForPreviewScroll(previewPane) {
+  const anchors = previewScrollAnchors(previewPane);
+  if (!anchors.length) return null;
+  const y = Math.max(0, Number(previewPane?.scrollTop || 0)) + (Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
+  let previous = anchors[0];
+  for (let index = 1; index < anchors.length; index += 1) {
+    const next = anchors[index];
+    if (next.top > y) {
+      const span = Math.max(1, next.top - previous.top);
+      const fraction = Math.min(1, Math.max(0, (y - previous.top) / span));
+      return {line: previous.line + ((next.line - previous.line) * fraction)};
+    }
+    previous = next;
+  }
+  return {line: previous.line};
+}
+
+function previewScrollTopForSourcePosition(previewPane, position) {
+  const anchors = previewScrollAnchors(previewPane);
+  if (!anchors.length || !position) return null;
+  const targetOffset = Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio;
+  const line = Math.max(1, Number(position.line || 1));
+  if (line <= anchors[0].line) return clampScrollTop(previewPane, anchors[0].top - targetOffset);
+  let previous = anchors[0];
+  for (let index = 1; index < anchors.length; index += 1) {
+    const next = anchors[index];
+    if (line <= next.line) {
+      const span = Math.max(1, next.line - previous.line);
+      const fraction = Math.min(1, Math.max(0, (line - previous.line) / span));
+      return clampScrollTop(previewPane, previous.top + ((next.top - previous.top) * fraction) - targetOffset);
+    }
+    previous = next;
+  }
+  return null;
+}
+
+function editorScrollTopForSourcePosition(cmView, position) {
+  if (!cmView?.state?.doc || !position) return null;
+  try {
+    const targetOffset = Math.max(1, Number(cmView.scrollDOM?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio;
+    const line = Math.max(1, Math.min(Number(position.line || 1), cmView.state.doc.lines));
+    const beforeLine = Math.max(1, Math.min(Math.floor(line), cmView.state.doc.lines));
+    const afterLine = Math.max(1, Math.min(Math.ceil(line), cmView.state.doc.lines));
+    const beforeBlock = cmView.lineBlockAt(cmView.state.doc.line(beforeLine).from);
+    const beforeTop = Number(beforeBlock?.top || 0);
+    if (afterLine === beforeLine) return clampScrollTop(cmView.scrollDOM, beforeTop - targetOffset);
+    const afterBlock = cmView.lineBlockAt(cmView.state.doc.line(afterLine).from);
+    const afterTop = Number(afterBlock?.top || beforeTop);
+    return clampScrollTop(cmView.scrollDOM, beforeTop + ((afterTop - beforeTop) * (line - beforeLine)) - targetOffset);
+  } catch (_) {
+    return null;
+  }
+}
+
+function previewPaneNeedsSourceAnchorScroll(previewPane) {
+  return Boolean(previewPane?.querySelector?.('details, img.markdown-preview-image, .mermaid-preview-host, .file-editor-preview-zoom-shell'));
+}
+
+function syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane) {
+  if (!previewPaneNeedsSourceAnchorScroll(previewPane)) return false;
+  const from = source === 'preview' ? previewPane : editorScroller;
+  const to = source === 'preview' ? editorScroller : previewPane;
+  to.scrollLeft = scrollSyncTargetPosition(from, to, 'left');
+  const edgeTarget = editorScrollEdgeTarget(source === 'preview' ? previewPane : editorScroller, source === 'preview' ? editorScroller : previewPane);
+  if (edgeTarget !== null) {
+    if (source === 'preview') editorScroller.scrollTop = edgeTarget;
+    else previewPane.scrollTop = edgeTarget;
+    return true;
+  }
+  const position = source === 'preview' ? sourcePositionForPreviewScroll(previewPane) : sourcePositionForEditorScroll(host?._cmView);
+  if (!position) return false;
+  if (source === 'preview') {
+    const target = editorScrollTopForSourcePosition(host?._cmView, position);
+    if (target === null) return false;
+    editorScroller.scrollTop = target;
+    return true;
+  }
+  const target = previewScrollTopForSourcePosition(previewPane, position);
+  if (target === null) return false;
+  previewPane.scrollTop = target;
+  return true;
 }
 
 function nowMs() {
@@ -38631,6 +38779,7 @@ function syncFileEditorInPaneSplitScroll(host, source) {
   const from = source === 'preview' ? previewPane : editorScroller;
   const to = source === 'preview' ? editorScroller : previewPane;
   setFileEditorScrollSyncGuardForSource(source, host);
+  if (syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane)) return true;
   return syncScrollPositionByRatio(from, to);
 }
 
@@ -38655,6 +38804,18 @@ function scheduleFileEditorSplitScrollSync(host, source) {
   if (typeof requestAnimationFrame === 'function') host._splitScrollFrame = requestAnimationFrame(run);
   else host._splitScrollFrame = setTimeout(run, 0);
   return true;
+}
+
+const fileEditorPreviewLayoutScrollSyncMs = 400;
+
+function fileEditorPreviewScrollSyncSource(panel) {
+  return Number(panel?._previewLayoutScrollUntil || 0) > nowMs() ? 'editor' : 'preview';
+}
+
+function scheduleFileEditorPreviewLayoutSync(panel) {
+  if (!panel) return false;
+  panel._previewLayoutScrollUntil = nowMs() + fileEditorPreviewLayoutScrollSyncMs;
+  return scheduleFileEditorSplitScrollSync(panel, 'editor');
 }
 
 function refreshEditorPreviews() {

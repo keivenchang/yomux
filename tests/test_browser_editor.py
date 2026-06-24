@@ -1728,6 +1728,184 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
+    page = tmp_path / "preview-markdown-split-scroll-media.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"], grid_width=920, grid_height=620), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+            window.marked = {
+              parse(markdown) {
+                const parts = [];
+                for (const line of String(markdown || '').split('\\n')) {
+                  const trimmed = line.trim();
+                  if (trimmed === '<details>' || trimmed === '</details>' || /^<summary>.*<\\/summary>$/.test(trimmed)) {
+                    parts.push(trimmed);
+                    continue;
+                  }
+                  const heading = trimmed.match(/^(#{1,6})\\s+(.+)$/);
+                  if (heading) {
+                    const level = heading[1].length;
+                    parts.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
+                    continue;
+                  }
+                  if (trimmed.startsWith('<img ')) {
+                    parts.push(trimmed);
+                    continue;
+                  }
+                  if (trimmed) parts.push(`<p>${escapeHtml(trimmed)}</p>`);
+                }
+                return parts.join('');
+              },
+            };
+            const canvas = document.createElement('canvas');
+            canvas.width = 120;
+            canvas.height = 720;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#14b8a6';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#111827';
+            ctx.font = '700 20px Arial';
+            ctx.fillText('TALL', 30, 360);
+            const tallImage = canvas.toDataURL('image/png');
+            const path = '/home/test/repo/docs/media-scroll.md';
+            const intro = Array.from({length: 18}, (_, index) => `Intro paragraph ${index + 1} before the expandable image block.`);
+            const content = [
+              '# Source Line Sync',
+              '',
+              ...intro.flatMap(line => [line, '']),
+              '<details>',
+              '<summary>Expandable image block</summary>',
+              '',
+              'Hidden paragraph before the tall image.',
+              '',
+              `<img alt="tall media" src="${tallImage}" width="420">`,
+              '',
+              'Hidden paragraph after the tall image.',
+              '',
+              '</details>',
+              '',
+              '## 2. Target Section',
+              '',
+              'The editor and preview should agree that this is the current section.',
+              '',
+              ...Array.from({length: 30}, (_, index) => `Tail paragraph ${index + 1}`),
+              '',
+            ].join('\\n');
+            const targetLine = content.split('\\n').findIndex(line => line.startsWith('## 2.')) + 1;
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '900px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              const image = panel.querySelector('img[alt="tall media"]');
+              const preview = panel.querySelector('.file-editor-preview-pane-panel');
+              if (panel._cmView?.scrollDOM && preview && !preview.hidden && image?.complete && image.naturalHeight > 0 && preview.scrollHeight > preview.clientHeight) break;
+              await frame();
+            }
+            const editorScroller = panel._cmView.scrollDOM;
+            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            const targetHeading = preview.querySelector(`h2[data-source-line="${targetLine}"]`);
+            const tall = preview.querySelector('img[alt="tall media"]');
+            const details = preview.querySelector('details');
+            const summary = details?.querySelector('summary');
+            const maxScroll = element => Math.max(0, Number(element.scrollHeight || 0) - Number(element.clientHeight || 0));
+            const settle = async (ms = 40) => {
+              await frame();
+              await frame();
+              await delay(ms);
+            };
+            const centerDelta = () => {
+              const previewBox = preview.getBoundingClientRect();
+              const headingBox = targetHeading.getBoundingClientRect();
+              return headingBox.top - (previewBox.top + (preview.clientHeight * 0.5));
+            };
+            const editorCenterLine = () => {
+              const block = panel._cmView.lineBlockAtHeight(editorScroller.scrollTop + (editorScroller.clientHeight * 0.5));
+              return panel._cmView.state.doc.lineAt(block.from).number;
+            };
+            const snapshot = () => ({
+              editorTop: editorScroller.scrollTop,
+              previewTop: preview.scrollTop,
+              targetCenterDelta: centerDelta(),
+              editorCenterLine: editorCenterLine(),
+              detailsOpen: details?.open === true,
+              tallHeight: tall.getBoundingClientRect().height,
+              previewClientHeight: preview.clientHeight,
+            });
+            const centerEditorOnTarget = async () => {
+              const targetBlock = panel._cmView.lineBlockAt(panel._cmView.state.doc.line(targetLine).from);
+              editorScroller.scrollTop = Math.min(maxScroll(editorScroller), Math.max(0, targetBlock.top - (editorScroller.clientHeight * 0.5)));
+              editorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
+              await settle();
+              return snapshot();
+            };
+            const afterClosedEditorDrive = await centerEditorOnTarget();
+            summary.click();
+            await settle(80);
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              if (details.open && tall.complete && tall.naturalHeight > 0 && tall.getBoundingClientRect().height > preview.clientHeight) break;
+              await frame();
+            }
+            await settle(80);
+            const afterOpenToggle = snapshot();
+            summary.click();
+            await settle(80);
+            const afterCloseToggle = snapshot();
+            panel._previewLayoutScrollUntil = 0;
+            preview.scrollTop = Math.min(maxScroll(preview), Math.max(0, scrollTopForPreviewElement(preview, targetHeading) - (preview.clientHeight * 0.5)));
+            preview.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await settle();
+            done({
+              targetLine,
+              afterClosedEditorDrive,
+              afterOpenToggle,
+              afterCloseToggle,
+              afterPreviewDrive: {
+                previewTop: preview.scrollTop,
+                editorTop: editorScroller.scrollTop,
+                editorCenterLine: editorCenterLine(),
+              },
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+    assert metrics["afterClosedEditorDrive"]["detailsOpen"] is False, metrics
+    assert metrics["afterOpenToggle"]["detailsOpen"] is True, metrics
+    assert metrics["afterCloseToggle"]["detailsOpen"] is False, metrics
+    assert metrics["afterOpenToggle"]["tallHeight"] > metrics["afterOpenToggle"]["previewClientHeight"], metrics
+    assert metrics["afterClosedEditorDrive"]["previewTop"] > 0, metrics
+    assert metrics["afterOpenToggle"]["previewTop"] > metrics["afterClosedEditorDrive"]["previewTop"], metrics
+    assert abs(metrics["afterClosedEditorDrive"]["targetCenterDelta"]) <= 32, metrics
+    assert abs(metrics["afterOpenToggle"]["targetCenterDelta"]) <= 32, metrics
+    assert abs(metrics["afterCloseToggle"]["targetCenterDelta"]) <= 32, metrics
+    assert metrics["targetLine"] <= metrics["afterPreviewDrive"]["editorCenterLine"] <= metrics["targetLine"] + 1, metrics
+
+
 def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser, tmp_path):
     browser.set_window_size(1200, 1200)
     page = tmp_path / "preview-markdown-visual-mermaid-media.html"

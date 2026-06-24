@@ -3074,7 +3074,14 @@ function createFileEditorPanel(item) {
     const path = controls?.dataset?.diffRefPath || '';
     setRepoDiffRefs(repo, 'HEAD', 'current', {path});
   });
-  panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'preview'));
+  const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+  previewPane?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, fileEditorPreviewScrollSyncSource(panel)));
+  previewPane?.addEventListener('toggle', event => {
+    if (event.target?.matches?.('details')) scheduleFileEditorPreviewLayoutSync(panel);
+  }, true);
+  previewPane?.addEventListener('load', event => {
+    if (event.target?.matches?.('img.markdown-preview-image, img.mermaid-preview-image')) scheduleFileEditorPreviewLayoutSync(panel);
+  }, true);
   renderFileEditorPanel(panel, item);
   return panel;
 }
