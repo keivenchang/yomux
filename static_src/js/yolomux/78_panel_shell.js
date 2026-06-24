@@ -1489,7 +1489,40 @@ function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, option
   return true;
 }
 
+function sessionMetadataIsLightweight(info) {
+  if (!info || typeof info !== 'object') return false;
+  if (info.metadata_loading === true) return true;
+  const project = info.project;
+  return Boolean(project && typeof project === 'object' && project.loading === true);
+}
+
+function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
+  if (!sessionMetadataIsLightweight(nextInfo) || !previousInfo || typeof previousInfo !== 'object') return nextInfo;
+  return {
+    ...nextInfo,
+    project: previousInfo.project || nextInfo.project,
+    window_metadata: Array.isArray(previousInfo.window_metadata) && previousInfo.window_metadata.length
+      ? previousInfo.window_metadata
+      : nextInfo.window_metadata,
+    metadata_loading: true,
+  };
+}
+
+function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMeta) {
+  if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
+  const previousSessions = previousPayload?.sessions && typeof previousPayload.sessions === 'object' ? previousPayload.sessions : {};
+  let nextSessions = null;
+  for (const [session, nextInfo] of Object.entries(payload.sessions)) {
+    const merged = mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousSessions[session]);
+    if (merged === nextInfo) continue;
+    if (!nextSessions) nextSessions = {...payload.sessions};
+    nextSessions[session] = merged;
+  }
+  return nextSessions ? {...payload, sessions: nextSessions} : payload;
+}
+
 function transcriptPayloadWithTmuxWindowOverrides(payload) {
+  payload = transcriptPayloadWithPriorSessionMetadata(payload);
   if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
   let nextSessions = null;
   for (const session of Object.keys(payload.sessions)) {

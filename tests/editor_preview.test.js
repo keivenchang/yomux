@@ -1010,10 +1010,59 @@ async function runEditorPreviewSuite() {
     assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*applyTmuxWindowActiveIndexToTranscriptInfo\(String\(session\), indexKey, \{render: true\}\)/.test(source), 'known direct tmux targets overlay transcript metadata immediately so stale polls do not flash the old window');
     assert.ok(/async function applyTranscriptsPayload\(payload, options = \{\}\)[\s\S]*transcriptMeta = transcriptPayloadWithTmuxWindowOverrides\(payload\)/.test(source), 'incoming transcript payloads preserve pending direct-window overrides');
+    assert.ok(/function transcriptPayloadWithPriorSessionMetadata\(payload, previousPayload = transcriptMeta\)[\s\S]*mergeSessionMetadataDuringLightweightRefresh/.test(source), 'incoming lightweight transcript payloads preserve prior repo metadata so YO!info does not flash empty');
     assert.ok(/async function refreshTmuxWindowActiveFromSignals\(session, options = \{\}\)[\s\S]*apiFetchJson\(tmuxWindowSignalReadbackUrl\(session\)/.test(source), 'tmux window readback uses the session-scoped lightweight tmux-signals endpoint');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when a known tmux window target is selected');
     assert.ok(/function setTmuxWindowActiveIndexPending\(session, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when an unknown tmux window target is pending');
     assert.ok(/function applyTmuxSignalActiveWindowsToTranscriptInfo\(payload = \{\}\)[\s\S]*updatePanelHeader\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]*renderInfoPanel\(\);[\s\S]*refreshTabberPanels\(\)/.test(source), 'probe-confirmed tmux window readback repaints the Tabber without waiting for the activity poll');
+  });
+
+  await testAsync('lightweight transcript refresh keeps existing YO!info branch rows', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const fullInfo = {
+      session: 'meta-preview',
+      panes: [{target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/app'}],
+      agents: [],
+      window_metadata: [{window_index: '0', git: {root: '/repo/app', branch: 'feature/yoinfo'}}],
+      project: {
+        git: {
+          root: '/repo/app',
+          branch: 'feature/yoinfo',
+          other_branches: {
+            branches: [
+              {name: 'feature/yoinfo', current: true, updated: 'now', updated_ts: 500, subject: 'keep branch metadata visible'},
+            ],
+          },
+        },
+        repos: [],
+        pull_request: null,
+        linear: [],
+      },
+      metadata_loading: false,
+    };
+    await api.applyTranscriptsPayloadForTest({session_order: ['meta-preview'], sessions: {'meta-preview': fullInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.branch)), ['feature/yoinfo']);
+
+    const lightweightInfo = {
+      session: 'meta-preview',
+      panes: [{target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/app/src'}],
+      agents: [{kind: 'claude'}],
+      window_metadata: [],
+      project: {git: null, pull_request: null, linear: [], repos: [], loading: true},
+      metadata_loading: true,
+    };
+    await api.applyTranscriptsPayloadForTest({metadata_loading: true, session_order: ['meta-preview'], sessions: {'meta-preview': lightweightInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.branch)), ['feature/yoinfo'], 'lightweight refresh does not blank the YO!info table');
+    assert.equal(api.transcriptInfoForTest('meta-preview').metadata_loading, true, 'the merged session still records that fresh metadata is loading');
+    assert.equal(api.transcriptInfoForTest('meta-preview').panes[0].current_path, '/repo/app/src', 'lightweight pane updates are still applied');
+
+    const fullEmptyInfo = {
+      ...lightweightInfo,
+      project: {git: null, pull_request: null, linear: [], repos: []},
+      metadata_loading: false,
+    };
+    await api.applyTranscriptsPayloadForTest({metadata_loading: false, session_order: ['meta-preview'], sessions: {'meta-preview': fullEmptyInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.branch)), [], 'a later full metadata payload can still clear rows when there is truly no branch metadata');
   });
 
   await testAsync('tmux window direct failure rolls back optimistic metadata', async () => {
