@@ -39,14 +39,13 @@ expected_screen_key: needs-input
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: mcp_tool_approval__codex-cli-synthetic_20260620
-height: 35
+height: 40
 id: mcp_tool_approval__codex-cli-synthetic_20260620
 operations: []
 raw_capture: |2
    Codex wants to use an MCP tool
 
-   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dyn
-  amo#123?
+   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
 
    › 1. Yes, allow once
      2. Yes, and always allow this MCP tool for this server
@@ -59,8 +58,7 @@ source_text_file: codex_mcp_tool_approval.txt
 styled_capture: |2
    Codex wants to use an MCP tool
 
-   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dyn
-  amo#123?
+   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
 
    › 1. Yes, allow once
      2. Yes, and always allow this MCP tool for this server
@@ -70,12 +68,11 @@ styled_capture: |2
 visible_text: |2
    Codex wants to use an MCP tool
 
-   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dyn
-  amo#123?
+   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
 
    › 1. Yes, allow once
      2. Yes, and always allow this MCP tool for this server
      3. No
 
    Press enter to confirm or esc to cancel
-width: 78
+width: 200

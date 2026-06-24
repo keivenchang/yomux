@@ -22,7 +22,7 @@ expected_screen_key: needs-input
 failures: []
 fixture_id: ask_user_question_selected_option__claude-code-2.1.185_20260621
 fixture_scenario: ask_user_question_selected_option
-height: 35
+height: 40
 id: ask_user_question_selected_option__claude-code-2.1.185_20260621
 include_scrollback: false
 launch_agent: ''
@@ -45,13 +45,11 @@ raw_capture: |
 
     Ran 1 shell command
 
-  ● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PD
-  T.
-  ──────────────────────────────────────────────────────────────────────────────
+  ● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PDT.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ☐ Time +5min
 
-  Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the
-   right time?
+  Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?
 
   ❯ 1. Yes, 09:45 is right
 
@@ -60,7 +58,7 @@ raw_capture: |
     2. No, that's wrong
        The computed time is not what you wanted.
     3. Type something.
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     4. Chat about this
 
   Enter to select · ↑/↓ to navigate · Esc to cancel
@@ -82,13 +80,11 @@ styled_capture: |
 
     Ran 1 shell command
 
-  ● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PD
-  T.
-  ──────────────────────────────────────────────────────────────────────────────
+  ● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PDT.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ☐ Time +5min
 
-  Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the
-   right time?
+  Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?
 
   ❯ 1. Yes, 09:45 is right
 
@@ -97,11 +93,11 @@ styled_capture: |
     2. No, that's wrong
        The computed time is not what you wanted.
     3. Type something.
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     4. Chat about this
 
   Enter to select · ↑/↓ to navigate · Esc to cancel
 target: '1:2.0'
 tmux_socket: ''
 wait_text: []
-width: 78
+width: 200

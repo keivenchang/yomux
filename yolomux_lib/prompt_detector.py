@@ -17,16 +17,31 @@ from . import yolo_rules
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_VISUAL_WRAP_COLS = 78
+_COMMON_VISUAL_WRAP_COLS = frozenset({78, 80, 100, 120, 126, 150, 200})
 _VISUAL_WRAP_CONTINUATION_RE = re.compile(r"^\s+|^[a-z0-9_./~:+#?)\]}-]", re.IGNORECASE)
 _BOX_OR_RULE_RE = re.compile(r"^[\s─━╌╍▔╭╮╰╯│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬\-]+$")
 
 
-def _is_visual_wrap_continuation(previous: str, current: str) -> bool:
+def _visual_wrap_candidate_cols(lines: list[str]) -> set[int]:
+    counts: dict[int, int] = {}
+    for line in lines:
+        length = len(line.rstrip())
+        if length >= 60:
+            counts[length] = counts.get(length, 0) + 1
+    inferred = {length for length, count in counts.items() if count >= 2}
+    return set(_COMMON_VISUAL_WRAP_COLS) | inferred
+
+
+def _is_visual_wrap_continuation(previous: str, current: str, wrap_cols: set[int]) -> bool:
     prev = previous.rstrip()
     cur = current.rstrip()
     stripped = cur.strip()
-    if len(prev) not in {_VISUAL_WRAP_COLS - 1, _VISUAL_WRAP_COLS} or not stripped:
+    if not stripped:
+        return False
+    prev_len = len(prev)
+    if not any(prev_len in {cols - 1, cols} for cols in wrap_cols):
+        return False
+    if re.search(r"(?:…|\.{3}).*\([^)]*(?:tokens|thinking|effort|esc\s+to\s+interrupt)[^)]*\)", prev, re.IGNORECASE):
         return False
     if _BOX_OR_RULE_RE.fullmatch(prev.strip()) or _BOX_OR_RULE_RE.fullmatch(stripped):
         return False
@@ -41,17 +56,21 @@ def _join_visual_wraps(text: str) -> str:
     lines = str(text or "").splitlines()
     if not lines:
         return ""
+    wrap_cols = _visual_wrap_candidate_cols(lines)
     joined: list[str] = []
+    previous_physical = ""
     for line in lines:
-        if joined and _is_visual_wrap_continuation(joined[-1], line):
+        if joined and _is_visual_wrap_continuation(previous_physical, line, wrap_cols):
             if line.startswith((" ", "\t")):
-                joined[-1] = joined[-1].rstrip() + line
+                joined[-1] = joined[-1].rstrip() + " " + line.lstrip()
             elif line.startswith("+"):
                 joined[-1] = joined[-1].rstrip() + " " + line.lstrip()
             else:
                 joined[-1] = joined[-1].rstrip() + line.lstrip()
+            previous_physical = line
             continue
         joined.append(line)
+        previous_physical = line
     return "\n".join(joined)
 
 

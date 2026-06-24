@@ -138,7 +138,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: shell_no_selected_option__codex-cli-0.141.0_20260620
 fixture_scenario: shell_no_selected_option
-height: 35
+height: 40
 id: shell_no_selected_option__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -156,8 +156,7 @@ raw_capture: |
   │ directory: ~/yolomux.dev8001                │
   ╰─────────────────────────────────────────────╯
 
-    Tip: New Use /fast to enable our fastest inference with increased plan usage
-  .
+    Tip: New Use /fast to enable our fastest inference with increased plan usage.
 
 
   › Please run the shell command `sleep 10`.
@@ -187,8 +186,7 @@ styled_capture: |
   │ directory: ~/yolomux.dev8001                │
   ╰─────────────────────────────────────────────╯
 
-    Tip: New Use /fast to enable our fastest inference with increased plan usage
-  .
+    Tip: New Use /fast to enable our fastest inference with increased plan usage.
 
 
   › Please run the shell command `sleep 10`.
@@ -215,4 +213,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

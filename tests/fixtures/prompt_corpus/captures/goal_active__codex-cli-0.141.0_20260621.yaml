@@ -23,7 +23,7 @@ expected_screen_key: working
 failures: []
 fixture_id: goal_active__codex-cli-0.141.0_20260621
 fixture_scenario: goal_active
-height: 35
+height: 40
 id: goal_active__codex-cli-0.141.0_20260621
 include_scrollback: false
 launch_agent: ''
@@ -38,24 +38,19 @@ raw_capture: |
       Read controller.py, test_server_query.py, server_auth.py, mock_claude.py,
   mock_codex.py,
            mock_agent_common.py, actions.py
-      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_a
-  gent_common.py
+      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_agent_common.py
       Read mock_agent_common.py
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  • For SO10 live verification, I’ll use disposable tmux sessions running the pr
-  oject’s mock agents. That
-    keeps the verification live through the 8001 server and tmux APIs, without s
-  ending prompts into your
+  • For SO10 live verification, I’ll use disposable tmux sessions running the project’s mock agents. That
+    keeps the verification live through the 8001 server and tmux APIs, without sending prompts into your
     active real Claude/Codex panes.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  • Before the final gate, I’m adding the real Codex goal capture that is visibl
-  e now. This only covers
-    the Codex half of the goal fixture item; the Claude /goal active capture rem
-  ains unavailable from the
+  • Before the final gate, I’m adding the real Codex goal capture that is visible now. This only covers
+    the Codex half of the goal fixture item; the Claude /goal active capture remains unavailable from the
     current live panes.
 
   • Working (55m 44s • esc to interrupt)
@@ -75,24 +70,19 @@ styled_capture: |
       Read controller.py, test_server_query.py, server_auth.py, mock_claude.py,
   mock_codex.py,
            mock_agent_common.py, actions.py
-      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_a
-  gent_common.py
+      Search def .*ask|\bask\b|yesno|mock list|Interrupted|What should in mock_agent_common.py
       Read mock_agent_common.py
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  • For SO10 live verification, I’ll use disposable tmux sessions running the pr
-  oject’s mock agents. That
-    keeps the verification live through the 8001 server and tmux APIs, without s
-  ending prompts into your
+  • For SO10 live verification, I’ll use disposable tmux sessions running the project’s mock agents. That
+    keeps the verification live through the 8001 server and tmux APIs, without sending prompts into your
     active real Claude/Codex panes.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  • Before the final gate, I’m adding the real Codex goal capture that is visibl
-  e now. This only covers
-    the Codex half of the goal fixture item; the Claude /goal active capture rem
-  ains unavailable from the
+  • Before the final gate, I’m adding the real Codex goal capture that is visible now. This only covers
+    the Codex half of the goal fixture item; the Claude /goal active capture remains unavailable from the
     current live panes.
 
   • Working (55m 44s • esc to interrupt)
@@ -106,4 +96,4 @@ target: '8001:0.0'
 tmux_socket: ''
 wait_text:
 - Pursuing goal
-width: 78
+width: 200

@@ -23,7 +23,7 @@ expected_screen_key: working
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: working_spinner__codex-cli-synthetic_20260620
-height: 35
+height: 40
 id: working_spinner__codex-cli-synthetic_20260620
 operations: []
 raw_capture: |
@@ -47,4 +47,4 @@ visible_text: |
   › Implement the detector corpus
 
     gpt-5.5 xhigh · ~/yolomux.dev8001
-width: 78
+width: 200

@@ -23,7 +23,7 @@ expected_screen_key: working
 failures: []
 fixture_id: goal_achieved_working__codex-cli-0.141.0_20260623
 fixture_scenario: goal_achieved_working
-height: 35
+height: 40
 id: goal_achieved_working__codex-cli-0.141.0_20260623
 include_scrollback: false
 launch_agent: ''
@@ -46,7 +46,8 @@ raw_capture: |
     gpt-5.5 xhigh · ~/yolomux.dev8002              Goal achieved (1h 50m)
 ready_text: []
 send_lines: []
-source: screenshot-provided Codex goal-achieved working capture from tmux 8002:0.0; later tmux capture confirmed the same Working/Goal achieved bottom rows after queued follow-up rows had re-rendered away
+source: screenshot-provided Codex goal-achieved working capture from tmux 8002:0.0; later tmux capture confirmed the same Working/Goal achieved bottom rows after
+  queued follow-up rows had re-rendered away
 styled_capture: |
   ○ Working (4m 46s • esc to interrupt)
 
@@ -64,4 +65,4 @@ target: '8002:0.0'
 tmux_socket: ''
 wait_text:
 - Goal achieved
-width: 78
+width: 200

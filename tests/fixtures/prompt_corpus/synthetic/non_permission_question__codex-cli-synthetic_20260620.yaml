@@ -37,7 +37,7 @@ expected_screen_key: needs-input
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: non_permission_question__codex-cli-synthetic_20260620
-height: 35
+height: 40
 id: non_permission_question__codex-cli-synthetic_20260620
 operations: []
 raw_capture: |
@@ -67,4 +67,4 @@ visible_text: |
     2. pnpm
 
   gpt-5 medium · ~/repo
-width: 78
+width: 200

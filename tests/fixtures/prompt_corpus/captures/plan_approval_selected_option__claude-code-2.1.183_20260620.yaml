@@ -137,7 +137,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Claude plan approval with selected option
 fixture_id: plan_approval_selected_option__claude-code-2.1.183_20260620
 fixture_scenario: plan_approval_selected_option
-height: 35
+height: 40
 id: plan_approval_selected_option__claude-code-2.1.183_20260620
 operations:
 - needles: []
@@ -162,14 +162,13 @@ raw_capture: |2
      - sleep 5 exits with status 0 after ~5 seconds.
      - Confirm the completion message is reported back.
 
-    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
   ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
 
 
-    ────────────────────────────────────────────────────────────────────────────
+    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ──────────────────────────────────────────
-     Claude has written up a plan and is ready to execute. Would you like to pro
-  ceed?
+     Claude has written up a plan and is ready to execute. Would you like to proceed?
 
      ❯ 1. Yes, and use auto mode
 
@@ -180,8 +179,7 @@ raw_capture: |2
           shift+tab to approve with this feedback
 
 
-     ctrl+g to edit in  VS Code  · ~/.claude/plans/plan-this-harmless-verificati
-  on-fuzzy-graham.md
+     ctrl+g to edit in  VS Code  · ~/.claude/plans/plan-this-harmless-verification-fuzzy-graham.md
 source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111057Z.yaml
 styled_capture: |2
 
@@ -199,14 +197,13 @@ styled_capture: |2
      - sleep 5 exits with status 0 after ~5 seconds.
      - Confirm the completion message is reported back.
 
-    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
   ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
 
 
-    ────────────────────────────────────────────────────────────────────────────
+    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ──────────────────────────────────────────
-     Claude has written up a plan and is ready to execute. Would you like to pro
-  ceed?
+     Claude has written up a plan and is ready to execute. Would you like to proceed?
 
      ❯ 1. Yes, and use auto mode
 
@@ -217,8 +214,7 @@ styled_capture: |2
           shift+tab to approve with this feedback
 
 
-     ctrl+g to edit in  VS Code  · ~/.claude/plans/plan-this-harmless-verificati
-  on-fuzzy-graham.md
+     ctrl+g to edit in  VS Code  · ~/.claude/plans/plan-this-harmless-verification-fuzzy-graham.md
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-claude-2552908-c8fd27:0.0
 verifier_capabilities:
@@ -228,4 +224,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

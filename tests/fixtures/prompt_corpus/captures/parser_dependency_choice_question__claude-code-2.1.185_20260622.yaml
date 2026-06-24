@@ -113,7 +113,7 @@ expected_promoted:
 failures: []
 fixture_id: parser_dependency_choice_question__claude-code-2.1.185_20260622
 fixture_scenario: parser_dependency_choice_question
-height: 35
+height: 40
 id: parser_dependency_choice_question__claude-code-2.1.185_20260622
 operations:
 - needles: []
@@ -134,10 +134,8 @@ raw_capture: |
 
   ❯ 1. Local path dep (relative)
 
-       Point dynamo's Cargo.toml at ../frontend-crates4 via relative path. Build
-  s on this machine, matches your
-       in-progress edits (but cleaner than absolute paths). Best for 'I'd like t
-  o use it' locally; not
+       Point dynamo's Cargo.toml at ../frontend-crates4 via relative path. Builds on this machine, matches your
+       in-progress edits (but cleaner than absolute paths). Best for 'I'd like to use it' locally; not
        CI/PR-portable.
 
     2. Git dep, pinned rev
@@ -148,12 +146,11 @@ raw_capture: |
 
     3. Absolute path (as-is)
 
-       Keep the absolute ~/... paths from the in-progress experiment, just refre
-  shed to current
+       Keep the absolute ~/... paths from the in-progress experiment, just refreshed to current
        versions (2.0.1/0.1.4). Fastest, fully machine-specific.
 
     4. Type something.
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     5. Chat about this
 
   Enter to select · Tab/Arrow keys to navigate · Esc to cancel
@@ -172,10 +169,8 @@ styled_capture: |
 
   ❯ 1. Local path dep (relative)
 
-       Point dynamo's Cargo.toml at ../frontend-crates4 via relative path. Build
-  s on this machine, matches your
-       in-progress edits (but cleaner than absolute paths). Best for 'I'd like t
-  o use it' locally; not
+       Point dynamo's Cargo.toml at ../frontend-crates4 via relative path. Builds on this machine, matches your
+       in-progress edits (but cleaner than absolute paths). Best for 'I'd like to use it' locally; not
        CI/PR-portable.
 
     2. Git dep, pinned rev
@@ -186,12 +181,11 @@ styled_capture: |
 
     3. Absolute path (as-is)
 
-       Keep the absolute ~/... paths from the in-progress experiment, just refre
-  shed to current
+       Keep the absolute ~/... paths from the in-progress experiment, just refreshed to current
        versions (2.0.1/0.1.4). Fastest, fully machine-specific.
 
     4. Type something.
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     5. Chat about this
 
   Enter to select · Tab/Arrow keys to navigate · Esc to cancel
@@ -204,4 +198,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

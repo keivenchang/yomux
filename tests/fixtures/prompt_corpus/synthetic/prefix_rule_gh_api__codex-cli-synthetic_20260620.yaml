@@ -35,7 +35,7 @@ expected_screen_key: approval
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: prefix_rule_gh_api__codex-cli-synthetic_20260620
-height: 35
+height: 40
 id: prefix_rule_gh_api__codex-cli-synthetic_20260620
 operations: []
 raw_capture: |
@@ -77,4 +77,4 @@ visible_text: |
   › 1. Yes, proceed (y)
     2. Yes, and don't ask again for commands that start with `gh api` (p)
     3. No, and tell Codex what to do differently (esc)
-width: 78
+width: 200

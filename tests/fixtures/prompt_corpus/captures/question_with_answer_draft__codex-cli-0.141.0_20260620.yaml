@@ -142,7 +142,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: question_with_answer_draft__codex-cli-0.141.0_20260620
 fixture_scenario: question_with_answer_draft
-height: 35
+height: 40
 id: question_with_answer_draft__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -163,15 +163,14 @@ raw_capture: |
   • Ran touch /tmp/yolomux-e2e-approval
     └ (no output)
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
   • Done.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Wh
-  ich YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -199,15 +198,14 @@ styled_capture: |
   • Ran touch /tmp/yolomux-e2e-approval
     └ (no output)
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
   • Done.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Wh
-  ich YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -230,4 +228,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

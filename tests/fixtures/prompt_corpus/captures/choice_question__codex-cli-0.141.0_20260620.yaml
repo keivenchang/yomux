@@ -123,7 +123,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Codex non-permission choice question
 fixture_id: choice_question__codex-cli-0.141.0_20260620
 fixture_scenario: choice_question
-height: 35
+height: 40
 id: choice_question__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -133,7 +133,7 @@ operations:
   ok: true
   type: wait_text
 raw_capture: |
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
   › Please run the shell command `touch /tmp/yolomux-e2e-approval`.
@@ -144,15 +144,14 @@ raw_capture: |
   • Ran touch /tmp/yolomux-e2e-approval
     └ (no output)
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
   • Done.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Wh
-  ich YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -167,7 +166,7 @@ raw_capture: |
     gpt-5.5 xhigh · ~/yolomux.dev8001
 source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110043Z.yaml
 styled_capture: |
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
   › Please run the shell command `touch /tmp/yolomux-e2e-approval`.
@@ -178,15 +177,14 @@ styled_capture: |
   • Ran touch /tmp/yolomux-e2e-approval
     └ (no output)
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
   • Done.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Wh
-  ich YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -208,4 +206,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

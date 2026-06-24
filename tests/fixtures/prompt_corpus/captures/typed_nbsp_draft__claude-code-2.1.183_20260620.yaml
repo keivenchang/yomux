@@ -107,7 +107,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: typed_nbsp_draft__claude-code-2.1.183_20260620
 fixture_scenario: typed_nbsp_draft
-height: 35
+height: 40
 id: typed_nbsp_draft__claude-code-2.1.183_20260620
 operations:
 - result:
@@ -118,72 +118,58 @@ operations:
 raw_capture: |2
 
 
-    DOIT.tabber_home_path_tilde.md — show ~/... instead of /home/<user>/... in T
-  abber. The key
-    finding: a shared compactHomePath() parent already exists (70_layout_actions
-  .js:1123), so the
-    queue routes the Tabber session label/description path through it rather tha
-  n adding a parallel
+    DOIT.tabber_home_path_tilde.md — show ~/... instead of /home/<user>/... in Tabber. The key
+    finding: a shared compactHomePath() parent already exists (70_layout_actions.js:1123), so the
+    queue routes the Tabber session label/description path through it rather than adding a parallel
     /home/ replace (avoiding the divergent-copy drift this repo keeps hitting).
   It scopes the change
-    to the human-visible path only — leaving the synthetic /s_<token> tree ids (
-  tabberSessionPath)
+    to the human-visible path only — leaving the synthetic /s_<token> tree ids ( tabberSessionPath)
     untouched — and notes the bundle is one scope so calling the hoisted compact
   HomePath from
     40_file_explorer_files.js is safe. Test goes in tabber.test.js.
 
 
 
-    Both follow the existing queue style (findings → tasks → done criteria, real
-   file:symbol pointers,
-    ending on tools/static_build.py + tools/check.py). Note: the concurrent sess
-  ion is still active
-    in this worktree, so it may pick these up (or churn other DOIT files) on its
-   own.
+    Both follow the existing queue style (findings → tasks → done criteria, real file:symbol pointers,
+    ending on tools/static_build.py + tools/check.py). Note: the concurrent session is still active
+    in this worktree, so it may pick these up (or churn other DOIT files) on its own.
 
   ✻ Churned for 2m 31s
 
                                                                new task? /clear
   to save 453.4k tokens
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯ old-draft-for-yolomux-verifier
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏵⏵ auto mode on (shift+tab to cycle)
 source_capture_status: promoted; staging discarded after promotion
 source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T104236Z.yaml
 styled_capture: |2
 
 
-    DOIT.tabber_home_path_tilde.md — show ~/... instead of /home/<user>/... in T
-  abber. The key
-    finding: a shared compactHomePath() parent already exists (70_layout_actions
-  .js:1123), so the
-    queue routes the Tabber session label/description path through it rather tha
-  n adding a parallel
+    DOIT.tabber_home_path_tilde.md — show ~/... instead of /home/<user>/... in Tabber. The key
+    finding: a shared compactHomePath() parent already exists (70_layout_actions.js:1123), so the
+    queue routes the Tabber session label/description path through it rather than adding a parallel
     /home/ replace (avoiding the divergent-copy drift this repo keeps hitting).
   It scopes the change
-    to the human-visible path only — leaving the synthetic /s_<token> tree ids (
-  tabberSessionPath)
+    to the human-visible path only — leaving the synthetic /s_<token> tree ids ( tabberSessionPath)
     untouched — and notes the bundle is one scope so calling the hoisted compact
   HomePath from
     40_file_explorer_files.js is safe. Test goes in tabber.test.js.
 
 
 
-    Both follow the existing queue style (findings → tasks → done criteria, real
-   file:symbol pointers,
-    ending on tools/static_build.py + tools/check.py). Note: the concurrent sess
-  ion is still active
-    in this worktree, so it may pick these up (or churn other DOIT files) on its
-   own.
+    Both follow the existing queue style (findings → tasks → done criteria, real file:symbol pointers,
+    ending on tools/static_build.py + tools/check.py). Note: the concurrent session is still active
+    in this worktree, so it may pick these up (or churn other DOIT files) on its own.
 
   ✻ Churned for 2m 31s
 
                                                                new task? /clear
   to save 453.4k tokens
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯ old-draft-for-yolomux-verifier
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏵⏵ auto mode on (shift+tab to cycle)
 tmux_socket: ''
 tmux_target: '8001:1.0'
@@ -194,4 +180,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

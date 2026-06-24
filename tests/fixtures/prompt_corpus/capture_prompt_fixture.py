@@ -22,8 +22,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from yolomux_lib.agent_tui import agent_client_version_slug
 
 
-DEFAULT_CAPTURE_COLS = 78
-DEFAULT_CAPTURE_ROWS = 35
+DEFAULT_CAPTURE_COLS = 200
+DEFAULT_CAPTURE_ROWS = 40
 
 TOKEN_RE = re.compile(
     r"\b(?:"

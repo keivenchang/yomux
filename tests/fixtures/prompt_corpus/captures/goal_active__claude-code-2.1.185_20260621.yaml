@@ -23,7 +23,7 @@ expected_screen_key: working
 failures: []
 fixture_id: goal_active__claude-code-2.1.185_20260621
 fixture_scenario: goal_active
-height: 35
+height: 40
 id: goal_active__claude-code-2.1.185_20260621
 include_scrollback: false
 launch_agent: ''
@@ -36,8 +36,7 @@ raw_capture: |2
   ● Reading 1 file, running 1 shell command…
     ⎿  $ git rev-parse --show-toplevel && echo "---DOIT files---" && ls -la DOIT
   *.md 2>/dev/null; echo "---scratch
-       refs---" && grep -ril "scratch" --include="*.md" --include="*.js" --inclu
-  de="*.py" . 2>/dev/null | grep -v
+       refs---" && grep -ril "scratch" --include="*.md" --include="*.js" --include="*.py" . 2>/dev/null | grep -v
        node_modules | head -40
 
 
@@ -61,9 +60,9 @@ raw_capture: |2
   · Flummoxing… (7s · ↑ 352 tokens)
 
                         ◎ /goal active (7s)
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
 ready_text: []
 send_lines: []
@@ -73,8 +72,7 @@ styled_capture: |2
   ● Reading 1 file, running 1 shell command…
     ⎿  $ git rev-parse --show-toplevel && echo "---DOIT files---" && ls -la DOIT
   *.md 2>/dev/null; echo "---scratch
-       refs---" && grep -ril "scratch" --include="*.md" --include="*.js" --inclu
-  de="*.py" . 2>/dev/null | grep -v
+       refs---" && grep -ril "scratch" --include="*.md" --include="*.js" --include="*.py" . 2>/dev/null | grep -v
        node_modules | head -40
 
 
@@ -98,12 +96,12 @@ styled_capture: |2
   · Flummoxing… (7s · ↑ 352 tokens)
 
                         ◎ /goal active (7s)
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
 target: yoreal-claude-capture:0.0
 tmux_socket: ''
 wait_text:
 - /goal active
-width: 78
+width: 200

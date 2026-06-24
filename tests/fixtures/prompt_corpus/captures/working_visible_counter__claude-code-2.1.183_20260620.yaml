@@ -95,7 +95,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Claude working visible status counter
 fixture_id: working_visible_counter__claude-code-2.1.183_20260620
 fixture_scenario: working_visible_counter
-height: 35
+height: 40
 id: working_visible_counter__claude-code-2.1.183_20260620
 operations:
 - needles: []
@@ -105,8 +105,7 @@ operations:
   ok: true
   type: wait_text
 raw_capture: |
-  ● This is a trivial task — no codebase exploration needed. Let me write a mini
-  mal plan and prepare to exit plan mode.
+  ● This is a trivial task — no codebase exploration needed. Let me write a minimal plan and prepare to exit plan mode.
 
   ● Updated plan
     ⎿  /plan to preview
@@ -133,15 +132,14 @@ raw_capture: |
   · Clauding… (11s · ↓ 471 tokens)
 
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105442Z.yaml
 styled_capture: |
-  ● This is a trivial task — no codebase exploration needed. Let me write a mini
-  mal plan and prepare to exit plan mode.
+  ● This is a trivial task — no codebase exploration needed. Let me write a minimal plan and prepare to exit plan mode.
 
   ● Updated plan
     ⎿  /plan to preview
@@ -168,10 +166,10 @@ styled_capture: |
   · Clauding… (11s · ↓ 471 tokens)
 
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-claude-2552908-c8fd27:0.0
@@ -182,4 +180,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

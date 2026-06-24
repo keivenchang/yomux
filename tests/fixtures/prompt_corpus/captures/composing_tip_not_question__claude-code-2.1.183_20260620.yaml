@@ -108,7 +108,7 @@ failures: []
 filename_convention: case_name__client-token_date
 fixture_id: composing_tip_not_question__claude-code-2.1.183_20260620
 fixture_scenario: composing_tip_not_question
-height: 35
+height: 40
 id: composing_tip_not_question__claude-code-2.1.183_20260620
 operations:
 - needles: []
@@ -138,19 +138,15 @@ raw_capture: |2
   ─────────────────────────────────────────╯
 
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
-  -choice question: Which YOLOmux verifier
-    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
-  election.
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
 
 
   ● User declined to answer questions
 
-    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript c
-  apture)
+    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)
 
-  ❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Sto
-  p for approval before executing.
+  ❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Stop for approval before executing.
 
 
   ✻ Composing…
@@ -159,10 +155,10 @@ raw_capture: |2
 
 
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 source_capture_status: promoted; staging discarded after promotion
 source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111001Z.yaml
@@ -174,19 +170,15 @@ styled_capture: |2
   ─────────────────────────────────────────╯
 
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
-  -choice question: Which YOLOmux verifier
-    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
-  election.
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
 
 
   ● User declined to answer questions
 
-    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript c
-  apture)
+    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)
 
-  ❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Sto
-  p for approval before executing.
+  ❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Stop for approval before executing.
 
 
   ✻ Composing…
@@ -195,10 +187,10 @@ styled_capture: |2
 
 
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏸ plan mode on (shift+tab to cycle) · esc to interrupt
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-claude-2552908-c8fd27:0.0
@@ -209,4 +201,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

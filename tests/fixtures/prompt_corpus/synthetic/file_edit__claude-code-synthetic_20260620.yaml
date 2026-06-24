@@ -35,7 +35,7 @@ expected_screen_key: approval
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: file_edit__claude-code-synthetic_20260620
-height: 35
+height: 40
 id: file_edit__claude-code-synthetic_20260620
 operations: []
 raw_capture: |
@@ -68,4 +68,4 @@ visible_text: |
     3. No
 
   Esc to cancel · Enter to select
-width: 78
+width: 200

@@ -153,8 +153,8 @@ def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch):
 def test_capture_prompt_fixture_harness_contract(monkeypatch, tmp_path):
     harness = load_capture_harness_module()
 
-    assert (harness.DEFAULT_CAPTURE_COLS, harness.DEFAULT_CAPTURE_ROWS) == (78, 35)
-    assert harness.parse_size("78x35") == (78, 35)
+    assert (harness.DEFAULT_CAPTURE_COLS, harness.DEFAULT_CAPTURE_ROWS) == (200, 40)
+    assert harness.parse_size("200x40") == (200, 40)
     assert harness.parse_size("120x40") == (120, 40)
     with pytest.raises(argparse.ArgumentTypeError):
         harness.parse_size("30x9")

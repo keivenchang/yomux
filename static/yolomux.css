@@ -2176,6 +2176,11 @@ body.theme-light .latency-meter {
   border-radius: 5px;
   animation-name: agent-symbol-glow-cadence;
   will-change: opacity, transform, filter, box-shadow;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
 }
 .agent-window-agent-icon--active.agent-icon.codex {
   --agent-working-glow-rgb: 102 126 248;

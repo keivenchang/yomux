@@ -86,7 +86,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Claude idle empty prompt
 fixture_id: idle_empty_prompt__claude-code-2.1.183_20260620
 fixture_scenario: idle_empty_prompt
-height: 35
+height: 40
 id: idle_empty_prompt__claude-code-2.1.183_20260620
 operations:
 - needles: []
@@ -112,22 +112,19 @@ raw_capture: |2
        ╰────────────────────────────────────────────────────────────────────────
   ─────────────────────────────────────────╯
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
-  -choice question: Which YOLOmux verifier
-    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
-  election.
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
 
 
   ● User declined to answer questions
 
-    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript c
-  apture)
+    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)
 
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏸ plan mode on (shift+tab to cycle) · ← for agents
 source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T110814Z.yaml
 styled_capture: |2
@@ -147,22 +144,19 @@ styled_capture: |2
        ╰────────────────────────────────────────────────────────────────────────
   ─────────────────────────────────────────╯
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
-  -choice question: Which YOLOmux verifier
-    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
-  election.
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
 
 
   ● User declined to answer questions
 
-    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript c
-  apture)
+    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)
 
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ❯
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     ⏸ plan mode on (shift+tab to cycle) · ← for agents
 tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
 tmux_target: yr-claude-2552908-c8fd27:0.0
@@ -173,4 +167,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

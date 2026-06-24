@@ -30,7 +30,7 @@ expected_screen_key: needs-input
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621
-height: 35
+height: 40
 id: ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621
 operations: []
 raw_capture: |
@@ -73,4 +73,4 @@ visible_text: |
        Capture the verification output from the session transcript.
 
   Enter to select · ↑/↓ to navigate · Esc to cancel
-width: 78
+width: 200

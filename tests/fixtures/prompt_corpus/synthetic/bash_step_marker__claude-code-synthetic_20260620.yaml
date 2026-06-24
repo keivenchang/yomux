@@ -34,7 +34,7 @@ expected_screen_key: approval
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: bash_step_marker__claude-code-synthetic_20260620
-height: 35
+height: 40
 id: bash_step_marker__claude-code-synthetic_20260620
 operations: []
 raw_capture: |
@@ -85,4 +85,4 @@ visible_text: |
      2. No
 
    Esc to cancel
-width: 78
+width: 200

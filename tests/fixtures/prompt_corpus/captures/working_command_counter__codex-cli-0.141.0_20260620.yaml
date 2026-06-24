@@ -96,7 +96,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Codex working after command send
 fixture_id: working_command_counter__codex-cli-0.141.0_20260620
 fixture_scenario: working_command_counter
-height: 35
+height: 40
 id: working_command_counter__codex-cli-0.141.0_20260620
 operations:
 - needles: []
@@ -123,11 +123,10 @@ raw_capture: |
 
   • Done.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Wh
-  ich YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -143,8 +142,7 @@ raw_capture: |
   • Pane capture.
 
 
-  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-202
-  60620-1106
+  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-202 60620-1106
 
 
   ◦ Working (0s • esc to interrupt)
@@ -159,11 +157,10 @@ styled_capture: |
 
   • Done.
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Wh
-  ich YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
@@ -179,8 +176,7 @@ styled_capture: |
   • Pane capture.
 
 
-  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-202
-  60620-1106
+  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-202 60620-1106
 
 
   ◦ Working (0s • esc to interrupt)
@@ -198,4 +194,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

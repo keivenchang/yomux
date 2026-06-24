@@ -138,7 +138,7 @@ filename_convention: case_name__client-token_date
 fixture_description: Claude AskUserQuestion needs-input prompt
 fixture_id: ask_user_question__claude-code-2.1.183_20260620
 fixture_scenario: ask_user_question
-height: 35
+height: 40
 id: ask_user_question__claude-code-2.1.183_20260620
 operations:
 - needles: []
@@ -164,14 +164,12 @@ raw_capture: |
   ─────────────────────────────────────────╯
 
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
-  -choice question: Which YOLOmux verifier
-    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
-  election.
-  ──────────────────────────────────────────────────────────────────────────────
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Planning: ~/.claude/plans/plan-this-harmless-verification-fuzzy-graham.md
 
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ☐ Verifier mode
 
 
@@ -188,7 +186,7 @@ raw_capture: |
        Capture the verification output from the session transcript.
 
     3. Type something.
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     4. Chat about this
 
 
@@ -197,14 +195,12 @@ source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105555Z.yam
 styled_capture: |2
 
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple
-  -choice question: Which YOLOmux verifier
-    mode should we use? Options: Pane capture, Transcript capture. Wait for my s
-  election.
-  ──────────────────────────────────────────────────────────────────────────────
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+    mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Planning: ~/.claude/plans/plan-this-harmless-verification-fuzzy-graham
   .md
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ☐ Verifier mode
 
 
@@ -221,7 +217,7 @@ styled_capture: |2
        Capture the verification output from the session transcript.
 
     3. Type something.
-  ──────────────────────────────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     4. Chat about this
 
 
@@ -235,4 +231,4 @@ verifier_capabilities:
 - central-clear-composer
 - central-send-prompt
 - visible-status-counter
-width: 78
+width: 200

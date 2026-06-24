@@ -34,7 +34,7 @@ expected_screen_key: approval
 failures: []
 filename_convention: case_name__client-token_date
 fixture_id: network_escalation__codex-cli-synthetic_20260620
-height: 35
+height: 40
 id: network_escalation__codex-cli-synthetic_20260620
 operations: []
 raw_capture: |2
@@ -79,4 +79,4 @@ visible_text: |2
      2. No, and tell Codex what to do differently (esc)
 
    Press enter to confirm or esc to cancel
-width: 78
+width: 200
