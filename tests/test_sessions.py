@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 from yolomux_lib import sessions
@@ -10,6 +11,22 @@ from yolomux_lib.sessions import pane_process_label
 def clear_transcript_lookup_cache():
     # the lookup cache is now a shared TtlCache (was a hand-rolled dict + lock).
     sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
+
+
+def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
+    calls = []
+
+    def fake_run_cmd(args, timeout):
+        calls.append((args, timeout))
+        return subprocess.CompletedProcess(args, 0, stdout="10 1 python3 yolomux.py\n", stderr="")
+
+    monkeypatch.setattr(sessions, "run_cmd", fake_run_cmd)
+
+    processes, error = sessions.list_processes()
+
+    assert error is None
+    assert calls == [(["ps", "-eww", "-o", "pid=,ppid=,command="], 8.0)]
+    assert processes[10] == ProcessInfo(pid=10, ppid=1, command="python3 yolomux.py")
 
 
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):

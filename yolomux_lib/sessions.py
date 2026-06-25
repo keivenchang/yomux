@@ -95,7 +95,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
 
 
 def list_processes() -> tuple[dict[int, ProcessInfo], str | None]:
-    result = run_cmd(["ps", "-eww", "-o", "pid=,ppid=,cmd="], timeout=8.0)
+    result = run_cmd(["ps", "-eww", "-o", "pid=,ppid=,command="], timeout=8.0)
     if result.returncode != 0:
         error = cmd_error(result, "ps failed")
         return {}, error
