@@ -13742,17 +13742,21 @@ function tabberSessionChromeHtml(data) {
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
   const tabHtml = stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto));
-  return `<span class="${classes}" data-tabber-session-chrome="shared">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+  return `<span class="${classes}" data-tabber-session-chrome="shared" data-pane-tab="${esc(session)}" draggable="true">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
 }
 
 function bindTabberSessionChrome(row, session) {
   const tab = row?.querySelector?.('.tabber-session-tab');
   if (!tab || tab.dataset.tabberChromeBound === 'true') return;
   tab.dataset.tabberChromeBound = 'true';
+  tab.dataset.paneTab = session;
   const info = transcriptMeta.sessions?.[session] || {};
   const state = sessionState(session, info);
   applySessionStateClasses(tab, state);
   bindPaneTabPopover(tab, session);
+  bindPaneTabNativeDragSource(tab, session, () => slotForItem(session), {
+    ignore: event => Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a')),
+  });
   tab.addEventListener('pointerdown', event => {
     const autoTarget = event.target.closest?.('[data-auto-session]');
     if (!autoTarget) return;
@@ -13765,6 +13769,28 @@ function bindTabberSessionChrome(row, session) {
       await toggleAutoApprove(autoTarget.dataset.autoSession);
       if (session === currentSessionActionTarget()) focusPanel(session);
     },
+  });
+}
+
+function tabberRowDragItem(row) {
+  const type = row?.dataset?.tabberType || '';
+  if (type === 'session') return row.dataset.tabberSession || '';
+  if (type === 'tab') return row.dataset.tabberItem || '';
+  return '';
+}
+
+function tabberRowIsTabDragSource(row) {
+  const item = tabberRowDragItem(row);
+  return Boolean(item && isLayoutItem(item) && !isFileExplorerItem(item));
+}
+
+function tabberRowDragIgnore(event) {
+  return Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a, .file-tree-icon'));
+}
+
+function bindTabberRowDragSource(row) {
+  bindPaneTabNativeDragSource(row, () => tabberRowDragItem(row), item => slotForItem(item), {
+    ignore: tabberRowDragIgnore,
   });
 }
 
@@ -13784,6 +13810,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   setRowDataset(row, 'tabberRepoRoot', data.repoRoot || '');
   setRowDataset(row, 'tabberItem', data.item || '');
   setRowDataset(row, 'tabberBranch', data.branchText || '');
+  setRowDataset(row, 'paneTab', tabberRowDragItem(row));
   setRowDataset(row, 'openChangeFile', '');
   setRowDataset(row, 'openChangeSession', '');
   setRowDataset(row, 'openChangeStatus', '');
@@ -13797,7 +13824,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const selected = tabberTreeSelectedPaths.has(fullPath);
   const current = data.current === true;
   setTreeItemAria(row, {selected, expandable, expanded});
-  row.draggable = false;
+  row.draggable = tabberRowIsTabDragSource(row);
   row.classList.toggle('selected', selected);
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('collapsed', expandable && !expanded);
@@ -13843,6 +13870,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     dateHtml: data.dateHtml || '',
   });
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
+  if (tabberRowIsTabDragSource(row)) bindTabberRowDragSource(row);
   applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
@@ -24514,7 +24542,7 @@ function dockviewSlotForGroupElement(group) {
   return slotForItem(activeItem) || '';
 }
 
-function dockviewFileDropIntentForEvent(event) {
+function dockviewGroupDropIntentForEvent(event) {
   const group = dockviewGroupForEvent(event);
   const targetSlot = dockviewSlotForGroupElement(group);
   const targetRect = group?.getBoundingClientRect?.();
@@ -24525,6 +24553,10 @@ function dockviewFileDropIntentForEvent(event) {
     previewNode: group,
     targetRect,
   };
+}
+
+function dockviewFileDropIntentForEvent(event) {
+  return dockviewGroupDropIntentForEvent(event);
 }
 
 function dockviewHandleFileDragOver(event) {
@@ -24543,17 +24575,32 @@ function dockviewHandleFileDragOver(event) {
     return;
   }
   const payload = fileDragPayload(event);
-  if (!payload?.path) return;
-  const intent = dockviewFileDropIntentForEvent(event);
+  if (payload?.path) {
+    const intent = dockviewFileDropIntentForEvent(event);
+    if (!intent) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!fileDropIntentAllowsPayload(payload, intent)) {
+      event.dataTransfer.dropEffect = 'none';
+      clearDropPreview();
+      return;
+    }
+    event.dataTransfer.dropEffect = 'copy';
+    showDropPreview(intent);
+    return;
+  }
+  const tabPayload = dragPayload(event);
+  if (!tabPayload?.session) return;
+  const intent = dockviewGroupDropIntentForEvent(event);
   if (!intent) return;
   event.preventDefault();
   event.stopPropagation();
-  if (!fileDropIntentAllowsPayload(payload, intent)) {
+  if (!dropIntentAllowsSession(tabPayload.session, intent)) {
     event.dataTransfer.dropEffect = 'none';
     clearDropPreview();
     return;
   }
-  event.dataTransfer.dropEffect = 'copy';
+  event.dataTransfer.dropEffect = 'move';
   showDropPreview(intent);
 }
 
@@ -24568,14 +24615,25 @@ function dockviewHandleFileDrop(event) {
     return;
   }
   const payload = fileDragPayload(event);
-  if (!payload?.path) return;
-  const intent = dockviewFileDropIntentForEvent(event);
+  if (payload?.path) {
+    const intent = dockviewFileDropIntentForEvent(event);
+    if (!intent) return;
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    if (!fileDropIntentAllowsPayload(payload, intent)) return;
+    openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+    return;
+  }
+  const tabPayload = dragPayload(event);
+  if (!tabPayload?.session) return;
+  const intent = dockviewGroupDropIntentForEvent(event);
   if (!intent) return;
   event.preventDefault();
   event.stopPropagation();
   clearDropPreview();
-  if (!fileDropIntentAllowsPayload(payload, intent)) return;
-  openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+  if (!dropIntentAllowsSession(tabPayload.session, intent)) return;
+  dropSessionWithIntent(tabPayload.session, intent, tabPayload.sourceSlot || slotForSession(tabPayload.session));
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -26278,6 +26336,35 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   return html;
 }
 
+function paneTabDragSourceItem(itemOrGetter, event) {
+  return typeof itemOrGetter === 'function' ? String(itemOrGetter(event) || '') : String(itemOrGetter || '');
+}
+
+function paneTabDragSourceSlot(item, sourceSlotOrGetter, event) {
+  const slot = typeof sourceSlotOrGetter === 'function' ? sourceSlotOrGetter(item, event) : sourceSlotOrGetter;
+  return slot || slotForItem(item);
+}
+
+function bindPaneTabNativeDragSource(tab, itemOrGetter, sourceSlotOrGetter = null, options = {}) {
+  if (!tab || tab.__yolomuxPaneTabNativeDragBound) return;
+  tab.__yolomuxPaneTabNativeDragBound = true;
+  tab.draggable = true;
+  tab.addEventListener('dragstart', event => {
+    if (options.ignore?.(event) === true) {
+      event.preventDefault?.();
+      return;
+    }
+    const item = paneTabDragSourceItem(itemOrGetter, event);
+    if (!isLayoutItem(item)) {
+      event.preventDefault?.();
+      return;
+    }
+    event.stopPropagation();
+    startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event));
+  });
+  tab.addEventListener('dragend', endSessionDrag);
+}
+
 function createPaneTab(side, item, displayContext = {}) {
   const type = tabTypeForItem(item);
   const isEditor = isFileEditorItem(item);
@@ -26360,11 +26447,7 @@ function createPaneTab(side, item, displayContext = {}) {
       showTabContextMenu(item, event.clientX, event.clientY, {tab});
     });
   }
-  tab.addEventListener('dragstart', event => {
-    event.stopPropagation();
-    startSessionDrag(event, item, side);
-  });
-  tab.addEventListener('dragend', endSessionDrag);
+  bindPaneTabNativeDragSource(tab, item, () => side);
   return tab;
 }
 

@@ -3778,17 +3778,21 @@ function tabberSessionChromeHtml(data) {
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
   const tabHtml = stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto));
-  return `<span class="${classes}" data-tabber-session-chrome="shared">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+  return `<span class="${classes}" data-tabber-session-chrome="shared" data-pane-tab="${esc(session)}" draggable="true">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
 }
 
 function bindTabberSessionChrome(row, session) {
   const tab = row?.querySelector?.('.tabber-session-tab');
   if (!tab || tab.dataset.tabberChromeBound === 'true') return;
   tab.dataset.tabberChromeBound = 'true';
+  tab.dataset.paneTab = session;
   const info = transcriptMeta.sessions?.[session] || {};
   const state = sessionState(session, info);
   applySessionStateClasses(tab, state);
   bindPaneTabPopover(tab, session);
+  bindPaneTabNativeDragSource(tab, session, () => slotForItem(session), {
+    ignore: event => Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a')),
+  });
   tab.addEventListener('pointerdown', event => {
     const autoTarget = event.target.closest?.('[data-auto-session]');
     if (!autoTarget) return;
@@ -3801,6 +3805,28 @@ function bindTabberSessionChrome(row, session) {
       await toggleAutoApprove(autoTarget.dataset.autoSession);
       if (session === currentSessionActionTarget()) focusPanel(session);
     },
+  });
+}
+
+function tabberRowDragItem(row) {
+  const type = row?.dataset?.tabberType || '';
+  if (type === 'session') return row.dataset.tabberSession || '';
+  if (type === 'tab') return row.dataset.tabberItem || '';
+  return '';
+}
+
+function tabberRowIsTabDragSource(row) {
+  const item = tabberRowDragItem(row);
+  return Boolean(item && isLayoutItem(item) && !isFileExplorerItem(item));
+}
+
+function tabberRowDragIgnore(event) {
+  return Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a, .file-tree-icon'));
+}
+
+function bindTabberRowDragSource(row) {
+  bindPaneTabNativeDragSource(row, () => tabberRowDragItem(row), item => slotForItem(item), {
+    ignore: tabberRowDragIgnore,
   });
 }
 
@@ -3820,6 +3846,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   setRowDataset(row, 'tabberRepoRoot', data.repoRoot || '');
   setRowDataset(row, 'tabberItem', data.item || '');
   setRowDataset(row, 'tabberBranch', data.branchText || '');
+  setRowDataset(row, 'paneTab', tabberRowDragItem(row));
   setRowDataset(row, 'openChangeFile', '');
   setRowDataset(row, 'openChangeSession', '');
   setRowDataset(row, 'openChangeStatus', '');
@@ -3833,7 +3860,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const selected = tabberTreeSelectedPaths.has(fullPath);
   const current = data.current === true;
   setTreeItemAria(row, {selected, expandable, expanded});
-  row.draggable = false;
+  row.draggable = tabberRowIsTabDragSource(row);
   row.classList.toggle('selected', selected);
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('collapsed', expandable && !expanded);
@@ -3879,6 +3906,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     dateHtml: data.dateHtml || '',
   });
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
+  if (tabberRowIsTabDragSource(row)) bindTabberRowDragSource(row);
   applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);

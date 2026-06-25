@@ -600,7 +600,7 @@ function dockviewSlotForGroupElement(group) {
   return slotForItem(activeItem) || '';
 }
 
-function dockviewFileDropIntentForEvent(event) {
+function dockviewGroupDropIntentForEvent(event) {
   const group = dockviewGroupForEvent(event);
   const targetSlot = dockviewSlotForGroupElement(group);
   const targetRect = group?.getBoundingClientRect?.();
@@ -611,6 +611,10 @@ function dockviewFileDropIntentForEvent(event) {
     previewNode: group,
     targetRect,
   };
+}
+
+function dockviewFileDropIntentForEvent(event) {
+  return dockviewGroupDropIntentForEvent(event);
 }
 
 function dockviewHandleFileDragOver(event) {
@@ -629,17 +633,32 @@ function dockviewHandleFileDragOver(event) {
     return;
   }
   const payload = fileDragPayload(event);
-  if (!payload?.path) return;
-  const intent = dockviewFileDropIntentForEvent(event);
+  if (payload?.path) {
+    const intent = dockviewFileDropIntentForEvent(event);
+    if (!intent) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!fileDropIntentAllowsPayload(payload, intent)) {
+      event.dataTransfer.dropEffect = 'none';
+      clearDropPreview();
+      return;
+    }
+    event.dataTransfer.dropEffect = 'copy';
+    showDropPreview(intent);
+    return;
+  }
+  const tabPayload = dragPayload(event);
+  if (!tabPayload?.session) return;
+  const intent = dockviewGroupDropIntentForEvent(event);
   if (!intent) return;
   event.preventDefault();
   event.stopPropagation();
-  if (!fileDropIntentAllowsPayload(payload, intent)) {
+  if (!dropIntentAllowsSession(tabPayload.session, intent)) {
     event.dataTransfer.dropEffect = 'none';
     clearDropPreview();
     return;
   }
-  event.dataTransfer.dropEffect = 'copy';
+  event.dataTransfer.dropEffect = 'move';
   showDropPreview(intent);
 }
 
@@ -654,14 +673,25 @@ function dockviewHandleFileDrop(event) {
     return;
   }
   const payload = fileDragPayload(event);
-  if (!payload?.path) return;
-  const intent = dockviewFileDropIntentForEvent(event);
+  if (payload?.path) {
+    const intent = dockviewFileDropIntentForEvent(event);
+    if (!intent) return;
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    if (!fileDropIntentAllowsPayload(payload, intent)) return;
+    openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+    return;
+  }
+  const tabPayload = dragPayload(event);
+  if (!tabPayload?.session) return;
+  const intent = dockviewGroupDropIntentForEvent(event);
   if (!intent) return;
   event.preventDefault();
   event.stopPropagation();
   clearDropPreview();
-  if (!fileDropIntentAllowsPayload(payload, intent)) return;
-  openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+  if (!dropIntentAllowsSession(tabPayload.session, intent)) return;
+  dropSessionWithIntent(tabPayload.session, intent, tabPayload.sourceSlot || slotForSession(tabPayload.session));
 }
 
 function dockviewInstallFileDropBridge(host) {

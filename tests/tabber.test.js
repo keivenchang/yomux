@@ -733,6 +733,54 @@ async function runTabberSuite() {
     assert.equal(api.customDragPreviewForTest(), null, '#47: tab drags install no JS clone-follow preview');
   });
 
+  test('Tabber tab rows share the normal pane-tab drag source', () => {
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/function bindPaneTabNativeDragSource\([\s\S]*startSessionDrag\(event, item, paneTabDragSourceSlot/.test(source), 'normal pane tabs have one shared native drag-source binder');
+    assert.ok(source.includes('bindPaneTabNativeDragSource(tab, item, () => side);'), 'createPaneTab uses the shared native tab drag binder');
+    assert.ok(/function bindTabberRowDragSource\(row\)[\s\S]*bindPaneTabNativeDragSource\(row, \(\) => tabberRowDragItem\(row\)/.test(source), 'Tabber rows reuse the shared native tab drag binder');
+    assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*const tabPayload = dragPayload\(event\)[\s\S]*dropIntentAllowsSession\(tabPayload\.session, intent\)[\s\S]*showDropPreview\(intent\)/.test(source), 'Dockview accepts external shared tab drags from Tabber rows');
+    assert.ok(/function dockviewHandleFileDrop\(event\)[\s\S]*const tabPayload = dragPayload\(event\)[\s\S]*dropSessionWithIntent\(tabPayload\.session, intent/.test(source), 'Dockview drops external shared tab drags through the normal session intent path');
+
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.right = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    api.setTranscriptInfoForTest('1', {
+      panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude'}],
+    });
+    api.setTranscriptInfoForTest('2', {
+      panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex'}],
+    });
+    api.setFileExplorerModeForTest('tabber');
+    api.setFocusedPanelItem('1');
+
+    const groups = new TestElement('tabber-drag-groups');
+    api.renderTabberTree(groups);
+    const sessionRow = Array.from(groups.querySelectorAll('.file-tree-row[data-tabber-type="session"]'))
+      .find(row => row.dataset.tabberSession === '1');
+    assert.ok(sessionRow, 'rendered Tabber tree includes session 1');
+    assert.equal(sessionRow.draggable, true, 'Tabber session rows are draggable tab sources');
+    assert.equal(sessionRow.dataset.paneTab, '1', 'Tabber session rows expose the shared tab identity');
+
+    const event = dragEvent(125, '1');
+    event.currentTarget = sessionRow;
+    event.target = sessionRow;
+    event.offsetX = 13;
+    event.offsetY = 7;
+    sessionRow.listeners.get('dragstart')[0](event);
+
+    assert.equal(event.propagationStopped, true, 'Tabber shared tab drag does not bubble into row/tree handlers');
+    assert.equal(event.dataTransfer.effectAllowed, 'move');
+    assert.equal(event.dataTransfer['application/x-yolomux-session'], JSON.stringify({session: '1', sourceSlot: 'left'}));
+    assert.equal(event.dataTransfer['text/plain'], '1');
+    assert.equal(event.dataTransfer.dragImage.node, sessionRow, 'Tabber rows use the same native drag image path as pane tabs');
+    assert.equal(event.dataTransfer.dragImage.x, 13);
+    assert.equal(event.dataTransfer.dragImage.y, 7);
+    api.endSessionDrag(event);
+  });
+
   test('t@8485', () => {
     const api = loadYolomux('', ['1', '2', '3']);
     const slots = api.emptyLayoutSlots();

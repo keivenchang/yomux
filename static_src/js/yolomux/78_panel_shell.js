@@ -548,6 +548,35 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   return html;
 }
 
+function paneTabDragSourceItem(itemOrGetter, event) {
+  return typeof itemOrGetter === 'function' ? String(itemOrGetter(event) || '') : String(itemOrGetter || '');
+}
+
+function paneTabDragSourceSlot(item, sourceSlotOrGetter, event) {
+  const slot = typeof sourceSlotOrGetter === 'function' ? sourceSlotOrGetter(item, event) : sourceSlotOrGetter;
+  return slot || slotForItem(item);
+}
+
+function bindPaneTabNativeDragSource(tab, itemOrGetter, sourceSlotOrGetter = null, options = {}) {
+  if (!tab || tab.__yolomuxPaneTabNativeDragBound) return;
+  tab.__yolomuxPaneTabNativeDragBound = true;
+  tab.draggable = true;
+  tab.addEventListener('dragstart', event => {
+    if (options.ignore?.(event) === true) {
+      event.preventDefault?.();
+      return;
+    }
+    const item = paneTabDragSourceItem(itemOrGetter, event);
+    if (!isLayoutItem(item)) {
+      event.preventDefault?.();
+      return;
+    }
+    event.stopPropagation();
+    startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event));
+  });
+  tab.addEventListener('dragend', endSessionDrag);
+}
+
 function createPaneTab(side, item, displayContext = {}) {
   const type = tabTypeForItem(item);
   const isEditor = isFileEditorItem(item);
@@ -630,11 +659,7 @@ function createPaneTab(side, item, displayContext = {}) {
       showTabContextMenu(item, event.clientX, event.clientY, {tab});
     });
   }
-  tab.addEventListener('dragstart', event => {
-    event.stopPropagation();
-    startSessionDrag(event, item, side);
-  });
-  tab.addEventListener('dragend', endSessionDrag);
+  bindPaneTabNativeDragSource(tab, item, () => side);
   return tab;
 }
 
