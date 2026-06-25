@@ -688,6 +688,7 @@ let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
 const ensureSessionPromises = new Map();
 const terminalStartupPromises = new Map();
+const pendingTmuxSessions = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
 const transcriptStreams = new Map();

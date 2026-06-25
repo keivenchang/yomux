@@ -967,6 +967,8 @@ globalThis.__layoutTestApi = {
   tmuxSessionViewCommands,
   tmuxSessionNameError,
   replaceTmuxSessionInClient,
+  createNextSessionForTest: createNextSession,
+  pendingTmuxSessionNamesForTest: pendingTmuxSessionNames,
   normalizedSessionOrder,
   fileDropCategory,
   dropSuggestionIndexFromKeyEvent,

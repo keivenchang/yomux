@@ -941,12 +941,65 @@ function openFileEditorItems() {
   return items;
 }
 
+const pendingTmuxSessionGraceMs = 30000;
+
+function pruneExpiredPendingTmuxSessions(now = Date.now()) {
+  let changed = false;
+  for (const [session, expiresAt] of pendingTmuxSessions.entries()) {
+    if (Number(expiresAt) <= now) {
+      pendingTmuxSessions.delete(session);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function pendingTmuxSessionNames() {
+  pruneExpiredPendingTmuxSessions();
+  return Array.from(pendingTmuxSessions.keys());
+}
+
+function markPendingTmuxSession(session) {
+  const key = String(session || '').trim();
+  if (!key) return '';
+  pendingTmuxSessions.set(key, Date.now() + pendingTmuxSessionGraceMs);
+  layoutItems = computeLayoutItems();
+  return key;
+}
+
+function clearPendingTmuxSession(session) {
+  const key = String(session || '').trim();
+  if (!key || !pendingTmuxSessions.delete(key)) return false;
+  layoutItems = computeLayoutItems();
+  return true;
+}
+
+function clearConfirmedPendingTmuxSessions(nextSessions = []) {
+  let changed = false;
+  for (const session of nextSessions) {
+    if (pendingTmuxSessions.delete(session)) changed = true;
+  }
+  return changed;
+}
+
+function sessionOrderIncludingPending(nextSessions = []) {
+  const next = normalizedSessionOrder(nextSessions) || [];
+  for (const session of pendingTmuxSessionNames()) {
+    if (!next.includes(session)) next.push(session);
+  }
+  return next;
+}
+
 function computeLayoutItems() {
-  return [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions];
+  const items = [];
+  for (const item of [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions, ...pendingTmuxSessionNames()]) {
+    if (!items.includes(item)) items.push(item);
+  }
+  return items;
 }
 
 function isTmuxSession(item) {
-  return sessions.includes(item);
+  return sessions.includes(item) || pendingTmuxSessions.has(item);
 }
 
 function isLayoutItem(item) {
@@ -3723,7 +3776,8 @@ function normalizedSessionOrder(nextSessions) {
 }
 
 function setSessionOrder(next) {
-  sessions = next;
+  const authoritative = normalizedSessionOrder(next) || [];
+  sessions = sessionOrderIncludingPending(authoritative);
   visibleSessions = sessions.slice(0, maxSessionTabs);
   layoutItems = computeLayoutItems();
 }
@@ -3731,10 +3785,16 @@ function setSessionOrder(next) {
 function updateSessionList(nextSessions) {
   const next = normalizedSessionOrder(nextSessions);
   if (!next) return false;
-  const changed = next.length !== sessions.length || next.some((session, index) => session !== sessions[index]);
-  if (!changed) return false;
-  const removedSessions = visibleSessions.filter(session => !next.includes(session));
-  setSessionOrder(next);
+  pruneExpiredPendingTmuxSessions();
+  clearConfirmedPendingTmuxSessions(next);
+  const effectiveNext = sessionOrderIncludingPending(next);
+  const changed = effectiveNext.length !== sessions.length || effectiveNext.some((session, index) => session !== sessions[index]);
+  if (!changed) {
+    layoutItems = computeLayoutItems();
+    return false;
+  }
+  const removedSessions = visibleSessions.filter(session => !effectiveNext.includes(session));
+  setSessionOrder(effectiveNext);
   layoutSlots = normalizeLayoutSlots(layoutSlots, {
     preserveRemovedItems: removedSessions,
     preserveRemovedSlots: true,

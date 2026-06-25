@@ -1352,6 +1352,7 @@ async function createNextSession(agent) {
   statusEl.textContent = `creating ${agentLabel} session...`;
   try {
     const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
+    markPendingTmuxSession(payload.session);
     const previousActive = activeSessions.slice();
     updateSessionList(payload.sessions || []);
     renderSessionButtons();
@@ -1438,6 +1439,8 @@ function replaceSessionMetadata(oldSession, newSession) {
 }
 
 function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
+  clearPendingTmuxSession(oldSession);
+  markPendingTmuxSession(newSession);
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
   stopSessionUi(oldSession);
   replaceSessionMetadata(oldSession, newSession);

@@ -29,6 +29,7 @@ const {
   canonical,
   makeFileTree,
   test,
+  testAsync,
   runSuites,
   finishSuite,
 } = require('./layout_test_helper');
@@ -190,6 +191,53 @@ async function runLayoutRestoreSuite() {
     const noFinder = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1&finder=tabber', ['1']);
     const noFinderParams = parseUrl(noFinder.syncInitialLayoutUrlForTest());
     assert.equal(noFinderParams.has('finder'), false, 'closed Finder/Differ/Tabber state is omitted from the URL');
+  });
+
+  await testAsync('renamed tmux tab survives stale session rosters while tmux catches up', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1', '2']);
+    api.replaceTmuxSessionInClient('1', '8002b', ['2']);
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['8002b'], active: '8002b'},
+    }, 'rename immediately keeps the renamed tab open even when the returned roster omits it');
+
+    await api.applyTranscriptsPayloadForTest({session_order: ['2'], sessions: {'2': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['8002b'], active: '8002b'},
+    }, 'a stale transcript push cannot drop the pending renamed tab');
+
+    await api.applyTranscriptsPayloadForTest({session_order: ['2', '8002b'], sessions: {'2': {panes: []}, '8002b': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.equal(api.pendingTmuxSessionNamesForTest().length, 0, 'fresh server roster clears the pending renamed-session marker');
+  });
+
+  await testAsync('new Claude/Codex tab opens before delayed discovery lists it', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/create-session') {
+        return Promise.resolve(jsonResponse({session: '2', sessions: ['1'], agent: parsed.searchParams.get('agent') || 'codex', created: true, ok: true}));
+      }
+      if (parsed.pathname === '/api/ensure-session') {
+        return Promise.resolve(jsonResponse({session: parsed.searchParams.get('session'), created: false, ok: true}));
+      }
+      if (parsed.pathname === '/api/transcripts') {
+        return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {panes: []}}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    await api.createNextSessionForTest('codex');
+    await flushAsyncWork();
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['1', '2'], active: '2'},
+    }, 'new session tab opens even when create-session returns the old roster');
+
+    await api.applyTranscriptsPayloadForTest({session_order: ['1'], sessions: {'1': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['1', '2'], active: '2'},
+    }, 'stale transcript metadata cannot close the pending new session tab');
+
+    await api.applyTranscriptsPayloadForTest({session_order: ['1', '2'], sessions: {'1': {panes: []}, '2': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.equal(api.pendingTmuxSessionNamesForTest().length, 0, 'fresh server roster clears the pending new-session marker');
   });
 
   test('t@1212', () => {
