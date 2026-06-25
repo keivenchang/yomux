@@ -30865,15 +30865,28 @@ function diffRefQueryString(repo) {
   return `from=${encodeURIComponent(refs.from)}&to=${encodeURIComponent(refs.to)}`;
 }
 
-// C6: the per-repo override map encoded for /api/session-files (one request covers several repos). Only
-// repos with a non-default selection are sent; an empty map yields '' so the request stays unchanged.
+function sessionFilesRelevantDiffRefRepos() {
+  const session = fileExplorerSessionFilesTargetSession();
+  const payload = fileExplorerSessionFilesPayload;
+  if (!sessionFilesPayloadIsLoadedForSession(payload, session)) return new Set();
+  return new Set(sessionFilesRepoRoots(payload));
+}
+
+// C6: the per-repo override map encoded for /api/session-files. Keep this scoped to the current loaded
+// Differ payload so stale repo refs from old sessions do not bloat forced refreshes or fragment cache keys.
 function sessionFilesRefsQuery() {
   const map = {};
+  const relevantRepos = sessionFilesRelevantDiffRefRepos();
+  const globalRefs = diffRefParams();
   for (const [repo, refs] of Object.entries(diffRefsByRepo || {})) {
+    const normalizedRepo = normalizeDirectoryPath(repo);
+    if (!normalizedRepo || !relevantRepos.has(normalizedRepo)) continue;
     const from = cleanDiffRef(refs?.from, '');
     const to = cleanDiffRef(refs?.to, '');
     if (!from && !to) continue;
-    map[repo] = {from: from || 'HEAD', to: to || 'current'};
+    const nextRefs = {from: from || 'HEAD', to: to || 'current'};
+    if (nextRefs.from === globalRefs.from && nextRefs.to === globalRefs.to) continue;
+    map[normalizedRepo] = nextRefs;
   }
   return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
 }

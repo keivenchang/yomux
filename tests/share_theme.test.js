@@ -490,6 +490,7 @@ async function runShareThemeSuite() {
     });
     assert.ok(api.fileExplorerChangesPanelHtml().includes('Differ:'), 'Finder embeds a Differ panel');
     assert.ok(/class="changes-title">Differ: &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Differ title uses the compact session title');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
     api.setFileExplorerModeForTest('diff');
     api.setDiffRefsByRepoForTest('/repo/app', {from: 'abc1111', to: 'current'});
     const firstDiffCacheKey = api.sessionFilesCacheKeyForTest('1');
@@ -1372,9 +1373,30 @@ async function runShareThemeSuite() {
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
     ), true, 'clean session-files push with the live repo root still clears Differ rows');
     assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].count, 0, 'clean rooted payload replaces the previous dirty count');
+    const staleRefApi = loadYolomux('', ['8002']);
+    staleRefApi.setFileExplorerModeForTest('diff');
+    staleRefApi.setFileExplorerChangesSelectedSessionForTest('8002');
+    staleRefApi.setFileExplorerSessionFilesPayloadForTest({
+      session: '8002',
+      loaded: true,
+      files: [{session: '8002', repo: yolomuxRepo, path: 'docs/DONE.md', abs_path: `${yolomuxRepo}/docs/DONE.md`, status: 'M'}],
+      repos: [{repo: yolomuxRepo, count: 1, touched_count: 1, added: 4, removed: 0}],
+      errors: [],
+    });
+    staleRefApi.setDiffRefsByRepoForTest('/home/keivenc/yolomux.dev2', {from: 'HEAD', to: 'current'});
+    staleRefApi.setDiffRefsByRepoForTest('/home/keivenc/dynamo/vllm-0.22.0', {from: '0b3ba88f165976e77ca5e6a7a3f5bba4562b80af', to: 'current'});
+    staleRefApi.setDiffRefsByRepoForTest('/home/keivenc/dynamo/dynamo-utils.dev', {from: 'bc81c855a74be44b19941546d624bfb647f48055', to: 'current'});
+    staleRefApi.setDiffRefsByRepoForTest(yolomuxRepo, {from: 'HEAD', to: 'current'});
+    assert.equal(staleRefApi.sessionFilesCacheKeyForTest('8002').includes('&refs='), false, 'session-files requests omit stale repo refs and global-equivalent HEAD/current overrides');
+    staleRefApi.setDiffRefsByRepoForTest(yolomuxRepo, {from: 'abc1234', to: 'current'});
+    const sessionFilesQuery = staleRefApi.sessionFilesCacheKeyForTest('8002').split('\x1f')[1];
+    const sessionFilesRefs = JSON.parse(new URLSearchParams(sessionFilesQuery).get('refs'));
+    assert.deepStrictEqual(Object.keys(sessionFilesRefs), [yolomuxRepo], 'session-files requests keep only the current Differ repo override');
+    assert.deepStrictEqual(sessionFilesRefs[yolomuxRepo], {from: 'abc1234', to: 'current'}, 'the current repo override remains intact');
     assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted Differ payload with a rootless empty result');
+    assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
     assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
     assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
     assert.ok(/function setFileExplorerMode\([\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'switching back from Differ to Finder forces a fresh worktree-status fetch');
