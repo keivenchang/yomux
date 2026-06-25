@@ -1818,7 +1818,7 @@ async function runEditorPreviewSuite() {
     const paletteRows = api.commandPaletteCommandItems().filter(item => item.targetItem === api.debugPaneItemId);
     assert.equal(paletteRows.length, 1, 'command palette lists the Debug pane once through the Tabs group');
     assert.equal(paletteRows[0].label, 'YO!stats', 'command palette labels the debug stats tab as YO!stats');
-    api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 12.3});
+    api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 12.3, requestBytes: 123 * 1024 * 1024, responseBytes: (456 * 1024 * 1024) - 999});
     api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/activity-summary?locale=en', status: 200, ok: true, durationMs: 4200.4});
     api.recordJsDebugEventForTest('sse', {
       eventType: 'fs_changed',
@@ -1874,7 +1874,8 @@ async function runEditorPreviewSuite() {
     assert.equal(html.includes('data-js-debug-range="28800"'), false, 'YO!stats hides the 8 hour range until enough history exists');
     assert.equal(html.includes('data-js-debug-range="57600"'), false, 'YO!stats hides the 16 hour range until enough history exists');
     assert.equal(html.includes('data-js-debug-graph-bar'), false, 'YO!stats graph is a line graph, not timing bars');
-    assert.ok(html.includes('data-js-debug-uptime="2m 5s"') && html.includes('PID=4242') && html.includes('rss 128 MiB'), 'YO!stats graph shows yolomux.py uptime and process stats');
+    assert.ok(html.includes('data-js-debug-uptime="2m 5s"') && html.includes('yolomux.py uptime 2m 5s') && html.includes('PID=4242') && html.includes('rss 128 MiB'), 'YO!stats graph shows yolomux.py uptime and process stats');
+    assert.ok(html.includes('total 123/456 MB up/down'), 'YO!stats graph shows cumulative upload/download totals in MB');
     assert.ok(html.includes('GET /api/ping'), 'debug panel renders API timing rows');
     assert.ok(html.includes('Slow API by max latency') && html.includes('GET /api/activity-summary'), 'debug panel summarizes slow API endpoints by path');
     assert.ok(html.includes('Slow SSE server work') && html.includes('Slow SSE receive latency'), 'debug panel summarizes SSE server time and receive latency');
@@ -1887,12 +1888,14 @@ async function runEditorPreviewSuite() {
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
     assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, and line graph styling');
+    assert.ok(/\.js-debug-line\s*\{[^}]*stroke-width:\s*1\.4/.test(debugPaneCss), 'YO!stats graph lines stay thin enough to read overlapping series');
     assert.equal(debugPaneSource.includes("initialSetting('performance.activity_summary_refresh_ms'"), false, 'silent activity-summary polling preference is removed');
     assert.equal(debugPaneSource.includes('activitySummaryBackgroundRefreshMs'), false, 'activity-summary no longer keeps a client background refresh timer');
     assert.ok(debugPaneSource.includes('function activitySummaryIsVisible()'), 'activity-summary visibility tracking remains available for server watch state');
     const debugText = api.jsDebugTextForClipboardForTest();
     assert.ok(debugText.includes('page=/?debug=1'), 'debug text includes the active URL path and query');
     assert.ok(debugText.includes('api=2'), 'debug text exports the API call count');
+    assert.ok(debugText.includes(`api_tx=${123 * 1024 * 1024}B`), 'debug text exports API upload byte totals');
     assert.ok(debugText.includes('API') && debugText.includes('GET /api/ping'), 'debug text exports API rows');
     assert.ok(debugText.includes('Slow API by max latency') && debugText.includes('GET /api/activity-summary'), 'debug text exports grouped slow API rows');
     assert.ok(debugText.includes('sse_rx=999B'), 'debug text counts estimated SSE frame bytes');

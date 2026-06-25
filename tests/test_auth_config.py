@@ -155,6 +155,7 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     monkeypatch.setattr(web, "settings_payload", lambda: {"settings": {"general": {"language": "en"}}})
     monkeypatch.setattr(web, "yolomux_commit_sha", lambda: "abcdef123456")
     monkeypatch.setattr(web, "yolomux_commit_time_pt", lambda: "2026-01-15 04:34:56 PT")
+    monkeypatch.setattr(web, "yolomux_client_revision", lambda: "client-rev-test")
     monkeypatch.setattr(web, "SERVER_STARTED_AT", 1234.5)
 
     page = web.html_page([])
@@ -162,6 +163,7 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     assert match
     payload = json.loads(match.group(1))
     assert payload["versionCommit"] == "abcdef123456"
+    assert payload["clientRevision"] == "client-rev-test"
     assert payload["serverStartedAt"] == 1234.5
     assert payload["serverStartedAtMs"] == 1234500
     assert "SHA: abcdef123456" in page

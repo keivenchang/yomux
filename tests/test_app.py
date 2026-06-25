@@ -1836,6 +1836,7 @@ def test_tmux_snapshot_bounds_and_skips_unchanged_history(monkeypatch):
 
 def test_transcripts_payload_exposes_server_version(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    monkeypatch.setattr(app_module, "yolomux_client_revision", lambda: "client-rev-test")
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
@@ -1846,6 +1847,7 @@ def test_transcripts_payload_exposes_server_version(monkeypatch):
         webapp.control_server.stop()
 
     assert payload["server_version"] == app_module.YOLOMUX_VERSION
+    assert payload["client_revision"] == "client-rev-test"
     assert payload["server_started_at"] == app_module.SERVER_STARTED_AT
     assert payload["server_uptime_seconds"] >= 0
 

@@ -2966,20 +2966,27 @@ function showServerUpdateBanner(version) {
   document.body.appendChild(banner);
 }
 
-function maybeHandleServerVersionChange(serverVersion) {
-  // The boot version (bootstrap.version) only updates on page load; this lets a
-  // long-lived open client learn that the running server no longer matches the
-  // browser bundle that booted this tab.
-  if (!serverVersion || serverVersion === bootstrap.version) return;
-  if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
-  if (selfUpdateOwnsServerVersion(serverVersion)) return;
-  if (serverVersionReloadHandled === serverVersion) return;
-  serverVersionReloadHandled = serverVersion;
+function maybeHandleServerVersionChange(serverVersion, serverClientRevision = '') {
+  // The boot version/revision only update on page load; this lets a long-lived
+  // client learn that the running server no longer matches the bundle that booted this tab.
+  const normalizedServerVersion = String(serverVersion || '');
+  const bootVersion = String(bootstrap.version || '');
+  const versionChanged = normalizedServerVersion && normalizedServerVersion !== bootVersion;
+  const versionReloadAllowed = versionChanged && updateNotificationAllowsVersion(bootVersion, normalizedServerVersion);
+  const bootClientRevision = String(bootstrap.clientRevision || '');
+  const normalizedClientRevision = String(serverClientRevision || '');
+  const reloadNotificationsEnabled = normalizeUpdateNotificationLevel(updateNotificationLevelSetting()) !== 'none';
+  const clientRevisionChanged = reloadNotificationsEnabled && normalizedClientRevision && bootClientRevision && normalizedClientRevision !== bootClientRevision;
+  if (!versionReloadAllowed && !clientRevisionChanged) return;
+  if (versionReloadAllowed && selfUpdateOwnsServerVersion(normalizedServerVersion)) return;
+  const reloadKey = versionReloadAllowed ? `version:${normalizedServerVersion}` : `client:${normalizedClientRevision}`;
+  if (serverVersionReloadHandled === reloadKey) return;
+  serverVersionReloadHandled = reloadKey;
   if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
     location.reload();
     return;
   }
-  showServerUpdateBanner(serverVersion);
+  showServerUpdateBanner(versionReloadAllowed ? normalizedServerVersion : reloadKey);
 }
 
 async function applyTranscriptsPayload(payload, options = {}) {
@@ -2989,7 +2996,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   transcriptMetaLoadError = '';
   clearInfoSessionDrawerCache();
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
-  maybeHandleServerVersionChange(transcriptMeta.server_version);
+  maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
   applyAgentAvailabilityPayload(transcriptMeta);
   updateMetadataBadgePulses(transcriptMeta);
   const previousActive = activeSessions.slice();

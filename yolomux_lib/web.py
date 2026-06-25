@@ -13,6 +13,7 @@ from .common import STATIC_DIR
 from .common import YOLOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
+from .common import yolomux_client_revision
 from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .settings import save_settings
@@ -175,6 +176,7 @@ def html_page(
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "version": YOLOMUX_VERSION,
+        "clientRevision": yolomux_client_revision(),
         "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
         "settingsPayload": settings_data,

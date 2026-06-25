@@ -31288,13 +31288,26 @@ function debugGraphBytesText(bytes) {
   return `${mib.toFixed(mib >= 100 ? 0 : 1)} MiB`;
 }
 
+function debugGraphTotalMegabytesText(bytes) {
+  const value = Math.max(0, Number(bytes) || 0) / 1024 / 1024;
+  if (value >= 100) return value.toFixed(0);
+  if (value >= 10) return value.toFixed(1);
+  return value.toFixed(2);
+}
+
 function debugGraphMetaHtml() {
   const items = [];
-  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
+  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`yolomux.py uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
   if (Number.isFinite(jsDebugStatsServerPid)) items.push(`PID=${Math.floor(jsDebugStatsServerPid)}`);
   const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
   if (rss) items.push(`rss ${rss}`);
   if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(`server seq ${Math.floor(jsDebugStatsServerSequence)}`);
+  if (items.length) {
+    const counts = debugEventCounts();
+    const uploadedMb = debugGraphTotalMegabytesText(counts.apiRequestBytes);
+    const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
+    items.push(`total ${uploadedMb}/${downloadedMb} MB up/down`);
+  }
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${esc(items.join(' | ') || 'waiting for server stats')}</div>`;
 }
 
@@ -48415,20 +48428,27 @@ function showServerUpdateBanner(version) {
   document.body.appendChild(banner);
 }
 
-function maybeHandleServerVersionChange(serverVersion) {
-  // The boot version (bootstrap.version) only updates on page load; this lets a
-  // long-lived open client learn that the running server no longer matches the
-  // browser bundle that booted this tab.
-  if (!serverVersion || serverVersion === bootstrap.version) return;
-  if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
-  if (selfUpdateOwnsServerVersion(serverVersion)) return;
-  if (serverVersionReloadHandled === serverVersion) return;
-  serverVersionReloadHandled = serverVersion;
+function maybeHandleServerVersionChange(serverVersion, serverClientRevision = '') {
+  // The boot version/revision only update on page load; this lets a long-lived
+  // client learn that the running server no longer matches the bundle that booted this tab.
+  const normalizedServerVersion = String(serverVersion || '');
+  const bootVersion = String(bootstrap.version || '');
+  const versionChanged = normalizedServerVersion && normalizedServerVersion !== bootVersion;
+  const versionReloadAllowed = versionChanged && updateNotificationAllowsVersion(bootVersion, normalizedServerVersion);
+  const bootClientRevision = String(bootstrap.clientRevision || '');
+  const normalizedClientRevision = String(serverClientRevision || '');
+  const reloadNotificationsEnabled = normalizeUpdateNotificationLevel(updateNotificationLevelSetting()) !== 'none';
+  const clientRevisionChanged = reloadNotificationsEnabled && normalizedClientRevision && bootClientRevision && normalizedClientRevision !== bootClientRevision;
+  if (!versionReloadAllowed && !clientRevisionChanged) return;
+  if (versionReloadAllowed && selfUpdateOwnsServerVersion(normalizedServerVersion)) return;
+  const reloadKey = versionReloadAllowed ? `version:${normalizedServerVersion}` : `client:${normalizedClientRevision}`;
+  if (serverVersionReloadHandled === reloadKey) return;
+  serverVersionReloadHandled = reloadKey;
   if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
     location.reload();
     return;
   }
-  showServerUpdateBanner(serverVersion);
+  showServerUpdateBanner(versionReloadAllowed ? normalizedServerVersion : reloadKey);
 }
 
 async function applyTranscriptsPayload(payload, options = {}) {
@@ -48438,7 +48458,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   transcriptMetaLoadError = '';
   clearInfoSessionDrawerCache();
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
-  maybeHandleServerVersionChange(transcriptMeta.server_version);
+  maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
   applyAgentAvailabilityPayload(transcriptMeta);
   updateMetadataBadgePulses(transcriptMeta);
   const previousActive = activeSessions.slice();

@@ -1070,7 +1070,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function dockviewScheduleLayoutToHost\(api = dockviewLayoutState\.api, host = dockviewLayoutState\.host\)[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*dockviewLayoutToHost\(api, host\)/.test(dockviewSource), 'Dockview host ResizeObserver layout work is coalesced to one layout per frame');
     assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
     assert.ok(source.includes('CodeMirror local bundle is unavailable or incomplete'), 'CodeMirror loading reports local bundle failures clearly');
-    assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version)'), 'the metadata poll checks the live server version');
+    assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision)'), 'the metadata poll checks the live server version and client bundle revision');
     // #39: the new-session picker greys an installed-but-logged-out agent and names its login command;
     // the metadata poll refreshes agentAuth so it re-enables after the user logs in.
     assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in !== false/.test(source), '#39: agentLoggedIn treats only confirmed logged-out status as unavailable');
@@ -1087,7 +1087,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/const YOAGENT_CHAT_BACKENDS = \['codex', 'claude'\]/.test(source) && /function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of YOAGENT_CHAT_BACKENDS\)[\s\S]*?yoagentBackendUsable\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
     assert.ok(source.includes("initialSetting('yoagent.backend', 'auto')"), '#41: the YO!agent backend default is auto');
     assert.ok(/function yoagentChatEnabled\(\)[\s\S]*YOAGENT_CHAT_BACKENDS\.includes\(yoagentResolvedBackend\(\)\)/.test(source), '#41/#72: chat-enabled tracks only usable model-backed chat');
-    assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*updateNotificationAllowsVersion\(bootstrap\.version, serverVersion\)/.test(source), 'server/client-version reload is gated on the boot version and the reload_on_update threshold');
+    assert.ok(/maybeHandleServerVersionChange[\s\S]*normalizedServerVersion !== bootVersion[\s\S]*updateNotificationAllowsVersion\(bootVersion, normalizedServerVersion\)/.test(source), 'server/client-version reload is gated on the boot version and the reload_on_update threshold');
     assert.ok(/function updateNotificationAllowsVersion\([^)]*\)[\s\S]*cleanLevel === 'none'[\s\S]*targetParts\[1\] !== currentParts\[1\][\s\S]*cleanLevel === 'patch'[\s\S]*targetParts\[2\] !== currentParts\[2\][\s\S]*cleanLevel === 'patch'/.test(source), 'update notification threshold follows SemVer major/minor/patch mismatches');
     assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
     const updateApi = loadYolomux('', ['1']);

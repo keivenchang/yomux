@@ -88,6 +88,7 @@ from .common import as_dict
 from .common import next_numbered_session_name
 from .common import tail_file_lines
 from .common import truncate_text
+from .common import yolomux_client_revision
 from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
 from .drop_actions import run_drop_action
@@ -5647,6 +5648,7 @@ class TmuxWebtermApp:
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "server_version": YOLOMUX_VERSION,
+            "client_revision": yolomux_client_revision(),
             "server_started_at": SERVER_STARTED_AT,
             "server_uptime_seconds": max(0.0, time.time() - SERVER_STARTED_AT),
             "session_order": self.sessions,

@@ -68,6 +68,18 @@ YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'
 SEMVER_RE = re.compile(r"^\s*v?(\d+)\.(\d+)\.(\d+)(?:\D.*)?$")
 
 
+def file_revision(path: Path) -> str:
+    try:
+        stat = path.stat()
+    except OSError:
+        return "0-0"
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
+
+
+def yolomux_client_revision() -> str:
+    return file_revision(STATIC_DIR / "yolomux.js")
+
+
 class ErrorPayload(TypedDict, total=False):
     error: str
     path: str

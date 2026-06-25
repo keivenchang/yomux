@@ -2029,6 +2029,56 @@ async function runLayoutAsyncSuite() {
       assert.ok(autoApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), 'dirty auto-reload fallback still shows the existing reload banner');
     });
 
+    test('server/client bundle revision mismatch asks whether to reload the browser', async () => {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          version: '0.4.20',
+          clientRevision: 'old-client-rev',
+          settingsPayload: {
+            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
+            settings: {},
+            mtime_ns: 1,
+          },
+        },
+      });
+      api.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
+      const banner = api.bodyChildren().find(node => node.id === 'serverUpdateBanner');
+      assert.ok(banner, 'same-version bundle revision mismatch shows the existing reload banner');
+      assert.equal(banner.dataset.version, 'client:new-client-rev', 'reload banner stores the mismatched bundle revision');
+      assert.ok(banner.children[0].textContent.includes('Do you want to reload the browser?'), 'bundle revision banner asks the user whether to reload');
+      api.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
+      assert.equal(api.bodyChildren().filter(node => node.id === 'serverUpdateBanner').length, 1, 'same bundle revision mismatch does not spawn repeated banners');
+
+      const autoApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          version: '0.4.20',
+          clientRevision: 'old-client-rev',
+          settingsPayload: {
+            defaults: {general: {reload_on_update: true, reload_on_update_auto: true}},
+            settings: {},
+            mtime_ns: 1,
+          },
+        },
+      });
+      autoApi.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
+      assert.equal(autoApi.reloadCountForTest(), 1, 'safe automatic reload fires on same-version bundle revision mismatch');
+
+      const disabledApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          version: '0.4.20',
+          clientRevision: 'old-client-rev',
+          settingsPayload: {
+            defaults: {general: {reload_on_update: false, reload_on_update_auto: true}},
+            settings: {},
+            mtime_ns: 1,
+          },
+        },
+      });
+      disabledApi.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
+      assert.equal(disabledApi.reloadCountForTest(), 0, 'disabled reload-on-update suppresses bundle revision auto reload');
+      assert.equal(disabledApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'disabled reload-on-update suppresses bundle revision banner');
+    });
+
     test('self-update: Update Now removes toast and reloads after restart ping', async () => {
       const api = loadYolomux('', ['1']);
       api.setConfirmForTest(() => true);

@@ -481,7 +481,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "default_layout"): "single | split | grid. Reserved default for new visits.",
     ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, ja, ko, es, de, fr, it, pt-BR, pl, nl, he, ar, ru, hi, vi, th, tr, en-XA pseudo).",
     ("general", "default_sessions"): "Legacy reserved list of tmux sessions. The running server defaults to all discovered sessions unless launched with --sessions.",
-    ("general", "reload_on_update"): "true/false. Default true. When true, an open client asks whether to reload the browser once the running server reports a YOLOMUX_VERSION that differs from the page boot version. This does not check origin/main.",
+    ("general", "reload_on_update"): "true/false. Default true. When true, an open client asks whether to reload the browser once the running server reports a YOLOMUX_VERSION or client bundle revision that differs from the page boot values. This does not check origin/main.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing the browser reload prompt — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
