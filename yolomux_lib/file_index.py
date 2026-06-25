@@ -345,9 +345,7 @@ def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> 
         with sqlite3.connect(_index_disk_path(root), timeout=30.0) as conn:
             _ensure_sqlite_schema(conn)
             metadata = dict(conn.execute("SELECT key, value FROM metadata"))
-            if metadata.get("root") != str(root):
-                return None
-            if metadata.get("version") != str(INDEX_FORMAT_VERSION) or metadata.get("storage") != "sqlite" or metadata.get("skip_signature") != _skip_signature(skip_dirs, exclude_signature):
+            if not _sqlite_metadata_matches(metadata, root, skip_dirs, exclude_signature):
                 return None
             rows = conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY ord").fetchall()
     except (OSError, sqlite3.DatabaseError):
@@ -358,6 +356,100 @@ def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> 
     except ValueError:
         built_at = 0.0
     return entries, built_at, metadata.get("truncated") == "1"
+
+
+def _sqlite_metadata_matches(metadata: dict[str, Any], root: Path, skip_dirs: set[str], exclude_signature: str = "") -> bool:
+    return (
+        metadata.get("root") == str(root)
+        and metadata.get("version") == str(INDEX_FORMAT_VERSION)
+        and metadata.get("storage") == "sqlite"
+        and metadata.get("skip_signature") == _skip_signature(skip_dirs, exclude_signature)
+    )
+
+
+def _read_sqlite_index(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+) -> tuple[sqlite3.Connection, dict[str, Any]] | None:
+    try:
+        conn = sqlite3.connect(f"file:{_index_disk_path(root).as_posix()}?mode=ro", uri=True, timeout=30.0)
+        metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+        if not _sqlite_metadata_matches(metadata, root, skip_dirs, exclude_signature):
+            conn.close()
+            return None
+        return conn, metadata
+    except (OSError, sqlite3.DatabaseError):
+        return None
+
+
+def _metadata_truncated(metadata: dict[str, Any]) -> bool:
+    return str(metadata.get("truncated") or "") == "1"
+
+
+def search_disk_index(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str,
+    match: Callable[[str, str, str], Any],
+    max_results: int,
+) -> tuple[list[dict[str, Any]], bool] | None:
+    """Search a persisted index without making a follower own/build or deserialize it wholesale."""
+    opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
+    if opened is None:
+        return None
+    conn, metadata = opened
+    try:
+        results: list[dict[str, Any]] = []
+        rows = conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY ord")
+        for path_str, name, rel, size, mtime in rows:
+            entry = match(str(path_str), str(name), str(rel))
+            if entry is None:
+                continue
+            entry["size"] = int(size)
+            entry["mtime"] = int(mtime)
+            results.append(entry)
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+    truncated = _metadata_truncated(metadata)
+    results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))
+    if len(results) > max_results:
+        truncated = True
+        results = results[:max_results]
+    return results, truncated
+
+
+def recent_disk_entries(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str,
+    max_results: int,
+    make_entry: Callable[[str, str, str], dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool] | None:
+    """Return recent entries from a persisted index without loading all rows into follower memory."""
+    opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
+    if opened is None:
+        return None
+    conn, metadata = opened
+    try:
+        rows = conn.execute(
+            "SELECT path, name, relative_path, size, mtime FROM entries ORDER BY mtime DESC LIMIT ?",
+            (max_results + 1,),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+    truncated = _metadata_truncated(metadata) or len(rows) > max_results
+    results = []
+    for path_str, name, rel, size, mtime in rows[:max_results]:
+        entry = make_entry(str(path_str), str(name), str(rel))
+        entry["size"] = int(size)
+        entry["mtime"] = int(mtime)
+        results.append(entry)
+    return results, truncated
 
 
 def _run_build(

@@ -980,7 +980,7 @@ def test_search_index_follower_status_uses_manifest_without_full_json_timing_reg
     assert elapsed < 0.2
 
 
-def test_search_index_follower_large_sqlite_metadata_status_and_search_timing_regression(monkeypatch, tmp_path):
+def test_search_index_follower_large_sqlite_metadata_status_and_streaming_search_regression(monkeypatch, tmp_path):
     entry_count = 5000
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     file_index.set_background_owner_done_notifier(None)
@@ -1026,8 +1026,8 @@ def test_search_index_follower_large_sqlite_metadata_status_and_search_timing_re
     assert status["state"] == "follower"
     assert status["ready_elsewhere"] is True
     assert status["count"] == entry_count
-    assert payload["index_state"] == "follower"
-    assert payload["files"] == []
+    assert payload["index_state"] == "follower-ready"
+    assert [entry["relative_path"] for entry in payload["files"]] == ["dir-99/target-04999.py"]
     assert load_calls == []
     assert elapsed < 0.2
 
@@ -1053,6 +1053,7 @@ def test_search_index_follower_refetches_manifest_after_owner_build(monkeypatch,
         )
         file_index.set_background_owner_checker(lambda _role: False)
         refreshed = filesystem.index_status(str(tmp_path))
+        payload = filesystem.search_files(str(tmp_path), query="target", recursive=True)
     finally:
         file_index.set_background_owner_checker(None)
         file_index.set_background_owner_done_notifier(None)
@@ -1062,6 +1063,7 @@ def test_search_index_follower_refetches_manifest_after_owner_build(monkeypatch,
     assert refreshed["state"] == "follower"
     assert refreshed["ready_elsewhere"] is True
     assert refreshed["count"] >= 1
+    assert [entry["relative_path"] for entry in payload["files"]] == ["target.py"]
 
 
 def test_only_owner_starts_search_index_walk_for_shared_root(monkeypatch, tmp_path):

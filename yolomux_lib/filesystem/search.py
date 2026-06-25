@@ -226,31 +226,8 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             exclude_path=paths._path_is_secret,
             exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
         )
-        if not index.ready and not file_index.background_owner_can_build():
-            refresh_result = file_index.request_background_owner_refresh({"root": str(root), "query": str(query or ""), "reason": "search-index-missing"})
-            if not refresh_result.get("fallback"):
-                return {
-                    "root": str(root),
-                    "root_realpath": os.path.realpath(root),
-                    "query": str(query or ""),
-                    "limit": max_results,
-                    "truncated": False,
-                    "files": [],
-                    "index_state": "follower",
-                    "refreshing_elsewhere": True,
-                }
-        if not index.ready and not file_index.background_owner_can_build() and not tokens:
-            return {
-                "root": str(root),
-                "root_realpath": os.path.realpath(root),
-                "query": str(query or ""),
-                "limit": max_results,
-                "truncated": False,
-                "files": [],
-                "index_state": "follower-fallback-skipped",
-                "refreshing_elsewhere": False,
-            }
-        if tokens and index.ready:
+        can_build_index = file_index.background_owner_can_build()
+        if tokens:
             def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
                 sort_key = _search_entry_sort_key(Path(path_str), rel, tokens)
                 if sort_key is None:
@@ -263,20 +240,46 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     "uploaded": is_generated_upload_name(Path(path_str)),
                     "_sort_key": sort_key,
                 }
-            indexed_results, indexed_truncated = file_index.search_index(index, _match, max_results)
-            for entry in indexed_results:
-                entry.pop("_sort_key", None)
-                # Annotate the (capped) results with realpath + size so the client can dedupe symlink
-                # overlaps and content-mirror copies. Bounded to <= max_results, so the stat is cheap.
-                _annotate_search_dedupe_fields(entry)
-            return {
-                "root": str(root),
-                "root_realpath": os.path.realpath(root),
-                "query": str(query or ""),
-                "limit": max_results,
-                "truncated": indexed_truncated,
-                "files": indexed_results,
-            }
+
+            indexed_payload_state = ""
+            indexed: tuple[list[dict[str, Any]], bool] | None = None
+            if index.ready:
+                indexed = file_index.search_index(index, _match, max_results)
+            elif not can_build_index and index.disk_metadata_ready:
+                indexed = file_index.search_disk_index(root, SEARCH_SKIP_DIRS, SEARCH_SECRET_EXCLUDE_SIGNATURE, _match, max_results)
+                indexed_payload_state = "follower-ready" if indexed is not None else ""
+            if indexed is not None:
+                indexed_results, indexed_truncated = indexed
+                for entry in indexed_results:
+                    entry.pop("_sort_key", None)
+                    # Annotate the (capped) results with realpath + size so the client can dedupe symlink
+                    # overlaps and content-mirror copies. Bounded to <= max_results, so the stat is cheap.
+                    _annotate_search_dedupe_fields(entry)
+                payload = {
+                    "root": str(root),
+                    "root_realpath": os.path.realpath(root),
+                    "query": str(query or ""),
+                    "limit": max_results,
+                    "truncated": indexed_truncated,
+                    "files": indexed_results,
+                }
+                if indexed_payload_state:
+                    payload["index_state"] = indexed_payload_state
+                    payload["refreshing_elsewhere"] = True
+                return payload
+            if not index.ready and not can_build_index:
+                refresh_result = file_index.request_background_owner_refresh({"root": str(root), "query": str(query or ""), "reason": "search-index-missing"})
+                if not refresh_result.get("fallback"):
+                    return {
+                        "root": str(root),
+                        "root_realpath": os.path.realpath(root),
+                        "query": str(query or ""),
+                        "limit": max_results,
+                        "truncated": False,
+                        "files": [],
+                        "index_state": "follower",
+                        "refreshing_elsewhere": True,
+                    }
         if not tokens:
             # C11: an EMPTY query on a full-tree root used to fall through to a cold recursive walk just to
             # return the first N files. When the index is ready, serve a capped most-recent slice from it
@@ -290,8 +293,15 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     "kind": "file",
                     "uploaded": is_generated_upload_name(Path(path_str)),
                 }
+            recent: tuple[list[dict[str, Any]], bool] | None = None
+            recent_payload_state = "ready"
             if index.ready:
-                recent_results, recent_truncated = file_index.recent_entries(index, max_results, _recent)
+                recent = file_index.recent_entries(index, max_results, _recent)
+            elif not can_build_index and index.disk_metadata_ready:
+                recent = file_index.recent_disk_entries(root, SEARCH_SKIP_DIRS, SEARCH_SECRET_EXCLUDE_SIGNATURE, max_results, _recent)
+                recent_payload_state = "follower-ready"
+            if recent is not None:
+                recent_results, recent_truncated = recent
                 for entry in recent_results:
                     _annotate_search_dedupe_fields(entry)
                 return {
@@ -301,7 +311,19 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     "limit": max_results,
                     "truncated": recent_truncated,
                     "files": recent_results,
-                    "index_state": "ready",
+                    "index_state": recent_payload_state,
+                    "refreshing_elsewhere": recent_payload_state == "follower-ready",
+                }
+            if not index.ready and not can_build_index:
+                return {
+                    "root": str(root),
+                    "root_realpath": os.path.realpath(root),
+                    "query": str(query or ""),
+                    "limit": max_results,
+                    "truncated": False,
+                    "files": [],
+                    "index_state": "follower-fallback-skipped",
+                    "refreshing_elsewhere": False,
                 }
             return {
                 "root": str(root),
