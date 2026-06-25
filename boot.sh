@@ -94,6 +94,21 @@ export PATH="${HOME}/.local/bin:${HOME}/.local/node-v22.11.0-linux-x64/bin:${PAT
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
 
+# YO!agent's Claude backend runs `claude` non-interactively. On macOS that binary
+# authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT read
+# primaryApiKey from ~/.claude.json the way the Linux build does. The detached server
+# bypasses the ~/bin/claude wrapper (PATH resolves ~/.local/bin/claude first), so mirror
+# that wrapper here: export the stored primaryApiKey as ANTHROPIC_API_KEY when it is not
+# already set. Exported (not passed on argv) so the key never appears in `ps`.
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -r "${HOME}/.claude.json" ]]; then
+  ANTHROPIC_API_KEY="$("$python_bin" -c 'import json, os
+try:
+    print(json.load(open(os.path.expanduser("~/.claude.json"))).get("primaryApiKey") or "")
+except Exception:
+    print("")' 2>/dev/null || true)"
+  [[ -n "$ANTHROPIC_API_KEY" ]] && export ANTHROPIC_API_KEY
+fi
+
 extra_env=()
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
