@@ -8,7 +8,7 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ### Visual animation verification rule
 
-- Added a durable GUI/development rule from the agent-status ball debugging failure: animation/color/glow fixes cannot be called done from source inspection, source-grep tests, or a single screenshot. The required proof is browser/Selenium evidence for the exact element, computed animation state, and at least two rendered frames or pixel/computed-style samples that show the visual change over time; reduced-motion bugs must test reduced motion explicitly. This is now documented in `docs/specs/GUI.md` and `docs/DEVELOPMENT.md` so future pulse/glow fixes start with real visual evidence instead of repeated guessing.
+- Refactored the agent-status ball debugging lesson into one readable source of truth. `docs/specs/GUI.md` owns the detailed visual contract and status-ball acceptance criteria; `docs/DEVELOPMENT.md` now keeps only the workflow checklist; `AGENTS.md` points agents back to those docs instead of repeating the full rule. The root lesson is still the same: prove the exact reported element changes in the browser over time before saying a visual animation fix is done.
 
 ### Differ rootless-empty session-files flicker
 
