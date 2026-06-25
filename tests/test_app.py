@@ -883,9 +883,21 @@ def test_session_files_cache_seconds_default_is_not_aggressive():
     assert app_module.SESSION_FILES_CACHE_SECONDS >= 30.0
 
 
-def test_client_status_poll_fallbacks_are_not_aggressive():
-    assert app_module.SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS >= 10.0
-    assert app_module.SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS >= 10.0
+def test_client_status_poll_fallbacks_are_interactive_with_jitter(monkeypatch):
+    assert app_module.SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS == pytest.approx(3.0)
+    assert app_module.SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS == pytest.approx(3.0)
+    assert app_module.SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS == pytest.approx(0.5)
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(app_module.random, "uniform", lambda lower, upper: upper)
+        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(3.5)
+        assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(3.5)
+        monkeypatch.setattr(app_module.random, "uniform", lambda lower, upper: lower)
+        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(2.5)
+        assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(2.5)
+    finally:
+        webapp.control_server.stop()
 
 
 def test_session_files_memory_cache_is_bounded():

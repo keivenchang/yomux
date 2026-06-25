@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import resource
 import secrets
@@ -240,9 +241,11 @@ SHARE_DEBUG_PROFILE_EVENT_LIMIT = 100
 SHARE_DEBUG_PROFILE_LOG_DIR = Path(os.environ.get("YOLOMUX_SHARE_DEBUG_DIR", "/tmp/yolomux-share-debug"))
 SHARE_DEBUG_PROFILE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|bearer)", re.I)
 SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
-SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 10.0
+SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 3.0
+SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
+SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 AUTO_APPROVE_CACHE_MAX_AGE_SECONDS = 5.003
-SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = 10.0
+SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 60 * 60
 STATS_HISTORY_RAW_BUCKET_SECONDS = 1
@@ -2425,11 +2428,17 @@ class TmuxWebtermApp:
     def server_background_file_event_poll_seconds(self) -> float:
         return self.performance_setting_ms_as_seconds("server_background_file_event_poll_ms", 0.25, 60.0)
 
+    def jittered_interactive_event_poll_seconds(self, base_seconds: float) -> float:
+        jitter = min(SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS, max(0.0, base_seconds * 0.25))
+        if jitter <= 0:
+            return max(0.25, base_seconds)
+        return max(0.25, base_seconds + random.uniform(-jitter, jitter))
+
     def server_auto_approve_event_poll_seconds(self) -> float:
-        return SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS
+        return self.jittered_interactive_event_poll_seconds(SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS)
 
     def server_tmux_signal_event_poll_seconds(self) -> float:
-        return SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS
+        return self.jittered_interactive_event_poll_seconds(SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS)
 
     def server_watched_pr_event_poll_seconds(self) -> float:
         return SERVER_WATCHED_PR_EVENT_POLL_SECONDS
