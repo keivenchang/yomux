@@ -547,10 +547,15 @@ class MetadataCache(TtlCache):
     def get(self, key: str) -> Any:
         return self.get_or_miss(key)
 
+
+def empty_project_metadata(*, loading: bool = False) -> dict[str, Any]:
+    return {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": loading}
+
+
 def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     git_data = session_git_inventory(info)
     if git_data is None:
-        return {"git": None, "pull_request": None, "linear": []}
+        return empty_project_metadata()
     enrich_branch_pull_requests(git_data, cache, allow_network=allow_network)
 
     pull_request = project_pull_request(git_data, cache, allow_network=allow_network)
@@ -944,6 +949,6 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_netw
         "agents": [asdict(agent) for agent in info.agents],
         "window_metadata": window_metadata(info, include_git=include_metadata),
         "transcript_mtime": transcript_mtime,
-        "project": session_project_metadata(info, metadata_cache, allow_network=allow_network) if include_metadata else {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": True},
+        "project": session_project_metadata(info, metadata_cache, allow_network=allow_network) if include_metadata else empty_project_metadata(loading=True),
         "metadata_loading": not include_metadata,
     }

@@ -1243,7 +1243,7 @@ function panelDetailsToggleLabel(collapsed) {
 function syncPanelDetailsToggleButton(button, collapsed) {
   if (!button) return;
   const detailsLabel = panelDetailsToggleLabel(collapsed);
-  button.classList.toggle('active', !collapsed);
+  button.classList.toggle(CLS.active, !collapsed);
   button.title = detailsLabel;
   button.setAttribute('aria-label', detailsLabel);
   button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
@@ -1470,7 +1470,7 @@ function updateTmuxWindowBarActiveButtons(session, windowIndex) {
     bar.querySelectorAll?.('[data-window-index]')?.forEach(button => {
       const active = indexKey !== null && tmuxWindowIndexKey(button.dataset.windowIndex) === indexKey;
       matched = matched || active;
-      button.classList.toggle('active', active);
+      button.classList.toggle(CLS.active, active);
       button.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
   });

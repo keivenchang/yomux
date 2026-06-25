@@ -137,7 +137,7 @@
   height: 30px;
   padding: 4px 7px;
   color: var(--pane-tab-panel-head-text);
-  background: #07110d;
+  background: var(--input-bg);
   border: 1px solid var(--auto-border);
   border-radius: var(--radius-control);
   font: 600 var(--ui-font-size)/1.2 var(--mono-font);
@@ -154,8 +154,8 @@
 }
 .session-rename-actions button {
   padding: 4px 9px;
-  color: var(--chrome-text-strong);
-  background: #222b3a;
+  color: var(--text);
+  background: var(--panel2);
   border: 1px solid var(--sep-muted);
   border-radius: 5px;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
@@ -205,12 +205,6 @@
   color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
   white-space: nowrap;
-}
-.terminal-context-menu button:hover,
-.terminal-context-menu button:focus-visible {
-  outline: 0;
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
 }
 .terminal-context-menu button.danger {
   color: #ffd6dc;
@@ -669,7 +663,7 @@
   font: var(--ui-font-size-sm)/1.2 var(--ui-font);
 }
 .search-history-input:focus {
-  outline: none;
+  outline: 0;
   border-color: var(--active-control-border);
   box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
@@ -719,7 +713,7 @@
 .search-history-result:focus-visible,
 .search-history-run:not(:disabled):hover,
 .search-history-run:not(:disabled):focus-visible {
-  outline: none;
+  outline: 0;
   border-color: var(--active-control-border);
   background: color-mix(in srgb, var(--active-control-bg) 12%, var(--panel));
 }
@@ -1095,7 +1089,7 @@
 .yoagent-waiting-clear:focus-visible {
   border-color: var(--active-control-focus-ring);
   color: var(--text);
-  outline: none;
+  outline: 0;
 }
 .yoagent-chat-queue {
   display: grid;
@@ -1159,7 +1153,7 @@
 .yoagent-chat-queue-cancel:focus-visible {
   border-color: var(--active-control-focus-ring);
   color: var(--text);
-  outline: none;
+  outline: 0;
 }
 .yoagent-jobs-list {
   display: grid;
@@ -1251,7 +1245,7 @@
 .yoagent-job-cancel:focus-visible {
   border-color: var(--active-control-focus-ring);
   color: var(--text);
-  outline: none;
+  outline: 0;
 }
 .yoagent-chat-spinner {
   min-width: 18px;
@@ -1580,7 +1574,7 @@
   border: 0;
   font: var(--terminal-font-size)/1.3 var(--ui-font);
 }
-.yoagent-chat-input:focus { outline: none; }
+.yoagent-chat-input:focus { outline: 0; }
 .yoagent-chat-controls {
   display: flex;
   align-items: center;
@@ -1649,8 +1643,8 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
   cursor: default;
   opacity: 0.65;
 }
-.yoagent-composer-pill select:focus { outline: none; }
-.yoagent-backend-pill select:focus { outline: none; }
+.yoagent-composer-pill select:focus { outline: 0; }
+.yoagent-backend-pill select:focus { outline: 0; }
 .yoagent-chat-disabled {
   color: var(--muted);
   font-size: max(11px, calc(var(--terminal-font-size) - 1px));
@@ -1706,7 +1700,7 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
 .yoagent-chat-stop:focus-visible {
   color: var(--auto-text);
   background: var(--bad);
-  outline: none;
+  outline: 0;
 }
 /* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
 .yoagent-chat .markdown-body pre,
@@ -1884,7 +1878,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
     + (var(--info-table-column-gap) * 6)
     + (var(--info-table-inline-padding) * 2)
   );
-  border-bottom: 1px solid #263044;
+  border-bottom: 1px solid var(--line);
   color: var(--pane-tab-text);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
@@ -1912,7 +1906,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
     + (var(--info-table-inline-padding) * 2)
   );
   padding: 7px var(--info-table-inline-padding) 8px;
-  border-bottom: 1px solid #263044;
+  border-bottom: 1px solid var(--line);
   color: var(--pane-tab-text);
   background: color-mix(in srgb, var(--panel2) 82%, var(--panel));
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
@@ -2160,7 +2154,6 @@ body.info-column-resizing {
    and the PR/branch links were low-contrast pastels. Repaint for the white surface; dark unchanged. */
 body.theme-light .info-row {
   color: var(--text);
-  border-bottom-color: var(--line);
 }
 body.theme-light .info-row.header {
   color: var(--muted);
@@ -2655,12 +2648,6 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
 }
-.share-extend-button:hover,
-.share-extend-button:focus-visible {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  outline: 0;
-}
 .share-error {
   color: var(--bad);
   font-weight: 800;
@@ -2910,7 +2897,7 @@ body.app-vw-lte-980 .tabs {
   border-radius: var(--radius-control);
   direction: ltr;
   text-align: start;
-  outline: none;
+  outline: 0;
 }
 .file-explorer-path {
   flex-grow: 1;

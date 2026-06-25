@@ -122,6 +122,24 @@ def test_session_repo_summaries_dedupes_same_repo_candidates_before_summary(monk
     assert calls == ["/repo/src", "/other"]
 
 
+def test_session_project_metadata_empty_shape_has_repos_and_loading(monkeypatch):
+    info = SessionInfo(session="empty", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(metadata, "session_git_inventory", lambda _info: None)
+
+    project = metadata.session_project_metadata(info, MetadataCache(), allow_network=False)
+
+    assert project == {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": False}
+
+
+def test_session_to_json_loading_project_uses_empty_metadata_shape():
+    info = SessionInfo(session="loading", panes=[], selected_pane=None, agents=[])
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False, include_metadata=False)
+
+    assert payload["project"] == {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": True}
+    assert payload["metadata_loading"] is True
+
+
 def test_session_to_json_includes_window_metadata(tmp_path):
     repo_a = tmp_path / "repo-a"
     repo_b = tmp_path / "repo-b"
@@ -498,7 +516,14 @@ def test_linear_issue_metadata_falls_back_without_network():
 
     assert issue["identifier"] == "OPS-123"
     assert issue["source"] == "local-id"
+    assert issue["url"] == "https://linear.app/issue/OPS-123"
     assert issue["url"].endswith("/OPS-123")
+
+
+def test_linear_issue_url_uses_env_base(monkeypatch):
+    monkeypatch.setenv("YOLOMUX_LINEAR_ISSUE_BASE_URL", "https://linear.app/dynamo/issue/")
+
+    assert linear_client.linear_issue_url("OPS-123") == "https://linear.app/dynamo/issue/OPS-123"
 
 
 def test_normalize_review_decision_reads_graphql_shape_and_ignores_garbage():

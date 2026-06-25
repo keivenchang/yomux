@@ -678,13 +678,26 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+const SETTING_FALLBACKS = Object.freeze({
+  'appearance.date_time_hour_cycle': '24',
+  'appearance.editor_font_size': 13,
+  'appearance.file_explorer_font_size': 13,
+  'appearance.terminal_font_size': 13,
+  'editor.autosave_delay_seconds': 2.5,
+  'file_explorer.image_open_mode': 'same-tab',
+  'file_explorer.image_preview_max_px': 320,
+  'general.auto_focus': false,
+  'general.startup_tips': true,
+  'terminal_editor.scrollback': 5000,
+  'uploads.max_bytes': 20 * 1024 * 1024,
+});
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 let shareResolvedGlobalThemeMode = '';
 let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
-let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle', '24') === '12' ? '12' : '24';
+let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle') === '12' ? '12' : '24';
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
-fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
 let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
 const ensureSessionPromises = new Map();
@@ -745,27 +758,28 @@ let serverWatchRootsTimer = null;
 let serverWatchRootsPendingOptions = {};
 let fileExplorerFilesystemWatchToken = '';
 let fileExplorerFilesystemLastFullAt = 0;
-const fileExplorerFilesystemKeyframeMs = 60000;
+const fileExplorerFilesystemKeyframeMs = 60001;
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms');
-let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
-let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
-let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);
+let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px');
+let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode');
+let uploadMaxBytes = initialSetting('uploads.max_bytes');
 const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
-let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
+let terminalFontSize = initialSetting('appearance.terminal_font_size');
 const terminalFontFamily = '"YOLOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
-let editorFontSize = initialSetting('appearance.editor_font_size', 13);
+let editorFontSize = initialSetting('appearance.editor_font_size');
 let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);
-let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
-let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
-let autoFocusEnabled = initialSetting('general.auto_focus', false);
-let startupHelpersEnabled = initialSetting('general.startup_tips', true) !== false;
+let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size');
+let terminalScrollback = initialSetting('terminal_editor.scrollback');
+let autoFocusEnabled = initialSetting('general.auto_focus');
+let startupHelpersEnabled = initialSetting('general.startup_tips') !== false;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
 const terminalWheelPixelLinePx = 35;
 const terminalWheelMaxLinesPerEvent = 12;
 const maxSessionTabs = bootstrap.maxSessionTabs;
+const linearIssueBaseUrl = String(bootstrap.linearIssueBaseUrl || 'https://linear.app/issue').replace(/\/+$/, '');
 const basePaneKeys = ['left', 'right'];
 const splitPaneKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
 const paneKeys = [...basePaneKeys, ...splitPaneKeys];
@@ -828,6 +842,51 @@ const CLS = Object.freeze({
   selected: 'selected',
   tabDragOver: 'tab-drag-over',
   tabDropPreview: 'tab-drop-preview',
+});
+const THEME_CLASS_BY_MODE = Object.freeze({
+  system: 'theme-system',
+  dark: 'theme-dark',
+  light: 'theme-light',
+});
+const THEME_RESOLVED_CLASS_BY_MODE = Object.freeze({
+  dark: 'theme-resolved-dark',
+  light: 'theme-resolved-light',
+});
+const THEME_BODY_CLASSES = Object.freeze([
+  ...Object.values(THEME_CLASS_BY_MODE),
+  ...Object.values(THEME_RESOLVED_CLASS_BY_MODE),
+]);
+const EDITOR_THEME_CLASS_BY_MODE = Object.freeze({
+  system: 'editor-theme-system',
+  dark: 'editor-theme-dark',
+  light: 'editor-theme-light',
+});
+const EDITOR_THEME_BODY_CLASSES = Object.freeze(Object.values(EDITOR_THEME_CLASS_BY_MODE));
+const EDITOR_PREVIEW_VANILLA_CLASS = 'editor-preview-vanilla';
+const PREVIEW_POPOUT_BODY_CLASSES = Object.freeze([
+  THEME_CLASS_BY_MODE.light,
+  THEME_CLASS_BY_MODE.dark,
+  EDITOR_THEME_CLASS_BY_MODE.light,
+  EDITOR_THEME_CLASS_BY_MODE.dark,
+  EDITOR_PREVIEW_VANILLA_CLASS,
+]);
+const STATE_KEY = Object.freeze({
+  approval: 'approval',
+  blocked: 'blocked',
+  interrupted: 'interrupted',
+  needsApproval: 'needs-approval',
+  needsInput: 'needs-input',
+  working: 'working',
+  idle: 'idle',
+});
+const STATE_CLASS = Object.freeze({
+  needsAttention: 'needs-attention',
+  needsInput: STATE_KEY.needsInput,
+  needsExec: 'needs-exec',
+  needsBlocked: 'needs-blocked',
+  needsInputPane: `${STATE_KEY.needsInput}-pane`,
+  needsExecPane: 'needs-exec-pane',
+  needsBlockedPane: 'needs-blocked-pane',
 });
 const DROP_PREVIEW_CLASSES = Object.freeze([
   CLS.dragOver,
@@ -1315,17 +1374,17 @@ let fileExplorerSyncGeneration = 0;
 // Hardcoded frontend timing values live here. Settings-backed intervals stay in settings.py and are read through initialSetting/numberSetting.
 const FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS = 15;
 const uiDelayMs = Object.freeze({
-  shareViewerStatusBackupRefresh: 30000,
-  shareHostStatusBackupRefresh: 3000,
+  shareViewerStatusBackupRefresh: 30001,
+  shareHostStatusBackupRefresh: 3001,
   shareRemoteResizeAfterSocketOpen: 50,
-  serverWatchRenew: 60000,
+  serverWatchRenew: 60001,
   serverWatchDebounce: 300,
   tmuxWindowReadback: 120,
   tmuxWindowReadbackRetry: 80,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
   fileExplorerTypeaheadClear: 700,
-  shareGeometryDigestPublish: 2000,
+  shareGeometryDigestPublish: 2001,
 });
 
 const yolomuxTiming = Object.freeze({
@@ -1875,6 +1934,16 @@ function nativeViewport() {
 
 function appViewport() {
   return appViewportOverride ? normalizeAppViewport(appViewportOverride, nativeViewport()) : nativeViewport();
+}
+
+const MIN_VIEWPORT_WIDTH_PX = 320;
+const DEFAULT_VIEWPORT_WIDTH_PX = 1200;
+const OFFSCREEN_POSITION_PX = -10000;
+
+function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIEWPORT_WIDTH_PX) {
+  const width = Number(viewport?.width ?? viewport?.w);
+  const fallbackWidth = Number(fallback) || DEFAULT_VIEWPORT_WIDTH_PX;
+  return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
 }
 
 const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720];
@@ -2590,8 +2659,26 @@ function nestedSetting(source, path, fallback) {
   return current === undefined || current === null ? fallback : current;
 }
 
+function settingFallback(path, fallback) {
+  if (arguments.length >= 2) return fallback;
+  return Object.prototype.hasOwnProperty.call(SETTING_FALLBACKS, path) ? SETTING_FALLBACKS[path] : undefined;
+}
+
 function initialSetting(path, fallback) {
-  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, fallback));
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, defaultValue));
+}
+
+function themeBodyClass(mode) {
+  return THEME_CLASS_BY_MODE[mode] || THEME_CLASS_BY_MODE.dark;
+}
+
+function themeResolvedBodyClass(mode) {
+  return THEME_RESOLVED_CLASS_BY_MODE[mode] || THEME_RESOLVED_CLASS_BY_MODE.dark;
+}
+
+function editorThemeBodyClass(mode) {
+  return EDITOR_THEME_CLASS_BY_MODE[mode] || EDITOR_THEME_CLASS_BY_MODE.dark;
 }
 
 function mergeSettingObjects(base, patch) {
@@ -2819,7 +2906,7 @@ function syncFileExplorerTreeDateButton(button) {
   if (!button) return;
   const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
   const active = mode !== 'none';
-  button.classList.toggle('active', active);
+  button.classList.toggle(CLS.active, active);
   button.dataset.dateMode = mode;
   button.setAttribute('aria-pressed', active ? 'true' : 'false');
   button.textContent = fileExplorerTreeDateModeButtonLabel(mode);
@@ -3015,7 +3102,7 @@ function clearFocusForInactiveLayout() {
 }
 
 function terminalPaneIsActive(session) {
-  return document.getElementById(`terminal-pane-${session}`)?.classList.contains('active') === true;
+  return document.getElementById(`terminal-pane-${session}`)?.classList.contains(CLS.active) === true;
 }
 
 function selectPanelOnHover(item) {
@@ -3607,8 +3694,8 @@ async function copyTextToClipboard(text) {
   textarea.value = value;
   textarea.setAttribute('readonly', '');
   textarea.style.position = 'fixed';
-  textarea.style.left = '-10000px';
-  textarea.style.top = '-10000px';
+  textarea.style.left = `${OFFSCREEN_POSITION_PX}px`;
+  textarea.style.top = `${OFFSCREEN_POSITION_PX}px`;
   document.body.appendChild(textarea);
   textarea.select();
   const copied = document.execCommand?.('copy') === true;
@@ -3825,8 +3912,10 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   const buttonHtml = iconHtml || shortcutHtml
     ? `<span class="context-menu-line">${iconHtml ? `<span class="context-menu-icon">${iconHtml}</span>` : ''}<span class="context-menu-label">${esc(label)}</span>${shortcutHtml}</span>`
     : undefined;
+  const className = ['control-active-hover', options.className || ''].filter(Boolean).join(' ');
   const button = makeButton({
     ...options,
+    className,
     html: buttonHtml,
     label: buttonHtml ? undefined : label,
     ariaLabel: options.ariaLabel || label,
@@ -5726,17 +5815,20 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  'needs-approval': {label: 'Needs approval', short: 'ASK?', priority: 0, attention: true},
+  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: 'ASK?', priority: 0, attention: true},
   'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  'needs-input': {label: 'Needs input', short: 'ASK?', priority: 1, attention: true},
-  blocked: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
+  [STATE_KEY.needsInput]: {label: 'Needs input', short: 'ASK?', priority: 1, attention: true},
+  [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
   'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
-  working: {label: 'Working', short: 'RUN', priority: 6, attention: false},
-  idle: {label: 'Idle', short: 'IDLE', priority: 7, attention: false},
+  [STATE_KEY.working]: {label: 'Working', short: 'RUN', priority: 6, attention: false},
+  [STATE_KEY.idle]: {label: 'Idle', short: 'IDLE', priority: 7, attention: false},
   done: {label: 'Done', short: 'DONE', priority: 8, attention: false},
 };
+const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
+const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
+const AGENT_WINDOW_APPROVAL_STATES = new Set([STATE_KEY.approval, STATE_KEY.needsApproval]);
 
 function stateReason(key, params = {}) {
   return t(`state.reason.${key}`, params);
@@ -5745,7 +5837,7 @@ function stateReason(key, params = {}) {
 function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
-  const resolvedKey = stateDefs[key] ? key : 'idle';
+  const resolvedKey = stateDefs[key] ? key : STATE_KEY.idle;
   return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
 }
 
@@ -5759,7 +5851,7 @@ function promptAttentionPayloadSignature(payload = {}) {
   if (prompt.visible === true) {
     return String(prompt.signature || prompt.hash || prompt.question_text || prompt.text || prompt.command || '');
   }
-  if (['approval', 'needs-approval', 'needs-input'].includes(String(screen.key || ''))) {
+  if (ATTENTION_SCREEN_KEYS.has(String(screen.key || ''))) {
     return String(screen.signature || screen.hash || screen.question_text || screen.text || screen.key || '');
   }
   return '';
@@ -5800,7 +5892,7 @@ function terminalDisconnected(session) {
 }
 
 function sessionState(session, info = transcriptMeta.sessions?.[session]) {
-  if (!isTmuxSession(session)) return {key: 'idle', ...stateDef('idle'), reason: t('state.notTmux')};
+  if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
   const approvalPrompt = auto.prompt || {};
@@ -5835,19 +5927,19 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('disconnected', disconnectedReason);
   }
   if (/blocked|denied|rejected/.test(lastAction)) {
-    return stateValue('blocked', stateReason('yoloBlockedApproval'));
+    return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
   }
   if (approvalPromptVisible && approvalYesSelected) {
-    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
+    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
   if (approvalPromptVisible) {
-    return stateValue('needs-input', stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
+    return stateValue(STATE_KEY.needsInput, stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
   }
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
-    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
+    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'));
   }
-  if (screenKey === 'approval') {
-    return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
+  if (screenKey === STATE_KEY.approval) {
+    return stateValue(STATE_KEY.needsApproval, screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
   const agentWindowAttention = agentWindowAttentionState(session, info, auto);
   if (agentWindowAttention) return agentWindowAttention;
@@ -5855,20 +5947,20 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (tmuxSignalStateForSession) {
     return tmuxSignalStateForSession;
   }
-  if (screenKey === 'working') {
-    return stateValue('working', screenText || stateReason('agentWorking'));
+  if (screenKey === STATE_KEY.working) {
+    return stateValue(STATE_KEY.working, screenText || stateReason('agentWorking'));
   }
-  if (screenKey === 'needs-input') {
-    return stateValue('needs-input', screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
+  if (screenKey === STATE_KEY.needsInput) {
+    return stateValue(STATE_KEY.needsInput, screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
   }
   if (screenKey === 'error') {
-    return stateValue('blocked', screenText || stateReason('agentScreenFailed'));
+    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
   }
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
-    return stateValue('needs-input', stateReason('agentWaitingInput'));
+    return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
   if (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText)) {
-    return stateValue('blocked', stateReason('agentErrorBlocker'));
+    return stateValue(STATE_KEY.blocked, stateReason('agentErrorBlocker'));
   }
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
     return stateValue('tests-running', stateReason('testsActive'));
@@ -5880,19 +5972,19 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('done', stateReason('agentComplete'));
   }
   if (agents.length || panes.some(pane => pane.active) || terminals.get(session)?.socket?.readyState === WebSocket.OPEN) {
-    return stateValue('working', stateReason('agentActivePaneDetected'));
+    return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
   }
-  return stateValue('idle', stateReason('noActiveAgent'));
+  return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
 }
 
 function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const windows = sessionAgentWindowStatusPayloads(session, info, auto);
-  const agent = windows.find(item => ['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(String(item?.state || '')));
+  const agent = windows.find(item => AGENT_WINDOW_ATTENTION_STATES.has(String(item?.state || '')));
   if (!agent) return null;
-  const stateKey = ['approval', 'needs-approval'].includes(String(agent.state || '')) ? 'needs-approval' : 'needs-input';
+  const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
   const windowLabel = String(agent.window_label || agent.window || agent.kind || '').trim();
-  const reasonText = String(agent.screen_text || '').trim() || (stateKey === 'needs-approval' ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
+  const reasonText = String(agent.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
   const reason = windowLabel ? `${windowLabel}: ${reasonText}` : reasonText;
   return stateValue(stateKey, reason, promptAttentionExtra(session, auto));
 }
@@ -5921,13 +6013,13 @@ function autoApproveEnabledForSession(payload) {
 }
 
 function autoApproveScreenIsWorking(payload) {
-  return String(payload?.screen?.key || '') === 'working';
+  return String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
 function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return false;
   return sessionAgentWindowStatusPayloads(session, info, payload)
-    .some(agent => String(agent?.state || '').toLowerCase() === 'working');
+    .some(agent => String(agent?.state || '').toLowerCase() === STATE_KEY.working);
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
@@ -6136,7 +6228,7 @@ function tmuxSignalAgentStateForSession(session) {
   const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
   const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
   if (actionRequiredPane) {
-    return stateValue('needs-input', 'tmux agent action required', {tmuxSignal: 'action-required'});
+    return stateValue(STATE_KEY.needsInput, 'tmux agent action required', {tmuxSignal: 'action-required'});
   }
   const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
   if (!panes.length) return null;
@@ -6145,7 +6237,7 @@ function tmuxSignalAgentStateForSession(session) {
   const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
   const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
   if (bellWindow) {
-    return stateValue('needs-input', 'tmux bell alert', {tmuxSignal: 'bell'});
+    return stateValue(STATE_KEY.needsInput, 'tmux bell alert', {tmuxSignal: 'bell'});
   }
   const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
   if (quietWindow && livePanes.length) {
@@ -6158,7 +6250,7 @@ function tmuxSignalAgentStateForSession(session) {
   if (runningPane) {
     const command = tmuxSignalPaneCommand(runningPane);
     const mode = runningPane?.alternate_on === true ? 'alternate screen' : 'process';
-    return stateValue('working', `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
+    return stateValue(STATE_KEY.working, `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
   }
   return null;
 }
@@ -6295,13 +6387,13 @@ function globalActivityCounts() {
     const key = String(payload?.screen?.key || '');
     const promptVisible = payload?.prompt?.visible === true;
     const promptAttentionKey = promptVisible
-      ? (payload?.prompt?.yes_selected === true ? 'needs-approval' : 'needs-input')
+      ? (payload?.prompt?.yes_selected === true ? STATE_KEY.needsApproval : STATE_KEY.needsInput)
       : key;
     const promptSignature = promptAttentionPayloadSignature(payload);
     const promptCleared = promptAttentionIsCleared(session, promptSignature);
-    if (key === 'working' && !runningSignalSessions.has(session)) running += 1;
-    else if (['approval', 'needs-approval', 'needs-input'].includes(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
-    else if (key === 'blocked') blocked += 1;
+    if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
+    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
+    else if (key === STATE_KEY.blocked) blocked += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
   const total = signalWindows.length
@@ -6383,17 +6475,17 @@ function statusIndicatorClasses(...classes) {
 
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
-  if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
+  if (tone === STATE_KEY.working) return ['status-indicator--working', 'heartbeat-pulse'];
   if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
-  if (tone === 'idle') return ['status-indicator--idle'];
+  if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
   return [];
 }
 
 function statusIndicatorToneStyle(tone) {
-  return ['working', 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
@@ -6444,9 +6536,9 @@ function sessionStateHtml(state) {
   // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
-  if (!state || (!state.showBadge && ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
+  if (!state || (!state.showBadge && [STATE_KEY.working, 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
-    clearable: ['needs-approval', 'needs-input'].includes(state.key) && Boolean(state.promptSignature),
+    clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
     session: state.session,
     promptSignature: state.promptSignature,
   });
@@ -6629,14 +6721,14 @@ function openKeyboardShortcutsOverlay() {
   const body = node.querySelector('.keyboard-shortcuts-body');
   if (body) body.innerHTML = keyboardShortcutsHtml();
   node.hidden = false;
-  node.classList.add('open');
+  node.classList.add(CLS.open);
   node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
 }
 
 function closeKeyboardShortcutsOverlay() {
   if (!keyboardShortcutsNode) return;
   keyboardShortcutsNode.hidden = true;
-  keyboardShortcutsNode.classList.remove('open');
+  keyboardShortcutsNode.classList.remove(CLS.open);
 }
 
 function commandPaletteAllTabItems() {
@@ -7586,7 +7678,7 @@ function openCommandPalette(options = {}) {
   commandPaletteQuery = '';
   commandPaletteIndex = 0;
   node.hidden = false;
-  node.classList.add('open');
+  node.classList.add(CLS.open);
   const input = node.querySelector('.command-palette-input');
   input.value = '';
   // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
@@ -7608,7 +7700,7 @@ function openFileQuickOpen() {
 function closeCommandPalette() {
   if (!commandPaletteNode) return;
   commandPaletteNode.hidden = true;
-  commandPaletteNode.classList.remove('open');
+  commandPaletteNode.classList.remove(CLS.open);
   if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
   fileQuickOpenDebounce = null;
 }
@@ -7738,8 +7830,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
 }
 
 function shouldNotifyTransitionKey(key) {
-  const configured = initialSetting('notifications.notify_transitions', ['needs-input', 'needs-approval', 'blocked']);
-  const transitions = Array.isArray(configured) ? configured : ['needs-input', 'needs-approval', 'blocked'];
+  const defaultTransitions = [STATE_KEY.needsInput, STATE_KEY.needsApproval, STATE_KEY.blocked];
+  const configured = initialSetting('notifications.notify_transitions', defaultTransitions);
+  const transitions = Array.isArray(configured) ? configured : defaultTransitions;
   return transitions.includes(key);
 }
 
@@ -8605,7 +8698,7 @@ function showAboutModal() {
     <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a></div>
     <div class="about-license"><a class="about-author about-license-link" href="${esc(aboutLicenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.license'))}</a></div>
   </div>`;
-  modal.classList.add('open');
+  modal.classList.add(CLS.open);
   scheduleSharePopupLayerPublish();
 }
 
@@ -9577,7 +9670,7 @@ function createAppMenu(menu) {
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (wrapper.classList.contains('open')) {
+    if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
       if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
@@ -9587,7 +9680,7 @@ function createAppMenu(menu) {
   });
   button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
   wrapper.append(button, popover);
-  if (openAppMenuId === menu.id) wrapper.classList.add('open');
+  if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
   return wrapper;
 }
@@ -9700,13 +9793,13 @@ function createAppSubmenu(item) {
     event.preventDefault();
     event.stopPropagation();
     if (button.disabled) return;
-    wrapper.classList.add('open');
+    wrapper.classList.add(CLS.open);
     button.setAttribute('aria-expanded', 'true');
   });
   button.addEventListener('keydown', event => {
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      wrapper.classList.add('open');
+      wrapper.classList.add(CLS.open);
       button.setAttribute('aria-expanded', 'true');
       focusFirstAppMenuCommand(submenu);
     }
@@ -9909,7 +10002,7 @@ function bindAppMenuHover(wrapper) {
     onOpen: () => {
       const menuId = wrapper.dataset.appMenu || '';
       const currentWrapper = document.querySelector(`.app-menu[data-app-menu="${cssEscape(menuId)}"]`) || wrapper;
-      if (!currentWrapper.classList.contains('open')) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
+      if (!currentWrapper.classList.contains(CLS.open)) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
     },
     onClose: () => {
       const menuId = wrapper.dataset.appMenu || '';
@@ -9926,9 +10019,9 @@ function openAppMenu(wrapper, options = {}) {
   closeAppMenus(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
-  wrapper.classList.add('open');
+  wrapper.classList.add(CLS.open);
   wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
-    submenu.classList.add('open');
+    submenu.classList.add(CLS.open);
     submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
   });
   openAppMenuId = wrapper.dataset.appMenu || null;
@@ -9943,7 +10036,7 @@ function openAppMenu(wrapper, options = {}) {
 function closeAppMenus(keepOpen = null) {
   for (const menu of document.querySelectorAll('.app-menu.open')) {
     if (menu === keepOpen) continue;
-    menu.classList.remove('open');
+    menu.classList.remove(CLS.open);
     menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
   }
   document.querySelectorAll('.app-menu-command.share-mirror-active').forEach(command => {
@@ -9951,7 +10044,7 @@ function closeAppMenus(keepOpen = null) {
   });
   for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
     if (keepOpen?.contains(submenu)) continue;
-    submenu.classList.remove('open');
+    submenu.classList.remove(CLS.open);
     submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'false');
   }
   openAppMenuId = keepOpen?.dataset?.appMenu || null;
@@ -11977,7 +12070,7 @@ function applyFileTreeRowRecency(row, entry, options = {}) {
   row.__fileTreeRecencyAttentionMtimeKey = state.mtimeKey;
   row.__fileTreeRecencyAttentionUntilMs = (Number(state.mtimeKey) * 1000) + (FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS * 1000);
   const attentionUntilMs = Number(row.__fileTreeRecencyAttentionUntilMs) || 0;
-  const rowSuppressesAttention = row.classList?.contains('selected') || row.classList?.contains('current-file');
+  const rowSuppressesAttention = row.classList?.contains(CLS.selected) || row.classList?.contains('current-file');
   const attentionActive = !rowSuppressesAttention && attentionUntilMs > nowMs && row.__fileTreeRecencyAttentionMtimeKey === state.mtimeKey;
   setFileTreeRecencyAttentionClass(row, attentionActive, nowMs);
   if (attentionActive) scheduleFileTreeRecencyAttentionStop(row, attentionUntilMs);
@@ -12346,9 +12439,9 @@ function applyFileTreeRowDataset(row, state) {
   if (row.style.paddingLeft !== state.paddingLeft) row.style.paddingLeft = state.paddingLeft;
   setTreeItemAria(row, {selected: state.selected, expandable: entry.kind === 'dir', expanded: state.expanded});
   row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-  row.classList.toggle('selected', state.selected);
+  row.classList.toggle(CLS.selected, state.selected);
   row.classList.toggle('expanded', state.expanded);
-  row.classList.toggle('collapsed', entry.kind === 'dir' && !state.expanded);
+  row.classList.toggle(CLS.collapsed, entry.kind === 'dir' && !state.expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('indexed-directory', state.indexedDirectory);
   row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
@@ -12614,7 +12707,7 @@ function updateFileExplorerCurrentFileHighlight() {
     const selected = fileExplorerSelectedPaths.has(row.dataset.path);
     const currentFile = row.dataset.kind === 'file' && row.dataset.path === activeFile;
     const currentDirectoryRow = !currentFile && row.dataset.kind === 'dir' && row.dataset.path === currentDirectory;
-    row.classList.toggle('selected', selected);
+    row.classList.toggle(CLS.selected, selected);
     row.classList.toggle('current-file', currentFile);
     row.classList.toggle('current-directory', currentDirectoryRow);
     row.setAttribute('aria-selected', selected ? 'true' : 'false');
@@ -12853,7 +12946,7 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
         const id = sharedTreeRowId(row);
         const selected = selectedIds.has(id);
         const current = controller.rowIsCurrent(row);
-        row.classList.toggle('selected', selected);
+        row.classList.toggle(CLS.selected, selected);
         row.setAttribute('aria-selected', selected ? 'true' : 'false');
         if (options.applyCurrentClasses !== false) {
           row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
@@ -13825,9 +13918,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const current = data.current === true;
   setTreeItemAria(row, {selected, expandable, expanded});
   row.draggable = tabberRowIsTabDragSource(row);
-  row.classList.toggle('selected', selected);
+  row.classList.toggle(CLS.selected, selected);
   row.classList.toggle('expanded', expanded);
-  row.classList.toggle('collapsed', expandable && !expanded);
+  row.classList.toggle(CLS.collapsed, expandable && !expanded);
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
@@ -14116,14 +14209,12 @@ function agentWindowPayloadKey(agent) {
   return index !== null && kind ? `${index}:${kind}` : '';
 }
 
-const AGENT_WINDOW_ATTENTION_STATES = new Set(['approval', 'needs-approval', 'needs-input', 'interrupted']);
-
 function agentWindowStateKey(state) {
   return String(state || '').trim();
 }
 
 function agentWindowIsWorkingState(state) {
-  return agentWindowStateKey(state) === 'working';
+  return agentWindowStateKey(state) === STATE_KEY.working;
 }
 
 function agentWindowIsAttentionState(state) {
@@ -14132,16 +14223,16 @@ function agentWindowIsAttentionState(state) {
 
 function agentWindowActivityTone(state) {
   const key = agentWindowStateKey(state);
-  if (key === 'working') return 'working';
+  if (key === STATE_KEY.working) return STATE_KEY.working;
   if (key === 'cooldown') return 'cooldown';
   if (key === 'attention') return 'attention';
   if (key === 'active') return 'active';
   if (key === 'settled') return 'settled';
-  return 'idle';
+  return STATE_KEY.idle;
 }
 
 function agentWindowStateRank(state) {
-  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[agentWindowStateKey(state)] ?? 9;
+  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, [STATE_KEY.idle]: 3}[agentWindowStateKey(state)] ?? 9;
 }
 
 function agentWindowKind(value) {
@@ -14197,10 +14288,10 @@ function agentWindowObservedTs(agent) {
 function agentWindowStateMergeRank(state) {
   const key = agentWindowStateKey(state);
   if (agentWindowIsAttentionState(key)) return 0;
-  if (key === 'working') return 1;
+  if (key === STATE_KEY.working) return 1;
   if (key === 'cooldown') return 2;
   if (key === 'active') return 3;
-  if (key === 'idle') return 4;
+  if (key === STATE_KEY.idle) return 4;
   return 9;
 }
 
@@ -14288,7 +14379,7 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
-      state: 'idle',
+      state: STATE_KEY.idle,
       pane_target: agent?.pane_target || '',
       window_label: agent?.window_label || '',
       transcript: agent?.transcript || '',
@@ -14377,16 +14468,16 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (agentWindowIsWorkingState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
+      agentWindowActivityStates.set(transitionKey, {state: STATE_KEY.working, seenWorking: true, stoppedAt: 0});
     }
-    return {state: 'working', icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
+    return {state: STATE_KEY.working, icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
   }
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
   let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
   const seenWorking = previous.seenWorking === true || stoppedAt > 0;
-  if (!stoppedAt && previous.state === 'working') stoppedAt = nowSeconds;
+  if (!stoppedAt && previous.state === STATE_KEY.working) stoppedAt = nowSeconds;
   if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
-  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
+  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || STATE_KEY.idle), seenWorking, stoppedAt});
   if (seenWorking && stoppedAt > 0) {
     const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
     if (cooldownSeconds > 0 && stoppedAgeSeconds < cooldownSeconds) {
@@ -14401,7 +14492,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 
 function agentWindowStatusDotHtml(item) {
   if (!item) return '';
-  if (!['attention', 'cooldown', 'working'].includes(item.state)) return '';
+  if (!['attention', 'cooldown', STATE_KEY.working].includes(item.state)) return '';
   const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
@@ -14427,7 +14518,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   ].filter(Boolean).join(' ');
   const markerHtml = agentWindowStatusDotHtml(item);
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = ['working', 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
+  const style = [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
   return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
 }
 
@@ -18473,8 +18564,8 @@ function updateEditorThemeButton(button, options = {}) {
   const scheme = activeEditorScheme();
   const previewState = editorPreviewThemeState();
   const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
-  button.classList.toggle('theme-dark', previewState === 'dark');
-  button.classList.toggle('theme-light', previewState === 'light');
+  button.classList.toggle(themeBodyClass('dark'), previewState === 'dark');
+  button.classList.toggle(themeBodyClass('light'), previewState === 'light');
   button.classList.toggle('theme-vanilla', previewState === 'vanilla');
   button.classList.toggle('theme-with-label', includeVanilla);
   button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
@@ -18512,11 +18603,11 @@ function refreshOpenEditorThemePanels() {
 function applyEditorThemeMode(options = {}) {
   const scheme = activeEditorScheme();
   applyEditorSchemeCssVariables(scheme);
-  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light', 'editor-preview-vanilla');
+  document.body?.classList.remove(...EDITOR_THEME_BODY_CLASSES, EDITOR_PREVIEW_VANILLA_CLASS);
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
-  document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
+  document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
-  document.body?.classList.toggle('editor-preview-vanilla', fileEditorPreviewDisplayMode === 'vanilla');
+  document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
 }
@@ -18785,12 +18876,14 @@ function toggleEditorLineNumbers() {
 }
 
 function numberSetting(path, fallback) {
-  const value = Number(initialSetting(path, fallback));
-  return Number.isFinite(value) ? value : fallback;
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = Number(initialSetting(path, defaultValue));
+  return Number.isFinite(value) ? value : defaultValue;
 }
 
 function boolSetting(path, fallback) {
-  const value = initialSetting(path, fallback);
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = initialSetting(path, defaultValue);
   return value === true || value === 'true' || value === 1;
 }
 
@@ -18938,7 +19031,7 @@ function applyActiveColor(value) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
     return;
   }
-  const light = document.body.classList.contains('theme-resolved-light');
+  const light = document.body.classList.contains(themeResolvedBodyClass('light'));
   const p = light ? preset.light : preset.dark;
   const rgb = hexToRgbTriple(p.accent);
   for (const style of styles) {
@@ -19005,9 +19098,9 @@ function applyCssSettings() {
 function applyGlobalThemeMode(options = {}) {
   globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
   const resolved = resolvedGlobalThemeMode();
-  document.body?.classList.remove('theme-system', 'theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light');
-  document.body?.classList.add(`theme-${resolved}`, `theme-resolved-${resolved}`);
-  if (globalThemeMode === 'system') document.body?.classList.add('theme-system');
+  document.body?.classList.remove(...THEME_BODY_CLASSES);
+  document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));
+  if (globalThemeMode === 'system') document.body?.classList.add(themeBodyClass('system'));
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
@@ -19115,31 +19208,31 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms');
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds');
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
-  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
-  fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
+  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
+  fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
-  uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
+  uploadMaxBytes = numberSetting('uploads.max_bytes');
   shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
   shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
   shareDefaultReadOnly = boolSetting('share.read_only', true);
   shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
   shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', shareViewFit));
-  terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
-  editorFontSize = numberSetting('appearance.editor_font_size', 13);
+  terminalFontSize = numberSetting('appearance.terminal_font_size');
+  editorFontSize = numberSetting('appearance.editor_font_size');
   editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
-  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 13);
-  terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size');
+  terminalScrollback = numberSetting('terminal_editor.scrollback');
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
-  fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+  fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
   const previousBlameAllLines = fileEditorBlameAllLines;
   fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
-  autoFocusEnabled = boolSetting('general.auto_focus', false);
-  startupHelpersEnabled = boolSetting('general.startup_tips', true);
+  autoFocusEnabled = boolSetting('general.auto_focus');
+  startupHelpersEnabled = boolSetting('general.startup_tips');
   const previousEditorSchemeId = activeEditorScheme().id;
   const previousCursorColor = fileEditorCursorColor;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
-  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle', '24'));
+  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle'));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR));
   fileEditorThemeMode = readConfiguredEditorScheme();
@@ -19689,8 +19782,8 @@ function yoloMarkerHtml(session, auto, options = {}) {
 function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
   // The tab's AI status indicator must follow the same working condition as the YO state, while keeping the
   // Claude/Codex symbol static and putting the glow on the separate green ball. Prefer a window literally
-  // reporting state==='working'; otherwise, when the session is working only via the screen-state proxy
-  // (screen.key==='working' with no per-window 'working' row), present the current/first agent window as
+  // reporting STATE_KEY.working; otherwise, when the session is working only via the screen-state proxy
+  // (a working screen key with no per-window working row), present the current/first agent window as
   // working so the separate ball appears instead of the indicator vanishing.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
@@ -19701,7 +19794,7 @@ function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveSta
   if (!sessionYoloIsWorking(session, payload)) return null;
   const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
   if (!candidate || agentWindowIsAttentionState(candidate.state)) return null;
-  return {...candidate, state: 'working'};
+  return {...candidate, state: STATE_KEY.working};
 }
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
@@ -19731,10 +19824,10 @@ function pullRequestCompactBadgesHtml(session, pr) {
 }
 
 function applySessionStateClasses(node, state) {
-  node.classList.toggle('needs-attention', state?.attention === true);
-  node.classList.toggle('needs-input', state?.key === 'needs-input' && state?.attention === true);
-  node.classList.toggle('needs-exec', state?.key === 'needs-approval' && state?.attention === true);
-  node.classList.toggle('needs-blocked', state?.key === 'blocked');
+  node.classList.toggle(STATE_CLASS.needsAttention, state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsInput, state?.key === STATE_KEY.needsInput && state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsExec, state?.key === STATE_KEY.needsApproval && state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsBlocked, state?.key === STATE_KEY.blocked);
   syncAttentionAnimation(node, state?.attention === true);
 }
 
@@ -20029,14 +20122,14 @@ function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, o
 }
 
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
-  const state = String(agent?.state || 'idle');
+  const state = String(agent?.state || STATE_KEY.idle);
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
-    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
+    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
   }
   if (agentWindowIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
-  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : 'idle';
+  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
 }
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
@@ -20090,7 +20183,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _session: session,
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
-      state: String(agent?.state || 'idle'),
+      state: String(agent?.state || STATE_KEY.idle),
       current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
         ? agentWindowPayloadCurrent(agent) === true
         : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
@@ -20321,9 +20414,15 @@ function linearIssueHtml(issue) {
   return linkHtml(issue.url, label, issue.title || '');
 }
 
+function linearIssueUrl(identifier) {
+  const id = String(identifier || '').trim();
+  if (!id || !linearIssueBaseUrl) return '';
+  return `${linearIssueBaseUrl}/${encodeURIComponent(id)}`;
+}
+
 function linearIssueLinkHtml(identifier) {
   if (!identifier) return '';
-  return linkHtml(`https://linear.app/nv/issue/${encodeURIComponent(identifier)}`, identifier, identifier);
+  return linkHtml(linearIssueUrl(identifier), identifier, identifier);
 }
 
 function pullRequestLinkForBranch(git, branch) {
@@ -20549,13 +20648,6 @@ function transparentNativeDragImage() {
   if (transparentDragImage) return transparentDragImage;
   const node = document.createElement('div');
   node.className = 'transparent-drag-image';
-  node.style.position = 'fixed';
-  node.style.left = '-10000px';
-  node.style.top = '-10000px';
-  node.style.width = '1px';
-  node.style.height = '1px';
-  node.style.opacity = '0';
-  node.style.pointerEvents = 'none';
   document.body.appendChild(node);
   transparentDragImage = node;
   return node;
@@ -20607,7 +20699,7 @@ function paneDragPreviewMetrics(slot, event) {
   const sourceWidth = Math.max(1, Number(rect?.width) || fallbackWidth);
   const sourceHeight = Math.max(1, Number(rect?.height) || fallbackHeight);
   const viewport = appViewport();
-  const viewportWidth = Math.max(320, Number(viewport.width) || 1200);
+  const viewportWidth = effectiveViewportWidth(viewport);
   const viewportHeight = Math.max(240, Number(viewport.height) || 800);
   const maxWidth = Math.min(720, Math.max(220, viewportWidth * 0.64));
   const maxHeight = Math.min(420, Math.max(160, viewportHeight * 0.58));
@@ -22016,9 +22108,9 @@ function projectMetaParts(session, info, options = {}) {
     const position = Math.max(0, repoIndex) + 1;
     const switchLabel = `${position}/${repos.length}`;
     return `<span class="meta-repo-switch" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">
-      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
-      <button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
-      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
+      <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
+      <button type="button" class="btn-base meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
+      <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
     </span>`;
   })() : '';
   if (!git) {
@@ -22613,7 +22705,7 @@ function refreshTerminal(session) {
 function terminalIsVisible(session, container) {
   const pane = document.getElementById(`terminal-pane-${session}`);
   return Boolean(
-    pane?.classList.contains('active')
+    pane?.classList.contains(CLS.active)
     && container.clientWidth > 40
     && container.clientHeight > 40
   );
@@ -22632,7 +22724,7 @@ function terminalAttentionRawText(value) {
 
 function terminalAttentionQuestionTexts(session) {
   const state = sessionState(session, transcriptMeta.sessions?.[session]);
-  if (!['needs-input', 'needs-approval'].includes(String(state?.key || '')) || state?.attention === false) return [];
+  if (![STATE_KEY.needsInput, STATE_KEY.needsApproval].includes(String(state?.key || '')) || state?.attention === false) return [];
   const payload = autoApproveStates.get(session) || {};
   const candidates = [
     payload.display?.question_text,
@@ -24001,7 +24093,7 @@ function dockviewOppositeOrientation(orientation) {
 function dockviewThemeForApp() {
   const core = dockviewCore();
   if (!core) return undefined;
-  return document.body?.classList?.contains('theme-light') ? core.themeLight : core.themeDark;
+  return document.body?.classList?.contains(themeBodyClass('light')) ? core.themeLight : core.themeDark;
 }
 
 function dockviewRootBoundaryDropIntent(event) {
@@ -25603,7 +25695,7 @@ function dockviewRefreshTabs() {
 
 function syncDockviewTabActiveClass(tab, api = null) {
   const dockviewActive = tab?.closest?.('.dv-tab')?.classList?.contains('dv-active-tab') === true;
-  tab?.classList?.toggle('active', api?.isActive === true || dockviewActive);
+  tab?.classList?.toggle(CLS.active, api?.isActive === true || dockviewActive);
 }
 
 function dockviewSyncMountedPanels() {
@@ -27031,7 +27123,7 @@ function panelDetailsToggleLabel(collapsed) {
 function syncPanelDetailsToggleButton(button, collapsed) {
   if (!button) return;
   const detailsLabel = panelDetailsToggleLabel(collapsed);
-  button.classList.toggle('active', !collapsed);
+  button.classList.toggle(CLS.active, !collapsed);
   button.title = detailsLabel;
   button.setAttribute('aria-label', detailsLabel);
   button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
@@ -27258,7 +27350,7 @@ function updateTmuxWindowBarActiveButtons(session, windowIndex) {
     bar.querySelectorAll?.('[data-window-index]')?.forEach(button => {
       const active = indexKey !== null && tmuxWindowIndexKey(button.dataset.windowIndex) === indexKey;
       matched = matched || active;
-      button.classList.toggle('active', active);
+      button.classList.toggle(CLS.active, active);
       button.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
   });
@@ -27944,6 +28036,33 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
   return infoSessionFileLookbackHours;
 }
 
+function bindInfoPanel(panel) {
+  if (!panel || panel.__yolomuxInfoPanelBound === true) return;
+  panel.__yolomuxInfoPanelBound = true;
+  delegate(panel, 'click', '[data-info-refresh]', event => {
+    event.preventDefault();
+    refreshTranscripts({force: true});
+    refreshActivitySummary({force: true});
+  });
+  delegate(panel, 'click', '[data-info-sort]', (_event, button) => {
+    setInfoBranchSort(button.dataset.infoSort);
+    renderInfoPanel();
+  });
+  delegate(panel, 'click', '[data-info-session-drawer]', (_event, button) => {
+    toggleInfoSessionDrawer(button.dataset.infoSessionDrawer || '');
+  });
+  delegate(panel, 'click', '[data-watched-remove]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    removeWatchedPr(button.dataset.watchedRemove);
+  });
+  panel.addEventListener('change', event => {
+    const lookback = event.target.closest('[data-info-lookback]');
+    if (lookback && panel.contains(lookback)) setInfoSessionFileLookbackHours(lookback.value);
+  });
+  if (typeof bindInfoColumnResizers === 'function') bindInfoColumnResizers(panel);
+}
+
 function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
@@ -27965,15 +28084,7 @@ function createInfoPanel() {
         <div id="info-watched" class="info-watched"></div>
       </div>`;
   bindPanelShell(panel, infoItemId);
-  panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
-    event.preventDefault();
-    refreshTranscripts({force: true});
-    refreshActivitySummary({force: true});
-  });
-  panel.addEventListener('change', event => {
-    const lookback = event.target.closest('[data-info-lookback]');
-    if (lookback && panel.contains(lookback)) setInfoSessionFileLookbackHours(lookback.value);
-  });
+  bindInfoPanel(panel);
   renderInfoPanel();
   return panel;
 }
@@ -30737,7 +30848,7 @@ function bindPreferencesPanel(panel) {
       const section = sectionToggle.closest('[data-preference-section]');
       const collapsed = collapsedPreferenceSections.has(title);
       if (section) {
-        section.classList.toggle('collapsed', collapsed);
+        section.classList.toggle(CLS.collapsed, collapsed);
         sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
         const settings = section.querySelector('.preferences-settings');
         if (settings) settings.hidden = collapsed;
@@ -31872,7 +31983,7 @@ function applyDebugSubTab(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-js-debug-subtab]').forEach(button => {
     const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === jsDebugSubTab;
-    button.classList.toggle('active', active);
+    button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   panel.querySelectorAll('[data-js-debug-subview]').forEach(view => {
@@ -32490,7 +32601,7 @@ function positionDiffRefPopover(input, compact) {
   const rect = input?.getBoundingClientRect?.();
   if (!rect) return;
   const viewport = appViewport();
-  const viewportWidth = Math.max(320, viewport.width || 1024);
+  const viewportWidth = effectiveViewportWidth(viewport);
   const viewportHeight = Math.max(240, viewport.height || 720);
   const minWidth = Math.min(compact ? 880 : 960, viewportWidth - 16);
   const maxWidth = compact ? 1040 : 1120;
@@ -32549,7 +32660,7 @@ function syncDiffRefPopoverActiveOption() {
   if (!diffRefPopover || diffRefPopover.hidden) return;
   diffRefPopover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
     const active = index === diffRefPopoverActiveIndex;
-    button.classList.toggle('active', active);
+    button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
     if (active) button.scrollIntoView?.({block: 'nearest'});
   });
@@ -33464,7 +33575,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       section.dataset.changesRepo = repo;
     }
     const collapsed = changesRepoCollapsed.has(repo);
-    section.classList.toggle('collapsed', collapsed);
+    section.classList.toggle(CLS.collapsed, collapsed);
     const repoInfo = repoMap.get(repo) || {};
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     const hasGit = repo && repo !== 'Outside repo';
@@ -37731,8 +37842,7 @@ function currentStylesheetHref(match) {
 }
 
 function previewPopoutBodyClassName() {
-  const keep = ['theme-light', 'theme-dark', 'editor-theme-light', 'editor-theme-dark', 'editor-preview-vanilla'];
-  const classes = keep.filter(name => document.body?.classList?.contains(name));
+  const classes = PREVIEW_POPOUT_BODY_CLASSES.filter(name => document.body?.classList?.contains(name));
   classes.push('file-preview-popout-window');
   return classes.join(' ');
 }
@@ -43669,7 +43779,8 @@ function renderShareClickRipple(x, y, sender = '') {
   ripple.style.top = `${Math.round(y)}px`;
   ripple.style.setProperty('--share-cursor-color', sharePointerSenderColor(sender));
   document.body.appendChild(ripple);
-  setTimeout(() => ripple.remove(), 560);
+  ripple.addEventListener('animationend', () => ripple.remove(), {once: true});
+  ripple.addEventListener('animationcancel', () => ripple.remove(), {once: true});
 }
 
 function renderSharePointerGhost(payload = {}) {
@@ -45197,7 +45308,7 @@ function shareEntryHtml(share) {
       <span>${esc(mode)}</span>
       <span>${esc(scheme)}</span>
       ${share.debugProfile ? `<span title="${esc(t('share.debugProfileHelp'))}">${esc(t('share.debugProfileOn'))}</span>` : ''}
-      <button type="button" class="share-extend-button" data-share-extend>${esc(t('share.extendTenMinutes'))}</button>
+      <button type="button" class="share-extend-button control-active-hover" data-share-extend>${esc(t('share.extendTenMinutes'))}</button>
       <button type="button" class="danger share-stop-inline" data-share-stop>${esc(t('share.stop'))}</button>
     </div>
     ${shareViewerListHtml(share)}
@@ -45387,7 +45498,7 @@ function updateShareViewerBanner() {
   });
   const fit = document.createElement('button');
   fit.type = 'button';
-  fit.className = 'share-view-fit-toggle';
+  fit.className = 'share-view-fit-toggle control-active-hover';
   fit.dataset.shareViewerControl = 'fit';
   fit.textContent = shareViewFit === 'cover' ? t('share.fit.cover') : t('share.fit.contain');
   fit.title = shareViewFit === 'cover' ? t('share.fit.switchToContain') : t('share.fit.switchToCover');
@@ -45404,7 +45515,7 @@ function updateShareViewerBanner() {
   if (shareDebugEnabled) {
     const debug = document.createElement('button');
     debug.type = 'button';
-    debug.className = 'share-view-fit-toggle share-debug-copy';
+    debug.className = 'share-view-fit-toggle share-debug-copy control-active-hover';
     debug.dataset.shareViewerControl = 'debug';
     debug.textContent = 'debug';
     debug.title = 'Copy share mirror diagnostics';
@@ -45804,7 +45915,7 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
 }
 
 function syncTranscriptMetaLoadingUi() {
-  document.querySelectorAll('[data-info-refresh]').forEach(button => {
+  document.getElementById(panelDomId(infoItemId))?.querySelectorAll('[data-info-refresh]').forEach(button => {
     setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
   });
   const metaRefreshButton = refreshMeta;
@@ -45989,16 +46100,6 @@ function renderInfoPanel() {
     return rowHtml + (row.session && infoSessionDrawerOpen.has(row.session) ? cachedInfoSessionDrawerHtml(row.session) : '');
   }).join('');
   node.innerHTML = serverRoleHtml + header + body;
-  node.querySelectorAll('[data-info-sort]').forEach(button => {
-    button.addEventListener('click', () => {
-      setInfoBranchSort(button.dataset.infoSort);
-      renderInfoPanel();
-    });
-  });
-  node.querySelectorAll('[data-info-session-drawer]').forEach(button => {
-    button.addEventListener('click', () => toggleInfoSessionDrawer(button.dataset.infoSessionDrawer || ''));
-  });
-  bindInfoColumnResizers(node);
 }
 
 function infoColumnResizeConfig(column) {
@@ -46094,47 +46195,52 @@ function applyInfoBranchColumnWidth(root = document.documentElement) {
   applyInfoColumnWidths(root);
 }
 
+function infoColumnResizeTarget(handle) {
+  const column = String(handle?.dataset?.infoColumnResize || '');
+  const config = infoColumnResizeConfig(column);
+  return config ? {column, config} : null;
+}
+
 function bindInfoColumnResizers(node) {
-  node.querySelectorAll('[data-info-column-resize]').forEach(handle => {
-    if (handle.dataset.bound === 'true') return;
-    const column = handle.dataset.infoColumnResize;
-    const config = infoColumnResizeConfig(column);
-    if (!config) return;
-    handle.dataset.bound = 'true';
-    handle.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    handle.addEventListener('dblclick', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      resetInfoColumnWidth(column);
-    });
-    handle.addEventListener('pointerdown', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      const pointerId = event.pointerId;
-      const startX = event.clientX;
-      const startWidth = infoColumnWidth(column);
-      const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
-      handle.setPointerCapture?.(pointerId);
-      document.body?.classList.add('info-column-resizing');
-      const move = moveEvent => {
-        const delta = (moveEvent.clientX - startX) * direction;
-        setInfoColumnWidth(column, startWidth + delta, {persist: false});
-      };
-      const done = () => {
-        storageSet(config.storageKey, infoColumnWidth(column));
-        document.body?.classList.remove('info-column-resizing');
-        try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', done);
-        window.removeEventListener('pointercancel', done);
-      };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', done);
-      window.addEventListener('pointercancel', done);
-    });
+  if (!node || node.__yolomuxInfoColumnResizersBound === true) return;
+  node.__yolomuxInfoColumnResizersBound = true;
+  delegate(node, 'click', '[data-info-column-resize]', event => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  delegate(node, 'dblclick', '[data-info-column-resize]', (event, handle) => {
+    const target = infoColumnResizeTarget(handle);
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    resetInfoColumnWidth(target.column);
+  });
+  delegate(node, 'pointerdown', '[data-info-column-resize]', (event, handle) => {
+    const target = infoColumnResizeTarget(handle);
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = infoColumnWidth(target.column);
+    const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
+    handle.setPointerCapture?.(pointerId);
+    document.body?.classList.add('info-column-resizing');
+    const move = moveEvent => {
+      const delta = (moveEvent.clientX - startX) * direction;
+      setInfoColumnWidth(target.column, startWidth + delta, {persist: false});
+    };
+    const done = () => {
+      storageSet(target.config.storageKey, infoColumnWidth(target.column));
+      document.body?.classList.remove('info-column-resizing');
+      try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
   });
 }
 
@@ -46187,13 +46293,6 @@ function renderWatchedPrs() {
     ? `<div class="info-watched-note">${esc(t('info.watched.truncated', {count: String(watchedPrsData.truncated)}))}</div>`
     : '';
   node.innerHTML = heading + rows + truncated;
-  node.querySelectorAll('[data-watched-remove]').forEach(button => {
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      removeWatchedPr(button.dataset.watchedRemove);
-    });
-  });
 }
 
 async function refreshWatchedPrs() {
@@ -47873,7 +47972,7 @@ function syncPanelVisibility(previousActive = []) {
   }
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`terminal-pane-${session}`);
-    if (pane?.classList.contains('active')) scheduleFit(session);
+    if (pane?.classList.contains(CLS.active)) scheduleFit(session);
   }
 }
 
@@ -47882,14 +47981,14 @@ function activateTab(session, name, options = {}) {
   if (name !== 'transcript') stopTranscriptStream(session);
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
-    button.classList.toggle('active', button.dataset.tabName === name);
+    button.classList.toggle(CLS.active, button.dataset.tabName === name);
   });
   document.querySelectorAll(`[data-panel-tab-overflow="${session}"]`).forEach(button => {
-    button.classList.toggle('active', ['transcript', 'summary', 'events'].includes(name));
+    button.classList.toggle(CLS.active, ['transcript', 'summary', 'events'].includes(name));
   });
   for (const tabName of ['terminal', 'transcript', 'summary', 'events']) {
     const pane = document.getElementById(`${tabName}-pane-${session}`);
-    if (pane) pane.classList.toggle('active', tabName === name);
+    if (pane) pane.classList.toggle(CLS.active, tabName === name);
   }
   updateTypingIndicator(session);
   if (name === 'terminal') {
@@ -48214,7 +48313,7 @@ function updateTypingIndicator(session) {
   const ready = Boolean(
     item?.socket?.readyState === WebSocket.OPEN
     && focusedTerminal === session
-    && pane?.classList.contains('active')
+    && pane?.classList.contains(CLS.active)
   );
   container?.classList.toggle('typing-ready', ready);
   panel?.classList.toggle('typing-ready-pane', ready);
@@ -48843,7 +48942,7 @@ function updatePanelHeader(session, info) {
   updatePanelControlLabels(session, info);
   syncAttentionAnimation(panel, state.attention === true);
   if (tab) {
-    tab.className = `panel-session-label ${auto ? 'auto' : ''} ${state.attention ? 'needs-attention' : ''}`;
+    tab.className = ['panel-session-label', auto ? 'auto' : '', state.attention ? STATE_CLASS.needsAttention : ''].filter(Boolean).join(' ');
     syncAttentionAnimation(tab, state.attention === true);
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
@@ -48856,9 +48955,9 @@ function updatePanelHeader(session, info) {
     wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
     popover.replaceWith(wrapper.firstElementChild);
   }
-  panel?.classList.toggle('needs-input-pane', state.key === 'needs-input' && state.attention === true);
-  panel?.classList.toggle('needs-exec-pane', state.key === 'needs-approval' && state.attention === true);
-  panel?.classList.toggle('needs-blocked-pane', state.key === 'blocked');
+  panel?.classList.toggle(STATE_CLASS.needsInputPane, state.key === STATE_KEY.needsInput && state.attention === true);
+  panel?.classList.toggle(STATE_CLASS.needsExecPane, state.key === STATE_KEY.needsApproval && state.attention === true);
+  panel?.classList.toggle(STATE_CLASS.needsBlockedPane, state.key === STATE_KEY.blocked);
 }
 
 function refreshSessionChrome(session) {
@@ -48937,10 +49036,10 @@ function startTranscriptStream(session, options = {}) {
   source.onerror = () => {
     stopTranscriptStream(session);
     const pane = document.getElementById(`transcript-pane-${session}`);
-    if (pane?.classList.contains('active')) {
+    if (pane?.classList.contains(CLS.active)) {
       statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
       setTimeout(() => {
-        if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
+        if (document.getElementById(`transcript-pane-${session}`)?.classList.contains(CLS.active)) {
           startTranscriptStream(session, {scrollBottom: false});
         }
       }, 1500);
@@ -49047,7 +49146,7 @@ async function refreshEventLog(session) {
 function refreshOpenEventLogs() {
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`events-pane-${session}`);
-    if (pane?.classList.contains('active')) refreshEventLog(session);
+    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
   }
 }
 
@@ -49604,7 +49703,7 @@ async function showContext(session) {
   title.textContent = t('transcript.tailTitle', {session: sessionLabel(session)});
   body.innerHTML = '';
   body.textContent = t('common.loading');
-  modal.classList.add('open');
+  modal.classList.add(CLS.open);
   const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
@@ -49730,7 +49829,7 @@ if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => {
   const modal = document.getElementById('modal');
-  modal.classList.remove('open', 'about-open', 'share-open');
+  modal.classList.remove(CLS.open, 'about-open', 'share-open');
   scheduleSharePopupLayerPublish({immediate: true});
 };
 function promptAttentionClearElement(target) {

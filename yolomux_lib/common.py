@@ -38,6 +38,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
+ACTIVITY_MAX_HOURS = 24.0 * 365.0
 YOLOMUX_VERSION = "0.5.2"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
@@ -99,7 +100,7 @@ HTTP_METADATA_TIMEOUT_SECONDS = 2.0
 MAX_EVENT_TAIL_LINES = 500
 GITHUB_API_ROOT = "https://api.github.com"
 LINEAR_API_URL = "https://api.linear.app/graphql"
-DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/nv/issue"
+DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/issue"
 OTHER_BRANCH_LIMIT = 8
 # the cache-miss sentinel is owned by cache.py (where the single TtlCache lives) and re-exported
 # here for the modules that import it from common. Same object identity, so `is _CACHE_MISS` holds.
@@ -172,6 +173,10 @@ heal_server_path()
 
 def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def project_git(project: Any) -> dict[str, Any]:
+    return as_dict(as_dict(project).get("git"))
 
 
 def codex_exec_argv(

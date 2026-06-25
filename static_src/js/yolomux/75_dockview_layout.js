@@ -59,7 +59,7 @@ function dockviewOppositeOrientation(orientation) {
 function dockviewThemeForApp() {
   const core = dockviewCore();
   if (!core) return undefined;
-  return document.body?.classList?.contains('theme-light') ? core.themeLight : core.themeDark;
+  return document.body?.classList?.contains(themeBodyClass('light')) ? core.themeLight : core.themeDark;
 }
 
 function dockviewRootBoundaryDropIntent(event) {
@@ -1661,7 +1661,7 @@ function dockviewRefreshTabs() {
 
 function syncDockviewTabActiveClass(tab, api = null) {
   const dockviewActive = tab?.closest?.('.dv-tab')?.classList?.contains('dv-active-tab') === true;
-  tab?.classList?.toggle('active', api?.isActive === true || dockviewActive);
+  tab?.classList?.toggle(CLS.active, api?.isActive === true || dockviewActive);
 }
 
 function dockviewSyncMountedPanels() {

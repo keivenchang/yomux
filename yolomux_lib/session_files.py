@@ -20,6 +20,9 @@ from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
 from .sessions import find_recent_codex_transcript
 from .sessions import recent_codex_transcript_candidates
+from .types import RepoPayload
+from .types import SessionFileEntry
+from .types import SessionFilesPayload
 from .workdir import session_workdir
 
 
@@ -722,10 +725,10 @@ def refreshing_session_files_payload_for_info(
     from_ref: str | None = None,
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
-) -> dict[str, Any]:
+) -> SessionFilesPayload:
     refs_active = refs_requested(from_ref, to_ref)
     selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
-    repo_payloads: list[dict[str, Any]] = []
+    repo_payloads: list[RepoPayload] = []
     for repo_text in session_live_pane_repo_roots(info):
         repo = Path(repo_text)
         repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
@@ -733,7 +736,7 @@ def refreshing_session_files_payload_for_info(
         repo_to = str(repo_override.get("to") or "").strip() or to_ref
         repo_refs_active = refs_requested(repo_from, repo_to)
         sel_from, sel_to = diff_refs(repo_from, repo_to) if repo_refs_active else ("", "")
-        repo_payload = {
+        repo_payload: RepoPayload = {
             "repo": str(repo),
             "count": 0,
             "touched_count": 0,
@@ -771,7 +774,7 @@ def session_file_entry(
     mtime: float | None = None,
     diff_tracked: bool | None = None,
     agent_windows: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> SessionFileEntry:
     rel_path = repo_relative_path(path, repo) if repo else None
     agent_list = [a for a in agents if a]
     tracked_diff = bool(repo) and source == "git" and status != "?"
@@ -987,7 +990,7 @@ def session_files_payload_for_info(
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
     agent_attribution: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
+) -> SessionFilesPayload:
     # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
     # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
     # to any repo without an override (and drive the top-level payload refs for legacy single-repo callers).
@@ -1014,8 +1017,8 @@ def session_files_payload_for_info(
         repos.setdefault(repo_text, set())
     live_pane_repo_roots = set(session_live_pane_repo_roots(info))
 
-    files: list[dict[str, Any]] = []
-    repo_payloads: list[dict[str, Any]] = []
+    files: list[SessionFileEntry] = []
+    repo_payloads: list[RepoPayload] = []
     refs_by_repo: dict[str, list[dict[str, Any]]] = {}
     for repo_text in sorted(repos):
         repo = Path(repo_text)
@@ -1048,7 +1051,7 @@ def session_files_payload_for_info(
             rel_path = repo_relative_path(Path(touched_path), repo)
             if rel_path:
                 touched_by_rel[rel_path] = metadata
-        repo_entries: list[dict[str, Any]] = []
+        repo_entries: list[SessionFileEntry] = []
         for rel_path, status in statuses.items():
             path = repo / rel_path
             counts = numstat.get(rel_path, {})
@@ -1095,7 +1098,7 @@ def session_files_payload_for_info(
         if not rendered_entries and repo_text not in live_pane_repo_roots and not repo_refs_active:
             continue
         refs_by_repo[str(repo)] = git_recent_refs(repo)
-        repo_payload = {
+        repo_payload: RepoPayload = {
             "repo": str(repo),
             "count": len(rendered_entries),
             "touched_count": len(repos[repo_text]),
@@ -1110,7 +1113,7 @@ def session_files_payload_for_info(
         repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
         repo_payloads.append(repo_payload)
 
-    outside_entries: list[dict[str, Any]] = []
+    outside_entries: list[SessionFileEntry] = []
     if outside_repo_paths and not refs_active:
         for path_text in sorted(outside_repo_paths):
             path = Path(path_text)
@@ -1166,7 +1169,7 @@ def session_files_payload(
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
     include_cross_session_attribution: bool = True,
-) -> tuple[dict[str, Any], HTTPStatus]:
+) -> tuple[SessionFilesPayload, HTTPStatus]:
     now = time.time()
     cutoff = session_files_cutoff(hours, now)
     attribution = agent_attribution_by_path(infos, cutoff) if include_cross_session_attribution else {}
@@ -1177,8 +1180,8 @@ def session_files_payload(
         payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         return payload, HTTPStatus.OK
 
-    files: list[dict[str, Any]] = []
-    repos: dict[str, dict[str, Any]] = {}
+    files: list[SessionFileEntry] = []
+    repos: dict[str, RepoPayload] = {}
     refs_by_repo: dict[str, list[dict[str, Any]]] = {}
     errors: list[str] = []
     warnings: list[str] = []

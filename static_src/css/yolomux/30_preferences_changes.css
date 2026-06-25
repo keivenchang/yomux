@@ -686,7 +686,7 @@
 .changes-repo-head:hover,
 .changes-repo-head:focus-visible {
   color: var(--active-control-bg);
-  outline: none;
+  outline: 0;
 }
 .changes-repo-caret {
   flex: 0 0 auto;
@@ -1031,7 +1031,7 @@
   border: 1px solid var(--line);
   border-radius: 5px;
   font: var(--ui-font-size-sm)/1.2 var(--ui-font);
-  outline: none;
+  outline: 0;
 }
 .preferences-search:focus {
   border-color: var(--active-control-border);
@@ -1151,7 +1151,7 @@
   background: #0b1017;
   border: 0;
   border-bottom: 1px solid var(--line);
-  outline: none;
+  outline: 0;
   font: var(--ui-font-size-lg)/1.2 var(--ui-font);
 }
 .command-palette-status {

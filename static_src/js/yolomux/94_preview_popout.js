@@ -142,8 +142,7 @@ function currentStylesheetHref(match) {
 }
 
 function previewPopoutBodyClassName() {
-  const keep = ['theme-light', 'theme-dark', 'editor-theme-light', 'editor-theme-dark', 'editor-preview-vanilla'];
-  const classes = keep.filter(name => document.body?.classList?.contains(name));
+  const classes = PREVIEW_POPOUT_BODY_CLASSES.filter(name => document.body?.classList?.contains(name));
   classes.push('file-preview-popout-window');
   return classes.join(' ');
 }

@@ -42,14 +42,12 @@ function agentWindowPayloadKey(agent) {
   return index !== null && kind ? `${index}:${kind}` : '';
 }
 
-const AGENT_WINDOW_ATTENTION_STATES = new Set(['approval', 'needs-approval', 'needs-input', 'interrupted']);
-
 function agentWindowStateKey(state) {
   return String(state || '').trim();
 }
 
 function agentWindowIsWorkingState(state) {
-  return agentWindowStateKey(state) === 'working';
+  return agentWindowStateKey(state) === STATE_KEY.working;
 }
 
 function agentWindowIsAttentionState(state) {
@@ -58,16 +56,16 @@ function agentWindowIsAttentionState(state) {
 
 function agentWindowActivityTone(state) {
   const key = agentWindowStateKey(state);
-  if (key === 'working') return 'working';
+  if (key === STATE_KEY.working) return STATE_KEY.working;
   if (key === 'cooldown') return 'cooldown';
   if (key === 'attention') return 'attention';
   if (key === 'active') return 'active';
   if (key === 'settled') return 'settled';
-  return 'idle';
+  return STATE_KEY.idle;
 }
 
 function agentWindowStateRank(state) {
-  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[agentWindowStateKey(state)] ?? 9;
+  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, [STATE_KEY.idle]: 3}[agentWindowStateKey(state)] ?? 9;
 }
 
 function agentWindowKind(value) {
@@ -123,10 +121,10 @@ function agentWindowObservedTs(agent) {
 function agentWindowStateMergeRank(state) {
   const key = agentWindowStateKey(state);
   if (agentWindowIsAttentionState(key)) return 0;
-  if (key === 'working') return 1;
+  if (key === STATE_KEY.working) return 1;
   if (key === 'cooldown') return 2;
   if (key === 'active') return 3;
-  if (key === 'idle') return 4;
+  if (key === STATE_KEY.idle) return 4;
   return 9;
 }
 
@@ -214,7 +212,7 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
-      state: 'idle',
+      state: STATE_KEY.idle,
       pane_target: agent?.pane_target || '',
       window_label: agent?.window_label || '',
       transcript: agent?.transcript || '',
@@ -303,16 +301,16 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (agentWindowIsWorkingState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
+      agentWindowActivityStates.set(transitionKey, {state: STATE_KEY.working, seenWorking: true, stoppedAt: 0});
     }
-    return {state: 'working', icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
+    return {state: STATE_KEY.working, icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
   }
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
   let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
   const seenWorking = previous.seenWorking === true || stoppedAt > 0;
-  if (!stoppedAt && previous.state === 'working') stoppedAt = nowSeconds;
+  if (!stoppedAt && previous.state === STATE_KEY.working) stoppedAt = nowSeconds;
   if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
-  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
+  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || STATE_KEY.idle), seenWorking, stoppedAt});
   if (seenWorking && stoppedAt > 0) {
     const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
     if (cooldownSeconds > 0 && stoppedAgeSeconds < cooldownSeconds) {
@@ -327,7 +325,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 
 function agentWindowStatusDotHtml(item) {
   if (!item) return '';
-  if (!['attention', 'cooldown', 'working'].includes(item.state)) return '';
+  if (!['attention', 'cooldown', STATE_KEY.working].includes(item.state)) return '';
   const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
@@ -353,7 +351,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   ].filter(Boolean).join(' ');
   const markerHtml = agentWindowStatusDotHtml(item);
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = ['working', 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
+  const style = [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
   return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
 }
 

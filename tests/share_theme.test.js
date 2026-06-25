@@ -771,6 +771,10 @@ async function runShareThemeSuite() {
     const c9Css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
     assert.ok(/showRepoChipMenu\([\s\S]*?openFileExplorerAt\(root\)/.test(c9Src), 'C9: clicking a repo row scopes the Finder to that repo');
+    assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-cycle"'), 'CSS-2: repo arrow buttons use the shared button reset');
+    assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-chip"'), 'CSS-2: repo count button uses the shared button reset');
+    assert.ok(/\.btn-base,[\s\S]*?\{[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(c9Css), 'CSS-2: shared btn-base owns the button reset cluster');
+    assert.ok(/\.control-active-hover:hover,\s*\.control-active-hover:focus-visible\s*\{[\s\S]*outline:\s*0;[\s\S]*color:\s*var\(--active-control-text\);[\s\S]*background:\s*var\(--active-control-bg\);/.test(c9Css), 'CSS-3: shared control-active-hover owns the active hover/focus recolor');
     assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*width:\s*auto/.test(c9Css), 'C9: the repo arrow buttons are content-sized, not fixed-width');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
@@ -2526,6 +2530,13 @@ async function runShareThemeSuite() {
     assert.equal(viewportClamp.top, 692);
     assert.deepEqual(canonical(api.appViewport()), {width: 1200, height: 800, w: 1200, h: 800}, 'M0: appViewport is the native browser viewport in normal mode');
     assert.deepEqual(canonical(api.setAppViewportOverrideForTest({w: 1440, h: 900})), {width: 1440, height: 900, w: 1440, h: 900}, 'M0: appViewport can be pinned to a host viewport shape');
+    assert.equal(api.effectiveViewportWidthForTest({width: 0}), 1200, 'MV-7: missing viewport widths use one shared desktop fallback');
+    assert.equal(api.effectiveViewportWidthForTest({width: 240}), 320, 'MV-7: viewport widths share the same minimum floor');
+    const uiSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/function effectiveViewportWidth\(/.test(uiSource), 'MV-7: effective viewport width is owned by one helper');
+    assert.ok(/function paneDragPreviewMetrics[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: pane drag preview routes viewport width through the shared helper');
+    assert.ok(/function positionDiffRefPopover[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: diff-ref popover routes viewport width through the shared helper');
+    assert.equal(/Math\.max\(320,\s*(?:Number\()?viewport\.width/.test(uiSource), false, 'MV-7: raw viewport width floors stay out of feature code');
     api.setAppMirrorTransformForTest({scale: 2, tx: 10, ty: 20});
     assert.deepEqual(canonical(api.appSpaceRect({left: 30, top: 50, right: 130, bottom: 150, width: 100, height: 100})), {left: 10, top: 15, width: 50, height: 50, right: 60, bottom: 65}, 'M2: appSpaceRect maps visual rects back into app space under a root transform');
     assert.deepEqual(canonical(api.appSpacePoint(30, 50)), {x: 10, y: 15}, 'M7: appSpacePoint maps a visual point back into mirror app space');
@@ -2798,10 +2809,12 @@ async function runShareThemeSuite() {
       const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
       const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
       const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-      assert.ok(/const uiDelayMs = Object\.freeze\(\{[\s\S]*shareViewerStatusBackupRefresh:\s*30000[\s\S]*shareHostStatusBackupRefresh:\s*3000[\s\S]*shareRemoteResizeAfterSocketOpen:\s*50/.test(timingSource), 'R10: round UI delays are owned by the shared timing partial');
+      assert.ok(/const uiDelayMs = Object\.freeze\(\{[\s\S]*shareViewerStatusBackupRefresh:\s*30001[\s\S]*shareHostStatusBackupRefresh:\s*3001[\s\S]*shareRemoteResizeAfterSocketOpen:\s*50/.test(timingSource), 'R10/MV-3: backend-facing backup polls use odd cadences through the shared timing partial');
+      assert.ok(/serverWatchRenew:\s*60001[\s\S]*serverWatchDebounce:\s*300[\s\S]*shareGeometryDigestPublish:\s*2001/.test(timingSource), 'MV-3: backend-facing renew and geometry publish cadences stay odd while UI delays stay round');
+      assert.ok(/fileExplorerFilesystemKeyframeMs = 60001/.test(bootstrapSource), 'MV-3: filesystem watch keyframes use an odd cadence');
       assert.ok(/shareDebugProfileUploadMinIntervalMs:\s*5000/.test(timingSource) && /autoApproveDisconnectedPollMs:\s*5003/.test(timingSource), 'R10: hardcoded debug upload and odd fallback poll timings are owned by the shared timing partial');
       assert.equal(/const shareDebugProfileUploadMinIntervalMs = 5000|const autoApproveDisconnectedPollMs = 5003/.test(bootstrapSource), false, 'R10: bootstrap no longer owns hardcoded timing literals');
-      assert.equal(/const shareViewerStatusBackupRefreshMs = 30000|const shareHostStatusBackupRefreshMs = 3000|const shareReplayKeyframeRequestInitialBackoffMs = 5000|const shareGeometryResyncMinIntervalMs = 10000|scheduleRemoteResize\(session, 50\)/.test(terminalSource), false, 'R10: terminal boot no longer owns share/replay timing literals');
+      assert.equal(/const shareViewerStatusBackupRefreshMs = \d+|const shareHostStatusBackupRefreshMs = \d+|const shareReplayKeyframeRequestInitialBackoffMs = 5000|const shareGeometryResyncMinIntervalMs = 10000|scheduleRemoteResize\(session, 50\)/.test(terminalSource), false, 'R10: terminal boot no longer owns share/replay timing literals');
       assert.ok(shareSource.includes("node.className = 'app-modal-overlay keyboard-shortcuts-overlay'"), 'keyboard shortcuts use the shared modal overlay parent');
       assert.ok(shareSource.includes("node.className = 'app-modal-overlay command-palette'"), 'command palette uses the shared modal overlay parent');
       assert.ok(/backdrop\.className = `app-modal-overlay file-editor-dialog-backdrop/.test(shareSource), 'file editor dialogs use the shared modal overlay parent');
@@ -2983,7 +2996,7 @@ async function runShareThemeSuite() {
       assert.ok(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*repairShareGeometryBucket\(payload, diff\)[\s\S]*shareGeometryDigestCompare/.test(shareSource), 'M9: viewers repair and recheck geometry drift through the bucket-specific repair helper');
       assert.equal(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*else await resyncShareViewerUiState\(\)/.test(shareSource), false, 'DOIT.72 P0.2: geometry drift repair no longer blindly runs the generic semantic resync for every mismatch');
       assert.ok(/function applyShareGeometryDigest\(payload = \{\}\)[\s\S]*shareGeometryDigestCompare\(payload\)[\s\S]*!shareGeometryRepairInFlight[\s\S]*repairShareGeometryDigest\(payload, diff\)/.test(shareSource), 'M9: viewers compare geometry digests and route mismatch through the guarded repair helper');
-      assert.ok(/shareGeometryDigestPublishMs:\s*uiDelayMs\.shareGeometryDigestPublish/.test(timingSource), 'M9: the two-second geometry digest cadence is owned by the shared timing partial');
+      assert.ok(/shareGeometryDigestPublishMs:\s*uiDelayMs\.shareGeometryDigestPublish/.test(timingSource), 'M9/MV-3: the odd geometry digest cadence is owned by the shared timing partial');
       assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*setInterval\(publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared timing owner');
       assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors and ignore their own echoed cursor');
       assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareHostDimensions\.get[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
@@ -3077,6 +3090,8 @@ async function runShareThemeSuite() {
       assert.ok(/\.share-ghost-cursor::before\s*\{[\s\S]*height:\s*36px[\s\S]*background:\s*var\(--share-cursor-color/.test(shareCss), 'remote share cursor has a vertical target crosshair');
       assert.ok(/\.share-ghost-cursor::after\s*\{[\s\S]*width:\s*36px[\s\S]*background:\s*var\(--share-cursor-color/.test(shareCss), 'remote share cursor has a horizontal target crosshair');
       assert.ok(/\.share-click-ripple\s*\{[\s\S]*animation:\s*share-click-ripple/.test(shareCss), 'share click ripples are transient CSS animations');
+      assert.ok(/function renderShareClickRipple\(x, y, sender = ''\)[\s\S]*addEventListener\('animationend', \(\) => ripple\.remove\(\), \{once: true\}\)[\s\S]*addEventListener\('animationcancel', \(\) => ripple\.remove\(\), \{once: true\}\)/.test(shareSource), 'CSS-JS-1: share click ripple cleanup is owned by CSS animation events');
+      assert.equal(/renderShareClickRipple[\s\S]*setTimeout\([\s\S]*ripple\.remove\(\)[\s\S]*560/.test(shareSource), false, 'CSS-JS-1: share click ripple cleanup has no JS duration literal');
       assert.ok(/\.share-status-pill\.share-mode-read\s*\{[\s\S]*var\(--good\)/.test(shareCss), 'read share status uses the green/good mode color');
       assert.ok(/\.share-status-pill\.share-mode-write\s*\{[\s\S]*var\(--bad\)/.test(shareCss), 'write share status uses the red/bad mode color');
       assert.ok(/\.share-ghost-cursor::before\s*\{[\s\S]*--share-cursor-color/.test(shareCss), 'share cursor color is participant-specific');
@@ -3997,6 +4012,7 @@ async function runShareThemeSuite() {
     assert.equal(source.includes("'Copy without indent'"), false, 'terminal copy menu labels are locale keys, not raw strings in the bundle');
     assert.equal(source.includes('copied ${text.length} chars'), false, 'terminal copied-count status text is locale/plural-key driven');
     assert.equal(source.includes('else copyTmuxSelectionToClipboard(session);'), false, 'Cmd-C no longer falls back to tmux copy-mode');
+    assert.ok(/function appendContextMenuButton\(menu, label, handler, closeMenu, options = \{\}\)[\s\S]*\['control-active-hover', options\.className \|\| ''\]/.test(source), 'CSS-3: terminal context menu rows use the shared active hover/focus class');
     assert.ok(api.keyboardShortcutsHtml().includes('Copy tmux selection'), 'keyboard shortcuts list includes the explicit tmux copy shortcut');
     const cleanupContainer = new TestElement('terminal-cleanup-container');
     const cleanupAnchor = new TestElement('terminal-cleanup-anchor');

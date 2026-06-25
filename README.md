@@ -263,6 +263,8 @@ python3 tmux_wall.py --port 8765
 python3 tmux_wall.py --targets project1:0.0,project2:0.0 --slots 4
 ```
 
+Set `YOLOMUX_CONTAINER_HELPER=/path/to/show_project_containers.py` if the wall should include container metadata from a helper outside `~/utils/container/show_project_containers.py`.
+
 ## License
 
 YOLOmux is licensed under PolyForm Noncommercial 1.0.0. Noncommercial use is allowed under that license. Commercial use requires a separate commercial license from Keiven Chang.

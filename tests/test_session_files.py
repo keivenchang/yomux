@@ -1,12 +1,20 @@
 import json
 import os
 import time
+from http import HTTPStatus
+from typing import get_args
+from typing import get_origin
+from typing import get_type_hints
 
 
+from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib import session_files
+from yolomux_lib.types import RepoPayload
+from yolomux_lib.types import SessionFileEntry
+from yolomux_lib.types import SessionFilesPayload
 
 from _git_helpers import git
 
@@ -24,6 +32,44 @@ def agent(kind, transcript, cwd, session="s1"):
         transcript=str(transcript),
         error=None,
     )
+
+
+def tuple_return_args(value):
+    assert get_origin(value) is tuple
+    return get_args(value)
+
+
+def dict_return_args(value):
+    assert get_origin(value) is dict
+    return get_args(value)
+
+
+def test_session_files_payload_types_cover_builder_shapes_and_annotations():
+    assert {
+        "session",
+        "agent",
+        "agent_windows",
+        "abs_path",
+        "size",
+        "missing",
+        "source",
+        "added",
+        "removed",
+        "diff_tracked",
+        "uploaded",
+    } <= set(SessionFileEntry.__annotations__)
+    assert {"from_ref", "to_ref", "error", "ahead", "behind"} <= set(RepoPayload.__annotations__)
+    assert {"hours", "warnings", "cache", "error", "refreshing_elsewhere"} <= set(SessionFilesPayload.__annotations__)
+
+    assert get_type_hints(session_files.session_file_entry)["return"] is SessionFileEntry
+    assert get_type_hints(session_files.refreshing_session_files_payload_for_info)["return"] is SessionFilesPayload
+    assert get_type_hints(session_files.session_files_payload_for_info)["return"] is SessionFilesPayload
+    assert tuple_return_args(get_type_hints(session_files.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
+
+    assert get_type_hints(TmuxWebtermApp.cached_session_files_payload_for_info)["return"] is SessionFilesPayload
+    assert dict_return_args(get_type_hints(TmuxWebtermApp.cached_session_files_payloads_for_infos)["return"]) == (str, SessionFilesPayload)
+    assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload_for_infos)["return"]) == (SessionFilesPayload, HTTPStatus)
+    assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 
 
 def test_scans_claude_and_codex_tool_changes(tmp_path):

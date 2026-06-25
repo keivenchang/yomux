@@ -2013,7 +2013,7 @@ function applyFileTreeRowRecency(row, entry, options = {}) {
   row.__fileTreeRecencyAttentionMtimeKey = state.mtimeKey;
   row.__fileTreeRecencyAttentionUntilMs = (Number(state.mtimeKey) * 1000) + (FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS * 1000);
   const attentionUntilMs = Number(row.__fileTreeRecencyAttentionUntilMs) || 0;
-  const rowSuppressesAttention = row.classList?.contains('selected') || row.classList?.contains('current-file');
+  const rowSuppressesAttention = row.classList?.contains(CLS.selected) || row.classList?.contains('current-file');
   const attentionActive = !rowSuppressesAttention && attentionUntilMs > nowMs && row.__fileTreeRecencyAttentionMtimeKey === state.mtimeKey;
   setFileTreeRecencyAttentionClass(row, attentionActive, nowMs);
   if (attentionActive) scheduleFileTreeRecencyAttentionStop(row, attentionUntilMs);
@@ -2382,9 +2382,9 @@ function applyFileTreeRowDataset(row, state) {
   if (row.style.paddingLeft !== state.paddingLeft) row.style.paddingLeft = state.paddingLeft;
   setTreeItemAria(row, {selected: state.selected, expandable: entry.kind === 'dir', expanded: state.expanded});
   row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-  row.classList.toggle('selected', state.selected);
+  row.classList.toggle(CLS.selected, state.selected);
   row.classList.toggle('expanded', state.expanded);
-  row.classList.toggle('collapsed', entry.kind === 'dir' && !state.expanded);
+  row.classList.toggle(CLS.collapsed, entry.kind === 'dir' && !state.expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('indexed-directory', state.indexedDirectory);
   row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
@@ -2650,7 +2650,7 @@ function updateFileExplorerCurrentFileHighlight() {
     const selected = fileExplorerSelectedPaths.has(row.dataset.path);
     const currentFile = row.dataset.kind === 'file' && row.dataset.path === activeFile;
     const currentDirectoryRow = !currentFile && row.dataset.kind === 'dir' && row.dataset.path === currentDirectory;
-    row.classList.toggle('selected', selected);
+    row.classList.toggle(CLS.selected, selected);
     row.classList.toggle('current-file', currentFile);
     row.classList.toggle('current-directory', currentDirectoryRow);
     row.setAttribute('aria-selected', selected ? 'true' : 'false');
@@ -2889,7 +2889,7 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
         const id = sharedTreeRowId(row);
         const selected = selectedIds.has(id);
         const current = controller.rowIsCurrent(row);
-        row.classList.toggle('selected', selected);
+        row.classList.toggle(CLS.selected, selected);
         row.setAttribute('aria-selected', selected ? 'true' : 'false');
         if (options.applyCurrentClasses !== false) {
           row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
@@ -3861,9 +3861,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const current = data.current === true;
   setTreeItemAria(row, {selected, expandable, expanded});
   row.draggable = tabberRowIsTabDragSource(row);
-  row.classList.toggle('selected', selected);
+  row.classList.toggle(CLS.selected, selected);
   row.classList.toggle('expanded', expanded);
-  row.classList.toggle('collapsed', expandable && !expanded);
+  row.classList.toggle(CLS.collapsed, expandable && !expanded);
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);

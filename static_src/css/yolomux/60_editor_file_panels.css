@@ -547,7 +547,7 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-action:hover,
 .file-editor-dialog-action:focus-visible {
   border-color: var(--active-control-border);
-  outline: none;
+  outline: 0;
   box-shadow: 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-editor-dialog-action.danger {
@@ -1263,7 +1263,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   background: rgba(10, 14, 20, 0.98);
   border: 1px solid var(--active-control-border);
   border-radius: 3px;
-  outline: none;
+  outline: 0;
   box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 /* Light mode: the rename box hardcodes a near-black fill while its text
@@ -2690,7 +2690,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-codemirror .cm-focused,
 .file-editor-codemirror-panel .cm-focused {
-  outline: none;
+  outline: 0;
 }
 .file-editor-codemirror .cm-scroller,
 .file-editor-codemirror-panel .cm-scroller {
@@ -2835,7 +2835,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-search .cm-textfield:focus,
 .file-editor-codemirror-panel .cm-search .cm-textfield:focus {
   border-color: var(--accent-sky-strong);
-  outline: none;
+  outline: 0;
   box-shadow: 0 0 0 2px rgba(159, 216, 255, 0.22);
 }
 .file-editor-codemirror .cm-search .cm-button,

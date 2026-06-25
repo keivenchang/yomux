@@ -14,6 +14,7 @@ from urllib.parse import quote
 from .common import AgentInfo
 from .common import SessionInfo
 from .common import is_generated_upload_name
+from .common import project_git
 from .common import tail_file_lines
 from .common import truncate_text
 from .transcripts import compact_transcript_items
@@ -304,7 +305,7 @@ def build_recent_agents_payload(
 
 def activity_signature(info: SessionInfo, project: dict[str, Any], files_payload: dict[str, Any]) -> dict[str, Any]:
     agent = agent_for_summary(info)
-    git = project.get("git") if isinstance(project, dict) else None
+    git = project_git(project)
     file_rows = []
     for item in files_payload.get("files", []) if isinstance(files_payload, dict) else []:
         if not isinstance(item, dict):
@@ -545,7 +546,7 @@ def stale_work_sentence(session_summaries: list[dict[str, Any]]) -> str:
 
 def project_status_sentence(project: dict[str, Any], files: dict[str, Any], active: bool) -> str:
     parts: list[str] = []
-    git = project.get("git") if isinstance(project, dict) else None
+    git = project_git(project)
     pr = project.get("pull_request") if isinstance(project, dict) else None
     ci = ci_summary(project)
     if ci:
@@ -572,8 +573,8 @@ def project_status_sentence(project: dict[str, Any], files: dict[str, Any], acti
 
 def repo_names(project: dict[str, Any], files_payload: dict[str, Any]) -> list[str]:
     names: list[str] = []
-    git = project.get("git") if isinstance(project, dict) else None
-    if isinstance(git, dict) and git.get("root"):
+    git = project_git(project)
+    if git.get("root"):
         names.append(str(git["root"]))
     for item in files_payload.get("repos", []) if isinstance(files_payload, dict) else []:
         repo = item.get("repo") if isinstance(item, dict) else None
@@ -605,7 +606,7 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
     items = recent_transcript_items(agent)
     activity_state = session_transcript_activity_state(info)
     last_activity = transcript_last_activity(agent)
-    git = project.get("git") if isinstance(project, dict) else None
+    git = project_git(project)
     pr = project.get("pull_request") if isinstance(project, dict) else None
     goal = latest_item_text(items, "user")
     latest_tool = latest_item_text(items, "tool_use")
@@ -613,7 +614,7 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
     work = ""
     if isinstance(pr, dict):
         work = str(pr.get("title") or pr.get("description") or "")
-    if not work and isinstance(git, dict):
+    if not work and git:
         work = str(git.get("subject") or git.get("branch") or "")
     if not work:
         work = latest_assistant
@@ -1117,8 +1118,7 @@ def yoagent_summary_git(summary: dict[str, Any]) -> dict[str, Any]:
     if isinstance(git, dict):
         return git
     project = yoagent_summary_project(summary)
-    git = project.get("git")
-    return git if isinstance(git, dict) else {}
+    return project_git(project)
 
 
 def yoagent_summary_pull_request(summary: dict[str, Any]) -> dict[str, Any]:

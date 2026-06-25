@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from .common import AUTH_CONFIG_DISPLAY_PATH
+from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
@@ -175,6 +176,7 @@ def html_page(
         "serverHostname": SERVER_HOSTNAME,
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
+        "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,
         "version": YOLOMUX_VERSION,
         "clientRevision": yolomux_client_revision(),
         "versionCommit": yolomux_commit_sha(),

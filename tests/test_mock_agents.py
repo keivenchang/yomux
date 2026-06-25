@@ -352,6 +352,17 @@ def test_mock_fixture_list_reports_cursor_status(monkeypatch, capsys):
     assert "synthetic_plan [idle]" not in output
 
 
+def test_all_claude_prompt_corpus_fixtures_have_cursor_metadata(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", None)
+    missing = [
+        f"{case['case_name']}:{case['path'].relative_to(REPO_ROOT)}"
+        for case in mock_agent_common.load_mock_fixture_cases()
+        if case.get("agent") == "claude" and mock_agent_common.mock_fixture_cursor_label(case.get("cursor") or {}) == "cursor=missing"
+    ]
+
+    assert missing == []
+
+
 def test_mock_fixture_list_prints_full_rows_for_terminal_wrap(monkeypatch, capsys):
     file_name = "interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml"
     monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [

@@ -779,7 +779,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           <div class="pane-info-bar-popover-zone panel-popover-zone">
             <div class="panel-session-label"><span class="session-button-dir">8001</span></div>
             <div id="meta" class="pane-info-bar-meta meta pane-info-bar-meta-overflow" style="--pane-info-bar-scroll-distance: 240px; --pane-info-bar-scroll-offset: -240px; --pane-info-bar-scroll-duration: 23s; --pane-info-bar-scroll-timing: linear(0 0%, 0 13.04%, 1 91.30%, 1 100%);">
-              <span id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="meta-repo-cycle">&lt;</button><button type="button" class="meta-repo-chip">2/3</button><button type="button" class="meta-repo-cycle">&gt;</button></span></span>
+              <span id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="btn-base meta-repo-cycle">&lt;</button><button type="button" class="btn-base meta-repo-chip">2/3</button><button type="button" class="btn-base meta-repo-cycle">&gt;</button></span></span>
               <span class="meta-sep pane-info-bar-fixed-sep"> · </span>
               <span id="viewport" class="pane-info-bar-scroll-viewport"><span id="scroll-text" class="pane-info-bar-scroll-text"><span class="meta-branch">__LONG_TEXT__</span></span></span>
             </div>
@@ -5301,6 +5301,7 @@ LIGHT_MODE_SURFACES = """
 </div>
 <span class="agent-icon codex" id="agent-ico">A</span>
 <span class="session-state-badge" id="badge-neutral">run</span>
+<span class="session-state-badge session-state-working" id="badge-working">working</span>
 <span class="session-state-badge session-state-done" id="badge-done">done</span>
 <span class="session-yolo-marker inactive" id="ym-inactive">YO</span>
 <button class="pane-tab file-missing" id="fm-tab">
@@ -5316,6 +5317,10 @@ LIGHT_MODE_SURFACES = """
   <span class="file-tree-git-status" id="idx-status">INDEXED</span>
 </div>
 <input class="file-tree-rename-input" id="rename-inp" value="name">
+<div class="session-rename-dialog">
+  <input class="session-rename-input" id="session-rename-inp" value="session">
+  <div class="session-rename-actions"><button id="session-rename-cancel">Cancel</button></div>
+</div>
 <div class="yoagent-message-body markdown-body"><pre id="md-pre"><code>code</code></pre></div>
 <div class="info-pane" style="background:var(--bg)">
   <div class="info-row header"><div class="info-cell" id="info-hdr">Session</div></div>
@@ -5369,7 +5374,7 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
         return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
 
-    for box in ("cp-dlg", "ks-dlg", "sub", "rename-inp", "md-pre"):
+    for box in ("cp-dlg", "ks-dlg", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre"):
         assert _lum(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
 
     # (b) Text must contrast with its surface. Where the element bg is transparent, it sits on the white page.
@@ -5377,9 +5382,9 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     text_checks = {
         "cp-row": "cp-dlg", "cp-grp": "cp-dlg", "cp-det": "cp-dlg", "cp-kb": "cp-dlg",
         "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "agent-ico": None,
-        "badge-neutral": "badge-neutral", "badge-done": "badge-done", "ym-inactive": "ym-inactive",
+        "badge-neutral": "badge-neutral", "badge-working": "badge-working", "badge-done": "badge-done", "ym-inactive": "ym-inactive",
         "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
-        "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "md-pre": "md-pre",
+        "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
         # the YO!info table — rows/header/current/links must read on the light pane.
         "info-hdr": None, "info-row-text": None, "info-link": None, "info-cur": None,
     }

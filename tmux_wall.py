@@ -14,6 +14,7 @@ import argparse
 import fnmatch
 import ipaddress
 import json
+import os
 import re
 import sys
 import time
@@ -40,7 +41,7 @@ from yolomux_lib.tmux_utils import tmux_capture_pane_styled
 DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
 DEFAULT_SLOTS = 6
 DEFAULT_LINES = 90
-CONTAINER_HELPER = Path.home() / "utils" / "container" / "show_project_containers.py"
+DEFAULT_CONTAINER_HELPER = Path.home() / "utils" / "container" / "show_project_containers.py"
 AGENT_COMMANDS = {"claude", "codex"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_CONTENT_TYPES = {
@@ -85,6 +86,10 @@ def static_asset_version(asset: str) -> int:
         return int(path.stat().st_mtime)
     except OSError:
         return 0
+
+
+def container_helper_path() -> Path:
+    return Path(os.environ.get("YOLOMUX_CONTAINER_HELPER", str(DEFAULT_CONTAINER_HELPER)))
 
 
 def is_loopback_bind_host(host: str) -> bool:
@@ -293,9 +298,10 @@ def parse_container_table(text: str) -> list[dict[str, str]]:
 
 
 def load_container_info() -> tuple[list[dict[str, str]], str | None]:
-    if not CONTAINER_HELPER.exists():
-        return [], f"missing container helper: {CONTAINER_HELPER}"
-    result = run_cmd(["python3", str(CONTAINER_HELPER)], timeout=8.0)
+    helper = container_helper_path()
+    if not helper.exists():
+        return [], f"missing container helper: {helper}"
+    result = run_cmd(["python3", str(helper)], timeout=8.0)
     if result.returncode != 0:
         err = cmd_error(result, "container helper failed")
         return [], err

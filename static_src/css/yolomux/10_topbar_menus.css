@@ -338,8 +338,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 .share-view-fit-toggle:hover,
 .share-view-fit-toggle:focus-visible {
   border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-  color: var(--active-control-text);
 }
 .share-ghost-cursor {
   position: fixed;

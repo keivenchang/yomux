@@ -14,6 +14,7 @@ from urllib.parse import parse_qs
 from urllib.parse import unquote
 from urllib.parse import urlparse
 
+from .common import ACTIVITY_MAX_HOURS
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_EVENT_TAIL_LINES
 from .common import MAX_TRANSCRIPT_TAIL_LINES
@@ -483,52 +484,60 @@ def get_run_history(request: Any, parsed: Any, route: Route) -> None:
 def get_activity(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
-    hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
-    if error:
-        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
-        return
-    request.write_app_result(request.share_scoped_activity_result(request.server.app.activity_payload(hours=hours)))
+    request.write_validated_float_result(
+        qs,
+        "hours",
+        24.0,
+        ACTIVITY_MAX_HOURS,
+        lambda hours: request.share_scoped_activity_result(request.server.app.activity_payload(hours=hours)),
+    )
 
 
 def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
     requested_sessions = query_list(qs, "session") or query_list(qs, "sessions")
-    hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
-    if error:
-        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
-        return
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
     force = query_bool(qs, "force")
     share_sessions = request.share_sessions()
-    if share_sessions:
-        if not requested_sessions:
-            requested_sessions = share_sessions
-        blocked = [session for session in requested_sessions if session not in share_sessions]
-        if blocked:
-            request.write_json(error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
-            return
     repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
-    request.write_app_result(request.server.app.session_files_batch_payload(requested_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
+
+    def make_result(hours: float) -> tuple[Any, HTTPStatus]:
+        scoped_sessions = requested_sessions
+        if share_sessions:
+            if not scoped_sessions:
+                scoped_sessions = share_sessions
+            blocked = [session for session in scoped_sessions if session not in share_sessions]
+            if blocked:
+                return error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), HTTPStatus.FORBIDDEN
+        return request.server.app.session_files_batch_payload(scoped_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
+
+    request.write_validated_float_result(qs, "hours", 24.0, ACTIVITY_MAX_HOURS, make_result)
 
 
 def get_session_files(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
     session = query_one(qs, "session", None)
-    hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
-    if error:
-        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
-        return
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
     force = query_bool(qs, "force")
-    if request.share_sessions() and session not in request.share_sessions():
-        request.write_json(error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
-        return
+    share_sessions = request.share_sessions()
     repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
-    request.write_app_result(request.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
+
+    def make_result(hours: float) -> tuple[Any, HTTPStatus]:
+        if share_sessions and session not in share_sessions:
+            return error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), HTTPStatus.FORBIDDEN
+        return request.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
+
+    request.write_validated_float_result(
+        qs,
+        "hours",
+        24.0,
+        ACTIVITY_MAX_HOURS,
+        make_result,
+    )
 
 
 def get_summary(request: Any, parsed: Any, route: Route) -> None:

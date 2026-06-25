@@ -1133,36 +1133,24 @@ body.theme-light .drop-slot.drag-over {
   vertical-align: middle;
 }
 .meta-repo-chip {
-  display: inline-flex;
-  align-items: center;
   min-width: 0;
   padding: 0 1px;
-  border: 0;
   border-radius: 0;
   appearance: none;
-  font: inherit;
   font-weight: 600;
   color: var(--pane-meta-branch);
-  background: transparent;
-  cursor: pointer;
 }
 .meta-repo-cycle {
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
   min-width: 0;
   width: auto;
   height: auto;
   padding: 0 1px;
-  border: 0;
   border-radius: 0;
   appearance: none;
-  font: inherit;
   font-weight: 800;
   line-height: 1;
   color: var(--pane-meta-branch);
-  background: transparent;
-  cursor: pointer;
 }
 .meta-repo-chip:hover,
 .meta-repo-chip:focus-visible,
@@ -1170,7 +1158,7 @@ body.theme-light .drop-slot.drag-over {
 .meta-repo-cycle:focus-visible {
   color: var(--active-accent-bright);
   background: transparent;
-  outline: none;
+  outline: 0;
 }
 .repo-chip-menu .repo-chip-row {
   display: flex;
@@ -1185,7 +1173,7 @@ body.theme-light .drop-slot.drag-over {
 .repo-chip-menu .repo-chip-row:hover,
 .repo-chip-menu .repo-chip-row:focus-visible {
   background: color-mix(in srgb, var(--accent-gold) 18%, transparent);
-  outline: none;
+  outline: 0;
 }
 .repo-chip-menu .repo-chip-row-primary .repo-chip-path {
   font-weight: 700;
@@ -1232,6 +1220,15 @@ body.theme-light .drop-slot.drag-over {
   pointer-events: none;
   background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
   box-shadow: 0 0 12px var(--pane-resizer-shadow);
+}
+.transparent-drag-image {
+  position: fixed;
+  left: -10000px;
+  top: -10000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 .pane-tab {
   width: min(var(--pane-tab-width), 100%);

@@ -677,13 +677,26 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+const SETTING_FALLBACKS = Object.freeze({
+  'appearance.date_time_hour_cycle': '24',
+  'appearance.editor_font_size': 13,
+  'appearance.file_explorer_font_size': 13,
+  'appearance.terminal_font_size': 13,
+  'editor.autosave_delay_seconds': 2.5,
+  'file_explorer.image_open_mode': 'same-tab',
+  'file_explorer.image_preview_max_px': 320,
+  'general.auto_focus': false,
+  'general.startup_tips': true,
+  'terminal_editor.scrollback': 5000,
+  'uploads.max_bytes': 20 * 1024 * 1024,
+});
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 let shareResolvedGlobalThemeMode = '';
 let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
-let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle', '24') === '12' ? '12' : '24';
+let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle') === '12' ? '12' : '24';
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
-fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
 let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
 const ensureSessionPromises = new Map();
@@ -744,27 +757,28 @@ let serverWatchRootsTimer = null;
 let serverWatchRootsPendingOptions = {};
 let fileExplorerFilesystemWatchToken = '';
 let fileExplorerFilesystemLastFullAt = 0;
-const fileExplorerFilesystemKeyframeMs = 60000;
+const fileExplorerFilesystemKeyframeMs = 60001;
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms');
-let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
-let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
-let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);
+let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px');
+let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode');
+let uploadMaxBytes = initialSetting('uploads.max_bytes');
 const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
-let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
+let terminalFontSize = initialSetting('appearance.terminal_font_size');
 const terminalFontFamily = '"YOLOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
-let editorFontSize = initialSetting('appearance.editor_font_size', 13);
+let editorFontSize = initialSetting('appearance.editor_font_size');
 let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);
-let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
-let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
-let autoFocusEnabled = initialSetting('general.auto_focus', false);
-let startupHelpersEnabled = initialSetting('general.startup_tips', true) !== false;
+let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size');
+let terminalScrollback = initialSetting('terminal_editor.scrollback');
+let autoFocusEnabled = initialSetting('general.auto_focus');
+let startupHelpersEnabled = initialSetting('general.startup_tips') !== false;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
 const terminalWheelPixelLinePx = 35;
 const terminalWheelMaxLinesPerEvent = 12;
 const maxSessionTabs = bootstrap.maxSessionTabs;
+const linearIssueBaseUrl = String(bootstrap.linearIssueBaseUrl || 'https://linear.app/issue').replace(/\/+$/, '');
 const basePaneKeys = ['left', 'right'];
 const splitPaneKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
 const paneKeys = [...basePaneKeys, ...splitPaneKeys];
@@ -827,6 +841,51 @@ const CLS = Object.freeze({
   selected: 'selected',
   tabDragOver: 'tab-drag-over',
   tabDropPreview: 'tab-drop-preview',
+});
+const THEME_CLASS_BY_MODE = Object.freeze({
+  system: 'theme-system',
+  dark: 'theme-dark',
+  light: 'theme-light',
+});
+const THEME_RESOLVED_CLASS_BY_MODE = Object.freeze({
+  dark: 'theme-resolved-dark',
+  light: 'theme-resolved-light',
+});
+const THEME_BODY_CLASSES = Object.freeze([
+  ...Object.values(THEME_CLASS_BY_MODE),
+  ...Object.values(THEME_RESOLVED_CLASS_BY_MODE),
+]);
+const EDITOR_THEME_CLASS_BY_MODE = Object.freeze({
+  system: 'editor-theme-system',
+  dark: 'editor-theme-dark',
+  light: 'editor-theme-light',
+});
+const EDITOR_THEME_BODY_CLASSES = Object.freeze(Object.values(EDITOR_THEME_CLASS_BY_MODE));
+const EDITOR_PREVIEW_VANILLA_CLASS = 'editor-preview-vanilla';
+const PREVIEW_POPOUT_BODY_CLASSES = Object.freeze([
+  THEME_CLASS_BY_MODE.light,
+  THEME_CLASS_BY_MODE.dark,
+  EDITOR_THEME_CLASS_BY_MODE.light,
+  EDITOR_THEME_CLASS_BY_MODE.dark,
+  EDITOR_PREVIEW_VANILLA_CLASS,
+]);
+const STATE_KEY = Object.freeze({
+  approval: 'approval',
+  blocked: 'blocked',
+  interrupted: 'interrupted',
+  needsApproval: 'needs-approval',
+  needsInput: 'needs-input',
+  working: 'working',
+  idle: 'idle',
+});
+const STATE_CLASS = Object.freeze({
+  needsAttention: 'needs-attention',
+  needsInput: STATE_KEY.needsInput,
+  needsExec: 'needs-exec',
+  needsBlocked: 'needs-blocked',
+  needsInputPane: `${STATE_KEY.needsInput}-pane`,
+  needsExecPane: 'needs-exec-pane',
+  needsBlockedPane: 'needs-blocked-pane',
 });
 const DROP_PREVIEW_CLASSES = Object.freeze([
   CLS.dragOver,

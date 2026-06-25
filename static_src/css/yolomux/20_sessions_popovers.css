@@ -455,6 +455,11 @@ body.theme-light .session-state-done {
   background: #e2e8f1;
   border-color: #b8c2d2;
 }
+body.theme-light .session-state-working {
+  color: #214f89;
+  background: #e5f0ff;
+  border-color: #8fb5eb;
+}
 body.theme-light .session-yolo-marker.inactive {
   color: var(--agent-inactive-marker-text);
   background: var(--agent-inactive-marker-bg);
@@ -611,7 +616,10 @@ body.theme-light .ci-indicator.branch-indicator {
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
-  animation: metadata-badge-pulse var(--pulse-duration) var(--pulse-easing) 14;
+  animation-name: metadata-badge-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
 }
 @keyframes metadata-badge-pulse {
   0%, 100% {

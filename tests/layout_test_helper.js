@@ -1460,6 +1460,7 @@ globalThis.__layoutTestApi = {
   windowListenersForTest(type) { return [...(window.__listeners?.get?.(type) || [])]; },
   appRootForTest: appRootElement,
   appViewport,
+  effectiveViewportWidthForTest: effectiveViewportWidth,
   setAppViewportOverrideForTest: setAppViewportOverride,
   appSpaceRect,
   appSpacePoint,

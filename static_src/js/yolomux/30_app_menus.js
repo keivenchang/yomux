@@ -141,7 +141,7 @@ function showAboutModal() {
     <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a></div>
     <div class="about-license"><a class="about-author about-license-link" href="${esc(aboutLicenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.license'))}</a></div>
   </div>`;
-  modal.classList.add('open');
+  modal.classList.add(CLS.open);
   scheduleSharePopupLayerPublish();
 }
 
@@ -1113,7 +1113,7 @@ function createAppMenu(menu) {
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (wrapper.classList.contains('open')) {
+    if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
       if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
@@ -1123,7 +1123,7 @@ function createAppMenu(menu) {
   });
   button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
   wrapper.append(button, popover);
-  if (openAppMenuId === menu.id) wrapper.classList.add('open');
+  if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
   return wrapper;
 }
@@ -1236,13 +1236,13 @@ function createAppSubmenu(item) {
     event.preventDefault();
     event.stopPropagation();
     if (button.disabled) return;
-    wrapper.classList.add('open');
+    wrapper.classList.add(CLS.open);
     button.setAttribute('aria-expanded', 'true');
   });
   button.addEventListener('keydown', event => {
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      wrapper.classList.add('open');
+      wrapper.classList.add(CLS.open);
       button.setAttribute('aria-expanded', 'true');
       focusFirstAppMenuCommand(submenu);
     }
@@ -1445,7 +1445,7 @@ function bindAppMenuHover(wrapper) {
     onOpen: () => {
       const menuId = wrapper.dataset.appMenu || '';
       const currentWrapper = document.querySelector(`.app-menu[data-app-menu="${cssEscape(menuId)}"]`) || wrapper;
-      if (!currentWrapper.classList.contains('open')) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
+      if (!currentWrapper.classList.contains(CLS.open)) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
     },
     onClose: () => {
       const menuId = wrapper.dataset.appMenu || '';
@@ -1462,9 +1462,9 @@ function openAppMenu(wrapper, options = {}) {
   closeAppMenus(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
-  wrapper.classList.add('open');
+  wrapper.classList.add(CLS.open);
   wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
-    submenu.classList.add('open');
+    submenu.classList.add(CLS.open);
     submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
   });
   openAppMenuId = wrapper.dataset.appMenu || null;
@@ -1479,7 +1479,7 @@ function openAppMenu(wrapper, options = {}) {
 function closeAppMenus(keepOpen = null) {
   for (const menu of document.querySelectorAll('.app-menu.open')) {
     if (menu === keepOpen) continue;
-    menu.classList.remove('open');
+    menu.classList.remove(CLS.open);
     menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
   }
   document.querySelectorAll('.app-menu-command.share-mirror-active').forEach(command => {
@@ -1487,7 +1487,7 @@ function closeAppMenus(keepOpen = null) {
   });
   for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
     if (keepOpen?.contains(submenu)) continue;
-    submenu.classList.remove('open');
+    submenu.classList.remove(CLS.open);
     submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'false');
   }
   openAppMenuId = keepOpen?.dataset?.appMenu || null;

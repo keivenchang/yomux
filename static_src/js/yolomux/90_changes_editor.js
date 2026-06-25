@@ -538,7 +538,7 @@ function positionDiffRefPopover(input, compact) {
   const rect = input?.getBoundingClientRect?.();
   if (!rect) return;
   const viewport = appViewport();
-  const viewportWidth = Math.max(320, viewport.width || 1024);
+  const viewportWidth = effectiveViewportWidth(viewport);
   const viewportHeight = Math.max(240, viewport.height || 720);
   const minWidth = Math.min(compact ? 880 : 960, viewportWidth - 16);
   const maxWidth = compact ? 1040 : 1120;
@@ -597,7 +597,7 @@ function syncDiffRefPopoverActiveOption() {
   if (!diffRefPopover || diffRefPopover.hidden) return;
   diffRefPopover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
     const active = index === diffRefPopoverActiveIndex;
-    button.classList.toggle('active', active);
+    button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
     if (active) button.scrollIntoView?.({block: 'nearest'});
   });
@@ -1512,7 +1512,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       section.dataset.changesRepo = repo;
     }
     const collapsed = changesRepoCollapsed.has(repo);
-    section.classList.toggle('collapsed', collapsed);
+    section.classList.toggle(CLS.collapsed, collapsed);
     const repoInfo = repoMap.get(repo) || {};
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     const hasGit = repo && repo !== 'Outside repo';

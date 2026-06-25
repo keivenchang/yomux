@@ -3,6 +3,7 @@ from yolomux_lib.agent_tui import AgentTuiCapture
 from tmux_wall import PaneInfo
 from tmux_wall import TmuxWallApp
 from tmux_wall import capture_pane_state
+from tmux_wall import container_helper_path
 from tmux_wall import is_loopback_bind_host
 from tmux_wall import remote_bind_error
 
@@ -33,6 +34,13 @@ def test_tmux_wall_rejects_remote_bind_without_explicit_flag():
     assert "no authentication" in remote_bind_error("0.0.0.0", False)
     assert remote_bind_error("0.0.0.0", True) == ""
     assert remote_bind_error("127.0.0.1", False) == ""
+
+
+def test_container_helper_path_uses_env_override(monkeypatch, tmp_path):
+    helper = tmp_path / "show_project_containers.py"
+    monkeypatch.setenv("YOLOMUX_CONTAINER_HELPER", str(helper))
+
+    assert container_helper_path() == helper
 
 
 def test_capture_pane_state_uses_agent_tui_shared_classification(monkeypatch):

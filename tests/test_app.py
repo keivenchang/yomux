@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from http import HTTPStatus
 import io
 import json
@@ -1006,6 +1007,49 @@ def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
     assert [event_type for event_type, _payload in events] == ["auto_approve_changed", "tmux_signals_changed"]
     assert events[0][1]["refresh"] is True
     assert "data" not in events[0][1]
+
+
+def test_stable_signature_payload_drops_volatile_keys_recursively():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        first = {
+            "ok": True,
+            "generated_at": "first",
+            "nested": {"generated_ts": 1.0, "compute_ms": 10.0, "value": "same"},
+            "items": [{"activity_ts": 100.0, "name": "same"}],
+        }
+        second = {
+            "ok": True,
+            "generated_at": "second",
+            "nested": {"generated_ts": 2.0, "compute_ms": 20.0, "value": "same"},
+            "items": [{"activity_ts": 200.0, "name": "same"}],
+        }
+        expected = {"ok": True, "nested": {"value": "same"}, "items": [{"name": "same"}]}
+
+        assert webapp.stable_signature_payload(first) == expected
+        assert webapp.stable_signature_payload(second) == expected
+        assert webapp.stable_client_event_payload_signature(first) == webapp.stable_client_event_payload_signature(second)
+    finally:
+        webapp.control_server.stop()
+
+
+def test_activity_summary_ready_signature_ignores_generated_timestamps(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    payloads = [
+        {"locale": "en", "generated_at": "first", "generated_ts": 1.0, "global": {"headline": "same"}, "sessions": {}},
+        {"locale": "en", "generated_at": "second", "generated_ts": 2.0, "global": {"headline": "same"}, "sessions": {}},
+    ]
+    monkeypatch.setattr(webapp, "client_watch_state_snapshot", lambda: ([], [], {"visible": True, "locale": "en", "hours": 24}))
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: payloads.pop(0))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.publish_activity_summary_ready_events(trigger="refresh") == ["activity_summary_ready"]
+        assert webapp.publish_activity_summary_ready_events(trigger="refresh") == []
+    finally:
+        webapp.control_server.stop()
+
+    assert [event_type for event_type, _payload in events] == ["activity_summary_ready"]
 
 
 def test_tmux_signal_event_publishes_changed_window_patch(monkeypatch):
@@ -2321,6 +2365,42 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     assert localized["locale"] == "zh-Hant"
 
 
+def test_activity_session_info_payload_normalizes_malformed_project_git(tmp_path):
+    info = SessionInfo(
+        session="5",
+        panes=[],
+        selected_pane=PaneInfo(
+            session="5",
+            window="0",
+            pane="0",
+            pane_id="%1",
+            target="5:0.0",
+            current_path=str(tmp_path),
+            command="zsh",
+            active=True,
+            window_active=True,
+            title="",
+            pid=100,
+        ),
+        agents=[],
+    )
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        payload = webapp.activity_session_info_payload(
+            "5",
+            info,
+            {"git": "not-a-dict", "pull_request": None, "linear": []},
+            {"files": [], "repos": [], "errors": []},
+            {"files": {}},
+            recent_events=[],
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["git"] == {}
+    assert payload["path"] == str(tmp_path)
+
+
 def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypatch):
     snapshots = [
         {"5": {"last_user_input_ts": 100}},
@@ -2815,6 +2895,31 @@ def test_session_files_disk_cache_manifest_refreshes_without_rewriting_unchanged
     assert cached is not None
     assert cached[0]["files"] == [{"path": "same.py"}]
     assert cached[2] is True
+
+
+def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["5"])
+    calls = []
+
+    def fake_signature(payload):
+        calls.append(payload)
+        return f"encoded-{len(calls)}"
+
+    webapp.client_event_payload_signature = fake_signature
+    try:
+        _path, disk_signature = webapp.session_files_disk_cache_path(("payload", {"session": "5"}))
+        payload_signature = webapp.session_files_payload_signature({"files": [{"path": "same.py"}]})
+        tabber_signature = webapp.tabber_activity_source_signature()
+    finally:
+        webapp.control_server.stop()
+
+    assert disk_signature == hashlib.sha256(b"encoded-1").hexdigest()
+    assert payload_signature == hashlib.sha256(b"encoded-2").hexdigest()
+    assert tabber_signature == hashlib.sha256(b"encoded-3").hexdigest()
+    assert calls[0] == ("payload", {"session": "5"})
+    assert calls[1] == {"files": [{"path": "same.py"}]}
+    assert calls[2] == {"scope": "configured", "sessions": [("5", None)]}
 
 
 def test_update_client_watch_roots_filters_and_expires(monkeypatch):

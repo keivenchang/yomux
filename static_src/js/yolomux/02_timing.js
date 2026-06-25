@@ -1,17 +1,17 @@
 // Hardcoded frontend timing values live here. Settings-backed intervals stay in settings.py and are read through initialSetting/numberSetting.
 const FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS = 15;
 const uiDelayMs = Object.freeze({
-  shareViewerStatusBackupRefresh: 30000,
-  shareHostStatusBackupRefresh: 3000,
+  shareViewerStatusBackupRefresh: 30001,
+  shareHostStatusBackupRefresh: 3001,
   shareRemoteResizeAfterSocketOpen: 50,
-  serverWatchRenew: 60000,
+  serverWatchRenew: 60001,
   serverWatchDebounce: 300,
   tmuxWindowReadback: 120,
   tmuxWindowReadbackRetry: 80,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
   fileExplorerTypeaheadClear: 700,
-  shareGeometryDigestPublish: 2000,
+  shareGeometryDigestPublish: 2001,
 });
 
 const yolomuxTiming = Object.freeze({

@@ -259,6 +259,16 @@ function appViewport() {
   return appViewportOverride ? normalizeAppViewport(appViewportOverride, nativeViewport()) : nativeViewport();
 }
 
+const MIN_VIEWPORT_WIDTH_PX = 320;
+const DEFAULT_VIEWPORT_WIDTH_PX = 1200;
+const OFFSCREEN_POSITION_PX = -10000;
+
+function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIEWPORT_WIDTH_PX) {
+  const width = Number(viewport?.width ?? viewport?.w);
+  const fallbackWidth = Number(fallback) || DEFAULT_VIEWPORT_WIDTH_PX;
+  return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
+}
+
 const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720];
 
 function syncAppViewportBreakpointClasses() {
@@ -972,8 +982,26 @@ function nestedSetting(source, path, fallback) {
   return current === undefined || current === null ? fallback : current;
 }
 
+function settingFallback(path, fallback) {
+  if (arguments.length >= 2) return fallback;
+  return Object.prototype.hasOwnProperty.call(SETTING_FALLBACKS, path) ? SETTING_FALLBACKS[path] : undefined;
+}
+
 function initialSetting(path, fallback) {
-  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, fallback));
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, defaultValue));
+}
+
+function themeBodyClass(mode) {
+  return THEME_CLASS_BY_MODE[mode] || THEME_CLASS_BY_MODE.dark;
+}
+
+function themeResolvedBodyClass(mode) {
+  return THEME_RESOLVED_CLASS_BY_MODE[mode] || THEME_RESOLVED_CLASS_BY_MODE.dark;
+}
+
+function editorThemeBodyClass(mode) {
+  return EDITOR_THEME_CLASS_BY_MODE[mode] || EDITOR_THEME_CLASS_BY_MODE.dark;
 }
 
 function mergeSettingObjects(base, patch) {
@@ -1201,7 +1229,7 @@ function syncFileExplorerTreeDateButton(button) {
   if (!button) return;
   const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
   const active = mode !== 'none';
-  button.classList.toggle('active', active);
+  button.classList.toggle(CLS.active, active);
   button.dataset.dateMode = mode;
   button.setAttribute('aria-pressed', active ? 'true' : 'false');
   button.textContent = fileExplorerTreeDateModeButtonLabel(mode);
@@ -1397,7 +1425,7 @@ function clearFocusForInactiveLayout() {
 }
 
 function terminalPaneIsActive(session) {
-  return document.getElementById(`terminal-pane-${session}`)?.classList.contains('active') === true;
+  return document.getElementById(`terminal-pane-${session}`)?.classList.contains(CLS.active) === true;
 }
 
 function selectPanelOnHover(item) {
@@ -1989,8 +2017,8 @@ async function copyTextToClipboard(text) {
   textarea.value = value;
   textarea.setAttribute('readonly', '');
   textarea.style.position = 'fixed';
-  textarea.style.left = '-10000px';
-  textarea.style.top = '-10000px';
+  textarea.style.left = `${OFFSCREEN_POSITION_PX}px`;
+  textarea.style.top = `${OFFSCREEN_POSITION_PX}px`;
   document.body.appendChild(textarea);
   textarea.select();
   const copied = document.execCommand?.('copy') === true;
@@ -2207,8 +2235,10 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   const buttonHtml = iconHtml || shortcutHtml
     ? `<span class="context-menu-line">${iconHtml ? `<span class="context-menu-icon">${iconHtml}</span>` : ''}<span class="context-menu-label">${esc(label)}</span>${shortcutHtml}</span>`
     : undefined;
+  const className = ['control-active-hover', options.className || ''].filter(Boolean).join(' ');
   const button = makeButton({
     ...options,
+    className,
     html: buttonHtml,
     label: buttonHtml ? undefined : label,
     ariaLabel: options.ariaLabel || label,

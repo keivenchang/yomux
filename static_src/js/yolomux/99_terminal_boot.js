@@ -160,7 +160,7 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
 }
 
 function syncTranscriptMetaLoadingUi() {
-  document.querySelectorAll('[data-info-refresh]').forEach(button => {
+  document.getElementById(panelDomId(infoItemId))?.querySelectorAll('[data-info-refresh]').forEach(button => {
     setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
   });
   const metaRefreshButton = refreshMeta;
@@ -345,16 +345,6 @@ function renderInfoPanel() {
     return rowHtml + (row.session && infoSessionDrawerOpen.has(row.session) ? cachedInfoSessionDrawerHtml(row.session) : '');
   }).join('');
   node.innerHTML = serverRoleHtml + header + body;
-  node.querySelectorAll('[data-info-sort]').forEach(button => {
-    button.addEventListener('click', () => {
-      setInfoBranchSort(button.dataset.infoSort);
-      renderInfoPanel();
-    });
-  });
-  node.querySelectorAll('[data-info-session-drawer]').forEach(button => {
-    button.addEventListener('click', () => toggleInfoSessionDrawer(button.dataset.infoSessionDrawer || ''));
-  });
-  bindInfoColumnResizers(node);
 }
 
 function infoColumnResizeConfig(column) {
@@ -450,47 +440,52 @@ function applyInfoBranchColumnWidth(root = document.documentElement) {
   applyInfoColumnWidths(root);
 }
 
+function infoColumnResizeTarget(handle) {
+  const column = String(handle?.dataset?.infoColumnResize || '');
+  const config = infoColumnResizeConfig(column);
+  return config ? {column, config} : null;
+}
+
 function bindInfoColumnResizers(node) {
-  node.querySelectorAll('[data-info-column-resize]').forEach(handle => {
-    if (handle.dataset.bound === 'true') return;
-    const column = handle.dataset.infoColumnResize;
-    const config = infoColumnResizeConfig(column);
-    if (!config) return;
-    handle.dataset.bound = 'true';
-    handle.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    handle.addEventListener('dblclick', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      resetInfoColumnWidth(column);
-    });
-    handle.addEventListener('pointerdown', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      const pointerId = event.pointerId;
-      const startX = event.clientX;
-      const startWidth = infoColumnWidth(column);
-      const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
-      handle.setPointerCapture?.(pointerId);
-      document.body?.classList.add('info-column-resizing');
-      const move = moveEvent => {
-        const delta = (moveEvent.clientX - startX) * direction;
-        setInfoColumnWidth(column, startWidth + delta, {persist: false});
-      };
-      const done = () => {
-        storageSet(config.storageKey, infoColumnWidth(column));
-        document.body?.classList.remove('info-column-resizing');
-        try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', done);
-        window.removeEventListener('pointercancel', done);
-      };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', done);
-      window.addEventListener('pointercancel', done);
-    });
+  if (!node || node.__yolomuxInfoColumnResizersBound === true) return;
+  node.__yolomuxInfoColumnResizersBound = true;
+  delegate(node, 'click', '[data-info-column-resize]', event => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  delegate(node, 'dblclick', '[data-info-column-resize]', (event, handle) => {
+    const target = infoColumnResizeTarget(handle);
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    resetInfoColumnWidth(target.column);
+  });
+  delegate(node, 'pointerdown', '[data-info-column-resize]', (event, handle) => {
+    const target = infoColumnResizeTarget(handle);
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = infoColumnWidth(target.column);
+    const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
+    handle.setPointerCapture?.(pointerId);
+    document.body?.classList.add('info-column-resizing');
+    const move = moveEvent => {
+      const delta = (moveEvent.clientX - startX) * direction;
+      setInfoColumnWidth(target.column, startWidth + delta, {persist: false});
+    };
+    const done = () => {
+      storageSet(target.config.storageKey, infoColumnWidth(target.column));
+      document.body?.classList.remove('info-column-resizing');
+      try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
   });
 }
 
@@ -543,13 +538,6 @@ function renderWatchedPrs() {
     ? `<div class="info-watched-note">${esc(t('info.watched.truncated', {count: String(watchedPrsData.truncated)}))}</div>`
     : '';
   node.innerHTML = heading + rows + truncated;
-  node.querySelectorAll('[data-watched-remove]').forEach(button => {
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      removeWatchedPr(button.dataset.watchedRemove);
-    });
-  });
 }
 
 async function refreshWatchedPrs() {
@@ -2229,7 +2217,7 @@ function syncPanelVisibility(previousActive = []) {
   }
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`terminal-pane-${session}`);
-    if (pane?.classList.contains('active')) scheduleFit(session);
+    if (pane?.classList.contains(CLS.active)) scheduleFit(session);
   }
 }
 
@@ -2238,14 +2226,14 @@ function activateTab(session, name, options = {}) {
   if (name !== 'transcript') stopTranscriptStream(session);
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
-    button.classList.toggle('active', button.dataset.tabName === name);
+    button.classList.toggle(CLS.active, button.dataset.tabName === name);
   });
   document.querySelectorAll(`[data-panel-tab-overflow="${session}"]`).forEach(button => {
-    button.classList.toggle('active', ['transcript', 'summary', 'events'].includes(name));
+    button.classList.toggle(CLS.active, ['transcript', 'summary', 'events'].includes(name));
   });
   for (const tabName of ['terminal', 'transcript', 'summary', 'events']) {
     const pane = document.getElementById(`${tabName}-pane-${session}`);
-    if (pane) pane.classList.toggle('active', tabName === name);
+    if (pane) pane.classList.toggle(CLS.active, tabName === name);
   }
   updateTypingIndicator(session);
   if (name === 'terminal') {
@@ -2570,7 +2558,7 @@ function updateTypingIndicator(session) {
   const ready = Boolean(
     item?.socket?.readyState === WebSocket.OPEN
     && focusedTerminal === session
-    && pane?.classList.contains('active')
+    && pane?.classList.contains(CLS.active)
   );
   container?.classList.toggle('typing-ready', ready);
   panel?.classList.toggle('typing-ready-pane', ready);
@@ -3199,7 +3187,7 @@ function updatePanelHeader(session, info) {
   updatePanelControlLabels(session, info);
   syncAttentionAnimation(panel, state.attention === true);
   if (tab) {
-    tab.className = `panel-session-label ${auto ? 'auto' : ''} ${state.attention ? 'needs-attention' : ''}`;
+    tab.className = ['panel-session-label', auto ? 'auto' : '', state.attention ? STATE_CLASS.needsAttention : ''].filter(Boolean).join(' ');
     syncAttentionAnimation(tab, state.attention === true);
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
@@ -3212,9 +3200,9 @@ function updatePanelHeader(session, info) {
     wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
     popover.replaceWith(wrapper.firstElementChild);
   }
-  panel?.classList.toggle('needs-input-pane', state.key === 'needs-input' && state.attention === true);
-  panel?.classList.toggle('needs-exec-pane', state.key === 'needs-approval' && state.attention === true);
-  panel?.classList.toggle('needs-blocked-pane', state.key === 'blocked');
+  panel?.classList.toggle(STATE_CLASS.needsInputPane, state.key === STATE_KEY.needsInput && state.attention === true);
+  panel?.classList.toggle(STATE_CLASS.needsExecPane, state.key === STATE_KEY.needsApproval && state.attention === true);
+  panel?.classList.toggle(STATE_CLASS.needsBlockedPane, state.key === STATE_KEY.blocked);
 }
 
 function refreshSessionChrome(session) {
@@ -3293,10 +3281,10 @@ function startTranscriptStream(session, options = {}) {
   source.onerror = () => {
     stopTranscriptStream(session);
     const pane = document.getElementById(`transcript-pane-${session}`);
-    if (pane?.classList.contains('active')) {
+    if (pane?.classList.contains(CLS.active)) {
       statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
       setTimeout(() => {
-        if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
+        if (document.getElementById(`transcript-pane-${session}`)?.classList.contains(CLS.active)) {
           startTranscriptStream(session, {scrollBottom: false});
         }
       }, 1500);
@@ -3403,7 +3391,7 @@ async function refreshEventLog(session) {
 function refreshOpenEventLogs() {
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`events-pane-${session}`);
-    if (pane?.classList.contains('active')) refreshEventLog(session);
+    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
   }
 }
 
@@ -3960,7 +3948,7 @@ async function showContext(session) {
   title.textContent = t('transcript.tailTitle', {session: sessionLabel(session)});
   body.innerHTML = '';
   body.textContent = t('common.loading');
-  modal.classList.add('open');
+  modal.classList.add(CLS.open);
   const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
@@ -4086,7 +4074,7 @@ if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => {
   const modal = document.getElementById('modal');
-  modal.classList.remove('open', 'about-open', 'share-open');
+  modal.classList.remove(CLS.open, 'about-open', 'share-open');
   scheduleSharePopupLayerPublish({immediate: true});
 };
 function promptAttentionClearElement(target) {

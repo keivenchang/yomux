@@ -79,6 +79,7 @@ from .common import PROJECT_ROOT
 from .common import RUN_HISTORY_PATH
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
+from .common import SessionInfo
 from .common import SUMMARY_MAX_PROMPT_CHARS
 from .common import WATCH_INDEX_PATH
 from .common import YOLOMUX_VERSION
@@ -86,6 +87,7 @@ from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
 from .common import as_dict
 from .common import next_numbered_session_name
+from .common import project_git
 from .common import tail_file_lines
 from .common import truncate_text
 from .common import yolomux_client_revision
@@ -151,6 +153,7 @@ from .types import AutoApproveStatusPayload
 from .types import RunHistoryEntry
 from .types import RunHistoryPayload
 from .types import SearchResult
+from .types import SessionFilesPayload
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
 from .web import server_string
@@ -369,6 +372,7 @@ CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
     "compute_ms",
     "display_elapsed_seconds",
     "generated_at",
+    "generated_ts",
     "history_bytes",
     "history_size",
     "last_counter_seen_at",
@@ -899,7 +903,7 @@ class TmuxWebtermApp:
         self.activity_ledger.load()
         self.activity_heartbeat_next_rotate_at = 0.0
         self.session_files_cache_lock = threading.RLock()
-        self.session_files_cache: dict[tuple[Any, ...], tuple[float, tuple[dict[str, Any], HTTPStatus]]] = {}
+        self.session_files_cache: dict[tuple[Any, ...], tuple[float, tuple[SessionFilesPayload, HTTPStatus]]] = {}
         self.session_files_refreshing_cache_keys: set[tuple[Any, ...]] = set()
         self.tabber_activity_cache_lock = threading.RLock()
         self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = None
@@ -2374,16 +2378,23 @@ class TmuxWebtermApp:
         except (TypeError, ValueError):
             return str(payload)
 
-    def stable_client_event_signature_payload(self, payload: Any) -> Any:
+    def stable_signature_payload(
+        self,
+        payload: Any,
+        volatile_keys: frozenset[str] = CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS,
+    ) -> Any:
         if isinstance(payload, dict):
             return {
-                key: self.stable_client_event_signature_payload(value)
+                key: self.stable_signature_payload(value, volatile_keys)
                 for key, value in payload.items()
-                if key not in CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS
+                if key not in volatile_keys
             }
         if isinstance(payload, list):
-            return [self.stable_client_event_signature_payload(item) for item in payload]
+            return [self.stable_signature_payload(item, volatile_keys) for item in payload]
         return payload
+
+    def stable_client_event_signature_payload(self, payload: Any) -> Any:
+        return self.stable_signature_payload(payload)
 
     def stable_client_event_payload_signature(self, payload: Any) -> str:
         return self.client_event_payload_signature(self.stable_client_event_signature_payload(payload))
@@ -2440,11 +2451,7 @@ class TmuxWebtermApp:
         return payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.SERVICE_UNAVAILABLE
 
     def tmux_signal_signature_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in payload.items()
-            if key not in {"generated_at", "compute_ms"}
-        }
+        return self.stable_signature_payload(payload)
 
     def tmux_signal_patch_payload(self, previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
         previous_windows = previous.get("windows") if isinstance(previous, dict) else None
@@ -3403,8 +3410,7 @@ class TmuxWebtermApp:
             session_scope=activity_summary.get("scope"),
             hours=activity_summary.get("hours"),
         )
-        stable_payload = {key: value for key, value in payload.items() if key not in {"generated_at", "generated_ts"}}
-        signature = self.client_event_payload_signature(stable_payload)
+        signature = self.stable_client_event_payload_signature(payload)
         with self.client_watch_lock:
             previous_signature = self.client_watch_activity_summary_signature
             self.client_watch_activity_summary_signature = signature
@@ -3662,21 +3668,21 @@ class TmuxWebtermApp:
         )
 
     def session_files_disk_cache_path(self, key: tuple[Any, ...]) -> tuple[Path, str]:
-        key_text = json.dumps(key, sort_keys=True, separators=(",", ":"), default=str)
+        key_text = self.client_event_payload_signature(key)
         signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
         return SESSION_FILES_CACHE_DIR / f"{signature}.json", signature
 
     def session_files_disk_manifest_path(self, signature: str) -> Path:
         return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
 
-    def session_files_payload_signature(self, payload: dict[str, Any]) -> str:
-        payload_text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    def session_files_payload_signature(self, payload: SessionFilesPayload | dict[str, Any]) -> str:
+        payload_text = self.client_event_payload_signature(payload)
         return hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
 
     def set_session_files_memory_cache(
         self,
         key: tuple[Any, ...],
-        payload: dict[str, Any],
+        payload: SessionFilesPayload,
         status: HTTPStatus,
         stored_at: float | None = None,
     ) -> None:
@@ -3693,7 +3699,7 @@ class TmuxWebtermApp:
         key: tuple[Any, ...],
         max_age_seconds: float | None = None,
         allow_stale: bool = False,
-    ) -> tuple[dict[str, Any], HTTPStatus, bool, float] | None:
+    ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
         path, signature = self.session_files_disk_cache_path(key)
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -3734,7 +3740,7 @@ class TmuxWebtermApp:
         self,
         path: Path,
         signature: str,
-        payload: dict[str, Any],
+        payload: SessionFilesPayload,
         status: HTTPStatus,
     ) -> None:
         payload_signature = self.session_files_payload_signature(payload)
@@ -3777,7 +3783,7 @@ class TmuxWebtermApp:
         }
         atomic_write_text(self.session_files_disk_manifest_path(signature), json.dumps(manifest, sort_keys=True, separators=(",", ":")), mode=0o600)
 
-    def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: dict[str, Any], status: HTTPStatus) -> None:
+    def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
         path, signature = self.session_files_disk_cache_path(key)
         try:
             with file_lock(path, dir_mode=0o700):
@@ -3788,8 +3794,8 @@ class TmuxWebtermApp:
     def compute_session_files_cache_entry(
         self,
         key: tuple[Any, ...],
-        compute: Callable[[], tuple[dict[str, Any], HTTPStatus]],
-    ) -> tuple[dict[str, Any], HTTPStatus, bool, float]:
+        compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]],
+    ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
         path, signature = self.session_files_disk_cache_path(key)
         try:
             with file_lock(path, dir_mode=0o700):
@@ -3812,9 +3818,9 @@ class TmuxWebtermApp:
         key: tuple[Any, ...],
         max_age_seconds: float | None = None,
         allow_stale: bool = False,
-    ) -> tuple[dict[str, Any], HTTPStatus, bool, float] | None:
+    ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
         now = time.monotonic()
-        stale_cached: tuple[dict[str, Any], HTTPStatus, bool, float] | None = None
+        stale_cached: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None
         with self.session_files_cache_lock:
             cached = self.session_files_cache.get(key)
             if cached:
@@ -3833,7 +3839,7 @@ class TmuxWebtermApp:
             return stale_cached
         return None
 
-    def set_session_files_cache(self, key: tuple[Any, ...], payload: dict[str, Any], status: HTTPStatus) -> None:
+    def set_session_files_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
         self.set_session_files_memory_cache(key, payload, status)
         self.write_session_files_disk_cache(key, payload, status)
 
@@ -3912,7 +3918,7 @@ class TmuxWebtermApp:
         from_ref: str | None = None,
         to_ref: str | None = None,
         repo_refs: dict[str, dict[str, str]] | None = None,
-    ) -> dict[str, Any]:
+    ) -> SessionFilesPayload:
         infos = {info.session: info}
         key = self.session_files_cache_key("payload", infos, info.session, hours, from_ref, to_ref, repo_refs)
         cached = self.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=True)
@@ -3972,7 +3978,7 @@ class TmuxWebtermApp:
         from_ref: str | None = None,
         to_ref: str | None = None,
         repo_refs: dict[str, dict[str, str]] | None = None,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, SessionFilesPayload]:
         if not infos:
             return {}
         if len(infos) == 1:
@@ -3983,7 +3989,7 @@ class TmuxWebtermApp:
                 session: self.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
                 for session, info in infos.items()
             }
-        payloads: dict[str, dict[str, Any]] = {}
+        payloads: dict[str, SessionFilesPayload] = {}
         with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(infos)), thread_name_prefix="session-files-warm") as executor:
             futures = {
                 executor.submit(self.cached_session_files_payload_for_info, info, hours, from_ref, to_ref, repo_refs): session
@@ -4003,7 +4009,7 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None = None,
         force: bool = False,
         extra_errors: list[str] | None = None,
-    ) -> tuple[dict[str, Any], HTTPStatus]:
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
         cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
         max_age = SESSION_FILES_CACHE_SECONDS
         cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
@@ -4215,7 +4221,7 @@ class TmuxWebtermApp:
     ) -> dict[str, Any]:
         selected = info.selected_pane
         agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
-        git_data = project.get("git") if isinstance(project.get("git"), dict) else None
+        git_data = project_git(project)
         pull_request = project.get("pull_request") if isinstance(project.get("pull_request"), dict) else None
         rolling = self.yoagent_session_summary_record(session)
         latest_summary = str(rolling.get("rolling_summary") or summary.get("local") or "").strip()
@@ -4248,7 +4254,7 @@ class TmuxWebtermApp:
         self.prune_yoagent_session_summaries(set(sessions))
         summaries: dict[str, Any] = {}
         ordered_summaries: list[dict[str, Any]] = []
-        session_files_by_session: dict[str, dict[str, Any]] = {}
+        session_files_by_session: dict[str, SessionFilesPayload] = {}
         session_info: dict[str, Any] = {}
         recent_events_by_session = self.event_log.tail_many([session for session in ordered_sessions if session in sessions], limit=5)
         with self.activity_summary_lock:
@@ -5067,7 +5073,7 @@ class TmuxWebtermApp:
                 selected_path,
                 tuple((agent.kind or "", agent.cwd or "", agent.transcript or "", agent.session_id or "") for agent in info.agents),
             ))
-        key_text = json.dumps({"scope": scope, "sessions": rows}, sort_keys=True, separators=(",", ":"), default=str)
+        key_text = self.client_event_payload_signature({"scope": scope, "sessions": rows})
         return hashlib.sha256(key_text.encode("utf-8")).hexdigest()
 
     def tabber_activity_cache_disk_path(self, hours: float, source_signature: str = "") -> tuple[Path, str]:
@@ -5492,7 +5498,7 @@ class TmuxWebtermApp:
         to_ref: str | None = None,
         repo_refs: dict[str, dict[str, str]] | None = None,
         force: bool = False,
-    ) -> tuple[dict[str, Any], HTTPStatus]:
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
         refresh_errors = self.refresh_sessions()
         if session and session not in self.sessions:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
@@ -5530,7 +5536,7 @@ class TmuxWebtermApp:
         invalid = [session for session in requested if session not in self.sessions]
         valid = [session for session in requested if session in self.sessions]
         infos, errors = discover_sessions(valid)
-        payloads: dict[str, dict[str, Any]] = {}
+        payloads: dict[str, SessionFilesPayload] = {}
         statuses: dict[str, int] = {}
         batch_infos: dict[str, SessionInfo] = {}
         for session in requested:
@@ -5545,7 +5551,7 @@ class TmuxWebtermApp:
                 continue
             batch_infos[session] = info
 
-        def load_session_payload(name: str, info: SessionInfo) -> tuple[dict[str, Any], HTTPStatus]:
+        def load_session_payload(name: str, info: SessionInfo) -> tuple[SessionFilesPayload, HTTPStatus]:
             return self.session_files_payload_for_infos(
                 name,
                 {name: info},
@@ -5807,7 +5813,7 @@ class TmuxWebtermApp:
 
     def metadata_badge_signatures_for_session(self, payload: dict[str, Any]) -> dict[str, str]:
         project = as_dict(payload.get("project"))
-        git_data = as_dict(project.get("git"))
+        git_data = project_git(project)
         pr = self.metadata_badge_pull_request(project)
         checks = as_dict(pr.get("checks"))
         status = "" if not pr or pr.get("source_only") else self.metadata_badge_status_state(pr)
@@ -5882,7 +5888,7 @@ class TmuxWebtermApp:
         pr = project.get("pull_request")
         if isinstance(pr, dict) and pr.get("number"):
             return pr
-        git_data = as_dict(project.get("git"))
+        git_data = project_git(project)
         if str(git_data.get("branch") or "") not in {"main", "master"}:
             return {}
         number = pull_request_number_from_subject(str(git_data.get("head") or ""))

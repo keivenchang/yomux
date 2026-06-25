@@ -2341,7 +2341,8 @@ function renderShareClickRipple(x, y, sender = '') {
   ripple.style.top = `${Math.round(y)}px`;
   ripple.style.setProperty('--share-cursor-color', sharePointerSenderColor(sender));
   document.body.appendChild(ripple);
-  setTimeout(() => ripple.remove(), 560);
+  ripple.addEventListener('animationend', () => ripple.remove(), {once: true});
+  ripple.addEventListener('animationcancel', () => ripple.remove(), {once: true});
 }
 
 function renderSharePointerGhost(payload = {}) {

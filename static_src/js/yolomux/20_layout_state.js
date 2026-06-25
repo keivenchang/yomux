@@ -1199,17 +1199,20 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  'needs-approval': {label: 'Needs approval', short: 'ASK?', priority: 0, attention: true},
+  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: 'ASK?', priority: 0, attention: true},
   'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  'needs-input': {label: 'Needs input', short: 'ASK?', priority: 1, attention: true},
-  blocked: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
+  [STATE_KEY.needsInput]: {label: 'Needs input', short: 'ASK?', priority: 1, attention: true},
+  [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
   'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
-  working: {label: 'Working', short: 'RUN', priority: 6, attention: false},
-  idle: {label: 'Idle', short: 'IDLE', priority: 7, attention: false},
+  [STATE_KEY.working]: {label: 'Working', short: 'RUN', priority: 6, attention: false},
+  [STATE_KEY.idle]: {label: 'Idle', short: 'IDLE', priority: 7, attention: false},
   done: {label: 'Done', short: 'DONE', priority: 8, attention: false},
 };
+const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
+const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
+const AGENT_WINDOW_APPROVAL_STATES = new Set([STATE_KEY.approval, STATE_KEY.needsApproval]);
 
 function stateReason(key, params = {}) {
   return t(`state.reason.${key}`, params);
@@ -1218,7 +1221,7 @@ function stateReason(key, params = {}) {
 function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
-  const resolvedKey = stateDefs[key] ? key : 'idle';
+  const resolvedKey = stateDefs[key] ? key : STATE_KEY.idle;
   return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
 }
 
@@ -1232,7 +1235,7 @@ function promptAttentionPayloadSignature(payload = {}) {
   if (prompt.visible === true) {
     return String(prompt.signature || prompt.hash || prompt.question_text || prompt.text || prompt.command || '');
   }
-  if (['approval', 'needs-approval', 'needs-input'].includes(String(screen.key || ''))) {
+  if (ATTENTION_SCREEN_KEYS.has(String(screen.key || ''))) {
     return String(screen.signature || screen.hash || screen.question_text || screen.text || screen.key || '');
   }
   return '';
@@ -1273,7 +1276,7 @@ function terminalDisconnected(session) {
 }
 
 function sessionState(session, info = transcriptMeta.sessions?.[session]) {
-  if (!isTmuxSession(session)) return {key: 'idle', ...stateDef('idle'), reason: t('state.notTmux')};
+  if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
   const approvalPrompt = auto.prompt || {};
@@ -1308,19 +1311,19 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('disconnected', disconnectedReason);
   }
   if (/blocked|denied|rejected/.test(lastAction)) {
-    return stateValue('blocked', stateReason('yoloBlockedApproval'));
+    return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
   }
   if (approvalPromptVisible && approvalYesSelected) {
-    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
+    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
   if (approvalPromptVisible) {
-    return stateValue('needs-input', stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
+    return stateValue(STATE_KEY.needsInput, stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
   }
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
-    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
+    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'));
   }
-  if (screenKey === 'approval') {
-    return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
+  if (screenKey === STATE_KEY.approval) {
+    return stateValue(STATE_KEY.needsApproval, screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
   const agentWindowAttention = agentWindowAttentionState(session, info, auto);
   if (agentWindowAttention) return agentWindowAttention;
@@ -1328,20 +1331,20 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (tmuxSignalStateForSession) {
     return tmuxSignalStateForSession;
   }
-  if (screenKey === 'working') {
-    return stateValue('working', screenText || stateReason('agentWorking'));
+  if (screenKey === STATE_KEY.working) {
+    return stateValue(STATE_KEY.working, screenText || stateReason('agentWorking'));
   }
-  if (screenKey === 'needs-input') {
-    return stateValue('needs-input', screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
+  if (screenKey === STATE_KEY.needsInput) {
+    return stateValue(STATE_KEY.needsInput, screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
   }
   if (screenKey === 'error') {
-    return stateValue('blocked', screenText || stateReason('agentScreenFailed'));
+    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
   }
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
-    return stateValue('needs-input', stateReason('agentWaitingInput'));
+    return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
   if (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText)) {
-    return stateValue('blocked', stateReason('agentErrorBlocker'));
+    return stateValue(STATE_KEY.blocked, stateReason('agentErrorBlocker'));
   }
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
     return stateValue('tests-running', stateReason('testsActive'));
@@ -1353,19 +1356,19 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('done', stateReason('agentComplete'));
   }
   if (agents.length || panes.some(pane => pane.active) || terminals.get(session)?.socket?.readyState === WebSocket.OPEN) {
-    return stateValue('working', stateReason('agentActivePaneDetected'));
+    return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
   }
-  return stateValue('idle', stateReason('noActiveAgent'));
+  return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
 }
 
 function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const windows = sessionAgentWindowStatusPayloads(session, info, auto);
-  const agent = windows.find(item => ['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(String(item?.state || '')));
+  const agent = windows.find(item => AGENT_WINDOW_ATTENTION_STATES.has(String(item?.state || '')));
   if (!agent) return null;
-  const stateKey = ['approval', 'needs-approval'].includes(String(agent.state || '')) ? 'needs-approval' : 'needs-input';
+  const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
   const windowLabel = String(agent.window_label || agent.window || agent.kind || '').trim();
-  const reasonText = String(agent.screen_text || '').trim() || (stateKey === 'needs-approval' ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
+  const reasonText = String(agent.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
   const reason = windowLabel ? `${windowLabel}: ${reasonText}` : reasonText;
   return stateValue(stateKey, reason, promptAttentionExtra(session, auto));
 }
@@ -1394,13 +1397,13 @@ function autoApproveEnabledForSession(payload) {
 }
 
 function autoApproveScreenIsWorking(payload) {
-  return String(payload?.screen?.key || '') === 'working';
+  return String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
 function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return false;
   return sessionAgentWindowStatusPayloads(session, info, payload)
-    .some(agent => String(agent?.state || '').toLowerCase() === 'working');
+    .some(agent => String(agent?.state || '').toLowerCase() === STATE_KEY.working);
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
@@ -1609,7 +1612,7 @@ function tmuxSignalAgentStateForSession(session) {
   const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
   const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
   if (actionRequiredPane) {
-    return stateValue('needs-input', 'tmux agent action required', {tmuxSignal: 'action-required'});
+    return stateValue(STATE_KEY.needsInput, 'tmux agent action required', {tmuxSignal: 'action-required'});
   }
   const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
   if (!panes.length) return null;
@@ -1618,7 +1621,7 @@ function tmuxSignalAgentStateForSession(session) {
   const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
   const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
   if (bellWindow) {
-    return stateValue('needs-input', 'tmux bell alert', {tmuxSignal: 'bell'});
+    return stateValue(STATE_KEY.needsInput, 'tmux bell alert', {tmuxSignal: 'bell'});
   }
   const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
   if (quietWindow && livePanes.length) {
@@ -1631,7 +1634,7 @@ function tmuxSignalAgentStateForSession(session) {
   if (runningPane) {
     const command = tmuxSignalPaneCommand(runningPane);
     const mode = runningPane?.alternate_on === true ? 'alternate screen' : 'process';
-    return stateValue('working', `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
+    return stateValue(STATE_KEY.working, `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
   }
   return null;
 }
@@ -1768,13 +1771,13 @@ function globalActivityCounts() {
     const key = String(payload?.screen?.key || '');
     const promptVisible = payload?.prompt?.visible === true;
     const promptAttentionKey = promptVisible
-      ? (payload?.prompt?.yes_selected === true ? 'needs-approval' : 'needs-input')
+      ? (payload?.prompt?.yes_selected === true ? STATE_KEY.needsApproval : STATE_KEY.needsInput)
       : key;
     const promptSignature = promptAttentionPayloadSignature(payload);
     const promptCleared = promptAttentionIsCleared(session, promptSignature);
-    if (key === 'working' && !runningSignalSessions.has(session)) running += 1;
-    else if (['approval', 'needs-approval', 'needs-input'].includes(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
-    else if (key === 'blocked') blocked += 1;
+    if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
+    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
+    else if (key === STATE_KEY.blocked) blocked += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
   const total = signalWindows.length
@@ -1856,17 +1859,17 @@ function statusIndicatorClasses(...classes) {
 
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
-  if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
+  if (tone === STATE_KEY.working) return ['status-indicator--working', 'heartbeat-pulse'];
   if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
-  if (tone === 'idle') return ['status-indicator--idle'];
+  if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
   return [];
 }
 
 function statusIndicatorToneStyle(tone) {
-  return ['working', 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
@@ -1917,9 +1920,9 @@ function sessionStateHtml(state) {
   // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
-  if (!state || (!state.showBadge && ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
+  if (!state || (!state.showBadge && [STATE_KEY.working, 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
-    clearable: ['needs-approval', 'needs-input'].includes(state.key) && Boolean(state.promptSignature),
+    clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
     session: state.session,
     promptSignature: state.promptSignature,
   });
@@ -2102,14 +2105,14 @@ function openKeyboardShortcutsOverlay() {
   const body = node.querySelector('.keyboard-shortcuts-body');
   if (body) body.innerHTML = keyboardShortcutsHtml();
   node.hidden = false;
-  node.classList.add('open');
+  node.classList.add(CLS.open);
   node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
 }
 
 function closeKeyboardShortcutsOverlay() {
   if (!keyboardShortcutsNode) return;
   keyboardShortcutsNode.hidden = true;
-  keyboardShortcutsNode.classList.remove('open');
+  keyboardShortcutsNode.classList.remove(CLS.open);
 }
 
 function commandPaletteAllTabItems() {
@@ -3059,7 +3062,7 @@ function openCommandPalette(options = {}) {
   commandPaletteQuery = '';
   commandPaletteIndex = 0;
   node.hidden = false;
-  node.classList.add('open');
+  node.classList.add(CLS.open);
   const input = node.querySelector('.command-palette-input');
   input.value = '';
   // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
@@ -3081,7 +3084,7 @@ function openFileQuickOpen() {
 function closeCommandPalette() {
   if (!commandPaletteNode) return;
   commandPaletteNode.hidden = true;
-  commandPaletteNode.classList.remove('open');
+  commandPaletteNode.classList.remove(CLS.open);
   if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
   fileQuickOpenDebounce = null;
 }
@@ -3211,8 +3214,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
 }
 
 function shouldNotifyTransitionKey(key) {
-  const configured = initialSetting('notifications.notify_transitions', ['needs-input', 'needs-approval', 'blocked']);
-  const transitions = Array.isArray(configured) ? configured : ['needs-input', 'needs-approval', 'blocked'];
+  const defaultTransitions = [STATE_KEY.needsInput, STATE_KEY.needsApproval, STATE_KEY.blocked];
+  const configured = initialSetting('notifications.notify_transitions', defaultTransitions);
+  const transitions = Array.isArray(configured) ? configured : defaultTransitions;
   return transitions.includes(key);
 }
 

@@ -262,7 +262,7 @@ function shareEntryHtml(share) {
       <span>${esc(mode)}</span>
       <span>${esc(scheme)}</span>
       ${share.debugProfile ? `<span title="${esc(t('share.debugProfileHelp'))}">${esc(t('share.debugProfileOn'))}</span>` : ''}
-      <button type="button" class="share-extend-button" data-share-extend>${esc(t('share.extendTenMinutes'))}</button>
+      <button type="button" class="share-extend-button control-active-hover" data-share-extend>${esc(t('share.extendTenMinutes'))}</button>
       <button type="button" class="danger share-stop-inline" data-share-stop>${esc(t('share.stop'))}</button>
     </div>
     ${shareViewerListHtml(share)}
@@ -452,7 +452,7 @@ function updateShareViewerBanner() {
   });
   const fit = document.createElement('button');
   fit.type = 'button';
-  fit.className = 'share-view-fit-toggle';
+  fit.className = 'share-view-fit-toggle control-active-hover';
   fit.dataset.shareViewerControl = 'fit';
   fit.textContent = shareViewFit === 'cover' ? t('share.fit.cover') : t('share.fit.contain');
   fit.title = shareViewFit === 'cover' ? t('share.fit.switchToContain') : t('share.fit.switchToCover');
@@ -469,7 +469,7 @@ function updateShareViewerBanner() {
   if (shareDebugEnabled) {
     const debug = document.createElement('button');
     debug.type = 'button';
-    debug.className = 'share-view-fit-toggle share-debug-copy';
+    debug.className = 'share-view-fit-toggle share-debug-copy control-active-hover';
     debug.dataset.shareViewerControl = 'debug';
     debug.textContent = 'debug';
     debug.title = 'Copy share mirror diagnostics';

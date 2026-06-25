@@ -9,7 +9,11 @@ client_name: Claude Code
 client_version: synthetic Claude Code fixture
 client_version_slug: claude-code-synthetic
 codex_version: ''
-cursor: {}
+cursor:
+  character: ❯
+  synthesized: true
+  x: 0
+  y: 2
 expected:
   action: null
   agent: claude

@@ -238,6 +238,8 @@ Write access requires HTTPS. A write viewer does not publish `layout`, `ui-state
 
 All API routes require auth unless the process was intentionally started with the local-only `YOLOMUX_TEST_AUTH_BYPASS=1` test bypass. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input, tmux-scroll, and resize messages. Share-token guests are narrower than `auth.yaml` readonly users: tokens are scoped to one share and whitelisted only for share-scoped page, static, replay, terminal, status, and readonly file/data routes. The test bypass never escalates a share-token request; share-token scoping still wins.
 
+Linear fallback links use the slug-less `https://linear.app/issue` base by default. Set `YOLOMUX_LINEAR_ISSUE_BASE_URL=https://linear.app/<workspace>/issue` when you want local fallback links to point at a specific Linear workspace; Linear API results keep their server-provided URL.
+
 - `GET /api/transcripts` returns pane, process, transcript-path, `project`, and `window_metadata[]` metadata. Use `project.git` only for the session-level summary. Claude/Codex per-window path/branch/git/active UI must use the backend-owned `agent_windows` rows from `/api/activity` or `/api/auto-approve`, not frontend reconstruction from `window_metadata[]` or pane cwd.
 - `GET /api/tmux?session=project1&lines=90` returns a tmux capture-pane snapshot.
 - `GET /api/transcript?session=project1&lines=120` returns the transcript tail for one session.

@@ -6,9 +6,17 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-25
 
+### Refactor simplify/reuse audit
+
+- Completed and removed `DOIT.refactor_simplify_reuse.md`. The final pass moved the transparent native drag-image hidden geometry into `.transparent-drag-image`, removed the matching inline style writes from `transparentNativeDragImage()`, and routed the clipboard textarea fallback through `OFFSCREEN_POSITION_PX`. Earlier passes in the same queue routed the audited environment defaults, theme/light-mode drifts, state keys, metadata shapes, event signatures, settings fallbacks, session-files types, query validation, button/hover CSS owners, and CSS/JS timing split through their shared owners. Verification included `python3 tools/static_build.py`, `python3 tools/static_build.py --check`, `node --check static/yolomux.js`, `node tests/editor_preview.test.js`, `node tests/tabber.test.js`, and source invariants for the final drag-image/off-screen owner.
+
 ### DOIT queue consolidation
 
 - Moved the remaining root `DOIT*.md` queue files from `~/yolomux.dev8002` into `~/yolomux.dev8003` and studied the consolidated queue set. Closed the completed license-rewrite and single-owner background indexing queue files: their source work, tests, docs, current-tree migration, and isolated live verification were already done; the remaining force-push and live-fleet checks now live in `docs/TODO.md` because they require explicit authorization or a deliberate multi-port restart. Updated the Claude fixture queue so stale checkboxes match the shipped cursor-follow/navigation work, leaving only the real-capture adoption decision open. Kept the refactor audit as an active backlog.
+
+### Claude prompt fixture cursors
+
+- Completed and removed `DOIT.claude-fixture-cursor.md`. The missing real-capture files named by the old queue are no longer present, so the durable adoption decision is to keep the current synthetic fixture coverage and add explicit synthesized cursor metadata for the remaining cursor-less Claude fixtures. The root and promoted-captures inventories now have no Claude fixture with `cursor=missing`, and `tests/test_mock_agents.py` includes a regression for that contract. Verification: direct inventory scan reported `all claude fixtures have cursor metadata`, `python3 -m pytest tests/test_mock_agents.py::test_all_claude_prompt_corpus_fixtures_have_cursor_metadata -q` passed, and full `python3 -m pytest tests/test_mock_agents.py -q` passed (`152 passed`).
 
 ## 2026-06-24
 

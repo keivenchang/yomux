@@ -12,6 +12,7 @@ from yolomux_lib import app as app_module
 from yolomux_lib import http_routes
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
+from yolomux_lib.common import ACTIVITY_MAX_HOURS
 from yolomux_lib.common import error_payload
 from yolomux_lib.server import Handler
 from yolomux_lib.server import parse_query_float
@@ -182,6 +183,53 @@ def test_parse_query_float_rejects_non_finite_and_negative_values():
     assert parse_query_float({"hours": ["nan"]}, "hours", 24.0) == (None, "hours must be finite")
     assert parse_query_float({"hours": ["inf"]}, "hours", 24.0) == (None, "hours must be finite")
     assert parse_query_float({"hours": ["-1"]}, "hours", 24.0) == (None, "hours must be at least 0")
+
+
+def test_write_validated_float_result_centralizes_activity_hours_validation():
+    handler = object.__new__(Handler)
+    writes = []
+    handler.write_app_result = lambda result: writes.append(("app", result))
+    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
+
+    Handler.write_validated_float_result(
+        handler,
+        {"hours": ["8761"]},
+        "hours",
+        24.0,
+        ACTIVITY_MAX_HOURS,
+        lambda value: ({"hours": value}, HTTPStatus.OK),
+    )
+    assert writes == [("app", ({"hours": ACTIVITY_MAX_HOURS}, HTTPStatus.OK))]
+
+    writes.clear()
+    Handler.write_validated_float_result(
+        handler,
+        {"hours": ["nope"]},
+        "hours",
+        24.0,
+        ACTIVITY_MAX_HOURS,
+        lambda value: ({"hours": value}, HTTPStatus.OK),
+    )
+    assert writes == [("json", HTTPStatus.BAD_REQUEST, {"error": "hours must be a number", "status": HTTPStatus.BAD_REQUEST})]
+
+
+def test_activity_hours_routes_share_float_validation_owner():
+    for handler in [http_routes.get_activity, http_routes.get_session_files_batch, http_routes.get_session_files]:
+        body = inspect.getsource(handler)
+        assert "write_validated_float_result" in body
+        assert "ACTIVITY_MAX_HOURS" in body
+        assert "parse_query_float(qs, \"hours\"" not in body
+        assert "24.0 * 365.0" not in body
+
+
+def test_session_files_route_validates_hours_before_share_scope():
+    app = SimpleNamespace(session_files_payload=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("app should not run")))
+    handler, _calls, writes = route_handler("/api/session-files", app)
+    handler.share_sessions = lambda: ["allowed"]
+
+    http_routes.get_session_files(handler, SimpleNamespace(query="session=blocked&hours=nope"), None)
+
+    assert writes == [("json", HTTPStatus.BAD_REQUEST, {"error": "hours must be a number", "status": HTTPStatus.BAD_REQUEST})]
 
 
 def test_write_int_query_app_result_parses_and_validates_once():

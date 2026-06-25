@@ -19,6 +19,33 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
   return infoSessionFileLookbackHours;
 }
 
+function bindInfoPanel(panel) {
+  if (!panel || panel.__yolomuxInfoPanelBound === true) return;
+  panel.__yolomuxInfoPanelBound = true;
+  delegate(panel, 'click', '[data-info-refresh]', event => {
+    event.preventDefault();
+    refreshTranscripts({force: true});
+    refreshActivitySummary({force: true});
+  });
+  delegate(panel, 'click', '[data-info-sort]', (_event, button) => {
+    setInfoBranchSort(button.dataset.infoSort);
+    renderInfoPanel();
+  });
+  delegate(panel, 'click', '[data-info-session-drawer]', (_event, button) => {
+    toggleInfoSessionDrawer(button.dataset.infoSessionDrawer || '');
+  });
+  delegate(panel, 'click', '[data-watched-remove]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    removeWatchedPr(button.dataset.watchedRemove);
+  });
+  panel.addEventListener('change', event => {
+    const lookback = event.target.closest('[data-info-lookback]');
+    if (lookback && panel.contains(lookback)) setInfoSessionFileLookbackHours(lookback.value);
+  });
+  if (typeof bindInfoColumnResizers === 'function') bindInfoColumnResizers(panel);
+}
+
 function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
@@ -40,15 +67,7 @@ function createInfoPanel() {
         <div id="info-watched" class="info-watched"></div>
       </div>`;
   bindPanelShell(panel, infoItemId);
-  panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
-    event.preventDefault();
-    refreshTranscripts({force: true});
-    refreshActivitySummary({force: true});
-  });
-  panel.addEventListener('change', event => {
-    const lookback = event.target.closest('[data-info-lookback]');
-    if (lookback && panel.contains(lookback)) setInfoSessionFileLookbackHours(lookback.value);
-  });
+  bindInfoPanel(panel);
   renderInfoPanel();
   return panel;
 }

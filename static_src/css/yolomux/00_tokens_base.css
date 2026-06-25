@@ -677,6 +677,7 @@ body.theme-light {
 .actions button,
 .info-refresh,
 .info-sort-button,
+.btn-base,
 .changes-repo-head,
 .file-editor-mode-control button,
 .file-editor-preview-font-panel button,
@@ -700,6 +701,13 @@ body.theme-light {
   border: 0;
   background: transparent;
   cursor: pointer;
+  font: inherit;
+}
+.control-active-hover:hover,
+.control-active-hover:focus-visible {
+  outline: 0;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 html {
   height: 100%;

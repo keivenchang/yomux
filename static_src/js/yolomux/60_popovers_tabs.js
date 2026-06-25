@@ -419,8 +419,8 @@ function yoloMarkerHtml(session, auto, options = {}) {
 function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
   // The tab's AI status indicator must follow the same working condition as the YO state, while keeping the
   // Claude/Codex symbol static and putting the glow on the separate green ball. Prefer a window literally
-  // reporting state==='working'; otherwise, when the session is working only via the screen-state proxy
-  // (screen.key==='working' with no per-window 'working' row), present the current/first agent window as
+  // reporting STATE_KEY.working; otherwise, when the session is working only via the screen-state proxy
+  // (a working screen key with no per-window working row), present the current/first agent window as
   // working so the separate ball appears instead of the indicator vanishing.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
@@ -431,7 +431,7 @@ function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveSta
   if (!sessionYoloIsWorking(session, payload)) return null;
   const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
   if (!candidate || agentWindowIsAttentionState(candidate.state)) return null;
-  return {...candidate, state: 'working'};
+  return {...candidate, state: STATE_KEY.working};
 }
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
@@ -461,10 +461,10 @@ function pullRequestCompactBadgesHtml(session, pr) {
 }
 
 function applySessionStateClasses(node, state) {
-  node.classList.toggle('needs-attention', state?.attention === true);
-  node.classList.toggle('needs-input', state?.key === 'needs-input' && state?.attention === true);
-  node.classList.toggle('needs-exec', state?.key === 'needs-approval' && state?.attention === true);
-  node.classList.toggle('needs-blocked', state?.key === 'blocked');
+  node.classList.toggle(STATE_CLASS.needsAttention, state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsInput, state?.key === STATE_KEY.needsInput && state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsExec, state?.key === STATE_KEY.needsApproval && state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsBlocked, state?.key === STATE_KEY.blocked);
   syncAttentionAnimation(node, state?.attention === true);
 }
 
@@ -759,14 +759,14 @@ function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, o
 }
 
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
-  const state = String(agent?.state || 'idle');
+  const state = String(agent?.state || STATE_KEY.idle);
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
-    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
+    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
   }
   if (agentWindowIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
-  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : 'idle';
+  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
 }
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
@@ -820,7 +820,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _session: session,
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
-      state: String(agent?.state || 'idle'),
+      state: String(agent?.state || STATE_KEY.idle),
       current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
         ? agentWindowPayloadCurrent(agent) === true
         : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
@@ -1051,9 +1051,15 @@ function linearIssueHtml(issue) {
   return linkHtml(issue.url, label, issue.title || '');
 }
 
+function linearIssueUrl(identifier) {
+  const id = String(identifier || '').trim();
+  if (!id || !linearIssueBaseUrl) return '';
+  return `${linearIssueBaseUrl}/${encodeURIComponent(id)}`;
+}
+
 function linearIssueLinkHtml(identifier) {
   if (!identifier) return '';
-  return linkHtml(`https://linear.app/nv/issue/${encodeURIComponent(identifier)}`, identifier, identifier);
+  return linkHtml(linearIssueUrl(identifier), identifier, identifier);
 }
 
 function pullRequestLinkForBranch(git, branch) {
@@ -1279,13 +1285,6 @@ function transparentNativeDragImage() {
   if (transparentDragImage) return transparentDragImage;
   const node = document.createElement('div');
   node.className = 'transparent-drag-image';
-  node.style.position = 'fixed';
-  node.style.left = '-10000px';
-  node.style.top = '-10000px';
-  node.style.width = '1px';
-  node.style.height = '1px';
-  node.style.opacity = '0';
-  node.style.pointerEvents = 'none';
   document.body.appendChild(node);
   transparentDragImage = node;
   return node;
@@ -1337,7 +1336,7 @@ function paneDragPreviewMetrics(slot, event) {
   const sourceWidth = Math.max(1, Number(rect?.width) || fallbackWidth);
   const sourceHeight = Math.max(1, Number(rect?.height) || fallbackHeight);
   const viewport = appViewport();
-  const viewportWidth = Math.max(320, Number(viewport.width) || 1200);
+  const viewportWidth = effectiveViewportWidth(viewport);
   const viewportHeight = Math.max(240, Number(viewport.height) || 800);
   const maxWidth = Math.min(720, Math.max(220, viewportWidth * 0.64));
   const maxHeight = Math.min(420, Math.max(160, viewportHeight * 0.58));

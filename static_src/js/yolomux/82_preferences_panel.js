@@ -896,7 +896,7 @@ function bindPreferencesPanel(panel) {
       const section = sectionToggle.closest('[data-preference-section]');
       const collapsed = collapsedPreferenceSections.has(title);
       if (section) {
-        section.classList.toggle('collapsed', collapsed);
+        section.classList.toggle(CLS.collapsed, collapsed);
         sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
         const settings = section.querySelector('.preferences-settings');
         if (settings) settings.hidden = collapsed;

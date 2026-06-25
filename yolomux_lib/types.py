@@ -12,12 +12,23 @@ from typing import TypedDict
 
 
 class SessionFileEntry(TypedDict, total=False):
+    session: str
     path: str
     relative_path: str
+    abs_path: str
     repo: str
     agents: list[str]
+    agent: str
+    agent_windows: list[dict[str, Any]]
     status: str
     mtime: float
+    size: int | None
+    missing: bool
+    source: str
+    added: int | None
+    removed: int | None
+    diff_tracked: bool
+    uploaded: bool
 
 
 class RepoPayload(TypedDict, total=False):
@@ -26,16 +37,26 @@ class RepoPayload(TypedDict, total=False):
     touched_count: int
     added: int
     removed: int
+    from_ref: str
+    to_ref: str
+    error: str
+    ahead: int
+    behind: int
 
 
 class SessionFilesPayload(TypedDict, total=False):
     session: str
+    hours: float
     files: list[SessionFileEntry]
     repos: list[RepoPayload]
     errors: list[str]
+    warnings: list[str]
     from_ref: str
     to_ref: str
     refs_by_repo: dict[str, list[dict[str, Any]]]
+    cache: dict[str, Any]
+    error: str
+    refreshing_elsewhere: bool
 
 
 class AutoApproveState(TypedDict, total=False):

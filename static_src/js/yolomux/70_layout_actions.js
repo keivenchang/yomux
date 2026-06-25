@@ -1186,9 +1186,9 @@ function projectMetaParts(session, info, options = {}) {
     const position = Math.max(0, repoIndex) + 1;
     const switchLabel = `${position}/${repos.length}`;
     return `<span class="meta-repo-switch" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">
-      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
-      <button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
-      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
+      <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
+      <button type="button" class="btn-base meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
+      <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
     </span>`;
   })() : '';
   if (!git) {
@@ -1783,7 +1783,7 @@ function refreshTerminal(session) {
 function terminalIsVisible(session, container) {
   const pane = document.getElementById(`terminal-pane-${session}`);
   return Boolean(
-    pane?.classList.contains('active')
+    pane?.classList.contains(CLS.active)
     && container.clientWidth > 40
     && container.clientHeight > 40
   );
@@ -1802,7 +1802,7 @@ function terminalAttentionRawText(value) {
 
 function terminalAttentionQuestionTexts(session) {
   const state = sessionState(session, transcriptMeta.sessions?.[session]);
-  if (!['needs-input', 'needs-approval'].includes(String(state?.key || '')) || state?.attention === false) return [];
+  if (![STATE_KEY.needsInput, STATE_KEY.needsApproval].includes(String(state?.key || '')) || state?.attention === false) return [];
   const payload = autoApproveStates.get(session) || {};
   const candidates = [
     payload.display?.question_text,

@@ -167,7 +167,7 @@ async function runEditorPreviewSuite() {
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
     const dotBlock = sessionsCss.match(/\.status-indicator--dot\s*\{[^}]*\}/)?.[0] || '';
-    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === 'working'[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === 'idle'[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/activity-dot status tones are centralized in one shared parent helper');
+    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === STATE_KEY\.working[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === STATE_KEY\.idle[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/activity-dot status tones are centralized in one shared parent helper');
     assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK? badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'ASK? status labels inherit shared status-indicator tone behavior without badge text-transform');
@@ -220,7 +220,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse duration token');
     assert.ok(/root\.setProperty\('--pulse-duration', `\$\{Math\.max\(0, redReminderMs\) \/ 1000\}s`\)/.test(settingsRuntimeSource), 'renamed red/yellow/green status pulse setting drives the actual shared pulse duration');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
-    assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation:\s*metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), 'metadata pulse no longer has a hardcoded duration');
+    assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation-name:\s*metadata-badge-pulse;[^}]*animation-duration:\s*var\(--pulse-duration\);[^}]*animation-timing-function:\s*var\(--pulse-easing\);[^}]*animation-iteration-count:\s*infinite;/.test(sessionsCss), 'metadata pulse repeats until the server-window class is removed');
+    assert.equal(/metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), false, 'metadata pulse no longer has a fixed iteration count');
     assert.equal(/900ms ease-in-out infinite alternate|metadata-badge-pulse 1\.4s/.test(sessionsCss), false, 'old hardcoded pulse durations are gone from session/popover CSS');
     assert.ok(/\.file-tree-date\s*\{[\s\S]*border:\s*1px solid transparent[\s\S]*border-radius:\s*5px/.test(treeCss), 'recency date cells have a visible border target for the shared attention-ring animation');
     assert.equal(/file-tree-recency-pulse/.test(treeCss + activitySource), false, 'the old standalone file-tree recency pulse is gone');
@@ -433,6 +434,8 @@ async function runEditorPreviewSuite() {
     ], 'all data-copy-path clicks are handled by the shared delegated owner');
     assert.ok(source.includes('globalThis.isSecureContext !== false && clipboard?.writeText'), 'copy avoids the async clipboard API when the page is explicitly insecure');
     assert.ok(source.includes('if (copyTextToClipboardViaCopyEvent(value)) return;'), 'copy falls back through a synchronous copy event before the textarea fallback');
+    assert.ok(source.includes('const OFFSCREEN_POSITION_PX = -10000;'), 'off-screen JS positioning uses one named constant');
+    assert.ok(/textarea\.style\.left = `\$\{OFFSCREEN_POSITION_PX\}px`;[\s\S]*textarea\.style\.top = `\$\{OFFSCREEN_POSITION_PX\}px`;/.test(source), 'textarea clipboard fallback routes both off-screen axes through the shared constant');
     assert.ok(source.includes("statusOk(localizedHtml('status.copied'))"), 'copy success reports a generic copied status for path, session ID, and transcript buttons');
     assert.ok(source.includes("statusErr(localizedHtml('status.copyFailed', {error}))"), 'copy failure reports the error through the shared status line');
     assert.equal(source.includes('data-copy-transcript-path'), false, 'terminal transcript path no longer uses a parallel copy attribute');
@@ -904,7 +907,7 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes("if (key === 'cooldown') return 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
     assert.ok(yoloCss.includes('.status-indicator--cooldown') && yoloCss.includes('var(--accent-gold)'), 'cooldown dot uses the shared theme-aware yellow/gold token');
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(yoloCss), 'the --active current agent glyph uses the glow-cadence; working renders a static symbol + glowing green ball');
-    assert.ok(source.includes("['working', 'active', 'attention', 'cooldown'].includes(tone)"), 'agent status wrappers receive the shared animation phase style');
+    assert.ok(source.includes("[STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone)"), 'agent status wrappers receive the shared animation phase style');
     assert.equal(/agent-symbol-status-alternate|agent-status-dot-alternate|--agent-alternate-animation-delay|--agent-alternate-pulse-duration/.test(yoloCss + source), false, 'built assets do not include the old alternating symbol/ball implementation');
     assert.ok(source.includes("status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse"), 'cooldown tone inherits heartbeat in the built source');
     assert.ok(/\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb:\s*245 197 66/.test(yoloCss), 'cooldown dots use the yellow glow in the built CSS');
@@ -1551,7 +1554,7 @@ async function runEditorPreviewSuite() {
 
   test('t@6493', () => {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/\.actions button,\s*\.info-refresh,\s*\.info-sort-button,\s*\.changes-repo-head,[\s\S]*\.file-editor-toolbar button,[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;/.test(css), 'I1: common button reset/flex base is centralized');
+    assert.ok(/\.actions button,\s*\.info-refresh,\s*\.info-sort-button,\s*\.btn-base,\s*\.changes-repo-head,[\s\S]*\.file-editor-toolbar button,[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(css), 'I1: common button reset/flex base is centralized');
     assert.equal(/\.actions button\s*\{[^}]*display:\s*inline-flex/.test(css), false, 'I1: topbar actions do not restate the shared inline-flex base');
     assert.equal(/\.info-refresh\s*\{[^}]*cursor:\s*pointer/.test(css), false, 'I1: info refresh does not restate shared cursor behavior');
     assert.equal(/\.file-editor-mode-control button\s*\{[^}]*background:\s*transparent/.test(css), false, 'I1: editor mode buttons do not restate shared transparent background');
@@ -1750,6 +1753,14 @@ async function runEditorPreviewSuite() {
       {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
     ]});
     assert.equal(api.sessionState('4', {agents: [{kind: 'claude'}, {kind: 'codex'}], panes: []}).key, 'needs-input', 'a background agent window needing input propagates ASK? to the session tab');
+    api.setAutoApproveStateForTest('4', {agent_windows: [
+      {kind: 'codex', state: 'interrupted', window_index: 1, window_label: '1:codex', screen_text: 'What should Codex do instead?'},
+    ]});
+    assert.equal(api.sessionState('4', {agents: [{kind: 'codex'}], panes: []}).key, 'needs-input', 'an interrupted background agent window propagates ASK? to the session tab');
+    api.setAutoApproveStateForTest('4', {agent_windows: [
+      {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
+      {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
+    ]});
     const agentPopover = api.sessionPopoverHtml('4', {panes: []}, 'claude', false);
     assert.ok(/session-agent-kind[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*agent-window-status-dot[^"]*status-indicator--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows a static Claude symbol plus green ball before the tmux window label');
     assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot[^"]*status-indicator--attention[^"]*attention-pulse[\s\S]*1:codex/.test(agentPopover), 'ASK? popover row shows a static Codex symbol plus red attention ball before the label');
@@ -3009,23 +3020,20 @@ async function runEditorPreviewSuite() {
     assert.equal(api.setInfoDescColumnWidthForTest(5000), 1600, 'YO!info desc column width clamps to its maximum');
     assert.equal(api.resetInfoDescColumnWidthForTest(), 310, 'YO!info desc column reset restores the default');
     const runResizeDrag = (column, moveX) => {
-      const handleListeners = new Map();
       let capturedPointer = null;
       let releasedPointer = null;
-      const resizeHandle = {
-        dataset: {infoColumnResize: column},
-        addEventListener(type, listener) { handleListeners.set(type, listener); },
-        setPointerCapture(pointerId) { capturedPointer = pointerId; },
-        releasePointerCapture(pointerId) { releasedPointer = pointerId; },
-      };
-      const resizeNode = {
-        querySelectorAll(selector) {
-          return selector === '[data-info-column-resize]' ? [resizeHandle] : [];
-        },
-      };
+      const resizeNode = new TestElement(`resize-root-${column}`);
+      const resizeHandle = new TestElement(`resize-handle-${column}`, 'button');
+      resizeHandle.dataset.infoColumnResize = column;
+      resizeHandle.setPointerCapture = pointerId => { capturedPointer = pointerId; };
+      resizeHandle.releasePointerCapture = pointerId => { releasedPointer = pointerId; };
+      resizeNode.appendChild(resizeHandle);
       api.bindInfoColumnResizersForTest(resizeNode);
-      assert.equal(resizeHandle.dataset.bound, 'true', `YO!info ${column} resize handle binds once`);
-      handleListeners.get('pointerdown')({
+      api.bindInfoColumnResizersForTest(resizeNode);
+      assert.equal(resizeNode.listeners.get('pointerdown').length, 1, `YO!info ${column} resize root binds pointerdown once`);
+      assert.equal(resizeHandle.dataset.bound, undefined, `YO!info ${column} resize handle does not carry dead per-render bound state`);
+      resizeNode.listeners.get('pointerdown')[0]({
+        target: resizeHandle,
         pointerId: 7,
         clientX: 100,
         preventDefault() {},
@@ -3044,6 +3052,18 @@ async function runEditorPreviewSuite() {
     assert.equal(api.infoDescColumnWidthForTest(), 460, 'YO!info desc resize drag changes the column width');
     assert.equal(api.storageValueForTest('yolomux.infoDescColumnWidth.v1'), '460', 'YO!info desc resize drag persists the final width');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const renderInfoPanelSource = terminalBootSource.slice(terminalBootSource.indexOf('function renderInfoPanel()'), terminalBootSource.indexOf('function infoColumnResizeConfig'));
+    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*delegate\(panel, 'click', '\[data-info-sort\]'[\s\S]*delegate\(panel, 'click', '\[data-info-session-drawer\]'[\s\S]*delegate\(panel, 'click', '\[data-watched-remove\]'/.test(infoPanelSource), 'YO!info click actions bind once on the persistent panel root');
+    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*bindInfoColumnResizers\(panel\)/.test(infoPanelSource), 'YO!info column resize actions bind once on the persistent panel root');
+    assert.ok(/function bindInfoColumnResizers\(node\)[\s\S]*__yolomuxInfoColumnResizersBound[\s\S]*delegate\(node, 'pointerdown', '\[data-info-column-resize\]'/.test(terminalBootSource), 'YO!info column resizers use one delegated pointerdown owner');
+    assert.equal(/dataset\.bound/.test(terminalBootSource), false, 'YO!info column resizers do not use the dead per-handle dataset.bound guard');
+    assert.equal(renderInfoPanelSource.includes('bindInfoColumnResizers'), false, 'renderInfoPanel does not re-bind column resizers after every repaint');
+    assert.equal(/querySelectorAll\('\[data-info-sort\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach sort click listeners after every repaint');
+    assert.equal(/querySelectorAll\('\[data-info-session-drawer\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach drawer click listeners after every repaint');
+    assert.equal(/querySelectorAll\('\[data-watched-remove\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderWatchedPrs does not reattach remove click listeners after every repaint');
+    assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(terminalBootSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
     assert.ok(/function setInfoColumnWidth\(column, value, options = \{\}\)[\s\S]*const previous = infoColumnWidth\(column\)[\s\S]*scheduleShareUiStatePublish\(\)/.test(source), 'YO!info column width changes schedule a host share UI-state snapshot');
     assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*columnWidths:[\s\S]*branch:[\s\S]*infoBranchColumnWidthPx[\s\S]*desc:[\s\S]*infoDescColumnWidthPx[\s\S]*options\.includeRows !== false[\s\S]*branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows and column widths when full state is requested');
     assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*setInfoColumnWidth\('branch', widths\.branch, \{persist: false, publish: false\}\)[\s\S]*setInfoColumnWidth\('desc', widths\.desc, \{persist: false, publish: false\}\)/.test(source), 'share clients apply host YO!info rows and column widths without persisting or echo-publishing');
@@ -3677,6 +3697,30 @@ async function runEditorPreviewSuite() {
     assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'pr-merged is opt-in, off by default');
   });
 
+  test('state contract keys route through STATE_KEY owners', () => {
+    const bootSrc = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.ok(/const STATE_KEY = Object\.freeze\(\{[\s\S]*needsApproval: 'needs-approval'[\s\S]*needsInput: 'needs-input'[\s\S]*working: 'working'[\s\S]*idle: 'idle'/.test(bootSrc), 'STATE_KEY owns the agent/session state-key contract');
+    assert.ok(/const STATE_CLASS = Object\.freeze\(\{[\s\S]*needsInput: STATE_KEY\.needsInput[\s\S]*needsInputPane: `\$\{STATE_KEY\.needsInput\}-pane`/.test(bootSrc), 'STATE_CLASS derives state-backed CSS classes from STATE_KEY');
+    const auditedSource = [
+      'static_src/js/yolomux/20_layout_state.js',
+      'static_src/js/yolomux/45_agent_window_activity.js',
+      'static_src/js/yolomux/60_popovers_tabs.js',
+      'static_src/js/yolomux/70_layout_actions.js',
+      'static_src/js/yolomux/99_terminal_boot.js',
+    ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
+    const contractKeys = '(approval|blocked|interrupted|needs-approval|needs-input|working|idle)';
+    const equalitySubjects = '(screenKey|promptAttentionKey|key|stateKey|previous\\.state|state\\.key)';
+    const rawLiteralChecks = [
+      new RegExp(`classList\\??\\.\\s*(?:add|remove|toggle|contains)\\s*\\(\\s*['"](?:approval|blocked|interrupted|needs-approval|needs-input|idle)['"]`),
+      new RegExp(`\\b${equalitySubjects}\\s*={2,3}\\s*['"]${contractKeys}['"]`),
+      new RegExp(`['"]${contractKeys}['"]\\s*={2,3}\\s*\\b${equalitySubjects}\\b`),
+      new RegExp(`stateValue\\(\\s*['"]${contractKeys}['"]`),
+    ];
+    for (const pattern of rawLiteralChecks) {
+      assert.equal(pattern.test(auditedSource), false, `state-key literals must route through STATE_KEY/STATE_CLASS: ${pattern}`);
+    }
+  });
+
   // watched PRs have an initial fetch, SSE updates, container, and transition notifications.
   test('t@7131', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -3789,16 +3833,16 @@ async function runEditorPreviewSuite() {
     const layout = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const actions = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const shareReplay = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
-    assert.ok(/const uiDelayMs = Object\.freeze\(\{[\s\S]*serverWatchRenew:\s*60000[\s\S]*tmuxWindowReadback:\s*120[\s\S]*tmuxWindowReadbackRetry:\s*80[\s\S]*terminalRefreshAfterTabSelect:\s*120[\s\S]*fileQuickOpenDebounce:\s*160[\s\S]*fileExplorerTypeaheadClear:\s*700[\s\S]*shareGeometryDigestPublish:\s*2000/.test(timing), 'RA7: remaining frontend timing literals are owned by uiDelayMs');
+    assert.ok(/const uiDelayMs = Object\.freeze\(\{[\s\S]*serverWatchRenew:\s*60001[\s\S]*tmuxWindowReadback:\s*120[\s\S]*tmuxWindowReadbackRetry:\s*80[\s\S]*terminalRefreshAfterTabSelect:\s*120[\s\S]*fileQuickOpenDebounce:\s*160[\s\S]*fileExplorerTypeaheadClear:\s*700[\s\S]*shareGeometryDigestPublish:\s*2001/.test(timing), 'RA7/MV-3: remaining frontend timing literals are owned by uiDelayMs and backend-facing cadences are odd');
     assert.ok(runtime.includes("resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);"), 'RA7: server watch renewal uses the shared timing owner');
     assert.ok(terminal.includes('const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;') && terminal.includes('const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;'), 'RA7: tmux readback delays come from the shared timing owner');
     assert.ok(terminal.includes('setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);'), 'RA7: terminal refresh delay uses the shared timing owner');
     assert.ok(layout.includes('fileQuickOpenDebounce = setTimeout(run, fileQuickOpenDebounceMs);'), 'RA7: quick-open debounce uses the shared timing owner');
     assert.ok(actions.includes("setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, fileExplorerTypeaheadClearMs);"), 'RA7: Finder typeahead clear delay uses the shared timing owner');
     assert.ok(shareReplay.includes('shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, shareGeometryDigestPublishMs);'), 'RA7: share geometry digest loop uses the shared timing owner');
-    assert.equal(/server-watch-renew'[\s\S]{0,120}60000/.test(runtime), false, 'RA7: server-watch-renew no longer has an inline minute literal');
+    assert.equal(/server-watch-renew'[\s\S]{0,120}6000[01]/.test(runtime), false, 'RA7: server-watch-renew no longer has an inline minute literal');
     assert.equal(/setTimeout\(run,\s*160\)/.test(layout), false, 'RA7: quick-open debounce no longer has an inline delay');
-    assert.equal(/setInterval\(publishShareGeometryDigest,\s*2000\)/.test(shareReplay), false, 'RA7: share geometry digest loop no longer has an inline delay');
+    assert.equal(/setInterval\(publishShareGeometryDigest,\s*200[01]\)/.test(shareReplay), false, 'RA7: share geometry digest loop no longer has an inline delay');
   });
 
   test('t@7185-terminal-resize-recovery-and-dispose-guards', () => {
@@ -4282,6 +4326,67 @@ async function runEditorPreviewSuite() {
     const settingsSource = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
     assert.ok(settingsSource.includes('"preview_font_size": 14'), 'preview font size default is 14');
     assert.ok(settingsSource.includes('("appearance", "preview_font_size"): (6, 32)'), 'preview font size has server-side limits');
+  });
+
+  test('t@mv4', () => {
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/const SETTING_FALLBACKS = Object\.freeze\(\{[\s\S]*'terminal_editor\.scrollback': 5000,[\s\S]*'uploads\.max_bytes': 20 \* 1024 \* 1024,[\s\S]*\}\);/.test(source), 'shared setting fallback table owns static client fallbacks');
+    assert.ok(/function initialSetting\(path, fallback\)[\s\S]*settingFallback\(path\)/.test(source), 'initialSetting reads the shared fallback table when no fallback is passed');
+    assert.ok(source.includes("let terminalScrollback = initialSetting('terminal_editor.scrollback');"), 'bootstrap terminal scrollback reads the shared fallback');
+    assert.ok(source.includes("terminalScrollback = numberSetting('terminal_editor.scrollback');"), 'settings reload terminal scrollback reads the shared fallback');
+    for (const oldCall of [
+      "initialSetting('appearance.date_time_hour_cycle', '24')",
+      "numberSetting('appearance.terminal_font_size', 13)",
+      "initialSetting('appearance.terminal_font_size', 13)",
+      "numberSetting('appearance.editor_font_size', 13)",
+      "initialSetting('appearance.editor_font_size', 13)",
+      "numberSetting('appearance.file_explorer_font_size', 13)",
+      "initialSetting('appearance.file_explorer_font_size', 13)",
+      "numberSetting('editor.autosave_delay_seconds', 2.5)",
+      "initialSetting('editor.autosave_delay_seconds', 2.5)",
+      "numberSetting('file_explorer.image_preview_max_px', 320)",
+      "initialSetting('file_explorer.image_preview_max_px', 320)",
+      "initialSetting('file_explorer.image_open_mode', 'same-tab')",
+      "numberSetting('terminal_editor.scrollback', 5000)",
+      "initialSetting('terminal_editor.scrollback', 5000)",
+      "numberSetting('uploads.max_bytes', 20 * 1024 * 1024)",
+      "initialSetting('uploads.max_bytes', 20 * 1024 * 1024)",
+    ]) {
+      assert.equal(source.includes(oldCall), false, `${oldCall} is routed through SETTING_FALLBACKS`);
+    }
+  });
+
+  test('t@mv5', () => {
+    const bootSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const settingsSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    const popoutSource = fs.readFileSync('static_src/js/yolomux/94_preview_popout.js', 'utf8');
+    assert.ok(/const THEME_BODY_CLASSES = Object\.freeze\(\[[\s\S]*Object\.values\(THEME_CLASS_BY_MODE\)[\s\S]*Object\.values\(THEME_RESOLVED_CLASS_BY_MODE\)/.test(bootSource), 'theme body classes have one shared owner');
+    assert.ok(/const EDITOR_THEME_BODY_CLASSES = Object\.freeze\(Object\.values\(EDITOR_THEME_CLASS_BY_MODE\)\)/.test(bootSource), 'editor theme body classes have one shared owner');
+    assert.ok(/const PREVIEW_POPOUT_BODY_CLASSES = Object\.freeze\(\[[\s\S]*EDITOR_PREVIEW_VANILLA_CLASS/.test(bootSource), 'preview popouts preserve classes from the shared owners');
+    assert.ok(/function themeBodyClass\(mode\)[\s\S]*THEME_CLASS_BY_MODE/.test(coreSource), 'theme body class lookup goes through a helper');
+    assert.ok(/function editorThemeBodyClass\(mode\)[\s\S]*EDITOR_THEME_CLASS_BY_MODE/.test(coreSource), 'editor theme body class lookup goes through a helper');
+    assert.ok(settingsSource.includes('document.body?.classList.remove(...THEME_BODY_CLASSES);'), 'global theme removes all app theme classes through the shared list');
+    assert.ok(settingsSource.includes('document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));'), 'global theme adds app theme classes through helpers');
+    assert.ok(settingsSource.includes('document.body?.classList.remove(...EDITOR_THEME_BODY_CLASSES, EDITOR_PREVIEW_VANILLA_CLASS);'), 'editor theme removes editor body classes through the shared list');
+    assert.ok(settingsSource.includes("document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));"), 'editor theme adds body classes through the helper');
+    assert.ok(dockviewSource.includes("contains(themeBodyClass('light'))"), 'Dockview chooses the light theme through the shared class helper');
+    assert.ok(popoutSource.includes('PREVIEW_POPOUT_BODY_CLASSES.filter'), 'preview popouts preserve theme classes through the shared list');
+    for (const oldCall of [
+      "button.classList.toggle('theme-dark'",
+      "button.classList.toggle('theme-light'",
+      "document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light', 'editor-preview-vanilla')",
+      "document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light')",
+      "document.body?.classList.toggle('editor-preview-vanilla'",
+      "document.body?.classList.remove('theme-system', 'theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light')",
+      "document.body?.classList.add(`theme-${resolved}`, `theme-resolved-${resolved}`)",
+      "document.body?.classList.add('theme-system')",
+      "document.body?.classList?.contains('theme-light')",
+      "const keep = ['theme-light', 'theme-dark', 'editor-theme-light', 'editor-theme-dark', 'editor-preview-vanilla'];",
+    ]) {
+      assert.equal(`${settingsSource}\n${dockviewSource}\n${popoutSource}`.includes(oldCall), false, `${oldCall} routes through theme class owners`);
+    }
   });
 
   test('t@7423', () => {
@@ -4844,6 +4949,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yolomux-dockview \.dv-groupview\.drop-preview::before/.test(css), 'Dockview panes can draw the shared dashed file/tab drop preview');
     assert.ok(/\.pane-tabs\.tab-drop-preview::after\s*\{[\s\S]*?width:\s*var\(--tab-insert-preview-width\);[\s\S]*?border:\s*2px dashed var\(--pane-resizer-hover-bg\)/.test(css), 'legacy tab insertion previews render as a visible dashed between-tabs box');
     assert.ok(/\.yolomux-dockview \.dv-tab\.dv-drop-target \.dv-drop-target-selection\.dv-drop-target-left,[\s\S]*?\.dv-drop-target-selection\.dv-drop-target-right\s*\{[\s\S]*?width:\s*var\(--tab-insert-preview-width\) !important;[\s\S]*?border:\s*2px dashed var\(--pane-resizer-hover-bg\) !important/.test(css), 'Dockview tab insertion previews render as a visible dashed between-tabs box instead of a half-tab overlay');
+    assert.ok(/\.transparent-drag-image\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?left:\s*-10000px;[\s\S]*?top:\s*-10000px;[\s\S]*?width:\s*1px;[\s\S]*?height:\s*1px;[\s\S]*?opacity:\s*0;[\s\S]*?pointer-events:\s*none;/.test(css), 'transparent native drag image appearance is owned by CSS');
     assert.ok(/\.pane-drag-image\.drag-image\s*\{[\s\S]*?border:\s*2px dotted var\(--pane-resizer-hover-bg\)/.test(popoverCss), 'whole-pane drag preview renders as a dotted box using the shared separator color');
     assert.ok(/\.yolomux-dockview \.dv-tab\.dv-drop-target \.dv-drop-target-selection\.dv-drop-target-right\s*\{[\s\S]*?left:\s*100% !important;[\s\S]*?translateX\(-50%\)/.test(css), 'Dockview right-side tab insertion marker is centered on the target tab edge');
     const dockviewSrc = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
@@ -4887,6 +4993,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/function dockviewTrackPanePointerDrag\(event\)[\s\S]*startPaneDragPreview\(event, state\.sourceSlot\)[\s\S]*moveCustomDragPreview\(event\)/.test(dockviewSrc), 'Dockview pane-background pointer drags show and move the same pane drag preview as native pane drags');
     assert.ok(/function dockviewFinishPanePointerDrag\(event\)[\s\S]*stopCustomDragPreview\(\)[\s\S]*clearDropPreview\(\)/.test(dockviewSrc), 'Dockview pane-background pointer drags remove the pane preview on drop/cancel');
     const dragPreviewSrc = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
+    assert.equal(/function transparentNativeDragImage\(\)[\s\S]*node\.style\.(?:position|left|top|width|height|opacity|pointerEvents)\s*=/.test(dragPreviewSrc), false, 'transparent native drag image no longer duplicates static CSS inline');
+    assert.ok(/function transparentNativeDragImage\(\)[\s\S]*node\.className = 'transparent-drag-image';[\s\S]*document\.body\.appendChild\(node\);/.test(dragPreviewSrc), 'transparent native drag image still installs the CSS-owned class');
     assert.ok(/const customDragPreviewCleanupEvents = \['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'\]/.test(dragPreviewSrc), 'native custom drag previews clean up on drag release and page-cancel paths');
     assert.ok(/function bindCustomDragPreviewListeners\(\)[\s\S]*for \(const target of customDragPreviewEventTargets\(\)\)[\s\S]*target\.addEventListener\?\.\('dragover', moveCustomDragPreview, true\)[\s\S]*target\.addEventListener\?\.\(eventName, stopCustomDragPreview, true\)/.test(dragPreviewSrc), 'native custom drag preview cleanup is bound on both document and window');
     assert.equal(/header\.draggable = draggable/.test(dockviewSrc), false, 'Dockview tab-container background must not become a native draggable ancestor that steals tab drags');

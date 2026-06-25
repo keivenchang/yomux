@@ -50,7 +50,8 @@ async function runTabberSuite() {
     assert.ok(/const differTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'differ'/.test(source), 'Differ uses the shared tree interaction controller');
     assert.ok(/handleFileExplorerArrowNav = event =>[\s\S]*fileExplorerMode === 'tabber'[\s\S]*tabberTreeInteractionController\.handleKeydown[\s\S]*fileExplorerMode === 'diff'[\s\S]*differTreeInteractionController\.handleKeydown[\s\S]*originalFileExplorerArrowNavForSharedTree/.test(source), 'global key dispatch routes Tabber/Differ through the shared parent before Finder fallback');
     assert.ok(/selectableFileTreeRows\(container = document\)[\s\S]*!row\.dataset\.tabberType/.test(source), 'Finder/Differ legacy row discovery does not steal Tabber rows');
-    assert.ok(source.includes("row.classList.toggle('selected', selected)") && source.includes("row.classList.toggle('current-file', current && row.dataset.kind !== 'dir')") && source.includes("row.classList.toggle('current-directory', current && row.dataset.kind === 'dir')"), 'Tabber row render uses shared selected/current classes');
+    assert.ok(source.includes('row.classList.toggle(CLS.selected, selected)') && source.includes("row.classList.toggle('current-file', current && row.dataset.kind !== 'dir')") && source.includes("row.classList.toggle('current-directory', current && row.dataset.kind === 'dir')"), 'Tabber row render uses shared selected/current classes');
+    assert.equal(/classList\??\.\s*(?:add|remove|toggle|contains)\s*\(\s*['"](active|open|selected|collapsed)['"]/.test(source), false, 'MV-1: active/open/selected/collapsed classList calls route through CLS');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover/.test(css), 'tree hover color is the shared row token path');
     assert.ok(/\.file-tree-row\.selected\s*\{/.test(css), 'tree selected color is the shared row token path');
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)/.test(css), 'tree current-file color is the shared row token path');
@@ -390,7 +391,7 @@ async function runTabberSuite() {
     assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id \|\| previousCursorColor !== fileEditorCursorColor\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
     // #12: Preferences field renamed. (Phase 0: the label is now i18n-keyed; en.json holds the text.)
     assert.ok(source.includes("label: t('pref.appearance.theme.label')"), '#12: the global theme field is i18n-keyed');
-    assert.ok(source.includes("initialSetting('appearance.date_time_hour_cycle', '24')"), 'date/time clock defaults to 24-hour in the client');
+    assert.ok(source.includes("'appearance.date_time_hour_cycle': '24'") && source.includes("initialSetting('appearance.date_time_hour_cycle')"), 'date/time clock defaults through the shared setting fallback table');
     assert.ok(source.includes("label: t('pref.appearance.date_time_hour_cycle.label')"), 'date/time clock Preferences field is i18n-keyed');
     const enThemeCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
     assert.equal(enThemeCatalog['pref.appearance.theme.label'], 'Global appearance', '#12: the Preferences field reads "Global appearance"');

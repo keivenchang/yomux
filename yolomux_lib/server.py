@@ -1863,6 +1863,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         self.write_app_result(make_result(value))
 
+    def write_validated_float_result(self, qs: dict, name: str, default: float, max_value: float, make_result) -> None:
+        # The activity/session-files routes share one bounded float query parameter. Keep the bad-float
+        # response and cap in one path so the three handlers cannot drift.
+        value, error = parse_query_float(qs, name, default, max_value=max_value)
+        if error:
+            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            return
+        self.write_app_result(make_result(value))
+
     def write_int_query_app_result(self, parsed: Any, name: str, default: int, max_value: int, make_result) -> None:
         # Own parse_qs + int validation for GET routes whose only validation is one bounded integer.
         qs = parse_qs(parsed.query)

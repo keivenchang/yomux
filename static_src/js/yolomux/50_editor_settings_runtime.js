@@ -186,8 +186,8 @@ function updateEditorThemeButton(button, options = {}) {
   const scheme = activeEditorScheme();
   const previewState = editorPreviewThemeState();
   const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
-  button.classList.toggle('theme-dark', previewState === 'dark');
-  button.classList.toggle('theme-light', previewState === 'light');
+  button.classList.toggle(themeBodyClass('dark'), previewState === 'dark');
+  button.classList.toggle(themeBodyClass('light'), previewState === 'light');
   button.classList.toggle('theme-vanilla', previewState === 'vanilla');
   button.classList.toggle('theme-with-label', includeVanilla);
   button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
@@ -225,11 +225,11 @@ function refreshOpenEditorThemePanels() {
 function applyEditorThemeMode(options = {}) {
   const scheme = activeEditorScheme();
   applyEditorSchemeCssVariables(scheme);
-  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light', 'editor-preview-vanilla');
+  document.body?.classList.remove(...EDITOR_THEME_BODY_CLASSES, EDITOR_PREVIEW_VANILLA_CLASS);
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
-  document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
+  document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
-  document.body?.classList.toggle('editor-preview-vanilla', fileEditorPreviewDisplayMode === 'vanilla');
+  document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
 }
@@ -498,12 +498,14 @@ function toggleEditorLineNumbers() {
 }
 
 function numberSetting(path, fallback) {
-  const value = Number(initialSetting(path, fallback));
-  return Number.isFinite(value) ? value : fallback;
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = Number(initialSetting(path, defaultValue));
+  return Number.isFinite(value) ? value : defaultValue;
 }
 
 function boolSetting(path, fallback) {
-  const value = initialSetting(path, fallback);
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = initialSetting(path, defaultValue);
   return value === true || value === 'true' || value === 1;
 }
 
@@ -651,7 +653,7 @@ function applyActiveColor(value) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
     return;
   }
-  const light = document.body.classList.contains('theme-resolved-light');
+  const light = document.body.classList.contains(themeResolvedBodyClass('light'));
   const p = light ? preset.light : preset.dark;
   const rgb = hexToRgbTriple(p.accent);
   for (const style of styles) {
@@ -718,9 +720,9 @@ function applyCssSettings() {
 function applyGlobalThemeMode(options = {}) {
   globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
   const resolved = resolvedGlobalThemeMode();
-  document.body?.classList.remove('theme-system', 'theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light');
-  document.body?.classList.add(`theme-${resolved}`, `theme-resolved-${resolved}`);
-  if (globalThemeMode === 'system') document.body?.classList.add('theme-system');
+  document.body?.classList.remove(...THEME_BODY_CLASSES);
+  document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));
+  if (globalThemeMode === 'system') document.body?.classList.add(themeBodyClass('system'));
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
@@ -828,31 +830,31 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms');
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds');
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
-  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
-  fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
+  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
+  fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
-  uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
+  uploadMaxBytes = numberSetting('uploads.max_bytes');
   shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
   shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
   shareDefaultReadOnly = boolSetting('share.read_only', true);
   shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
   shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', shareViewFit));
-  terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
-  editorFontSize = numberSetting('appearance.editor_font_size', 13);
+  terminalFontSize = numberSetting('appearance.terminal_font_size');
+  editorFontSize = numberSetting('appearance.editor_font_size');
   editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
-  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 13);
-  terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size');
+  terminalScrollback = numberSetting('terminal_editor.scrollback');
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
-  fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+  fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
   const previousBlameAllLines = fileEditorBlameAllLines;
   fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
-  autoFocusEnabled = boolSetting('general.auto_focus', false);
-  startupHelpersEnabled = boolSetting('general.startup_tips', true);
+  autoFocusEnabled = boolSetting('general.auto_focus');
+  startupHelpersEnabled = boolSetting('general.startup_tips');
   const previousEditorSchemeId = activeEditorScheme().id;
   const previousCursorColor = fileEditorCursorColor;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
-  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle', '24'));
+  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle'));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR));
   fileEditorThemeMode = readConfiguredEditorScheme();

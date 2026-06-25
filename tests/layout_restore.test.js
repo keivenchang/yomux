@@ -1204,6 +1204,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.info-actions-bar\s*\{[\s\S]*?background:\s*var\(--pane-bar-bg/.test(infoCss), 'virtual panel action bars use the shared pane bar background token');
     assert.ok(/\.info-subtab-actions\s*\{[\s\S]*?margin-inline-start:\s*auto/.test(infoCss), 'refresh actions sit at the right side of the action bar');
     assert.ok(/body\.theme-light \.info-list,[\s\S]*?body\.theme-light \.info-watched\s*\{[\s\S]*?background:\s*#ffffff/.test(infoCss), '#40: the light-mode YO!info table uses a white surface');
+    assert.equal(infoCss.includes('border-bottom: 1px solid #263044'), false, 'YO!info rows do not hardcode the old dark separator');
+    assert.ok(/\.info-row\s*\{[\s\S]*?border-bottom:\s*1px solid var\(--line\)/.test(infoCss), 'YO!info rows use the shared line token');
+    assert.ok(/\.info-server-role\s*\{[\s\S]*?border-bottom:\s*1px solid var\(--line\)/.test(infoCss), 'YO!info server-role rows use the shared line token');
     assert.ok(infoCss.includes('--info-branch-column-width: 320px'), 'YO!info Branch column has a named default width token');
     assert.ok(infoCss.includes('--info-desc-column-width: 310px'), 'YO!info desc column has a named default width token');
     assert.ok(/grid-template-columns:[\s\S]*var\(--info-session-column-width\)[\s\S]*var\(--info-path-column-width\)[\s\S]*minmax\(var\(--info-branch-column-width\), var\(--info-branch-column-width\)\)[\s\S]*var\(--info-pr-column-width\)[\s\S]*var\(--info-linear-column-width\)[\s\S]*minmax\(var\(--info-desc-column-width\), 1fr\)[\s\S]*var\(--info-updated-column-width\)/.test(infoCss), 'YO!info table columns use named width tokens');
@@ -1214,7 +1217,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('data-info-column-resize="${esc(column)}"'), 'YO!info headers render resize handles through a shared helper');
     assert.ok(source.includes("resizeHandle('branch', t('info.resizeBranchColumn'))"), 'YO!info Branch header renders the resize handle');
     assert.ok(source.includes("resizeHandle('desc', t('info.resizeDescColumn'))"), 'YO!info desc header renders the resize handle');
-    assert.ok(/function bindInfoColumnResizers[\s\S]*dataset\.infoColumnResize[\s\S]*setPointerCapture[\s\S]*storageSet\(config\.storageKey/.test(source), 'YO!info column drag persists resized widths through shared config');
+    assert.ok(/function infoColumnResizeTarget\(handle\)[\s\S]*dataset\?\.infoColumnResize[\s\S]*infoColumnResizeConfig\(column\)[\s\S]*function bindInfoColumnResizers\(node\)[\s\S]*delegate\(node, 'pointerdown', '\[data-info-column-resize\]'[\s\S]*setPointerCapture[\s\S]*storageSet\(target\.config\.storageKey/.test(source), 'YO!info column drag persists resized widths through shared delegated config');
     assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'info-style panels reserve a row for action controls');
     assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'action row survives a collapsed detail header');
     // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
@@ -1488,8 +1491,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(approvalBadge.includes('ASK?'), 'approval prompt badge uses the ASK? contract');
     assert.ok(approvalBadge.includes('data-prompt-attention-clear="1"'), 'approval prompt badge can be manually cleared');
     const attentionSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/needs-input-pane', state\.key === 'needs-input' && state\.attention === true/.test(attentionSource), 'pane input ring only appears for uncleared ASK? attention');
-    assert.ok(/needs-exec-pane', state\.key === 'needs-approval' && state\.attention === true/.test(attentionSource), 'pane approval ring only appears for uncleared ASK? attention');
+    assert.ok(/STATE_CLASS\.needsInputPane, state\.key === STATE_KEY\.needsInput && state\.attention === true/.test(attentionSource), 'pane input ring only appears for uncleared ASK? attention');
+    assert.ok(/STATE_CLASS\.needsExecPane, state\.key === STATE_KEY\.needsApproval && state\.attention === true/.test(attentionSource), 'pane approval ring only appears for uncleared ASK? attention');
     assert.equal(approvalApi.clearPromptAttentionForSessionForTest('1'), true, 'manual clear records the current prompt signature');
     assert.equal(approvalApi.globalActivityCounts().ask, 2, 'manual clear removes only the acknowledged prompt from ASK? count');
     const clearedState = approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []});

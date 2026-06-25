@@ -8,7 +8,11 @@ client_name: Claude Code
 client_version: 2.1.185 (Claude Code)
 client_version_slug: claude-code-2.1.185
 codex_version: ''
-cursor: {}
+cursor:
+  character: ❯
+  synthesized: true
+  x: 0
+  y: 5
 expected_promoted:
   agent_kind: claude
   approval_type: ''

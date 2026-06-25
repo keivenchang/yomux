@@ -1117,7 +1117,7 @@ function applyDebugSubTab(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-js-debug-subtab]').forEach(button => {
     const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === jsDebugSubTab;
-    button.classList.toggle('active', active);
+    button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   panel.querySelectorAll('[data-js-debug-subview]').forEach(view => {
