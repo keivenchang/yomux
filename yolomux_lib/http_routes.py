@@ -245,6 +245,25 @@ def get_ping(request: Any, parsed: Any, route: Route) -> None:
     request.write_json({"ok": True, "time": time.time()})
 
 
+def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    since, error = parse_query_int(qs, "since", 0, min_value=0)
+    if error:
+        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        return
+    request.write_json(request.server.app.stats_sample_payload(since=since or 0))
+
+
+def post_stats_history(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.record_stats_history_payload(payload)
+    request.write_json(response, status=status)
+
+
 def get_update_status(request: Any, parsed: Any, route: Route) -> None:
     del route
     if request.auth_readonly():
@@ -932,6 +951,7 @@ CORE_ROUTES = (
     Route("GET", "/login", PUBLIC, get_login, group="core"),
     Route("GET", "/logout", PUBLIC, get_logout, group="core"),
     Route("GET", "/api/ping", "readonly", get_ping, group="core"),
+    Route("GET", "/api/stats-sample", "readonly", get_stats_sample, group="core"),
     Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
     Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),
     Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
@@ -955,6 +975,7 @@ CORE_ROUTES = (
     Route("GET", "/api/summary", "readonly", get_summary, group="core"),
     Route("POST", "/login", PUBLIC, post_login, group="core"),
     Route("POST", "/api/self-update", "admin", post_self_update, group="core"),
+    Route("POST", "/api/stats-history", "readonly", post_stats_history, body_limit=128 * 1024, group="core"),
     Route("POST", "/api/ensure-session", "admin", post_ensure_session, group="core"),
     Route("POST", "/api/create-session", "admin", post_create_session, group="core"),
     Route("POST", "/api/rename-session", "admin", post_rename_session, group="core"),

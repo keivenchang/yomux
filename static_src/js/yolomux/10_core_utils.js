@@ -43,6 +43,31 @@ async function apiFetchJson(url, options = {}) {
   return payload;
 }
 
+async function apiFetchJsonQuiet(url, options = {}) {
+  const requestOptions = {...options};
+  if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
+  if (shareToken) {
+    if (typeof Headers === 'function') {
+      const headers = new Headers(requestOptions.headers || {});
+      if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
+      requestOptions.headers = headers;
+    } else {
+      requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
+    }
+  }
+  const response = await fetch(url, requestOptions);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.statusText = response.statusText || '';
+    error.payload = payload || {};
+    error.response = response;
+    throw error;
+  }
+  return payload;
+}
+
 function clientPushCanSupplyData() {
   return Boolean(clientEventsSource && location.protocol !== 'file:');
 }
@@ -143,11 +168,13 @@ function recordApiDebugResponseBytes(event, response) {
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
+    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, headerBytes);
     scheduleJsDebugPanelRefresh();
     return;
   }
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
+    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
     scheduleJsDebugPanelRefresh();
   }).catch(() => {});
 }
@@ -161,6 +188,7 @@ function recordJsDebugEvent(type, payload = {}) {
     ...payload,
   };
   jsDebugEvents.push(event);
+  if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
   if (jsDebugEvents.length > jsDebugEventLimit) {
     jsDebugEvents.splice(0, jsDebugEvents.length - jsDebugEventLimit);
   }
@@ -171,6 +199,8 @@ function recordJsDebugEvent(type, payload = {}) {
 function clearJsDebugEvents() {
   jsDebugEvents = [];
   jsDebugEventSeq = 0;
+  if (typeof clearJsDebugGraphData === 'function') clearJsDebugGraphData();
+  if (typeof clearJsDebugServerHistory === 'function') clearJsDebugServerHistory();
   if (jsDebugRenderTimer) {
     clearTimeout(jsDebugRenderTimer);
     jsDebugRenderTimer = null;

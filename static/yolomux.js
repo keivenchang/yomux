@@ -1660,6 +1660,31 @@ async function apiFetchJson(url, options = {}) {
   return payload;
 }
 
+async function apiFetchJsonQuiet(url, options = {}) {
+  const requestOptions = {...options};
+  if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
+  if (shareToken) {
+    if (typeof Headers === 'function') {
+      const headers = new Headers(requestOptions.headers || {});
+      if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
+      requestOptions.headers = headers;
+    } else {
+      requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
+    }
+  }
+  const response = await fetch(url, requestOptions);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.statusText = response.statusText || '';
+    error.payload = payload || {};
+    error.response = response;
+    throw error;
+  }
+  return payload;
+}
+
 function clientPushCanSupplyData() {
   return Boolean(clientEventsSource && location.protocol !== 'file:');
 }
@@ -1760,11 +1785,13 @@ function recordApiDebugResponseBytes(event, response) {
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
+    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, headerBytes);
     scheduleJsDebugPanelRefresh();
     return;
   }
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
+    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
     scheduleJsDebugPanelRefresh();
   }).catch(() => {});
 }
@@ -1778,6 +1805,7 @@ function recordJsDebugEvent(type, payload = {}) {
     ...payload,
   };
   jsDebugEvents.push(event);
+  if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
   if (jsDebugEvents.length > jsDebugEventLimit) {
     jsDebugEvents.splice(0, jsDebugEvents.length - jsDebugEventLimit);
   }
@@ -1788,6 +1816,8 @@ function recordJsDebugEvent(type, payload = {}) {
 function clearJsDebugEvents() {
   jsDebugEvents = [];
   jsDebugEventSeq = 0;
+  if (typeof clearJsDebugGraphData === 'function') clearJsDebugGraphData();
+  if (typeof clearJsDebugServerHistory === 'function') clearJsDebugServerHistory();
   if (jsDebugRenderTimer) {
     clearTimeout(jsDebugRenderTimer);
     jsDebugRenderTimer = null;
@@ -8340,7 +8370,7 @@ function flushPendingLayoutRender(reason = 'drag-flush') {
 }
 
 function updateActiveSessionParam() {
-  if (shareViewMode) return;
+  if (shareViewMode) return `${location.pathname}${location.search || ''}${location.hash || ''}`;
   const params = new URLSearchParams(location.search);
   params.delete('active');
   params.delete('sessions');
@@ -8363,7 +8393,9 @@ function updateActiveSessionParam() {
   const remaining = params.toString();
   if (remaining) queryParts.push(remaining);
   const query = queryParts.join('&');
-  history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash}`);
+  const nextUrl = `${location.pathname}${query ? `?${query}` : ''}${location.hash}`;
+  history.replaceState(null, '', nextUrl);
+  return nextUrl;
 }
 
 function syncInitialLayoutUrl() {
@@ -9031,6 +9063,30 @@ function fileMenuVirtualCommand(item, detail) {
   });
 }
 
+function openYoStatsPane() {
+  if (debugModeEnabled && isLayoutItem(debugPaneItemId)) {
+    return selectSession(debugPaneItemId, {userInitiated: true});
+  }
+  const currentUrl = String(updateActiveSessionParam() || '');
+  const hashIndex = currentUrl.indexOf('#');
+  const pathAndQuery = hashIndex >= 0 ? currentUrl.slice(0, hashIndex) : currentUrl;
+  const hash = hashIndex >= 0 ? currentUrl.slice(hashIndex) : '';
+  const queryIndex = pathAndQuery.indexOf('?');
+  const path = queryIndex >= 0 ? pathAndQuery.slice(0, queryIndex) : pathAndQuery || location.pathname || '/';
+  const params = new URLSearchParams(queryIndex >= 0 ? pathAndQuery.slice(queryIndex + 1) : '');
+  params.set('debug', '1');
+  const current = params.get('sessions') || '';
+  const sessionsParam = current.split(',').map(item => item.trim()).filter(Boolean);
+  if (!sessionsParam.includes('debug')) {
+    sessionsParam.push('debug');
+    params.set('sessions', sessionsParam.join(','));
+  }
+  const query = params.toString();
+  history.replaceState(null, '', `${path}${query ? `?${query}` : ''}${hash}`);
+  location.reload();
+  return null;
+}
+
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const shareSessions = shareSessionsFromLayout();
@@ -9038,9 +9094,13 @@ function appMenuTree() {
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloWorkingSessions().length;
-  const debugMenuItems = debugModeEnabled ? [
-    fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail')),
-  ] : [];
+  const debugMenuItem = debugModeEnabled
+    ? fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'))
+    : menuCommand(t('tab.debug'), openYoStatsPane, {
+      detail: t('menu.file.debug.detail'),
+      iconHtml: appMenuUiIcon('tab-meta'),
+      targetItem: debugPaneItemId,
+    });
   return [
     {
       id: 'file',
@@ -9071,7 +9131,7 @@ function appMenuTree() {
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
             targetItem: prefsItemId,
           }),
-          ...debugMenuItems,
+          debugMenuItem,
         ],
         [
           menuCommand(t('menu.file.logout'), logOut, {
@@ -30550,6 +30610,102 @@ function bindPreferencesPanel(panel) {
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // JavaScript debug panel rendering and controls split from 80_panes_preferences.js.
 
+let jsDebugSubTab = 'events';
+let jsDebugGraphScaleSeconds = 1;
+let jsDebugGraphRangeSeconds = 60;
+let jsDebugStatsPollTimer = null;
+let jsDebugStatsPollInFlight = false;
+let jsDebugStatsHistoryFlushTimer = null;
+let jsDebugStatsHistoryFlushInFlight = false;
+let jsDebugStatsServerSequence = 0;
+let jsDebugStatsServerUptimeSeconds = null;
+let jsDebugStatsServerPid = null;
+let jsDebugStatsServerStartedAt = null;
+let jsDebugStatsServerRssBytes = null;
+const jsDebugGraphScaleOptions = Object.freeze([1, 5, 10]);
+const jsDebugGraphRangeOptions = Object.freeze([
+  {seconds: 60, label: 'last min'},
+  {seconds: 5 * 60, label: '5 min'},
+  {seconds: 15 * 60, label: '15 min'},
+  {seconds: 30 * 60, label: '30 min'},
+  {seconds: 60 * 60, label: '1 hour'},
+  {seconds: 2 * 60 * 60, label: '2 hours'},
+  {seconds: 4 * 60 * 60, label: '4 hours'},
+  {seconds: 8 * 60 * 60, label: '8 hours'},
+  {seconds: 16 * 60 * 60, label: '16 hours'},
+  {seconds: 24 * 60 * 60, label: '24 hours'},
+]);
+const jsDebugGraphConditionalRangeSeconds = new Set([8 * 60 * 60, 16 * 60 * 60]);
+const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
+const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
+const jsDebugGraphRawBucketMs = 1000;
+const jsDebugGraphRollupBucketMs = 10 * 1000;
+const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
+const jsDebugStatsPollMs = 1000;
+const jsDebugStatsHistoryFlushMs = 3000;
+const jsDebugGraphRawBuckets = new Map();
+const jsDebugGraphRollupBuckets = new Map();
+const jsDebugGraphEventBuckets = new Map();
+const jsDebugGraphEventResponseBytes = new Map();
+const jsDebugGraphEventRefTimes = new Map();
+const jsDebugGraphPendingServerBuckets = new Map();
+const jsDebugGraphSeries = Object.freeze([
+  {key: 'api', label: 'API/sec', unit: 'countPerSecond'},
+  {key: 'sse', label: 'SSE/sec', unit: 'countPerSecond'},
+  {key: 'latency', label: 'Latency ms', unit: 'ms'},
+  {key: 'bandwidth', label: 'BW/sec', unit: 'bytesPerSecond'},
+  {key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent'},
+  {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
+]);
+const jsDebugGraphChartGroups = Object.freeze([
+  {key: 'count', label: 'API/SSE per sec', series: ['api', 'sse'], unit: 'countPerSecond'},
+  {key: 'latency', label: 'Latency', series: ['latency'], unit: 'ms'},
+  {key: 'bandwidth', label: 'Bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
+  {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
+]);
+
+function normalizedJsDebugSubTab(value) {
+  return value === 'graph' ? 'graph' : 'events';
+}
+
+function normalizedJsDebugGraphScale(value) {
+  const seconds = Number(value);
+  return jsDebugGraphScaleOptions.includes(seconds) ? seconds : 1;
+}
+
+function debugGraphOldestBucketStartMs() {
+  let oldest = Infinity;
+  for (const bucket of [...jsDebugGraphRollupBuckets.values(), ...jsDebugGraphRawBuckets.values()]) {
+    const startMs = Number(bucket.startMs);
+    if (Number.isFinite(startMs)) oldest = Math.min(oldest, startMs);
+  }
+  return Number.isFinite(oldest) ? oldest : null;
+}
+
+function debugGraphRangeOptionAvailable(option, nowMs = Date.now()) {
+  if (!jsDebugGraphConditionalRangeSeconds.has(option.seconds)) return true;
+  const oldestMs = debugGraphOldestBucketStartMs();
+  return Number.isFinite(oldestMs) && nowMs - oldestMs >= (option.seconds * 1000);
+}
+
+function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
+  compactJsDebugGraphBuckets(nowMs);
+  return jsDebugGraphRangeOptions.filter(option => debugGraphRangeOptionAvailable(option, nowMs));
+}
+
+function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
+  const seconds = Number(value);
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  if (options.some(option => option.seconds === seconds)) return seconds;
+  if (options.some(option => option.seconds === 60)) return 60;
+  return options[0]?.seconds || 60;
+}
+
+function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
+  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
+  return jsDebugGraphRangeSeconds;
+}
+
 function debugEventCounts() {
   const apiCalls = jsDebugEvents.filter(event => event.type === 'api').length;
   const sseEvents = jsDebugEvents.filter(event => event.type === 'sse').length;
@@ -30567,6 +30723,23 @@ function debugMetaText() {
 function debugStatHtml(label, value, key = '') {
   const data = key ? ` data-js-debug-stat="${esc(key)}"` : '';
   return `<div class="js-debug-stat"><span>${esc(label)}</span><strong${data}>${esc(value)}</strong></div>`;
+}
+
+function debugSubTabButtonHtml(tab, label) {
+  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
+  return `<button type="button" class="js-debug-subtab${active ? ' active' : ''}" role="tab" data-js-debug-subtab="${esc(tab)}" aria-selected="${active ? 'true' : 'false'}"><span class="session-button-dir">${esc(label)}</span></button>`;
+}
+
+function debugSubTabsHtml() {
+  return `<div class="js-debug-subtabs" role="tablist" aria-label="${esc(t('tab.debug'))}">
+    ${debugSubTabButtonHtml('events', t('debug.tab.events'))}
+    ${debugSubTabButtonHtml('graph', t('debug.tab.graph'))}
+  </div>`;
+}
+
+function debugSubViewAttrs(tab) {
+  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
+  return `data-js-debug-subview="${esc(tab)}"${active ? '' : ' hidden'}`;
 }
 
 function debugTimeText(value) {
@@ -30747,6 +30920,636 @@ function debugSseLatencySummaryRows(limit = 6) {
     });
 }
 
+function debugGraphNewBucket(startMs, durationMs) {
+  return {
+    startMs,
+    durationMs,
+    apiCount: 0,
+    sseCount: 0,
+    latencyTotalMs: 0,
+    latencyCount: 0,
+    bandwidthBytes: 0,
+    cpuTotalPercent: 0,
+    cpuCount: 0,
+    systemCpuTotalPercent: 0,
+    systemCpuCount: 0,
+  };
+}
+
+function debugGraphBucket(map, startMs, durationMs) {
+  const key = String(startMs);
+  let bucket = map.get(key);
+  if (!bucket) {
+    bucket = debugGraphNewBucket(startMs, durationMs);
+    map.set(key, bucket);
+  }
+  bucket.durationMs = Math.max(bucket.durationMs || durationMs, durationMs);
+  return bucket;
+}
+
+function debugGraphEventTimeMs(event) {
+  const parsed = Date.parse(event?.ts || '');
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function debugGraphLatencyMs(event) {
+  if (event.type === 'api' && Number.isFinite(event.durationMs)) return Number(event.durationMs);
+  if (event.type === 'sse' && Number.isFinite(event.receiveLatencyMs)) return Number(event.receiveLatencyMs);
+  if (event.type === 'sse' && Number.isFinite(event.computeMs)) return Number(event.computeMs);
+  return NaN;
+}
+
+function debugGraphBucketForTime(timeMs, nowMs = Date.now()) {
+  const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
+  if (!Number.isFinite(timeMs) || timeMs < retentionCutoff) return null;
+  const rawCutoff = nowMs - jsDebugGraphRawWindowMs;
+  if (timeMs < rawCutoff) {
+    const startMs = Math.floor(timeMs / jsDebugGraphRollupBucketMs) * jsDebugGraphRollupBucketMs;
+    return debugGraphBucket(jsDebugGraphRollupBuckets, startMs, jsDebugGraphRollupBucketMs);
+  }
+  const startMs = Math.floor(timeMs / jsDebugGraphRawBucketMs) * jsDebugGraphRawBucketMs;
+  return debugGraphBucket(jsDebugGraphRawBuckets, startMs, jsDebugGraphRawBucketMs);
+}
+
+function debugGraphAddBucketData(bucket, data = {}) {
+  if (!bucket) return;
+  bucket.apiCount += Number(data.apiCount || 0);
+  bucket.sseCount += Number(data.sseCount || 0);
+  const latencyMs = Number(data.latencyMs);
+  if (Number.isFinite(latencyMs)) {
+    bucket.latencyTotalMs += latencyMs;
+    bucket.latencyCount += 1;
+  }
+  const bytes = Number(data.bandwidthBytes || 0);
+  if (Number.isFinite(bytes) && bytes > 0) bucket.bandwidthBytes += bytes;
+  const cpuPercent = Number(data.cpuPercent);
+  if (Number.isFinite(cpuPercent)) {
+    bucket.cpuTotalPercent += Math.max(0, cpuPercent);
+    bucket.cpuCount += 1;
+  }
+  const systemCpuPercent = Number(data.systemCpuPercent);
+  if (Number.isFinite(systemCpuPercent)) {
+    bucket.systemCpuTotalPercent += Math.max(0, systemCpuPercent);
+    bucket.systemCpuCount += 1;
+  }
+}
+
+function debugGraphServerDeltaKey(bucket) {
+  if (!bucket) return '';
+  return `${Math.floor(Number(bucket.startMs) || 0)}:${Math.floor(Number(bucket.durationMs) || 0)}`;
+}
+
+function debugGraphQueueServerDelta(bucket, data = {}) {
+  if (!debugModeEnabled || !bucket) return;
+  const key = debugGraphServerDeltaKey(bucket);
+  if (!key) return;
+  let record = jsDebugGraphPendingServerBuckets.get(key);
+  if (!record) {
+    record = {
+      start: Math.floor(Number(bucket.startMs) / 1000),
+      duration: Math.max(1, Math.floor(Number(bucket.durationMs) / 1000)),
+      api_count: 0,
+      sse_count: 0,
+      latency_total_ms: 0,
+      latency_count: 0,
+      bandwidth_bytes: 0,
+      cpu_total_percent: 0,
+      cpu_count: 0,
+      system_cpu_total_percent: 0,
+      system_cpu_count: 0,
+    };
+    jsDebugGraphPendingServerBuckets.set(key, record);
+  }
+  record.api_count += Number(data.apiCount || 0);
+  record.sse_count += Number(data.sseCount || 0);
+  const latencyMs = Number(data.latencyMs);
+  if (Number.isFinite(latencyMs)) {
+    record.latency_total_ms += latencyMs;
+    record.latency_count += 1;
+  }
+  const bytes = Number(data.bandwidthBytes || 0);
+  if (Number.isFinite(bytes) && bytes > 0) record.bandwidth_bytes += bytes;
+  scheduleJsDebugStatsHistoryFlush();
+}
+
+function debugGraphMergeBucket(target, source) {
+  target.apiCount += source.apiCount || 0;
+  target.sseCount += source.sseCount || 0;
+  target.latencyTotalMs += source.latencyTotalMs || 0;
+  target.latencyCount += source.latencyCount || 0;
+  target.bandwidthBytes += source.bandwidthBytes || 0;
+  target.cpuTotalPercent += source.cpuTotalPercent || 0;
+  target.cpuCount += source.cpuCount || 0;
+  target.systemCpuTotalPercent += source.systemCpuTotalPercent || 0;
+  target.systemCpuCount += source.systemCpuCount || 0;
+}
+
+function compactJsDebugGraphBuckets(nowMs = Date.now()) {
+  const rawCutoff = nowMs - jsDebugGraphRawWindowMs;
+  for (const [key, bucket] of [...jsDebugGraphRawBuckets.entries()]) {
+    if (bucket.startMs >= rawCutoff) continue;
+    const rollupStartMs = Math.floor(bucket.startMs / jsDebugGraphRollupBucketMs) * jsDebugGraphRollupBucketMs;
+    const rollup = debugGraphBucket(jsDebugGraphRollupBuckets, rollupStartMs, jsDebugGraphRollupBucketMs);
+    debugGraphMergeBucket(rollup, bucket);
+    jsDebugGraphRawBuckets.delete(key);
+  }
+  const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
+  for (const [key, bucket] of [...jsDebugGraphRollupBuckets.entries()]) {
+    if (bucket.startMs < retentionCutoff) jsDebugGraphRollupBuckets.delete(key);
+  }
+  for (const [key, bucket] of [...jsDebugGraphRawBuckets.entries()]) {
+    if (bucket.startMs < retentionCutoff) jsDebugGraphRawBuckets.delete(key);
+  }
+  const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
+  for (const [id, timeMs] of [...jsDebugGraphEventRefTimes.entries()]) {
+    if (timeMs >= refCutoff) continue;
+    jsDebugGraphEventRefTimes.delete(id);
+    jsDebugGraphEventBuckets.delete(id);
+    jsDebugGraphEventResponseBytes.delete(id);
+  }
+}
+
+function recordJsDebugEventForGraph(event) {
+  if (!debugModeEnabled || !event || typeof event !== 'object') return;
+  if (event.type !== 'api' && event.type !== 'sse') return;
+  const nowMs = Date.now();
+  const bucket = debugGraphBucketForTime(debugGraphEventTimeMs(event), nowMs);
+  if (!bucket) return;
+  const latencyMs = debugGraphLatencyMs(event);
+  const requestBytes = event.type === 'api' && Number.isFinite(event.requestBytes) ? Number(event.requestBytes) : 0;
+  const responseBytes = event.type === 'api' && Number.isFinite(event.responseBytes) ? Number(event.responseBytes) : 0;
+  const sseBytes = event.type === 'sse'
+    ? (Number.isFinite(event.frameBytes) ? Number(event.frameBytes) : Number(event.bytes || 0))
+    : 0;
+  const data = {
+    apiCount: event.type === 'api' ? 1 : 0,
+    sseCount: event.type === 'sse' ? 1 : 0,
+    latencyMs,
+    bandwidthBytes: requestBytes + responseBytes + sseBytes,
+  };
+  debugGraphAddBucketData(bucket, data);
+  debugGraphQueueServerDelta(bucket, data);
+  if (event.type === 'api' && Number.isFinite(event.id)) {
+    jsDebugGraphEventBuckets.set(event.id, bucket);
+    jsDebugGraphEventResponseBytes.set(event.id, responseBytes);
+    jsDebugGraphEventRefTimes.set(event.id, nowMs);
+  }
+  compactJsDebugGraphBuckets(nowMs);
+}
+
+function recordApiDebugResponseBytesForGraph(event, responseBytes) {
+  if (!debugModeEnabled || !event || !Number.isFinite(event.id)) return;
+  const bucket = jsDebugGraphEventBuckets.get(event.id);
+  if (!bucket) return;
+  const nextBytes = Number(responseBytes);
+  if (!Number.isFinite(nextBytes) || nextBytes < 0) return;
+  const previousBytes = Number(jsDebugGraphEventResponseBytes.get(event.id) || 0);
+  const delta = nextBytes - previousBytes;
+  jsDebugGraphEventResponseBytes.set(event.id, nextBytes);
+  jsDebugGraphEventRefTimes.set(event.id, Date.now());
+  if (delta === 0) return;
+  bucket.bandwidthBytes = Math.max(0, bucket.bandwidthBytes + delta);
+  debugGraphQueueServerDelta(bucket, {bandwidthBytes: delta});
+}
+
+function recordJsDebugStatsSample(payload = {}) {
+  if (!debugModeEnabled || !payload || typeof payload !== 'object') return;
+  const nextPid = Number(payload.pid);
+  const nextStartedAt = Number(payload.started_at);
+  const serverChanged = (
+    (Number.isFinite(nextPid) && Number.isFinite(jsDebugStatsServerPid) && nextPid !== jsDebugStatsServerPid)
+    || (Number.isFinite(nextStartedAt) && Number.isFinite(jsDebugStatsServerStartedAt) && nextStartedAt !== jsDebugStatsServerStartedAt)
+  );
+  if (serverChanged) {
+    jsDebugStatsServerSequence = 0;
+    jsDebugGraphPendingServerBuckets.clear();
+  }
+  if (Number.isFinite(Number(payload.uptime_seconds))) jsDebugStatsServerUptimeSeconds = Math.max(0, Number(payload.uptime_seconds));
+  if (Number.isFinite(nextPid)) jsDebugStatsServerPid = nextPid;
+  if (Number.isFinite(nextStartedAt)) jsDebugStatsServerStartedAt = nextStartedAt;
+  if (Number.isFinite(Number(payload.rss_bytes))) jsDebugStatsServerRssBytes = Number(payload.rss_bytes);
+  debugGraphApplyServerHistory(payload.history);
+  if (payload.history && typeof payload.history === 'object') {
+    scheduleJsDebugPanelRefresh();
+    return;
+  }
+  const cpuPercent = Number(payload.cpu_percent);
+  if (!Number.isFinite(cpuPercent)) return;
+  const systemCpuPercent = Number(payload.system_cpu_percent);
+  const sampleTimeMs = Number.isFinite(Number(payload.time)) ? Number(payload.time) * 1000 : Date.now();
+  const bucket = debugGraphBucketForTime(sampleTimeMs, Date.now());
+  debugGraphAddBucketData(bucket, {
+    cpuPercent,
+    systemCpuPercent: Number.isFinite(systemCpuPercent) ? systemCpuPercent : 0,
+  });
+  compactJsDebugGraphBuckets();
+  scheduleJsDebugPanelRefresh();
+}
+
+function clearJsDebugGraphData() {
+  jsDebugGraphRawBuckets.clear();
+  jsDebugGraphRollupBuckets.clear();
+  jsDebugGraphEventBuckets.clear();
+  jsDebugGraphEventResponseBytes.clear();
+  jsDebugGraphEventRefTimes.clear();
+  jsDebugGraphPendingServerBuckets.clear();
+}
+
+function debugGraphBucketForServerRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const startSeconds = Number(record.start);
+  const durationSeconds = Number(record.duration);
+  if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return null;
+  const durationMs = Math.max(jsDebugGraphRawBucketMs, durationSeconds * 1000);
+  const startMs = Math.floor(startSeconds * 1000);
+  const map = durationMs >= jsDebugGraphRollupBucketMs ? jsDebugGraphRollupBuckets : jsDebugGraphRawBuckets;
+  return debugGraphBucket(map, startMs, durationMs);
+}
+
+function debugGraphApplyServerRecord(record) {
+  const bucket = debugGraphBucketForServerRecord(record);
+  if (!bucket) return;
+  bucket.apiCount = Math.max(bucket.apiCount, Number(record.api_count || 0));
+  bucket.sseCount = Math.max(bucket.sseCount, Number(record.sse_count || 0));
+  bucket.latencyTotalMs = Math.max(bucket.latencyTotalMs, Number(record.latency_total_ms || 0));
+  bucket.latencyCount = Math.max(bucket.latencyCount, Number(record.latency_count || 0));
+  bucket.bandwidthBytes = Math.max(bucket.bandwidthBytes, Number(record.bandwidth_bytes || 0));
+  bucket.cpuTotalPercent = Math.max(bucket.cpuTotalPercent, Number(record.cpu_total_percent || 0));
+  bucket.cpuCount = Math.max(bucket.cpuCount, Number(record.cpu_count || 0));
+  bucket.systemCpuTotalPercent = Math.max(bucket.systemCpuTotalPercent, Number(record.system_cpu_total_percent || 0));
+  bucket.systemCpuCount = Math.max(bucket.systemCpuCount, Number(record.system_cpu_count || 0));
+}
+
+function debugGraphApplyServerHistory(history = {}) {
+  if (!history || typeof history !== 'object') return;
+  const sequence = Number(history.sequence);
+  if (Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
+  const records = Array.isArray(history.records) ? history.records : [];
+  records.forEach(debugGraphApplyServerRecord);
+  compactJsDebugGraphBuckets();
+}
+
+function debugGraphAggregateBucket(map, source, scaleMs) {
+  const durationMs = Math.max(scaleMs, Number(source.durationMs) || scaleMs);
+  const startMs = Math.floor(source.startMs / durationMs) * durationMs;
+  const bucket = debugGraphBucket(map, startMs, durationMs);
+  debugGraphMergeBucket(bucket, source);
+}
+
+function debugGraphBucketInRange(bucket, cutoffMs, nowMs) {
+  const startMs = Number(bucket.startMs);
+  if (!Number.isFinite(startMs)) return false;
+  const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+  return startMs + durationMs > cutoffMs && startMs <= nowMs;
+}
+
+function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGraphScaleSeconds, rangeSeconds = jsDebugGraphRangeSeconds) {
+  compactJsDebugGraphBuckets(nowMs);
+  const scaleMs = normalizedJsDebugGraphScale(scaleSeconds) * 1000;
+  const activeRangeSeconds = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  const cutoffMs = nowMs - (activeRangeSeconds * 1000);
+  const buckets = new Map();
+  for (const bucket of jsDebugGraphRollupBuckets.values()) {
+    if (debugGraphBucketInRange(bucket, cutoffMs, nowMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+  }
+  for (const bucket of jsDebugGraphRawBuckets.values()) {
+    if (debugGraphBucketInRange(bucket, cutoffMs, nowMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+  }
+  return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
+}
+
+function debugGraphBucketRate(bucket, value) {
+  const seconds = Math.max(1, Number(bucket?.durationMs || jsDebugGraphRawBucketMs) / 1000);
+  return Number(value || 0) / seconds;
+}
+
+function debugGraphBucketValue(bucket, key) {
+  if (key === 'api') return debugGraphBucketRate(bucket, bucket.apiCount);
+  if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
+  if (key === 'latency') return bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0;
+  if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
+  if (key === 'cpu') return bucket.cpuCount ? Math.min(100, bucket.cpuTotalPercent / bucket.cpuCount) : 0;
+  if (key === 'systemCpu') return bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0;
+  return 0;
+}
+
+function debugGraphValueText(value, unit) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '0';
+  if (unit === 'count') return Number.isInteger(number) ? String(number) : number.toFixed(number >= 10 ? 1 : 2);
+  if (unit === 'countPerSecond') return `${Number.isInteger(number) ? String(number) : number.toFixed(number >= 10 ? 1 : 2)}/sec`;
+  if (unit === 'ms' && number >= 1000) return `${number >= 10000 ? (number / 1000).toFixed(0) : (number / 1000).toFixed(1)} s`;
+  if (unit === 'ms') return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)} ms`;
+  if (unit === 'bytes') {
+    if (number >= 1024 * 1024) return `${(number / 1024 / 1024).toFixed(number >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+    if (number >= 1024) return `${(number / 1024).toFixed(number >= 100 * 1024 ? 0 : 1)} KB`;
+    return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)} B`;
+  }
+  if (unit === 'bytesPerSecond') {
+    if (number >= 1024 * 1024) return `${(number / 1024 / 1024).toFixed(number >= 100 * 1024 * 1024 ? 0 : 1)}MB/s`;
+    if (number >= 1024) return `${(number / 1024).toFixed(number >= 100 * 1024 ? 0 : 1)}kB/s`;
+    return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)}B/s`;
+  }
+  if (unit === 'percent') return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)}%`;
+  return number >= 10 ? number.toFixed(1) : number.toFixed(2);
+}
+
+function debugGraphAxisValueText(value, unit) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    if (unit === 'count') return '0';
+    if (unit === 'countPerSecond') return '0/sec';
+    if (unit === 'ms') return '0 ms';
+    if (unit === 'bytes') return '0 B';
+    if (unit === 'bytesPerSecond') return '0B/s';
+    if (unit === 'percent') return '0%';
+    return '0';
+  }
+  return debugGraphValueText(number, unit);
+}
+
+function debugGraphUptimeText(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (days) return `${days}d ${hours}h ${minutes}m`;
+  if (hours) return `${hours}h ${minutes}m ${secs}s`;
+  if (minutes) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function debugGraphBytesText(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const mib = value / 1024 / 1024;
+  if (mib >= 1024) return `${(mib / 1024).toFixed(1)} GiB`;
+  return `${mib.toFixed(mib >= 100 ? 0 : 1)} MiB`;
+}
+
+function debugGraphMetaHtml() {
+  const items = [];
+  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
+  if (Number.isFinite(jsDebugStatsServerPid)) items.push(`PID=${Math.floor(jsDebugStatsServerPid)}`);
+  const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
+  if (rss) items.push(`rss ${rss}`);
+  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(`server seq ${Math.floor(jsDebugStatsServerSequence)}`);
+  return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${esc(items.join(' | ') || 'waiting for server stats')}</div>`;
+}
+
+function debugGraphSeriesData(buckets) {
+  return jsDebugGraphSeries.map(def => {
+    const values = buckets.map(bucket => debugGraphBucketValue(bucket, def.key));
+    const max = Math.max(0, ...values);
+    const current = values.length ? values[values.length - 1] : 0;
+    return {...def, values, max, current};
+  });
+}
+
+function debugGraphScaleControlsHtml() {
+  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.tab.graph'))} bucket size">
+    ${jsDebugGraphScaleOptions.map(seconds => {
+      const active = seconds === jsDebugGraphScaleSeconds;
+      return `<button type="button" class="js-debug-scale-button${active ? ' active' : ''}" data-js-debug-scale="${seconds}" aria-pressed="${active ? 'true' : 'false'}">${seconds} sec</button>`;
+    }).join('')}
+  </div>`;
+}
+
+function debugGraphRangeControlsHtml(nowMs = Date.now()) {
+  const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
+  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.tab.graph'))} time range">
+    ${debugGraphAvailableRangeOptions(nowMs).map(option => {
+      const active = option.seconds === activeRange;
+      return `<button type="button" class="js-debug-range-button${active ? ' active' : ''}" data-js-debug-range="${option.seconds}" aria-pressed="${active ? 'true' : 'false'}">${esc(option.label)}</button>`;
+    }).join('')}
+  </div>`;
+}
+
+function debugGraphControlsHtml(nowMs = Date.now()) {
+  return `<div class="js-debug-graph-controls">
+    ${debugGraphScaleControlsHtml()}
+    ${debugGraphRangeControlsHtml(nowMs)}
+  </div>`;
+}
+
+function debugGraphTimeLabel(ms) {
+  if (!Number.isFinite(ms)) return '';
+  const date = new Date(ms);
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function debugGraphPolylineHtml(series, chartMax, count) {
+  const top = 8;
+  const width = 600;
+  const height = 104;
+  const max = Math.max(chartMax, 1);
+  const points = series.values.map((value, i) => {
+    const x = count > 1 ? (i / (count - 1)) * width : width;
+    const y = top + (1 - (Math.max(0, value) / max)) * height;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  if (!points) return '';
+  return `<polyline class="js-debug-line js-debug-line--${esc(series.key)}" data-js-debug-series="${esc(series.key)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"><title>${esc(series.label)}</title></polyline>`;
+}
+
+function debugGraphLegendHtml(seriesItems) {
+  return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
+    ${seriesItems.map(series => `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"><span class="js-debug-legend-swatch js-debug-legend-swatch--${esc(series.key)}"></span><span>${esc(series.label)}</span><strong>${esc(debugGraphValueText(series.current, series.unit))}</strong></div>`).join('')}
+  </div>`;
+}
+
+function debugGraphAxisHtml(group, max) {
+  const axisMax = Math.max(0, Number(max) || 0);
+  return `<div class="js-debug-y-axis" data-js-debug-axis="${esc(group.key)}">
+    <span data-js-debug-axis-max="${esc(group.key)}">${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+    <span data-js-debug-axis-mid="${esc(group.key)}">${esc(debugGraphAxisValueText(axisMax / 2, group.unit))}</span>
+    <span data-js-debug-axis-zero="${esc(group.key)}">${esc(debugGraphAxisValueText(0, group.unit))}</span>
+  </div>`;
+}
+
+function debugGraphXAxisTickIndexes(count) {
+  if (count <= 0) return [];
+  if (count === 1) return [0];
+  return [...new Set([0, Math.floor((count - 1) / 2), count - 1])];
+}
+
+function debugGraphXAxisTickName(position, total) {
+  if (position === 0) return 'start';
+  if (position === total - 1) return 'end';
+  return 'mid';
+}
+
+function debugGraphXAxisHtml(buckets) {
+  const indexes = debugGraphXAxisTickIndexes(buckets.length);
+  if (!indexes.length) return '';
+  return `<div class="js-debug-x-axis" data-js-debug-x-axis>
+    ${indexes.map((index, position) => `<span data-js-debug-x-tick="${esc(debugGraphXAxisTickName(position, indexes.length))}">${esc(debugGraphTimeLabel(buckets[index]?.startMs || 0))}</span>`).join('')}
+  </div>`;
+}
+
+function debugGraphChartHtml(group, seriesItems, buckets) {
+  const count = buckets.length;
+  const seriesByKey = new Map(seriesItems.map(series => [series.key, series]));
+  const groupSeries = group.series.map(key => seriesByKey.get(key)).filter(Boolean);
+  const fixedMax = Number(group.fixedMax);
+  const max = Number.isFinite(fixedMax) && fixedMax > 0 ? fixedMax : Math.max(0, ...groupSeries.map(series => series.max));
+  const axisMax = max > 0 ? max : 0;
+  return `<section class="js-debug-chart" data-js-debug-chart="${esc(group.key)}">
+    <div class="js-debug-chart-head">
+      <span class="js-debug-chart-title">${esc(group.label)}</span>
+      ${debugGraphLegendHtml(groupSeries)}
+    </div>
+    <div class="js-debug-chart-body">
+      ${debugGraphAxisHtml(group, axisMax)}
+      <div class="js-debug-plot">
+        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(group.label)}" preserveAspectRatio="none">
+          <line class="js-debug-grid-line" x1="0" y1="8" x2="600" y2="8"></line>
+          <line class="js-debug-grid-line" x1="0" y1="60" x2="600" y2="60"></line>
+          <line class="js-debug-grid-line" x1="0" y1="112" x2="600" y2="112"></line>
+          ${groupSeries.map(series => debugGraphPolylineHtml(series, Math.max(max, 1), count)).join('')}
+        </svg>
+        ${debugGraphXAxisHtml(buckets)}
+      </div>
+    </div>
+  </section>`;
+}
+
+function debugGraphSvgHtml(buckets, seriesItems) {
+  const first = buckets[0]?.startMs || 0;
+  const last = buckets[buckets.length - 1]?.startMs || first;
+  return `<div class="js-debug-chart-shell">
+    <div class="js-debug-chart-grid">${jsDebugGraphChartGroups.map(group => debugGraphChartHtml(group, seriesItems, buckets)).join('')}</div>
+    <div class="js-debug-graph-scale"><span>${esc(debugGraphTimeLabel(first))}</span><span>${esc(jsDebugGraphScaleSeconds)} sec buckets | ${esc(jsDebugGraphRangeOptions.find(option => option.seconds === jsDebugGraphRangeSeconds)?.label || 'last min')}</span><span>${esc(debugGraphTimeLabel(last))}</span></div>
+  </div>`;
+}
+
+function debugGraphClassName() {
+  return `js-debug-graph${debugGraphDisplayBuckets().length ? '' : ' js-debug-graph--empty'}`;
+}
+
+function debugGraphInnerHtml() {
+  const nowMs = Date.now();
+  activeJsDebugGraphRangeSeconds(nowMs);
+  const controls = debugGraphControlsHtml(nowMs);
+  const meta = debugGraphMetaHtml();
+  const buckets = debugGraphDisplayBuckets(nowMs);
+  if (!buckets.length) {
+    return `${controls}${meta}<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
+  }
+  const seriesItems = debugGraphSeriesData(buckets);
+  return `${controls}${meta}${debugGraphSvgHtml(buckets, seriesItems)}${debugGraphLegendHtml(seriesItems)}`;
+}
+
+function debugGraphHtml() {
+  return `<div class="${debugGraphClassName()}" data-js-debug-graph aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml()}</div>`;
+}
+
+function debugGraphBucketSummary(nowMs = Date.now()) {
+  const buckets = debugGraphDisplayBuckets(nowMs);
+  const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
+  return {
+    rawBuckets: jsDebugGraphRawBuckets.size,
+    rollupBuckets: jsDebugGraphRollupBuckets.size,
+    displayBuckets: buckets.length,
+    eventRefs: jsDebugGraphEventBuckets.size,
+    scaleSeconds: jsDebugGraphScaleSeconds,
+    rangeSeconds: jsDebugGraphRangeSeconds,
+    availableRangeSeconds,
+    retentionHours: jsDebugGraphRetentionMs / 60 / 60 / 1000,
+    rawWindowSeconds: jsDebugGraphRawWindowMs / 1000,
+    rollupBucketSeconds: jsDebugGraphRollupBucketMs / 1000,
+    serverSequence: jsDebugStatsServerSequence,
+    pendingServerBuckets: jsDebugGraphPendingServerBuckets.size,
+    uptimeSeconds: jsDebugStatsServerUptimeSeconds,
+    series: jsDebugGraphSeries.map(series => series.key),
+  };
+}
+
+async function pollJsDebugStatsSample() {
+  if (!debugModeEnabled || jsDebugStatsPollInFlight || typeof apiFetchJsonQuiet !== 'function') return;
+  jsDebugStatsPollInFlight = true;
+  try {
+    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}`, {cache: 'no-store'});
+    recordJsDebugStatsSample(payload);
+  } catch (_error) {
+  } finally {
+    jsDebugStatsPollInFlight = false;
+  }
+}
+
+function scheduleJsDebugStatsHistoryFlush() {
+  if (!debugModeEnabled || jsDebugStatsHistoryFlushTimer || typeof setTimeout !== 'function') return;
+  jsDebugStatsHistoryFlushTimer = setTimeout(() => {
+    jsDebugStatsHistoryFlushTimer = null;
+    flushJsDebugStatsHistory();
+  }, jsDebugStatsHistoryFlushMs);
+}
+
+async function flushJsDebugStatsHistory() {
+  if (!debugModeEnabled || jsDebugStatsHistoryFlushInFlight || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
+  const records = [...jsDebugGraphPendingServerBuckets.values()]
+    .map(record => ({...record}))
+    .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.cpu_count || record.system_cpu_count);
+  jsDebugGraphPendingServerBuckets.clear();
+  if (!records.length) return;
+  jsDebugStatsHistoryFlushInFlight = true;
+  try {
+    const payload = await apiFetchJsonQuiet('/api/stats-history', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({since: jsDebugStatsServerSequence || 0, records}),
+    });
+    debugGraphApplyServerHistory(payload?.history);
+    scheduleJsDebugPanelRefresh();
+  } catch (_error) {
+    for (const record of records) {
+      const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+      const existing = jsDebugGraphPendingServerBuckets.get(key);
+      if (existing) {
+        for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
+          existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
+        }
+      } else {
+        jsDebugGraphPendingServerBuckets.set(key, record);
+      }
+    }
+  } finally {
+    jsDebugStatsHistoryFlushInFlight = false;
+    if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
+  }
+}
+
+function clearJsDebugServerHistory() {
+  jsDebugStatsServerSequence = 0;
+  jsDebugStatsServerUptimeSeconds = null;
+  jsDebugStatsServerPid = null;
+  jsDebugStatsServerStartedAt = null;
+  jsDebugStatsServerRssBytes = null;
+  if (jsDebugStatsHistoryFlushTimer) {
+    clearTimeout(jsDebugStatsHistoryFlushTimer);
+    jsDebugStatsHistoryFlushTimer = null;
+  }
+  if (typeof apiFetchJsonQuiet !== 'function') return;
+  apiFetchJsonQuiet('/api/stats-history', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({clear: true}),
+  }).then(payload => {
+    debugGraphApplyServerHistory(payload?.history);
+    scheduleJsDebugPanelRefresh();
+  }).catch(() => {});
+}
+
+function startJsDebugStatsPolling() {
+  if (!debugModeEnabled || jsDebugStatsPollTimer) return;
+  pollJsDebugStatsSample();
+  if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollMs);
+}
+
 function jsDebugTextForClipboard() {
   const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
   const counts = debugEventCounts();
@@ -30777,19 +31580,23 @@ function jsDebugTextForClipboard() {
 function debugPanelHtml() {
   const counts = debugEventCounts();
   return `
-    <div class="js-debug-toolbar">
-      <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
-        ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
-        ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
-        ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
-        ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+    ${debugSubTabsHtml()}
+    <div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
+      <div class="js-debug-toolbar">
+        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
+          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+        </div>
+        <div class="js-debug-actions">
+          <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('debug.copy'))}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('debug.clear'))}</button>
+        </div>
       </div>
-      <div class="js-debug-actions">
-        <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('debug.copy'))}</button>
-        <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('debug.clear'))}</button>
-      </div>
+      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
     </div>
-    <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>`;
+    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`;
 }
 
 function createDebugPanel() {
@@ -30849,6 +31656,12 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   if (statApi) statApi.textContent = String(counts.apiCalls);
   if (statSse) statSse.textContent = String(counts.sseEvents);
   if (statErrors) statErrors.textContent = String(counts.errors);
+  applyDebugSubTab(panel);
+  const graph = panel.querySelector('[data-js-debug-graph]');
+  if (graph) {
+    graph.className = debugGraphClassName();
+    graph.innerHTML = debugGraphInnerHtml();
+  }
   const log = panel.querySelector('[data-js-debug-log]');
   if (!log || (document.activeElement === log && options.force !== true)) return;
   const text = jsDebugTextForClipboard();
@@ -30860,10 +31673,70 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   log.scrollTop = nearBottom || options.force === true ? log.scrollHeight : oldTop;
 }
 
+function applyDebugSubTab(panel) {
+  if (!panel) return;
+  panel.querySelectorAll('[data-js-debug-subtab]').forEach(button => {
+    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === jsDebugSubTab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  panel.querySelectorAll('[data-js-debug-subview]').forEach(view => {
+    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === jsDebugSubTab;
+    view.hidden = !active;
+  });
+}
+
+function setDebugSubTab(tab) {
+  jsDebugSubTab = normalizedJsDebugSubTab(tab);
+  for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
+}
+
+function setDebugGraphScale(value) {
+  jsDebugGraphScaleSeconds = normalizedJsDebugGraphScale(value);
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    graph.className = debugGraphClassName();
+    graph.innerHTML = debugGraphInnerHtml();
+  }
+}
+
+function setDebugGraphRange(value) {
+  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    graph.className = debugGraphClassName();
+    graph.innerHTML = debugGraphInnerHtml();
+  }
+}
+
+function handleDebugGraphControlEvent(event, panel) {
+  const range = event.target.closest('[data-js-debug-range]');
+  if (range && panel.contains(range)) {
+    event.preventDefault();
+    setDebugGraphRange(range.dataset.jsDebugRange);
+    return true;
+  }
+  const scale = event.target.closest('[data-js-debug-scale]');
+  if (scale && panel.contains(scale)) {
+    event.preventDefault();
+    setDebugGraphScale(scale.dataset.jsDebugScale);
+    return true;
+  }
+  return false;
+}
+
 function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
+  panel.addEventListener('pointerdown', event => {
+    handleDebugGraphControlEvent(event, panel);
+  });
   panel.addEventListener('click', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    const subtab = event.target.closest('[data-js-debug-subtab]');
+    if (subtab && panel.contains(subtab)) {
+      event.preventDefault();
+      setDebugSubTab(subtab.dataset.jsDebugSubtab);
+      return;
+    }
     const copy = event.target.closest('[data-js-debug-copy]');
     if (copy && panel.contains(copy)) {
       event.preventDefault();
@@ -30880,6 +31753,8 @@ function bindDebugPanel(panel) {
     }
   });
 }
+
+startJsDebugStatsPolling();
 function sessionForFileRepo(path) {
   const normalized = String(path || '');
   if (!normalized) return '';

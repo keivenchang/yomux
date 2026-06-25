@@ -1795,15 +1795,29 @@ async function runEditorPreviewSuite() {
   });
 
   test('t@6675', () => {
+    const normalApi = loadYolomux('', ['1', '2']);
+    const normalFileMenu = normalApi.appMenuTree().find(menu => menu.id === 'file');
+    const normalStatsItem = normalFileMenu.items.find(item => item.label === 'YO!stats');
+    assert.ok(normalStatsItem, 'File menu exposes YO!stats without requiring a manual debug=1 URL edit');
+    assert.equal(normalStatsItem.checked, undefined, 'YO!stats is not checked until the debug pane is active');
+    normalStatsItem.action();
+    assert.equal(normalApi.reloadCountForTest(), 1, 'opening YO!stats from a normal page reloads with instrumentation enabled from boot');
+    assert.equal(parseUrl(normalApi.lastUrlForTest()).get('debug'), '1', 'YO!stats menu action enables debug=1 in the URL');
+    assert.ok((parseUrl(normalApi.lastUrlForTest()).get('sessions') || '').split(',').includes('debug'), 'YO!stats menu action requests the stats tab after reload');
+
     const api = loadYolomux('?debug=1', ['1', '2']);
-    assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 enables the JS Debug pane');
+    assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 enables the YO!stats pane');
     assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,debug,image-viewer,file-editor');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane when enabled');
-    assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'Debug pane serializes to the readable debug item');
+    assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'YO!stats pane serializes to the readable debug item');
     const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
-    assert.ok(fileMenu.items.some(item => item.targetItem === api.debugPaneItemId), 'File menu exposes JS Debug only when enabled');
+    const statsItem = fileMenu.items.find(item => item.targetItem === api.debugPaneItemId);
+    assert.ok(statsItem, 'File menu exposes YO!stats when enabled');
+    assert.equal(statsItem.label, 'YO!stats', 'File menu labels the debug stats tab as YO!stats');
+    assert.equal(statsItem.checked, true, 'YO!stats menu item is checked while the stats tab is in the layout');
     const paletteRows = api.commandPaletteCommandItems().filter(item => item.targetItem === api.debugPaneItemId);
     assert.equal(paletteRows.length, 1, 'command palette lists the Debug pane once through the Tabs group');
+    assert.equal(paletteRows[0].label, 'YO!stats', 'command palette labels the debug stats tab as YO!stats');
     api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 12.3});
     api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/activity-summary?locale=en', status: 200, ok: true, durationMs: 4200.4});
     api.recordJsDebugEventForTest('sse', {
@@ -1833,9 +1847,34 @@ async function runEditorPreviewSuite() {
       },
     });
     api.recordJsDebugEventForTest('error', {message: 'boom', source: '/static/yolomux.js', line: 10});
+    api.recordJsDebugStatsSampleForTest({time: Date.now() / 1000, cpu_percent: 7.5, system_cpu_percent: 22.5, uptime_seconds: 125, pid: 4242, rss_bytes: 134217728});
     assert.equal(api.jsDebugEventsForTest().length, 4, 'debug event recorder stores bounded diagnostics while enabled');
     const html = api.debugPanelHtmlForTest();
+    assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
+    assert.ok(html.includes('data-js-debug-subtab="graph"') && html.includes('Graph'), 'YO!stats renders a Graph sub-tab');
+    assert.ok(html.includes('data-js-debug-subview="events"') && html.includes('data-js-debug-subview="graph" hidden'), 'YO!stats defaults to the API/SSE sub-tab and keeps the graph separate');
     assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
+    assert.ok(html.includes('data-js-debug-stat="api">2<'), 'debug panel surfaces the API call count');
+    assert.ok(html.includes('data-js-debug-graph'), 'YO!stats graph sub-tab renders a graph container');
+    for (const chart of ['count', 'latency', 'bandwidth', 'cpu']) {
+      assert.ok(html.includes(`data-js-debug-chart="${chart}"`), `YO!stats graph splits out the ${chart} chart`);
+      assert.ok(html.includes(`data-js-debug-axis-max="${chart}"`), `YO!stats graph renders a unit-aware Y axis for ${chart}`);
+    }
+    assert.ok(html.includes('data-js-debug-x-axis') && html.includes('data-js-debug-x-tick="start"'), 'YO!stats graph renders time ticks on each X axis');
+    for (const series of ['api', 'sse', 'latency', 'bandwidth', 'cpu', 'systemCpu']) {
+      assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats graph renders the ${series} line`);
+      assert.ok(html.includes(`data-js-debug-legend="${series}"`), `YO!stats graph renders the ${series} legend entry`);
+    }
+    for (const scale of ['1', '5', '10']) {
+      assert.ok(html.includes(`data-js-debug-scale="${scale}"`), `YO!stats graph renders the ${scale}s scale button`);
+    }
+    for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '86400']) {
+      assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph renders the ${range}s range button`);
+    }
+    assert.equal(html.includes('data-js-debug-range="28800"'), false, 'YO!stats hides the 8 hour range until enough history exists');
+    assert.equal(html.includes('data-js-debug-range="57600"'), false, 'YO!stats hides the 16 hour range until enough history exists');
+    assert.equal(html.includes('data-js-debug-graph-bar'), false, 'YO!stats graph is a line graph, not timing bars');
+    assert.ok(html.includes('data-js-debug-uptime="2m 5s"') && html.includes('PID=4242') && html.includes('rss 128 MiB'), 'YO!stats graph shows yolomux.py uptime and process stats');
     assert.ok(html.includes('GET /api/ping'), 'debug panel renders API timing rows');
     assert.ok(html.includes('Slow API by max latency') && html.includes('GET /api/activity-summary'), 'debug panel summarizes slow API endpoints by path');
     assert.ok(html.includes('Slow SSE server work') && html.includes('Slow SSE receive latency'), 'debug panel summarizes SSE server time and receive latency');
@@ -1847,11 +1886,13 @@ async function runEditorPreviewSuite() {
     const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
+    assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, and line graph styling');
     assert.equal(debugPaneSource.includes("initialSetting('performance.activity_summary_refresh_ms'"), false, 'silent activity-summary polling preference is removed');
     assert.equal(debugPaneSource.includes('activitySummaryBackgroundRefreshMs'), false, 'activity-summary no longer keeps a client background refresh timer');
     assert.ok(debugPaneSource.includes('function activitySummaryIsVisible()'), 'activity-summary visibility tracking remains available for server watch state');
     const debugText = api.jsDebugTextForClipboardForTest();
     assert.ok(debugText.includes('page=/?debug=1'), 'debug text includes the active URL path and query');
+    assert.ok(debugText.includes('api=2'), 'debug text exports the API call count');
     assert.ok(debugText.includes('API') && debugText.includes('GET /api/ping'), 'debug text exports API rows');
     assert.ok(debugText.includes('Slow API by max latency') && debugText.includes('GET /api/activity-summary'), 'debug text exports grouped slow API rows');
     assert.ok(debugText.includes('sse_rx=999B'), 'debug text counts estimated SSE frame bytes');
@@ -1874,6 +1915,238 @@ async function runEditorPreviewSuite() {
       slot1: {tabs: ['5', injectedApi.infoItemId, injectedApi.debugPaneItemId], active: injectedApi.debugPaneItemId},
       slot2: {tabs: [injectedApi.fileExplorerItemId], active: injectedApi.fileExplorerItemId},
     }, 'debug=1 injects and activates Debug in an existing URL layout');
+  });
+
+  test('YO!stats graph retains 24 hours with old timing buckets compressed', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.clearJsDebugEventsForTest();
+    const now = Date.now();
+    for (let i = 0; i < 20; i += 1) {
+      api.recordJsDebugEventForTest('api', {
+        ts: new Date(now - (2 * 60 * 60 * 1000) + (i * 1000)).toISOString(),
+        method: 'GET',
+        url: `/api/timing-${i}`,
+        status: 200,
+        ok: true,
+        durationMs: 10 + i,
+        requestBytes: 50,
+        responseBytes: 150,
+      });
+    }
+    api.recordJsDebugEventForTest('api', {
+      ts: new Date(now - (25 * 60 * 60 * 1000)).toISOString(),
+      method: 'GET',
+      url: '/api/expired',
+      status: 200,
+      ok: true,
+      durationMs: 500,
+      requestBytes: 100,
+      responseBytes: 100,
+    });
+    api.recordJsDebugStatsSampleForTest({time: (now - (2 * 60 * 60 * 1000)) / 1000, cpu_percent: 42});
+    let summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.retentionHours, 24, 'YO!stats graph keeps a 24 hour retention window');
+    assert.equal(summary.rawWindowSeconds, 3600, 'YO!stats graph keeps high-resolution raw buckets for the last hour');
+    assert.equal(summary.rollupBucketSeconds, 10, 'YO!stats graph rolls old samples into ten-second timing buckets');
+    assert.equal(summary.rawBuckets, 0, 'two-hour-old samples are no longer kept as one-second raw buckets');
+    assert.ok(summary.rollupBuckets > 0 && summary.rollupBuckets <= 3, 'two-hour-old per-second samples compress into ten-second buckets');
+    assert.equal(summary.rangeSeconds, 60, 'YO!stats graph defaults to the one-minute time range');
+    assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default one-minute range');
+    assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 86400], 'YO!stats shows short ranges and 24h before 8h/16h data exists');
+    assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', 'cpu', 'systemCpu'], 'graph tracks API, SSE, latency, bandwidth, process CPU, and system CPU series');
+    assert.ok(summary.pendingServerBuckets > 0, 'browser-observed API/SSE graph buckets are queued for server retention');
+    api.recordJsDebugStatsSampleForTest({
+      uptime_seconds: 3661,
+      pid: 4321,
+      rss_bytes: 268435456,
+      history: {
+        sequence: 17,
+        records: [{
+          start: Math.floor((now - (2 * 60 * 60 * 1000)) / 1000 / 10) * 10,
+          duration: 10,
+          sequence: 17,
+          api_count: 25,
+          sse_count: 3,
+          latency_total_ms: 250,
+          latency_count: 5,
+          bandwidth_bytes: 4096,
+          cpu_total_percent: 42,
+          cpu_count: 1,
+          system_cpu_total_percent: 35,
+          system_cpu_count: 1,
+        }],
+      },
+    });
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.serverSequence, 17, 'graph applies server-retained history sequence numbers');
+    assert.equal(summary.uptimeSeconds, 3661, 'graph remembers server-reported yolomux.py uptime');
+    const preRestartHtml = api.debugPanelHtmlForTest();
+    assert.ok(preRestartHtml.includes('uptime 1h 1m 1s') && preRestartHtml.includes('PID=4321'), 'graph renders server-retained process metadata');
+    api.recordJsDebugStatsSampleForTest({
+      uptime_seconds: 1,
+      pid: 9876,
+      started_at: 123,
+      history: {
+        sequence: 1,
+        records: [],
+      },
+    });
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.serverSequence, 1, 'graph resets incremental history sequence after yolomux.py restarts with a new PID');
+    api.setDebugGraphRangeForTest(7200);
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.rangeSeconds, 7200, 'clickable graph range changes the rendered history window');
+    assert.ok(summary.displayBuckets > 0, 'two-hour range displays the retained two-hour bucket');
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 18,
+      records: [{
+        start: Math.floor((now - (9 * 60 * 60 * 1000)) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 18,
+        api_count: 1,
+        latency_total_ms: 10,
+        latency_count: 1,
+      }],
+    });
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.ok(summary.availableRangeSeconds.includes(28800), '8 hour range appears once retained history reaches 8 hours');
+    assert.equal(summary.availableRangeSeconds.includes(57600), false, '16 hour range stays hidden before retained history reaches 16 hours');
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 19,
+      records: [{
+        start: Math.floor((now - (17 * 60 * 60 * 1000)) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 19,
+        sse_count: 1,
+        bandwidth_bytes: 20,
+      }],
+    });
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.ok(summary.availableRangeSeconds.includes(57600), '16 hour range appears once retained history reaches 16 hours');
+    api.recordJsDebugEventForTest('sse', {
+      ts: new Date(now - 500).toISOString(),
+      eventType: 'ping',
+      receiveLatencyMs: 2.5,
+      frameBytes: 40,
+    });
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.ok(summary.rawBuckets > 0, 'recent timing samples stay in one-second buckets');
+    api.setDebugGraphScaleForTest(5);
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.scaleSeconds, 5, 'clickable graph scale changes the rendered aggregation interval');
+    const html = api.debugPanelHtmlForTest();
+    assert.ok(html.includes('5 sec buckets | 2 hours'), 'graph labels the active time scale and selected range');
+    assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"'), 'graph renders long range buttons after enough retained history exists');
+    assert.ok(/data-js-debug-axis-max="count">[0-9.]+\/sec</.test(html), 'count chart Y axis shows per-second rates');
+    assert.ok(/data-js-debug-axis-max="latency">[0-9.]+ (?:ms|s)</.test(html), 'latency chart Y axis shows time units');
+    assert.ok(/data-js-debug-axis-max="bandwidth">[0-9.]+(?:B|kB|MB)\/s</.test(html), 'bandwidth chart Y axis shows byte-per-second units');
+    assert.ok(/data-js-debug-axis-max="cpu">[0-9.]+%</.test(html), 'CPU chart Y axis shows percent units');
+    assert.ok(html.includes('system avg CPU %'), 'CPU chart includes system average CPU beside yolomux.py CPU');
+    assert.ok(html.includes('uptime 1s') && html.includes('PID=9876') && html.includes('server seq 19'), 'graph renders restarted process metadata with retained sequence');
+  });
+
+  test('YO!stats split charts render deterministic Y-axis max labels with units', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 31,
+      records: [{
+        start: Math.floor((now - 30000) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 29,
+        api_count: 4,
+        sse_count: 2,
+        latency_total_ms: 100,
+        latency_count: 1,
+        bandwidth_bytes: 512,
+        cpu_total_percent: 5,
+        cpu_count: 1,
+        system_cpu_total_percent: 8,
+        system_cpu_count: 1,
+      }, {
+        start: Math.floor((now - 20000) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 30,
+        api_count: 8,
+        sse_count: 4,
+        latency_total_ms: 250,
+        latency_count: 1,
+        bandwidth_bytes: 1024,
+        cpu_total_percent: 10,
+        cpu_count: 1,
+        system_cpu_total_percent: 16,
+        system_cpu_count: 1,
+      }, {
+        start: Math.floor((now - 10000) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 31,
+        api_count: 20,
+        sse_count: 10,
+        latency_total_ms: 5000,
+        latency_count: 1,
+        bandwidth_bytes: 10240,
+        cpu_total_percent: 50,
+        cpu_count: 1,
+        system_cpu_total_percent: 80,
+        system_cpu_count: 1,
+      }],
+    });
+    api.setDebugGraphScaleForTest(10);
+    const html = api.debugPanelHtmlForTest();
+
+    assert.ok(html.includes('data-js-debug-chart="count"') && html.includes('data-js-debug-chart="latency"') && html.includes('data-js-debug-chart="bandwidth"') && html.includes('data-js-debug-chart="cpu"'), 'YO!stats renders separate charts for unlike units');
+    assert.ok(/data-js-debug-axis-max="count">2\/sec</.test(html), 'count chart Y axis shows per-second API/SSE rates');
+    assert.ok(/data-js-debug-axis-max="latency">5\.0 s</.test(html), 'latency chart Y axis converts large millisecond values to seconds');
+    assert.ok(/data-js-debug-axis-max="bandwidth">1\.0kB\/s</.test(html), 'bandwidth chart Y axis shows per-second bandwidth');
+    assert.ok(/data-js-debug-axis-max="cpu">100%</.test(html), 'CPU chart Y axis always uses a 0-100% scale');
+    assert.ok(html.includes('yolomux.py CPU %') && html.includes('system avg CPU %'), 'CPU legend shows process and system CPU series together');
+    assert.ok(html.includes('data-js-debug-x-tick="start"') && html.includes('data-js-debug-x-tick="mid"') && html.includes('data-js-debug-x-tick="end"'), 'split charts render start/mid/end time ticks on the X axis');
+  });
+
+  test('YO!stats graph controls apply on pointer down before refresh can replace buttons', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const panel = new TestElement('debug-panel');
+    const scale = new TestElement('graph-scale', 'button');
+    const range = new TestElement('graph-range', 'button');
+    scale.dataset.jsDebugScale = '10';
+    range.dataset.jsDebugRange = '7200';
+    panel.appendChild(scale);
+    panel.appendChild(range);
+    api.bindDebugPanelForTest(panel);
+    const pointerdown = panel.listeners.get('pointerdown')[0];
+    let prevented = 0;
+
+    pointerdown({target: scale, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().scaleSeconds, 10, 'single pointerdown applies the graph bucket scale immediately');
+    pointerdown({target: range, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'single pointerdown applies the graph time range immediately');
+    assert.equal(prevented, 2, 'graph controls claim pointerdown before a refresh can remove the clicked button');
+  });
+
+  await testAsync('YO!stats stats polling does not count itself as API timing', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    api.clearJsDebugEventsForTest();
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET')});
+      return Promise.resolve(jsonResponse({ok: true, history: {sequence: 0, records: []}}));
+    });
+
+    await api.apiFetchJsonQuietForTest('/api/stats-sample?since=0', {cache: 'no-store'});
+    await api.apiFetchJsonQuietForTest('/api/stats-history', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({records: []}),
+    });
+
+    assert.deepStrictEqual(requests, [
+      {url: '/api/stats-sample?since=0', method: 'GET'},
+      {url: '/api/stats-history', method: 'POST'},
+    ], 'YO!stats polling uses the quiet JSON fetch path for sample and history requests');
+    assert.equal(api.jsDebugEventsForTest().length, 0, 'quiet stats sample/history calls do not create API debug events');
+    api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 1});
+    assert.equal(api.jsDebugEventsForTest().length, 1, 'regular debug event recording remains enabled');
   });
 
   test('session popover lists agent windows with working durations and idle recency', () => {

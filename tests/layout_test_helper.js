@@ -756,6 +756,14 @@ globalThis.__layoutTestApi = {
   debugModeEnabledForTest() { return debugModeEnabled; },
   debugPaneItemId,
   debugPanelHtmlForTest: debugPanelHtml,
+  debugGraphBucketSummaryForTest: debugGraphBucketSummary,
+  debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
+  flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
+  recordJsDebugStatsSampleForTest: recordJsDebugStatsSample,
+  bindDebugPanelForTest: bindDebugPanel,
+  setDebugGraphScaleForTest: setDebugGraphScale,
+  setDebugGraphRangeForTest: setDebugGraphRange,
+  clearJsDebugEventsForTest: clearJsDebugEvents,
   jsDebugEventsForTest() { return jsDebugEvents.map(event => ({...event})); },
   jsDebugTextForClipboardForTest: jsDebugTextForClipboard,
   recordSseDebugEventForTest: recordSseDebugEvent,
@@ -854,6 +862,7 @@ globalThis.__layoutTestApi = {
   terminalContextMenuSelectionForTest: terminalContextMenuSelection,
   terminalVisibleSelectionStateForTest: terminalVisibleSelectionState,
   clearTerminalVisibleSelectionForTest: clearTerminalVisibleSelection,
+  apiFetchJsonQuietForTest: apiFetchJsonQuiet,
   setFetchForTest(fn) { globalThis.fetch = fn; },
   setConfirmForTest(fn) { window.confirm = fn; },
   setShowToastForTest(fn) { showToast = fn; },
@@ -1735,6 +1744,9 @@ globalThis.__layoutTestApi = {
   syncInitialLayoutUrlForTest() {
     syncInitialLayoutUrl();
     return globalThis.__lastUrl;
+  },
+  lastUrlForTest() {
+    return globalThis.__lastUrl || '';
   },
   setGridPreviewNodesForTest(nodes) {
     grid.querySelectorAll = () => nodes;

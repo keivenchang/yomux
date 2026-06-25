@@ -38,6 +38,107 @@ def test_session_http_guards_use_shared_decorator():
     assert source.count("@requires_known_session(") >= 10
 
 
+def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    wall_times = iter([1000.0, 1002.0])
+    monotonic_times = iter([50.0, 52.0])
+    process_times = iter([10.0, 10.5])
+    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
+    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
+    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
+    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
+    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
+    try:
+        first = webapp.stats_sample_payload()
+        second = webapp.stats_sample_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert first["ok"] is True
+    assert first["cpu_percent"] == 0.0
+    assert first["system_cpu_percent"] == 0.0
+    assert first["uptime_seconds"] == 10.0
+    assert second["time"] == 1002.0
+    assert second["pid"] == os.getpid()
+    assert second["cpu_percent"] == 25.0
+    assert second["system_cpu_percent"] == 50.0
+    assert second["uptime_seconds"] == 12.0
+    assert second["rss_bytes"] == 123456
+    assert second["history"]["sequence"] >= 2
+    assert second["history"]["records"]
+    assert any(record["system_cpu_count"] for record in second["history"]["records"])
+
+
+def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    wall_times = iter([1000.0, 1000.2, 1002.0])
+    monotonic_times = iter([50.0, 50.2, 52.0])
+    process_times = iter([10.0, 10.5])
+    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
+    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
+    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
+    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
+    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
+    try:
+        first = webapp.stats_sample_payload()
+        duplicate = webapp.stats_sample_payload()
+        third = webapp.stats_sample_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert duplicate["time"] == first["time"]
+    assert duplicate["cpu_percent"] == first["cpu_percent"]
+    assert duplicate["system_cpu_percent"] == first["system_cpu_percent"]
+    assert duplicate["history"]["sequence"] == first["history"]["sequence"]
+    assert third["time"] == 1002.0
+    assert third["cpu_percent"] == 25.0
+    assert third["system_cpu_percent"] == 50.0
+    assert third["history"]["sequence"] > duplicate["history"]["sequence"]
+
+
+def test_system_cpu_percent_from_times_clamps_to_single_100_percent_scale():
+    assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 22.0)) == 50.0
+    assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 200.0)) == 100.0
+    assert app_module.system_cpu_percent_from_times((100.0, 20.0), (100.0, 21.0)) == 0.0
+
+
+def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    now = 200000.0
+    monkeypatch.setattr(app_module.time, "time", lambda: now)
+    records = [{
+        "start": now - (2 * 60 * 60) + i,
+        "duration": 1,
+        "api_count": 1,
+        "sse_count": 1 if i % 2 == 0 else 0,
+        "latency_total_ms": 10 + i,
+        "latency_count": 1,
+        "bandwidth_bytes": 100 + i,
+        "system_cpu_total_percent": 5,
+        "system_cpu_count": 1,
+    } for i in range(20)]
+    try:
+        payload, status = webapp.record_stats_history_payload({"records": records})
+        incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["history"]["raw_window_seconds"] == app_module.STATS_HISTORY_RAW_WINDOW_SECONDS
+    assert payload["history"]["rollup_bucket_seconds"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS
+    assert len(payload["history"]["records"]) <= 3
+    assert sum(record["api_count"] for record in payload["history"]["records"]) == 20
+    assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 20
+    assert any(record["duration"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS for record in payload["history"]["records"])
+    assert incremental["history"]["records"] == []
+
+
 class FakeCodexAppServerStdin:
     def __init__(self):
         self.messages = []

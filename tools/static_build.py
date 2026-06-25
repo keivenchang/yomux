@@ -68,9 +68,9 @@ RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {
 I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT = 10
 I18N_ALLOWED_IDENTICAL_TERMS = {
     "apache", "api", "ci", "claude", "cli", "codex", "css", "git", "github", "gitlab", "head", "html", "http",
-    "id", "ip", "javascript", "json", "linkedin", "markdown", "mit", "ok", "openai",
-    "polyform", "pr", "readme", "ssh", "tmux", "url", "websocket", "worktree", "yaml", "yo!agent",
-    "yo!info", "yo!share", "yolo", "yolomux",
+    "graph", "id", "ip", "javascript", "json", "linkedin", "markdown", "mit", "ok", "openai",
+    "polyform", "pr", "readme", "sse", "ssh", "tmux", "url", "websocket", "worktree", "yaml", "yo!agent",
+    "yo!info", "yo!share", "yo!stats", "yolo", "yolomux",
 }
 I18N_IDENTICAL_KEY_PATTERNS = (
     re.compile(r"^brand\."),

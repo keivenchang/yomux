@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import resource
 import secrets
 import shutil
 import shlex
@@ -238,6 +239,114 @@ SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 10.0
 AUTO_APPROVE_CACHE_MAX_AGE_SECONDS = 5.003
 SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = 10.0
+STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
+STATS_HISTORY_RAW_WINDOW_SECONDS = 60 * 60
+STATS_HISTORY_RAW_BUCKET_SECONDS = 1
+STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 10
+STATS_HISTORY_POST_MAX_RECORDS = 1000
+STATS_SAMPLE_CACHE_SECONDS = 0.95
+
+
+def current_process_rss_bytes() -> int | None:
+    try:
+        statm = Path("/proc/self/statm").read_text(encoding="utf-8").split()
+        resident_pages = int(statm[1])
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        if resident_pages >= 0 and page_size > 0:
+            return resident_pages * page_size
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        max_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (OSError, ValueError):
+        return None
+    if max_rss <= 0:
+        return None
+    return max_rss if sys.platform == "darwin" else max_rss * 1024
+
+
+def clamp_cpu_percent(value: float) -> float:
+    if not math.isfinite(value):
+        return 0.0
+    return max(0.0, min(100.0, value))
+
+
+def current_system_cpu_times() -> tuple[float, float] | None:
+    try:
+        fields = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0].split()
+    except (OSError, IndexError):
+        return None
+    if not fields or fields[0] != "cpu":
+        return None
+    try:
+        values = [float(value) for value in fields[1:]]
+    except ValueError:
+        return None
+    if len(values) < 4:
+        return None
+    idle = values[3] + (values[4] if len(values) > 4 else 0.0)
+    total = sum(values)
+    busy = total - idle
+    return total, busy
+
+
+def system_cpu_percent_from_times(previous: tuple[float, float] | None, current: tuple[float, float] | None) -> float:
+    if previous is None or current is None:
+        return 0.0
+    total_delta = current[0] - previous[0]
+    busy_delta = current[1] - previous[1]
+    if total_delta <= 0 or busy_delta < 0:
+        return 0.0
+    return clamp_cpu_percent((busy_delta / total_delta) * 100.0)
+
+
+def current_system_cpu_percent_from_ps() -> float | None:
+    try:
+        result = subprocess.run(["ps", "-A", "-o", "%cpu="], capture_output=True, text=True, timeout=0.75, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    total = 0.0
+    found = False
+    for line in result.stdout.splitlines():
+        try:
+            total += float(line.strip())
+            found = True
+        except ValueError:
+            continue
+    if not found:
+        return None
+    return clamp_cpu_percent(total / max(1, os.cpu_count() or 1))
+
+
+def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
+    return {
+        "start": start,
+        "duration": duration,
+        "sequence": 0,
+        "api_count": 0.0,
+        "sse_count": 0.0,
+        "latency_total_ms": 0.0,
+        "latency_count": 0.0,
+        "bandwidth_bytes": 0.0,
+        "cpu_total_percent": 0.0,
+        "cpu_count": 0.0,
+        "system_cpu_total_percent": 0.0,
+        "system_cpu_count": 0.0,
+    }
+
+
+def stats_history_positive_number(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number) or number <= 0:
+        return 0.0
+    return number
+
+
 TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
 TMUX_SIGNAL_ACTIVITY_WINDOW_SECONDS = 120.0
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
@@ -813,6 +922,16 @@ class TmuxWebtermApp:
         self.metadata_badge_lock = threading.Lock()
         self.metadata_badge_signatures: dict[str, dict[str, str]] = {}
         self.metadata_badge_pulse_until: dict[str, dict[str, float]] = {}
+        self.stats_sample_lock = threading.Lock()
+        self.stats_sample_last_monotonic: float | None = None
+        self.stats_sample_last_process_time: float | None = None
+        self.stats_sample_last_system_cpu_times: tuple[float, float] | None = None
+        self.stats_sample_cached_monotonic: float | None = None
+        self.stats_sample_cached_payload: dict[str, Any] | None = None
+        self.stats_history_lock = threading.RLock()
+        self.stats_history_raw_buckets: dict[tuple[int, int], dict[str, Any]] = {}
+        self.stats_history_rollup_buckets: dict[tuple[int, int], dict[str, Any]] = {}
+        self.stats_history_sequence = 0
         self.client_events = ClientEventBroker()
         self.client_watch_lock = threading.RLock()
         self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
@@ -909,6 +1028,183 @@ class TmuxWebtermApp:
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         return None
+
+    def stats_history_next_sequence_locked(self) -> int:
+        self.stats_history_sequence += 1
+        return self.stats_history_sequence
+
+    def stats_history_bucket_locked(self, sample_time: float, now: float) -> dict[str, Any] | None:
+        if not math.isfinite(sample_time) or sample_time < now - STATS_HISTORY_RETENTION_SECONDS:
+            return None
+        if sample_time < now - STATS_HISTORY_RAW_WINDOW_SECONDS:
+            bucket_seconds = STATS_HISTORY_ROLLUP_BUCKET_SECONDS
+            buckets = self.stats_history_rollup_buckets
+        else:
+            bucket_seconds = STATS_HISTORY_RAW_BUCKET_SECONDS
+            buckets = self.stats_history_raw_buckets
+        start = int(math.floor(sample_time / bucket_seconds) * bucket_seconds)
+        key = (start, bucket_seconds)
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = stats_history_empty_bucket(start, bucket_seconds)
+            buckets[key] = bucket
+        return bucket
+
+    def stats_history_merge_record_locked(self, record: dict[str, Any], now: float) -> None:
+        sample_time = record.get("start", record.get("time", now))
+        try:
+            sample_time_float = float(sample_time)
+        except (TypeError, ValueError):
+            sample_time_float = now
+        bucket = self.stats_history_bucket_locked(sample_time_float, now)
+        if bucket is None:
+            return
+        changed = False
+        for key in ("api_count", "sse_count", "latency_total_ms", "latency_count", "bandwidth_bytes", "cpu_total_percent", "cpu_count", "system_cpu_total_percent", "system_cpu_count"):
+            value = stats_history_positive_number(record.get(key))
+            if value:
+                bucket[key] = float(bucket.get(key) or 0.0) + value
+                changed = True
+        if changed:
+            bucket["sequence"] = self.stats_history_next_sequence_locked()
+
+    def stats_history_merge_bucket_locked(self, target: dict[str, Any], source: dict[str, Any]) -> None:
+        for key in ("api_count", "sse_count", "latency_total_ms", "latency_count", "bandwidth_bytes", "cpu_total_percent", "cpu_count", "system_cpu_total_percent", "system_cpu_count"):
+            target[key] = float(target.get(key) or 0.0) + float(source.get(key) or 0.0)
+        target["sequence"] = self.stats_history_next_sequence_locked()
+
+    def stats_history_compact_locked(self, now: float) -> None:
+        raw_cutoff = now - STATS_HISTORY_RAW_WINDOW_SECONDS
+        for key, bucket in list(self.stats_history_raw_buckets.items()):
+            if float(bucket.get("start") or 0.0) >= raw_cutoff:
+                continue
+            start = int(math.floor(float(bucket.get("start") or 0.0) / STATS_HISTORY_ROLLUP_BUCKET_SECONDS) * STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
+            rollup_key = (start, STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
+            rollup = self.stats_history_rollup_buckets.get(rollup_key)
+            if rollup is None:
+                rollup = stats_history_empty_bucket(start, STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
+                self.stats_history_rollup_buckets[rollup_key] = rollup
+            self.stats_history_merge_bucket_locked(rollup, bucket)
+            self.stats_history_raw_buckets.pop(key, None)
+        retention_cutoff = now - STATS_HISTORY_RETENTION_SECONDS
+        for key, bucket in list(self.stats_history_raw_buckets.items()):
+            if float(bucket.get("start") or 0.0) < retention_cutoff:
+                self.stats_history_raw_buckets.pop(key, None)
+        for key, bucket in list(self.stats_history_rollup_buckets.items()):
+            if float(bucket.get("start") or 0.0) < retention_cutoff:
+                self.stats_history_rollup_buckets.pop(key, None)
+
+    def stats_history_records_locked(self, since: int = 0) -> list[dict[str, Any]]:
+        records = []
+        for bucket in [*self.stats_history_rollup_buckets.values(), *self.stats_history_raw_buckets.values()]:
+            sequence = int(bucket.get("sequence") or 0)
+            if sequence <= since:
+                continue
+            records.append({
+                "start": int(bucket.get("start") or 0),
+                "duration": int(bucket.get("duration") or 0),
+                "sequence": sequence,
+                "api_count": float(bucket.get("api_count") or 0.0),
+                "sse_count": float(bucket.get("sse_count") or 0.0),
+                "latency_total_ms": float(bucket.get("latency_total_ms") or 0.0),
+                "latency_count": float(bucket.get("latency_count") or 0.0),
+                "bandwidth_bytes": float(bucket.get("bandwidth_bytes") or 0.0),
+                "cpu_total_percent": float(bucket.get("cpu_total_percent") or 0.0),
+                "cpu_count": float(bucket.get("cpu_count") or 0.0),
+                "system_cpu_total_percent": float(bucket.get("system_cpu_total_percent") or 0.0),
+                "system_cpu_count": float(bucket.get("system_cpu_count") or 0.0),
+            })
+        return sorted(records, key=lambda item: (item["start"], item["duration"], item["sequence"]))
+
+    def stats_history_payload_locked(self, since: int = 0) -> dict[str, Any]:
+        return {
+            "sequence": self.stats_history_sequence,
+            "records": self.stats_history_records_locked(since),
+            "retention_seconds": STATS_HISTORY_RETENTION_SECONDS,
+            "raw_window_seconds": STATS_HISTORY_RAW_WINDOW_SECONDS,
+            "rollup_bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS,
+        }
+
+    def record_stats_history_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        if not isinstance(payload, dict):
+            return {"error": "payload must be an object"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        with self.stats_history_lock:
+            if payload.get("clear") is True:
+                self.stats_history_raw_buckets.clear()
+                self.stats_history_rollup_buckets.clear()
+                self.stats_history_next_sequence_locked()
+            records = payload.get("records", [])
+            if records is None:
+                records = []
+            if not isinstance(records, list):
+                return {"error": "records must be a list"}, HTTPStatus.BAD_REQUEST
+            if len(records) > STATS_HISTORY_POST_MAX_RECORDS:
+                return {"error": f"records limit is {STATS_HISTORY_POST_MAX_RECORDS}"}, HTTPStatus.BAD_REQUEST
+            for record in records:
+                if isinstance(record, dict):
+                    self.stats_history_merge_record_locked(record, now)
+            self.stats_history_compact_locked(now)
+            try:
+                since = int(payload.get("since") or 0)
+            except (TypeError, ValueError):
+                since = 0
+            return {"ok": True, "history": self.stats_history_payload_locked(max(0, since))}, HTTPStatus.OK
+
+    def stats_sample_payload(self, since: int = 0) -> dict[str, Any]:
+        now = time.time()
+        monotonic_now = time.monotonic()
+        with self.stats_sample_lock:
+            cached = self.stats_sample_cached_payload
+            cached_monotonic = self.stats_sample_cached_monotonic
+            use_cached = cached is not None and cached_monotonic is not None and monotonic_now - cached_monotonic < STATS_SAMPLE_CACHE_SECONDS
+            if use_cached:
+                sample = dict(cached)
+                record_cpu_sample = False
+            else:
+                process_time = time.process_time()
+                cpu_percent = 0.0
+                if self.stats_sample_last_monotonic is not None and self.stats_sample_last_process_time is not None:
+                    elapsed = monotonic_now - self.stats_sample_last_monotonic
+                    cpu_elapsed = process_time - self.stats_sample_last_process_time
+                    if elapsed > 0 and cpu_elapsed >= 0:
+                        cpu_percent = clamp_cpu_percent((cpu_elapsed / elapsed) * 100.0)
+                system_cpu_times = current_system_cpu_times()
+                if system_cpu_times is not None:
+                    system_cpu_percent = system_cpu_percent_from_times(self.stats_sample_last_system_cpu_times, system_cpu_times)
+                    self.stats_sample_last_system_cpu_times = system_cpu_times
+                else:
+                    system_cpu_percent = current_system_cpu_percent_from_ps() or 0.0
+                self.stats_sample_last_monotonic = monotonic_now
+                self.stats_sample_last_process_time = process_time
+                sample = {
+                    "time": now,
+                    "pid": os.getpid(),
+                    "started_at": SERVER_STARTED_AT,
+                    "uptime_seconds": max(0.0, now - SERVER_STARTED_AT),
+                    "cpu_percent": round(cpu_percent, 3),
+                    "system_cpu_percent": round(system_cpu_percent, 3),
+                    "rss_bytes": current_process_rss_bytes(),
+                }
+                self.stats_sample_cached_monotonic = monotonic_now
+                self.stats_sample_cached_payload = dict(sample)
+                record_cpu_sample = True
+        with self.stats_history_lock:
+            if record_cpu_sample:
+                self.stats_history_merge_record_locked({
+                    "time": sample["time"],
+                    "cpu_total_percent": sample["cpu_percent"],
+                    "cpu_count": 1,
+                    "system_cpu_total_percent": sample["system_cpu_percent"],
+                    "system_cpu_count": 1,
+                }, now)
+            self.stats_history_compact_locked(now)
+            history = self.stats_history_payload_locked(max(0, since))
+        return {
+            "ok": True,
+            **sample,
+            "history": history,
+        }
 
     def start_background_owner(self, port: int | None = None) -> bool:
         self.background_owner = BackgroundOwnerRegistry(

@@ -3844,7 +3844,7 @@ function flushPendingLayoutRender(reason = 'drag-flush') {
 }
 
 function updateActiveSessionParam() {
-  if (shareViewMode) return;
+  if (shareViewMode) return `${location.pathname}${location.search || ''}${location.hash || ''}`;
   const params = new URLSearchParams(location.search);
   params.delete('active');
   params.delete('sessions');
@@ -3867,7 +3867,9 @@ function updateActiveSessionParam() {
   const remaining = params.toString();
   if (remaining) queryParts.push(remaining);
   const query = queryParts.join('&');
-  history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash}`);
+  const nextUrl = `${location.pathname}${query ? `?${query}` : ''}${location.hash}`;
+  history.replaceState(null, '', nextUrl);
+  return nextUrl;
 }
 
 function syncInitialLayoutUrl() {

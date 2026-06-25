@@ -45,6 +45,18 @@ def test_get_agent_auth_honors_force_query():
     assert writes == [(HTTPStatus.OK, {"ok": True, "force": True})]
 
 
+def test_get_stats_sample_uses_app_payload():
+    writes = []
+    calls = []
+    app = SimpleNamespace(stats_sample_payload=lambda since=0: calls.append(since) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
+    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
+
+    http_routes.get_stats_sample(request, SimpleNamespace(query="since=9"), None)
+
+    assert calls == [9]
+    assert writes == [(HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123})]
+
+
 class FakeShareConnection:
     def __init__(self) -> None:
         self.sent: list[bytes] = []
@@ -430,6 +442,9 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert "if parsed.path" not in post_body
     assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "filesystem", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
+    assert route_by_path("GET", "/api/stats-sample").handler is http_routes.get_stats_sample
+    assert route_by_path("POST", "/api/stats-history").role == "readonly"
+    assert route_by_path("POST", "/api/stats-history").body_limit == 128 * 1024
     assert route_by_path("GET", "/ws/share-ui").handler is http_routes.get_share_ui_websocket
     assert route_by_path("POST", "/api/share/extend").body_limit == 4096
     assert route_by_path("POST", "/api/yoagent/jobs/cancel-session").handler is http_routes.post_yoagent_jobs_cancel_session
@@ -443,7 +458,13 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     app = SimpleNamespace(
         transcripts_payload=lambda force=False: {"transcripts": [], "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
+        stats_sample_payload=lambda since=0: {"ok": True, "cpu_percent": 1.25, "since": since},
     )
+
+    handler, calls, writes = route_handler("/api/stats-sample?since=2", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2})]
 
     handler, calls, writes = route_handler("/api/transcripts?force=1", app)
     Handler.do_GET(handler)
@@ -538,6 +559,22 @@ def test_do_get_fs_watch_diff_uses_client_since_token_without_tracking_clients()
 
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"since": "old-token", "force_full": False})]
+
+
+def test_do_post_stats_history_records_browser_deltas():
+    app_calls = []
+    app = SimpleNamespace(
+        record_stats_history_payload=lambda payload: app_calls.append(payload) or ({"ok": True, "history": {"sequence": 3}}, HTTPStatus.OK),
+    )
+    handler, calls, writes = route_handler("/api/stats-history", app)
+    handler.headers = {"Content-Length": "64"}
+    handler.read_json_body = lambda limit: {"since": 2, "records": [{"start": 10, "api_count": 1}]}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "history": {"sequence": 3}})]
+    assert app_calls == [{"since": 2, "records": [{"start": 10, "api_count": 1}]}]
 
 
 def test_share_scoped_transcripts_payload_filters_to_shared_sessions():
