@@ -814,6 +814,13 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
         const movedX = movedTransform && movedTransform !== 'none' ? new DOMMatrixReadOnly(movedTransform).m41 : 0;
         const firstButton = document.querySelector('.tmux-window-button');
         const buttonStyle = getComputedStyle(firstButton);
+        const borderDistance = (left, right) => {
+          const nums = value => (String(value).match(/[0-9.]+/g) || []).slice(0, 3).map(Number);
+          const a = nums(left);
+          const b = nums(right);
+          if (a.length < 3 || b.length < 3) return 0;
+          return Math.sqrt(((a[0] - b[0]) ** 2) + ((a[1] - b[1]) ** 2) + ((a[2] - b[2]) ** 2));
+        };
         return {
           controls: rect('controls'),
           viewport: rect('viewport'),
@@ -832,6 +839,9 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           buttonMaxWidth: buttonStyle.maxWidth,
           buttonOverflow: buttonStyle.overflow,
           buttonWidth: firstButton.getBoundingClientRect().width,
+          buttonBorderStyle: buttonStyle.borderTopStyle,
+          buttonBorderWidth: buttonStyle.borderTopWidth,
+          buttonBorderBackgroundDistance: borderDistance(buttonStyle.borderTopColor, buttonStyle.backgroundColor),
           labelMode: document.getElementById('window-bar').dataset.tmuxWindowLabelMode,
           visibleNameDisplays: Array.from(document.querySelectorAll('.tmux-window-name-label')).map(node => getComputedStyle(node).display),
           visibleNumberDisplays: Array.from(document.querySelectorAll('.tmux-window-number-label')).map(node => getComputedStyle(node).display),
@@ -855,6 +865,9 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert metrics["buttonMaxWidth"] == "none"
     assert metrics["buttonOverflow"] == "visible"
     assert metrics["buttonWidth"] > 40
+    assert metrics["buttonBorderStyle"] == "solid"
+    assert metrics["buttonBorderWidth"] == "1px"
+    assert metrics["buttonBorderBackgroundDistance"] > 32
     assert metrics["labelMode"] == "names"
     assert set(metrics["visibleNameDisplays"]).issubset({"flex", "inline-flex"})
     assert "none" not in set(metrics["visibleNameDisplays"])

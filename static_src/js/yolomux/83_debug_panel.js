@@ -627,6 +627,38 @@ function debugGraphBucketValue(bucket, key) {
   return 0;
 }
 
+function debugGraphNiceCeil(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  const magnitude = 10 ** Math.floor(Math.log10(number));
+  const scaled = number / magnitude;
+  for (const step of [1, 2, 5, 10]) {
+    if (scaled <= step) return step * magnitude;
+  }
+  return 10 * magnitude;
+}
+
+function debugGraphNiceCountPerSecondAxisMax(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  const whole = Math.max(2, Math.ceil(number));
+  return whole % 2 === 0 ? whole : whole + 1;
+}
+
+function debugGraphNiceBytesPerSecondAxisMax(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  const unit = number >= 1024 * 1024 ? 1024 * 1024 : (number >= 1024 ? 1024 : 1);
+  return debugGraphNiceCeil(number / unit) * unit;
+}
+
+function debugGraphNiceAxisMax(value, unit) {
+  if (unit === 'countPerSecond') return debugGraphNiceCountPerSecondAxisMax(value);
+  if (unit === 'ms') return debugGraphNiceCeil(value);
+  if (unit === 'bytesPerSecond') return debugGraphNiceBytesPerSecondAxisMax(value);
+  return value;
+}
+
 function debugGraphValueText(value, unit) {
   const number = Number(value);
   if (!Number.isFinite(number)) return '0';
@@ -803,7 +835,8 @@ function debugGraphChartHtml(group, seriesItems, buckets) {
   const seriesByKey = new Map(seriesItems.map(series => [series.key, series]));
   const groupSeries = group.series.map(key => seriesByKey.get(key)).filter(Boolean);
   const fixedMax = Number(group.fixedMax);
-  const max = Number.isFinite(fixedMax) && fixedMax > 0 ? fixedMax : Math.max(0, ...groupSeries.map(series => series.max));
+  const rawMax = Math.max(0, ...groupSeries.map(series => series.max));
+  const max = Number.isFinite(fixedMax) && fixedMax > 0 ? fixedMax : debugGraphNiceAxisMax(rawMax, group.unit);
   const axisMax = max > 0 ? max : 0;
   return `<section class="js-debug-chart" data-js-debug-chart="${esc(group.key)}">
     <div class="js-debug-chart-head">
@@ -817,7 +850,7 @@ function debugGraphChartHtml(group, seriesItems, buckets) {
           <line class="js-debug-grid-line" x1="0" y1="8" x2="600" y2="8"></line>
           <line class="js-debug-grid-line" x1="0" y1="60" x2="600" y2="60"></line>
           <line class="js-debug-grid-line" x1="0" y1="112" x2="600" y2="112"></line>
-          ${groupSeries.map(series => debugGraphPolylineHtml(series, Math.max(max, 1), count)).join('')}
+          ${groupSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), count)).join('')}
         </svg>
         ${debugGraphXAxisHtml(buckets)}
       </div>

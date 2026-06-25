@@ -5,6 +5,7 @@ from pathlib import Path
 
 from yolomux_lib import sessions
 from yolomux_lib.common import PaneInfo, ProcessInfo
+from yolomux_lib.sessions import list_processes
 from yolomux_lib.sessions import pane_process_label
 
 
@@ -291,3 +292,26 @@ def test_pane_process_label_falls_back_to_pane_pid_for_shell():
 
     assert label == "bash"
     assert pid == 100
+
+
+def test_list_processes_uses_portable_command_field_for_macos_wrappers(monkeypatch):
+    calls = []
+
+    def fake_run_cmd(args, timeout=0):
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args, 0, "100 1 -zsh\n321 100 /Users/me/.local/bin/claude --dangerously-skip-permissions\n", ""
+        )
+
+    monkeypatch.setattr(sessions, "run_cmd", fake_run_cmd)
+
+    processes, error = list_processes()
+
+    assert error is None
+    assert calls == [["ps", "-eww", "-o", "pid=,ppid=,command="]]
+    assert processes[100] == ProcessInfo(pid=100, ppid=1, command="-zsh")
+    assert processes[321] == ProcessInfo(
+        pid=321,
+        ppid=100,
+        command="/Users/me/.local/bin/claude --dangerously-skip-permissions",
+    )

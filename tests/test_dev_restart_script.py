@@ -8,6 +8,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def printable_command_text(output: str) -> str:
+    return output.replace("\\ ", " ")
+
+
 def test_boot_print_command_defaults_to_prod_port():
     env = {
         **os.environ,
@@ -23,7 +27,7 @@ def test_boot_print_command_defaults_to_prod_port():
         capture_output=True,
     )
 
-    command = result.stdout
+    command = printable_command_text(result.stdout)
     assert "yolomux.py" in command
     assert "--host 127.0.0.1" in command
     assert "--port 7777" in command
@@ -40,7 +44,7 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
         capture_output=True,
     )
 
-    command = result.stdout
+    command = printable_command_text(result.stdout)
     assert "--port 8123" in command
     assert "--port 8124" in command
     assert "--port 8125" in command

@@ -125,6 +125,8 @@ python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang --dev
 
 ### Restart workflow
 
+After every YOLOmux change in a dev worktree, restart that active dev server and verify it before reporting the change ready for testing. Restart prod only when explicitly requested.
+
 Use `boot.sh` from the checkout you want to serve. It restarts only the requested port listener, sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible, and writes logs under `/tmp` by default. On Linux it finds listeners with `ss`; on macOS it falls back to `lsof`, and it uses plain `nohup` when `setsid -f` is unavailable.
 
 ```bash
@@ -190,7 +192,7 @@ Rules:
 - The `merge --ff-only` into `~/yolomux` MUST be its own exit-checked command — NOT piped through `tail`/`grep` and NOT `&&`-chained straight into the push. A pipe's exit status is the last stage's, so a DIVERGED ff-merge fails silently and a chained `push origin main` then publishes whatever local `main` already points at, not your commit. Confirm the merge succeeded before pushing.
 - This is a shared multi-worktree: local `main` can advance from another worktree mid-`cps`, so your ff-merge can suddenly refuse (diverged). Recovery: `git fetch origin`, `git rebase origin/main` your dev branch (disjoint files rebase clean), re-run the gate, then ff-merge + push. No force-push, nothing lost — the other commit is usually a sibling off the same base.
 - Production pull/merge is `--ff-only`. Never edit, stage, or commit inside `~/yolomux`.
-- Restart is NOT part of `cps`. Restart prod/dev only when explicitly asked (see Restart workflow above), then verify `/api/ping`, the process cwd, and `YOLOMUX_VERSION`. The login page may not expose the version to unauthenticated curl; do not rely on a blank version grep alone.
+- Restart is NOT part of `cps` itself. After code changes in a dev worktree, restart the active dev server before reporting ready; restart prod only when explicitly asked (see Restart workflow above), then verify `/api/ping`, the process cwd, and `YOLOMUX_VERSION`. The login page may not expose the version to unauthenticated curl; do not rely on a blank version grep alone.
 
 ## xterm.js Assets
 

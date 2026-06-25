@@ -6392,6 +6392,15 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   flex: 0 0 auto;
   max-width: none;
   overflow: visible;
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+}
+.pane-info-bar .tmux-window-button:not(.active):hover,
+.panel-detail-row .tmux-window-button:not(.active):hover {
+  color: var(--pc-control-hover-fg);
+  background: var(--pane-tab-control-hover-bg);
+  border-color: var(--pane-tab-control-hover-border);
 }
 .tmux-window-button .tmux-window-number-label {
   display: block;

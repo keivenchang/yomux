@@ -2108,6 +2108,34 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('data-js-debug-x-tick="start"') && html.includes('data-js-debug-x-tick="mid"') && html.includes('data-js-debug-x-tick="end"'), 'split charts render start/mid/end time ticks on the X axis');
   });
 
+  test('YO!stats rounds graph Y-axis labels to clean unit steps', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 41,
+      records: [{
+        start: Math.floor((now - 10000) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 41,
+        api_count: 38,
+        sse_count: 17,
+        latency_total_ms: 196,
+        latency_count: 1,
+        bandwidth_bytes: 140 * 1024 * 10,
+      }],
+    });
+    api.setDebugGraphScaleForTest(10);
+    const html = api.debugPanelHtmlForTest();
+
+    assert.ok(/data-js-debug-axis-max="count">4\/sec</.test(html), 'API/SSE per-second axis rounds 3.8/sec to a whole 4/sec');
+    assert.ok(/data-js-debug-axis-mid="count">2\/sec</.test(html), 'API/SSE per-second midpoint stays whole');
+    assert.ok(/data-js-debug-axis-max="latency">200 ms</.test(html), 'latency axis rounds 196ms to 200ms');
+    assert.ok(/data-js-debug-axis-mid="latency">100 ms</.test(html), 'latency midpoint stays readable after rounding');
+    assert.ok(/data-js-debug-axis-max="bandwidth">200kB\/s</.test(html), 'bandwidth axis rounds 140kB/s to 200kB/s');
+    assert.ok(/data-js-debug-axis-mid="bandwidth">100kB\/s</.test(html), 'bandwidth midpoint stays readable after rounding');
+  });
+
   test('YO!stats graph controls apply on pointer down before refresh can replace buttons', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const panel = new TestElement('debug-panel');
