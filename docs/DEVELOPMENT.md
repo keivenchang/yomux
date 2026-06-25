@@ -92,7 +92,7 @@ python3 -m pytest tests/test_browser_layout.py -k 'finder_path_is_first_and_read
 
 Full pytest may need local socket/browser access. If a sandboxed run fails with `PermissionError: Operation not permitted`, rerun the same command outside the sandbox before treating it as a product failure.
 
-Browser/live tests may launch local throwaway HTTP servers, but they must also isolate tmux and state. Use fixture-owned config/state directories, ephemeral HTTP ports, a private tmux socket, and fixture-created session names such as `yt-<pid>-<uuid>-1`; automated tests must not touch live dev/prod servers on ports like `8001` or `7777`, and live dev/prod access is limited to explicit smoke checks after a requested restart or sync.
+Browser/live tests may launch local throwaway HTTP servers, but they must also isolate tmux and state. Use fixture-owned config/state directories, ephemeral HTTP ports, a private tmux socket, and fixture-created session names such as `yt-<pid>-<uuid>-1`; automated tests must not touch live dev/prod servers on fixed local ports, and live dev/prod access is limited to explicit smoke checks after a requested restart or sync.
 
 For local verification that should skip login, start the dev server with `YOLOMUX_TEST_AUTH_BYPASS=1`. This is a test-only admin bypass for localhost/dev workflows, useful for direct curls or Selenium checks against `/api/settings` and other login-gated routes. Tests that are not validating auth and only need a logged-in host should use this path instead of minting cookies. Tests that validate setup, login, logout, cookies, Basic auth, readonly/admin role boundaries, share-token scoping, or expected 401/403 behavior must not use it. Do not use it for production or any server reachable by untrusted clients.
 
@@ -125,33 +125,27 @@ python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang --dev
 
 ### Restart workflow
 
-For the dev8001 worktree (HTTPS `8001`), use the repo restart owner (`tools/yolomux-restart-dev1.sh` — the filename and its `YOLOMUX_DEV1_*` env vars predate the `dev1`->`dev8001` worktree rename; it still targets port `8001`). It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped environment:
+Use `boot.sh` from the checkout you want to serve. It restarts only the requested port listener, sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible, and writes logs under `/tmp` by default. On Linux it finds listeners with `ss`; on macOS it falls back to `lsof`, and it uses plain `nohup` when `setsid -f` is unavailable.
 
 ```bash
-tools/yolomux-restart-dev1.sh
+./boot.sh
 ```
 
-The script defaults to HTTPS `8001`, `--self-signed`, `--dang`, and `--dev`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard instance. Logs go under `/tmp`. For the dev8002/dev8003 worktrees use the generic recipe below (port `8002`/`8003`), not this script.
-
-To restart dev8001 in no-auth test mode:
+The script defaults to HTTPS `7777`, `--self-signed`, and `--dang`. For a dev worktree, run the script from that checkout and pass the port you chose; non-`7777` ports use `--dev` automatically:
 
 ```bash
-YOLOMUX_TEST_AUTH_BYPASS=1 tools/yolomux-restart-dev1.sh
+(cd ~/path/to/dev-checkout && ./boot.sh <dev-port>)
 ```
 
-For any other active dev worktree, use the actual checkout path and port. Kill only the listener for that port, then relaunch detached with an explicit `PATH`. Invoke this from outside long-lived test/browser runs so you do not kill your own verifier:
+Override with `YOLOMUX_PORT`, `YOLOMUX_HOST`, `YOLOMUX_LOG_DIR`, `--port`, `--dev`, or `--no-dev` when testing a non-standard instance. Use `./boot.sh --print-command <dev-port>` to inspect the launch command without restarting anything.
+
+To restart a dev worktree in no-auth test mode:
 
 ```bash
-role=dev8003
-port=8003
-checkout="$HOME/yolomux.dev8003"
-log="/tmp/yolomux-${role}-${port}.log"
-pid="$(ps -eo pid=,args= | awk -v port="$port" '$0 ~ /yolomux.py/ && $0 ~ ("--port " port) {print $1; exit}')"
-if [ -n "$pid" ]; then kill "$pid"; fi
-( cd "$checkout" && nohup env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 python3 -u yolomux.py --host 0.0.0.0 --port "$port" --self-signed --dang --dev > "$log" 2>&1 < /dev/null & )
+YOLOMUX_TEST_AUTH_BYPASS=1 ./boot.sh <dev-port>
 ```
 
-Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string because it can match the launching shell; use a port variable and keep kill and relaunch steps separate; (2) do not use stale local helper scripts that point at a different checkout or port; (3) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code.
+Three footguns: (1) never `pkill -f` broad YOLOmux patterns; kill only the listener for the selected port; (2) run `boot.sh` from the checkout you intend to serve so a dev port does not accidentally serve another worktree; (3) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code.
 
 Verify after restart:
 
