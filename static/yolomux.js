@@ -2339,12 +2339,8 @@ function selectedSessionRepo(session, info) {
   return index >= 0 ? repos[index] : null;
 }
 
-function displayedSessionGit(session, info) {
-  const project = info?.project || {};
-  const git = project.git || null;
-  const repo = selectedSessionRepo(session, info);
-  if (!repo) return git;
-  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+function gitFromRepoSummary(repo) {
+  if (!repo) return null;
   return {
     root: repo.root || '',
     cwd: repo.cwd || repo.root || '',
@@ -2354,8 +2350,19 @@ function displayedSessionGit(session, info) {
     dirty_count: repo.dirty_count,
     activity_ts: repo.activity_ts,
     activity_source: repo.activity_source || '',
+    github_repo: repo.github_repo || null,
+    other_branches: repo.other_branches || null,
     worktree: repo.worktree || null,
   };
+}
+
+function displayedSessionGit(session, info) {
+  const project = info?.project || {};
+  const git = project.git || null;
+  const repo = selectedSessionRepo(session, info);
+  if (!repo) return git;
+  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+  return gitFromRepoSummary(repo);
 }
 
 function cycleSessionRepoDisplay(session, info, direction) {
@@ -19552,14 +19559,15 @@ function githubPullRequestUrlFromGit(git, number) {
   return repoUrl && number ? `${repoUrl}/pull/${number}` : '';
 }
 
-function defaultBranchHeadPullRequest(info) {
+function defaultBranchHeadPullRequestForGit(info, git) {
   const project = info?.project || {};
-  const git = project.git;
   if (!isDefaultBranch(git)) return null;
   const subject = gitHeadSubject(git);
   const number = pullRequestNumberFromSubject(subject);
   if (!number) return null;
-  const existing = project.pull_request?.number === number ? project.pull_request : {};
+  const projectGitRoot = repoRootKey(project.git?.root);
+  const showingPrimaryGit = !projectGitRoot || projectGitRoot === repoRootKey(git?.root);
+  const existing = showingPrimaryGit && project.pull_request?.number === number ? project.pull_request : {};
   const title = subjectWithoutPullRequestNumber(existing.title || subject);
   const description = subjectWithoutPullRequestNumber(existing.description || subject);
   return {
@@ -19576,13 +19584,31 @@ function defaultBranchHeadPullRequest(info) {
   };
 }
 
-function currentBranchInventoryPullRequest(info) {
-  const branches = info?.project?.git?.other_branches?.branches || [];
+function defaultBranchHeadPullRequest(info) {
+  return defaultBranchHeadPullRequestForGit(info, info?.project?.git);
+}
+
+function currentBranchInventoryPullRequestForGit(git) {
+  const branches = git?.other_branches?.branches || [];
   return branches.find(branch => branch.current === true)?.pull_request || null;
 }
 
+function currentBranchInventoryPullRequest(info) {
+  return currentBranchInventoryPullRequestForGit(info?.project?.git);
+}
+
+function displayPullRequestForGit(info, git) {
+  const project = info?.project || {};
+  const targetGit = git || project.git;
+  const projectGitRoot = repoRootKey(project.git?.root);
+  const showingPrimaryGit = !targetGit || !projectGitRoot || projectGitRoot === repoRootKey(targetGit.root);
+  return defaultBranchHeadPullRequestForGit(info, targetGit)
+    || (showingPrimaryGit ? project.pull_request : null)
+    || currentBranchInventoryPullRequestForGit(targetGit);
+}
+
 function displayPullRequest(info) {
-  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || currentBranchInventoryPullRequest(info);
+  return displayPullRequestForGit(info, info?.project?.git);
 }
 
 function metadataBadgeKey(session, badge) {
@@ -21666,18 +21692,7 @@ function activeWindowPaneForProjectMeta(session, info) {
 }
 
 function repoSummaryAsGit(repo) {
-  if (!repo) return null;
-  return {
-    root: repo.root || '',
-    cwd: repo.cwd || repo.root || '',
-    branch: repo.branch || '',
-    ahead: repo.ahead,
-    behind: repo.behind,
-    dirty_count: repo.dirty_count,
-    activity_ts: repo.activity_ts,
-    activity_source: repo.activity_source || '',
-    worktree: repo.worktree || null,
-  };
+  return gitFromRepoSummary(repo);
 }
 
 function activeAgentWindowMetadataItemForProjectMeta(session, info) {
@@ -21800,14 +21815,15 @@ function projectMetaParts(session, info, options = {}) {
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
-  const pr = displayPullRequest(info);
-  if (showingPrimaryGit && pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
+  const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
+  const pr = displayPullRequestForGit(info, prGit);
+  if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
   if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
   if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
-  if (showingPrimaryGit && pr?.number) {
+  if (pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
@@ -21817,11 +21833,11 @@ function projectMetaParts(session, info, options = {}) {
       const state = issue.state ? ` ${issue.state}` : '';
       metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
-    const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-    if (desc) {
-      const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
-      if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
-    }
+  }
+  const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
+  if (desc) {
+    const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
+    if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
   }
   if (!metadataParts.length) metadataParts.push(`<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`);
   return {repoSwitchHtml, metadataParts};

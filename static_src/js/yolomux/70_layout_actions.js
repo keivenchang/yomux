@@ -1073,18 +1073,7 @@ function activeWindowPaneForProjectMeta(session, info) {
 }
 
 function repoSummaryAsGit(repo) {
-  if (!repo) return null;
-  return {
-    root: repo.root || '',
-    cwd: repo.cwd || repo.root || '',
-    branch: repo.branch || '',
-    ahead: repo.ahead,
-    behind: repo.behind,
-    dirty_count: repo.dirty_count,
-    activity_ts: repo.activity_ts,
-    activity_source: repo.activity_source || '',
-    worktree: repo.worktree || null,
-  };
+  return gitFromRepoSummary(repo);
 }
 
 function activeAgentWindowMetadataItemForProjectMeta(session, info) {
@@ -1207,14 +1196,15 @@ function projectMetaParts(session, info, options = {}) {
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
-  const pr = displayPullRequest(info);
-  if (showingPrimaryGit && pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
+  const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
+  const pr = displayPullRequestForGit(info, prGit);
+  if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
   if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
   if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
-  if (showingPrimaryGit && pr?.number) {
+  if (pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
@@ -1224,11 +1214,11 @@ function projectMetaParts(session, info, options = {}) {
       const state = issue.state ? ` ${issue.state}` : '';
       metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
-    const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-    if (desc) {
-      const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
-      if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
-    }
+  }
+  const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
+  if (desc) {
+    const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
+    if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
   }
   if (!metadataParts.length) metadataParts.push(`<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`);
   return {repoSwitchHtml, metadataParts};

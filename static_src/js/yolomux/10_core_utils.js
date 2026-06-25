@@ -730,12 +730,8 @@ function selectedSessionRepo(session, info) {
   return index >= 0 ? repos[index] : null;
 }
 
-function displayedSessionGit(session, info) {
-  const project = info?.project || {};
-  const git = project.git || null;
-  const repo = selectedSessionRepo(session, info);
-  if (!repo) return git;
-  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+function gitFromRepoSummary(repo) {
+  if (!repo) return null;
   return {
     root: repo.root || '',
     cwd: repo.cwd || repo.root || '',
@@ -745,8 +741,19 @@ function displayedSessionGit(session, info) {
     dirty_count: repo.dirty_count,
     activity_ts: repo.activity_ts,
     activity_source: repo.activity_source || '',
+    github_repo: repo.github_repo || null,
+    other_branches: repo.other_branches || null,
     worktree: repo.worktree || null,
   };
+}
+
+function displayedSessionGit(session, info) {
+  const project = info?.project || {};
+  const git = project.git || null;
+  const repo = selectedSessionRepo(session, info);
+  if (!repo) return git;
+  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+  return gitFromRepoSummary(repo);
 }
 
 function cycleSessionRepoDisplay(session, info, direction) {

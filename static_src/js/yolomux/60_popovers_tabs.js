@@ -500,14 +500,15 @@ function githubPullRequestUrlFromGit(git, number) {
   return repoUrl && number ? `${repoUrl}/pull/${number}` : '';
 }
 
-function defaultBranchHeadPullRequest(info) {
+function defaultBranchHeadPullRequestForGit(info, git) {
   const project = info?.project || {};
-  const git = project.git;
   if (!isDefaultBranch(git)) return null;
   const subject = gitHeadSubject(git);
   const number = pullRequestNumberFromSubject(subject);
   if (!number) return null;
-  const existing = project.pull_request?.number === number ? project.pull_request : {};
+  const projectGitRoot = repoRootKey(project.git?.root);
+  const showingPrimaryGit = !projectGitRoot || projectGitRoot === repoRootKey(git?.root);
+  const existing = showingPrimaryGit && project.pull_request?.number === number ? project.pull_request : {};
   const title = subjectWithoutPullRequestNumber(existing.title || subject);
   const description = subjectWithoutPullRequestNumber(existing.description || subject);
   return {
@@ -524,13 +525,31 @@ function defaultBranchHeadPullRequest(info) {
   };
 }
 
-function currentBranchInventoryPullRequest(info) {
-  const branches = info?.project?.git?.other_branches?.branches || [];
+function defaultBranchHeadPullRequest(info) {
+  return defaultBranchHeadPullRequestForGit(info, info?.project?.git);
+}
+
+function currentBranchInventoryPullRequestForGit(git) {
+  const branches = git?.other_branches?.branches || [];
   return branches.find(branch => branch.current === true)?.pull_request || null;
 }
 
+function currentBranchInventoryPullRequest(info) {
+  return currentBranchInventoryPullRequestForGit(info?.project?.git);
+}
+
+function displayPullRequestForGit(info, git) {
+  const project = info?.project || {};
+  const targetGit = git || project.git;
+  const projectGitRoot = repoRootKey(project.git?.root);
+  const showingPrimaryGit = !targetGit || !projectGitRoot || projectGitRoot === repoRootKey(targetGit.root);
+  return defaultBranchHeadPullRequestForGit(info, targetGit)
+    || (showingPrimaryGit ? project.pull_request : null)
+    || currentBranchInventoryPullRequestForGit(targetGit);
+}
+
 function displayPullRequest(info) {
-  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || currentBranchInventoryPullRequest(info);
+  return displayPullRequestForGit(info, info?.project?.git);
 }
 
 function metadataBadgeKey(session, badge) {

@@ -170,6 +170,34 @@ def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
     assert summaries[0]["activity_source"] == "dirty"
 
 
+def test_session_git_inventory_prefers_current_branch_pr_within_same_signal(monkeypatch, tmp_path):
+    config_repo = tmp_path / "ai-config"
+    work_repo = tmp_path / "dynamo4"
+    _init_repo(config_repo)
+    _init_repo(work_repo)
+    _git(work_repo, "checkout", "-b", "keivenchang/DIS-2228__qwen3-coder-tool-calls-v2")
+    _git(work_repo, "update-ref", "refs/remotes/origin/pull-request/10853", "HEAD")
+    (config_repo / "f.txt").write_text("newer config edit\n", encoding="utf-8")
+    os.utime(config_repo / "f.txt", (2_000_000_000, 2_000_000_000))
+    panes = [_pane("4", 0, config_repo)]
+    info = SessionInfo(session="4", panes=panes, selected_pane=panes[0], agents=[])
+
+    monkeypatch.setattr(
+        metadata,
+        "candidate_session_cwd_entries",
+        lambda _info: [(str(config_repo), 0), (str(work_repo), 0)],
+    )
+
+    git_data = session_git_inventory(info)
+    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+
+    assert git_data is not None
+    assert git_data["root"] == str(work_repo.resolve())
+    assert summaries[0]["root"] == str(work_repo.resolve())
+    assert summaries[0]["primary"] is True
+    assert metadata.summary_current_branch_pull_request(summaries[0])["number"] == 10853
+
+
 def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tmp_path):
     # A claude launched from a NON-repo cwd (e.g. $HOME) that edits files in a real repo must still
     # surface that repo: the transcript-touched dir is fed into candidate_session_cwds, so repo

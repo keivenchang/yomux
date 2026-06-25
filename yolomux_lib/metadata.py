@@ -719,6 +719,18 @@ def candidate_cwd_cache_signature(info: SessionInfo) -> str:
     )
     return repr(value)
 
+def summary_current_branch_pull_request(summary: dict[str, Any]) -> dict[str, Any] | None:
+    branches = summary.get("other_branches", {}).get("branches", [])
+    if not isinstance(branches, list):
+        return None
+    for branch in branches:
+        if not isinstance(branch, dict) or branch.get("current") is not True:
+            continue
+        pull_request = branch.get("pull_request")
+        if isinstance(pull_request, dict) and isinstance(pull_request.get("number"), int):
+            return pull_request
+    return None
+
 
 def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[dict[str, Any]]:
     # C9: every git repo the session's panes/agents sit in (cwd -> git root), deduped, with the focused
@@ -742,7 +754,12 @@ def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[
     return [
         summary for _index, (priority, summary) in sorted(
             enumerate(summaries),
-            key=lambda item: (item[1][0], -(float(item[1][1].get("activity_ts") or 0)), item[0]),
+            key=lambda item: (
+                item[1][0],
+                -int(summary_current_branch_pull_request(item[1][1]) is not None),
+                -(float(item[1][1].get("activity_ts") or 0)),
+                item[0],
+            ),
         )
     ]
 

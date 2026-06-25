@@ -712,6 +712,37 @@ async function runShareThemeSuite() {
     const cycledMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
     assert.ok(cycledMetaHtml.includes('/repo/app'), 'C9: the next arrow cycles the informational row to the next repo');
     assert.ok(cycledMetaHtml.includes('>2/2</button>'), 'C9: the repo control updates the current repo position');
+    const secondaryPrInfo = {
+      selected_pane: {current_path: '/home/test/dynamo/dynamo4'},
+      project: {
+        git: {root: '/home/test/ai-config', cwd: '/home/test/ai-config', branch: 'master', dirty_count: 1},
+        pull_request: null,
+        linear: [{identifier: 'CFG-1', title: 'Config repo issue', state: 'Open'}],
+        repos: [
+          {
+            root: '/home/test/dynamo/dynamo4',
+            cwd: '/home/test/dynamo/dynamo4',
+            branch: 'keivenchang/DIS-2228__qwen3-coder-tool-calls-v2',
+            dirty_count: 0,
+            primary: true,
+            other_branches: {
+              branches: [
+                {
+                  name: 'keivenchang/DIS-2228__qwen3-coder-tool-calls-v2',
+                  current: true,
+                  pull_request: {number: 10853, title: 'feat: gate Qwen3-Coder tool calls'},
+                },
+              ],
+            },
+          },
+          {root: '/home/test/ai-config', cwd: '/home/test/ai-config', branch: 'master', dirty_count: 1, primary: false},
+        ],
+      },
+    };
+    const secondaryPrHtml = api.paneInfoBarMetaHtml('secondary-pr', secondaryPrInfo);
+    assert.ok(secondaryPrHtml.includes('#10853'), 'Info Bar shows a current-branch PR from the selected secondary repo');
+    assert.ok(secondaryPrHtml.includes('feat: gate Qwen3-Coder tool calls'), 'Info Bar uses the selected secondary repo PR title');
+    assert.equal(secondaryPrHtml.includes('CFG-1'), false, 'secondary repo Info Bar does not inherit primary repo Linear metadata');
     const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, repos: [multiRepoInfo.project.repos[0]]}};
     assert.equal(api.projectMetaHtml('single-repo-cycle', singleRepoInfo).includes('meta-repo-switch'), false, 'C9: a single-repo session shows no carousel');
     const windowScopedInfo = {
