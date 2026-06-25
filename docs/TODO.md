@@ -17,6 +17,13 @@ Borrow from other tools only when the feature improves the local control loop: k
 - Line numbers drift. Search by symbol, route, CSS class, setting key, or test name before editing.
 - `DOIT*.md` files are active work queues. When a queue is fully implemented and validated, archive the result in [`DONE.md`](DONE.md) and remove the queue file.
 
+## Active Queue Follow-Ups
+
+- [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive `7777`, `8001`, `8002`, and `8003`, verify startup ownership order, `8001` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work.
+- [ ] [M] Claude fixture real-capture adoption. Decide whether to replace the synthetic Claude prompt fixtures with the real `claude-code-2.1.185` cursor captures or copy just the real cursor/indent metadata into the synthetic YAMLs, update `inventory.yaml` or the fixture metadata, and rerun `python3 -m pytest tests/test_mock_agents.py`. The mock cursor-follow/navigation implementation is already complete.
+- [ ] [M] License history remote finalization. Only after explicit force-push authorization, push the rewritten PolyForm Noncommercial history with `--force-with-lease`, then verify a fresh clone against the key license searches. The current-tree migration, local history rewrite, and local verification are already complete.
+- [ ] [L] Refactor audit pass. Work through `DOIT.refactor_simplify_reuse.md` in scoped commits, starting with Tier 0/1/2 before broad consolidation, and run `python3 tools/static_build.py` after any `static_src/` change.
+
 ## Current Priorities
 
 - [ ] [XL] Reliable structured agent control. Replace as much scrape-and-type approval/send behavior as possible with structured channels: Claude permission hooks for Claude decisions, Codex app-server/SDK/MCP where YOLOmux owns or can safely resume the conversation, and `tmux-legacy` only as the verified visible-pane fallback.

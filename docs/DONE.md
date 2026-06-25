@@ -4,6 +4,12 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 
 Unless an entry says otherwise, every item shipped with the standard check gate green (`tools/check.py`: py_compile, `static_build.py --check`, both `node --check`, `node tests/layout_url.test.js`, full pytest, `git diff --check`). Entries call out only verification that goes BEYOND that gate (live user confirmation, focused browser repros, notable test counts).
 
+## 2026-06-25
+
+### DOIT queue consolidation
+
+- Moved the remaining root `DOIT*.md` queue files from `~/yolomux.dev8002` into `~/yolomux.dev8003` and studied the consolidated queue set. Closed the completed license-rewrite and single-owner background indexing queue files: their source work, tests, docs, current-tree migration, and isolated live verification were already done; the remaining force-push and live-fleet checks now live in `docs/TODO.md` because they require explicit authorization or a deliberate multi-port restart. Updated the Claude fixture queue so stale checkboxes match the shipped cursor-follow/navigation work, leaving only the real-capture adoption decision open. Kept the refactor audit as an active backlog.
+
 ## 2026-06-24
 
 ### Background indexing owner visibility
