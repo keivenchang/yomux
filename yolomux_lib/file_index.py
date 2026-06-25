@@ -387,12 +387,35 @@ def _metadata_truncated(metadata: dict[str, Any]) -> bool:
     return str(metadata.get("truncated") or "") == "1"
 
 
+def _sqlite_like_pattern(term: str) -> str:
+    escaped = str(term or "").lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _sqlite_search_candidates(
+    conn: sqlite3.Connection,
+    literal_terms: list[str] | None,
+) -> sqlite3.Cursor:
+    terms = [term for term in (literal_terms or []) if term]
+    if not terms:
+        return conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY ord")
+    clauses = []
+    params = []
+    for term in terms:
+        pattern = _sqlite_like_pattern(term)
+        clauses.append("(lower(name) LIKE ? ESCAPE '\\' OR lower(relative_path) LIKE ? ESCAPE '\\' OR lower(path) LIKE ? ESCAPE '\\')")
+        params.extend([pattern, pattern, pattern])
+    where = " AND ".join(clauses)
+    return conn.execute(f"SELECT path, name, relative_path, size, mtime FROM entries WHERE {where} ORDER BY ord", params)
+
+
 def search_disk_index(
     root: Path,
     skip_dirs: set[str],
     exclude_signature: str,
     match: Callable[[str, str, str], Any],
     max_results: int,
+    literal_terms: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], bool] | None:
     """Search a persisted index without making a follower own/build or deserialize it wholesale."""
     opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
@@ -401,7 +424,7 @@ def search_disk_index(
     conn, metadata = opened
     try:
         results: list[dict[str, Any]] = []
-        rows = conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY ord")
+        rows = _sqlite_search_candidates(conn, literal_terms)
         for path_str, name, rel, size, mtime in rows:
             entry = match(str(path_str), str(name), str(rel))
             if entry is None:

@@ -246,7 +246,14 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             if index.ready:
                 indexed = file_index.search_index(index, _match, max_results)
             elif not can_build_index and index.disk_metadata_ready:
-                indexed = file_index.search_disk_index(root, SEARCH_SKIP_DIRS, SEARCH_SECRET_EXCLUDE_SIGNATURE, _match, max_results)
+                indexed = file_index.search_disk_index(
+                    root,
+                    SEARCH_SKIP_DIRS,
+                    SEARCH_SECRET_EXCLUDE_SIGNATURE,
+                    _match,
+                    max_results,
+                    [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
+                )
                 indexed_payload_state = "follower-ready" if indexed is not None else ""
             if indexed is not None:
                 indexed_results, indexed_truncated = indexed
