@@ -3616,7 +3616,7 @@ function clientEventPayloadFromEnvelope(envelope) {
 }
 
 function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
-  if (!debugModeEnabled) return;
+  if (!jsDebugCollectionEnabled) return;
   const payload = clientEventPayloadFromEnvelope(envelope);
   const rawData = rawEvent?.data || '';
   const dataBytes = jsDebugByteLength(rawData);

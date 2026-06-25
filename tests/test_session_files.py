@@ -105,6 +105,47 @@ def test_scans_claude_and_codex_tool_changes(tmp_path):
     assert codex[str(tmp_path / "old.py")] == {"D"}
 
 
+def test_transcript_scans_collect_generated_usage_with_changes(tmp_path):
+    claude_path = tmp_path / "claude.jsonl"
+    claude_path.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "usage": {"input_tokens": 100, "output_tokens": 11},
+                "content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": "src/app.py"}}],
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    codex_path = tmp_path / "rollout.jsonl"
+    codex_path.write_text(
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": 1000,
+                        "cached_input_tokens": 500,
+                        "output_tokens": 17,
+                        "reasoning_output_tokens": 3,
+                        "total_tokens": 1520,
+                    }
+                }
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    claude_details = session_files.scan_claude_transcript_details(claude_path, str(tmp_path))
+    codex_details = session_files.scan_codex_transcript_details(codex_path, str(tmp_path))
+
+    assert claude_details["changes"][str(tmp_path / "src" / "app.py")] == {"M"}
+    assert claude_details["usage"]["generated_tokens"] == 11
+    assert codex_details["usage"]["generated_tokens"] == 20
+    assert session_files.transcript_generated_tokens(claude_path, "claude", str(tmp_path)) == 11
+    assert session_files.transcript_generated_tokens(codex_path, "codex", str(tmp_path)) == 20
+
+
 def test_session_touched_dirs_collects_edited_dirs(tmp_path):
     # session_touched_dirs returns the unique containing dirs of files the agents EDITED (not read),
     # so repo detection can find the real repo even when the live cwd is a non-repo.

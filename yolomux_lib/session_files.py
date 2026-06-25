@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shlex
 import time
@@ -35,9 +36,9 @@ SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
 SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
 _CODEX_TRANSCRIPT_SCAN_CACHE_MAX = 64
-_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, bool, float, int], dict[str, set[str]]] = {}
+_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, bool, float, int], dict[str, Any]] = {}
 _CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX = 64
-_CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, float, int], dict[str, set[str]]] = {}
+_CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, float, int], dict[str, Any]] = {}
 
 
 def classify_change(markers: set[str]) -> str:
@@ -88,14 +89,19 @@ def file_mtime_or_fallback(path: Path, fallback: Any = 0.0) -> float:
 
 
 def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[str]]:
+    return copy_change_set(scan_claude_transcript_details(path, cwd).get("changes", {}))
+
+
+def scan_claude_transcript_details(path: Path, cwd: str | None = None) -> dict[str, Any]:
     # Same (path, mtime, size) memoization the codex scanner uses: candidate_session_cwds now scans
     # transcripts on the hot metadata-refresh path, so an unchanged transcript must read from disk once.
     cache_key = claude_transcript_scan_cache_key(path, cwd)
     if cache_key is not None:
         cached = _CLAUDE_TRANSCRIPT_SCAN_CACHE.get(cache_key)
         if cached is not None:
-            return copy_change_set(cached)
+            return copy_transcript_scan_details(cached)
     changes: dict[str, set[str]] = {}
+    generated_tokens = 0.0
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -108,6 +114,7 @@ def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[
                 message = record.get("message")
                 if not isinstance(message, dict):
                     continue
+                generated_tokens += claude_usage_generated_tokens(message.get("usage"))
                 for item in message.get("content", []) or []:
                     if not isinstance(item, dict) or item.get("type") != "tool_use":
                         continue
@@ -121,12 +128,13 @@ def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[
                         continue
                     changes.setdefault(str(resolved), set()).add("A" if tool == "Write" else "M")
     except OSError:
-        return changes
+        return transcript_scan_details(changes, generated_tokens)
+    details = transcript_scan_details(changes, generated_tokens)
     if cache_key is not None:
         if len(_CLAUDE_TRANSCRIPT_SCAN_CACHE) >= _CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX:
             _CLAUDE_TRANSCRIPT_SCAN_CACHE.pop(next(iter(_CLAUDE_TRANSCRIPT_SCAN_CACHE)))
-        _CLAUDE_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_change_set(changes)
-    return changes
+        _CLAUDE_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_transcript_scan_details(details)
+    return details
 
 
 def claude_transcript_scan_cache_key(path: Path, cwd: str | None) -> tuple[str, str, float, int] | None:
@@ -138,12 +146,18 @@ def claude_transcript_scan_cache_key(path: Path, cwd: str | None) -> tuple[str, 
 
 
 def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, set[str]]:
+    return copy_change_set(scan_codex_transcript_details(path, cwd, include_patch_text).get("changes", {}))
+
+
+def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, Any]:
     cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text)
     if cache_key is not None:
         cached = _CODEX_TRANSCRIPT_SCAN_CACHE.get(cache_key)
         if cached is not None:
-            return copy_change_set(cached)
+            return copy_transcript_scan_details(cached)
     changes: dict[str, set[str]] = {}
+    latest_total_generated_tokens: float | None = None
+    summed_last_generated_tokens = 0.0
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -153,19 +167,31 @@ def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text
                         if resolved is None:
                             continue
                         changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                total_generated, last_generated = codex_record_usage_generated_tokens(record)
+                if total_generated is not None:
+                    latest_total_generated_tokens = total_generated
+                elif last_generated is not None:
+                    summed_last_generated_tokens += last_generated
                 if not codex_line_may_contain_git_change(line):
                     continue
-                for path_text, markers in scan_codex_tool_call_changes(line, cwd).items():
+                for path_text, markers in scan_codex_tool_call_changes_from_record(record, cwd).items():
                     changes.setdefault(path_text, set()).update(markers)
     except OSError:
-        return changes
+        generated_tokens = latest_total_generated_tokens if latest_total_generated_tokens is not None else summed_last_generated_tokens
+        return transcript_scan_details(changes, generated_tokens)
+    generated_tokens = latest_total_generated_tokens if latest_total_generated_tokens is not None else summed_last_generated_tokens
+    details = transcript_scan_details(changes, generated_tokens)
     if cache_key is not None:
         if len(_CODEX_TRANSCRIPT_SCAN_CACHE) >= _CODEX_TRANSCRIPT_SCAN_CACHE_MAX:
             oldest_key = next(iter(_CODEX_TRANSCRIPT_SCAN_CACHE), None)
             if oldest_key is not None:
                 _CODEX_TRANSCRIPT_SCAN_CACHE.pop(oldest_key, None)
-        _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_change_set(changes)
-    return changes
+        _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_transcript_scan_details(details)
+    return details
 
 
 def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool) -> tuple[str, str, bool, float, int] | None:
@@ -178,6 +204,88 @@ def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_t
 
 def copy_change_set(changes: dict[str, set[str]]) -> dict[str, set[str]]:
     return {path_text: set(markers) for path_text, markers in changes.items()}
+
+
+def transcript_scan_details(changes: dict[str, set[str]], generated_tokens: float = 0.0) -> dict[str, Any]:
+    return {
+        "changes": copy_change_set(changes),
+        "usage": {"generated_tokens": max(0.0, float(generated_tokens or 0.0))},
+    }
+
+
+def copy_transcript_scan_details(details: dict[str, Any]) -> dict[str, Any]:
+    changes = details.get("changes") if isinstance(details, dict) else {}
+    usage = details.get("usage") if isinstance(details, dict) else {}
+    generated_tokens = usage.get("generated_tokens") if isinstance(usage, dict) else 0.0
+    return transcript_scan_details(changes if isinstance(changes, dict) else {}, numeric_token_value(generated_tokens))
+
+
+def numeric_token_value(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number) or number <= 0:
+        return 0.0
+    return number
+
+
+def generated_usage_tokens(usage: Any) -> float:
+    if not isinstance(usage, dict):
+        return 0.0
+    return sum(numeric_token_value(usage.get(key)) for key in (
+        "output_tokens",
+        "outputTokens",
+        "completion_tokens",
+        "completionTokens",
+        "generated_tokens",
+        "generatedTokens",
+        "reasoning_output_tokens",
+        "reasoningOutputTokens",
+    ))
+
+
+def claude_usage_generated_tokens(usage: Any) -> float:
+    direct = generated_usage_tokens(usage)
+    if direct:
+        return direct
+    if not isinstance(usage, dict):
+        return 0.0
+    iterations = usage.get("iterations")
+    if not isinstance(iterations, list):
+        return 0.0
+    return sum(generated_usage_tokens(item) for item in iterations if isinstance(item, dict))
+
+
+def codex_record_usage_generated_tokens(record: Any) -> tuple[float | None, float | None]:
+    if not isinstance(record, dict):
+        return None, None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None, None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None, None
+    total_usage = info.get("total_token_usage")
+    total_generated = generated_usage_tokens(total_usage)
+    if total_generated:
+        return total_generated, None
+    last_usage = info.get("last_token_usage")
+    last_generated = generated_usage_tokens(last_usage)
+    return None, last_generated if last_generated else None
+
+
+def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -> float | None:
+    agent_kind = str(kind or "").strip().lower()
+    if agent_kind == "claude":
+        details = scan_claude_transcript_details(path, cwd)
+    elif agent_kind == "codex":
+        details = scan_codex_transcript_details(path, cwd)
+    else:
+        return None
+    usage = details.get("usage") if isinstance(details, dict) else {}
+    generated_tokens = numeric_token_value(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
+    return generated_tokens if generated_tokens > 0 else None
 
 
 def codex_line_may_contain_git_change(line: str) -> bool:
@@ -204,6 +312,10 @@ def scan_codex_tool_call_changes(line: str, cwd: str | None = None) -> dict[str,
         record = json.loads(line)
     except json.JSONDecodeError:
         return {}
+    return scan_codex_tool_call_changes_from_record(record, cwd)
+
+
+def scan_codex_tool_call_changes_from_record(record: Any, cwd: str | None = None) -> dict[str, set[str]]:
     if not isinstance(record, dict):
         return {}
     payload = record.get("payload")

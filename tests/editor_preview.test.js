@@ -1811,6 +1811,9 @@ async function runEditorPreviewSuite() {
     const normalStatsItem = normalFileMenu.items.find(item => item.label === 'YO!stats');
     assert.ok(normalStatsItem, 'File menu exposes YO!stats without requiring a manual debug=1 URL edit');
     assert.equal(normalStatsItem.checked, undefined, 'YO!stats is not checked until the debug pane is active');
+    assert.equal(normalApi.debugModeEnabledForTest(), false, 'normal pages do not open the YO!stats pane by default');
+    normalApi.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/preopen', status: 200, ok: true, durationMs: 7.5});
+    assert.equal(normalApi.jsDebugEventsForTest().length, 1, 'YO!stats starts collecting API timing before the pane is opened');
     normalStatsItem.action();
     assert.equal(normalApi.reloadCountForTest(), 1, 'opening YO!stats from a normal page reloads with instrumentation enabled from boot');
     assert.equal(parseUrl(normalApi.lastUrlForTest()).get('debug'), '1', 'YO!stats menu action enables debug=1 in the URL');
@@ -1858,12 +1861,38 @@ async function runEditorPreviewSuite() {
       },
     });
     api.recordJsDebugEventForTest('error', {message: 'boom', source: '/static/yolomux.js', line: 10});
-    api.recordJsDebugStatsSampleForTest({time: Date.now() / 1000, cpu_percent: 7.5, system_cpu_percent: 22.5, uptime_seconds: 125, pid: 4242, rss_bytes: 134217728});
+    const graphNow = Date.now();
+    api.recordJsDebugStatsSampleForTest({
+      time: graphNow / 1000,
+      cpu_percent: 7.5,
+      system_cpu_percent: 22.5,
+      uptime_seconds: 125,
+      pid: 4242,
+      rss_bytes: 134217728,
+      history: {
+        sequence: 9,
+        records: [{
+          start: Math.floor(graphNow / 1000),
+          duration: 1,
+          sequence: 9,
+          api_count: 2,
+          sse_count: 1,
+          latency_total_ms: 15.5,
+          latency_count: 2,
+          bandwidth_bytes: 4096,
+          cpu_total_percent: 7.5,
+          cpu_count: 1,
+          system_cpu_total_percent: 22.5,
+          system_cpu_count: 1,
+        }],
+      },
+    });
     assert.equal(api.jsDebugEventsForTest().length, 4, 'debug event recorder stores bounded diagnostics while enabled');
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
     assert.ok(html.includes('data-js-debug-subtab="graph"') && html.includes('Graph'), 'YO!stats renders a Graph sub-tab');
-    assert.ok(html.includes('data-js-debug-subview="events"') && html.includes('data-js-debug-subview="graph" hidden'), 'YO!stats defaults to the API/SSE sub-tab and keeps the graph separate');
+    assert.ok(html.indexOf('data-js-debug-subtab="graph"') < html.indexOf('data-js-debug-subtab="events"'), 'YO!stats puts the Graph button left of API/SSE');
+    assert.ok(html.includes('data-js-debug-subview="graph"') && html.includes('data-js-debug-subview="events" hidden'), 'YO!stats defaults to the Graph sub-tab and keeps API/SSE separate');
     assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
     assert.ok(html.includes('data-js-debug-stat="api">2<'), 'debug panel surfaces the API call count');
     assert.ok(html.includes('data-js-debug-graph'), 'YO!stats graph sub-tab renders a graph container');
@@ -1872,18 +1901,17 @@ async function runEditorPreviewSuite() {
       assert.ok(html.includes(`data-js-debug-axis-max="${chart}"`), `YO!stats graph renders a unit-aware Y axis for ${chart}`);
     }
     assert.ok(html.includes('data-js-debug-x-axis') && html.includes('data-js-debug-x-tick="start"'), 'YO!stats graph renders time ticks on each X axis');
+    assert.equal(html.includes('js-debug-graph-scale'), false, 'YO!stats omits the redundant bottom graph scale footer');
     for (const series of ['api', 'sse', 'latency', 'bandwidth', 'cpu', 'systemCpu']) {
       assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats graph renders the ${series} line`);
       assert.ok(html.includes(`data-js-debug-legend="${series}"`), `YO!stats graph renders the ${series} legend entry`);
     }
     for (const scale of ['1', '5', '10']) {
-      assert.ok(html.includes(`data-js-debug-scale="${scale}"`), `YO!stats graph renders the ${scale}s scale button`);
+      assert.ok(html.includes(`data-js-debug-scale="${scale}"`), `YO!stats graph renders the ${scale}s aggregate button`);
     }
-    for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '86400']) {
+    for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '28800', '57600', '86400']) {
       assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph renders the ${range}s range button`);
     }
-    assert.equal(html.includes('data-js-debug-range="28800"'), false, 'YO!stats hides the 8 hour range until enough history exists');
-    assert.equal(html.includes('data-js-debug-range="57600"'), false, 'YO!stats hides the 16 hour range until enough history exists');
     assert.equal(html.includes('data-js-debug-graph-bar'), false, 'YO!stats graph is a line graph, not timing bars');
     assert.ok(html.includes('data-js-debug-uptime="2m 5s"') && html.includes('yolomux.py uptime 2m 5s') && html.includes('PID=4242') && html.includes('rss 128 MiB'), 'YO!stats graph shows yolomux.py uptime and process stats');
     assert.ok(html.includes('total 123/456 MB up/down'), 'YO!stats graph shows cumulative upload/download totals in MB');
@@ -1898,7 +1926,11 @@ async function runEditorPreviewSuite() {
     const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
-    assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, and line graph styling');
+    assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-area--runAgents') && debugPaneCss.includes('.js-debug-area--agentToken') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, area/line graph styling, and legends');
+    assert.ok(/\.js-debug-graph\s*\{[\s\S]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'YO!stats graph reserves rows for controls, metadata, and charts without a clobbering trailing legend row');
+    assert.equal(debugPaneSource.includes('${debugGraphLegendHtml(legendItems)}'), false, 'YO!stats does not append a redundant all-series legend after the chart grid');
+    const debugGraphLegendSource = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphLegendHtml'), debugPaneSource.indexOf('function debugGraphAxisHtml'));
+    assert.equal(debugGraphLegendSource.includes('debugGraphValueText'), false, 'YO!stats chart legends show labels only, without current values');
     assert.ok(/\.js-debug-line\s*\{[^}]*stroke-width:\s*1\.4/.test(debugPaneCss), 'YO!stats graph lines stay thin enough to read overlapping series');
     assert.equal(debugPaneSource.includes("initialSetting('performance.activity_summary_refresh_ms'"), false, 'silent activity-summary polling preference is removed');
     assert.equal(debugPaneSource.includes('activitySummaryBackgroundRefreshMs'), false, 'activity-summary no longer keeps a client background refresh timer');
@@ -1964,11 +1996,11 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.rollupBucketSeconds, 10, 'YO!stats graph rolls old samples into ten-second timing buckets');
     assert.equal(summary.rawBuckets, 0, 'two-hour-old samples are no longer kept as one-second raw buckets');
     assert.ok(summary.rollupBuckets > 0 && summary.rollupBuckets <= 3, 'two-hour-old per-second samples compress into ten-second buckets');
-    assert.equal(summary.scaleSeconds, 5, 'YO!stats graph defaults to five-second buckets');
+    assert.equal(summary.scaleSeconds, 5, 'YO!stats graph defaults to five-second aggregate buckets');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
-    assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 86400], 'YO!stats shows short ranges and 24h before 8h/16h data exists');
-    assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', 'cpu', 'systemCpu'], 'graph tracks API, SSE, latency, bandwidth, process CPU, and system CPU series');
+    assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range buttons available');
+    assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', 'askAgents', 'runAgents', 'transitionAgents', 'idleAgents', 'tokensPerAgent', 'cpu', 'systemCpu'], 'graph tracks API, SSE, latency, bandwidth, agent activity, agent tokens, process CPU, and system CPU series');
     assert.ok(summary.pendingServerBuckets > 0, 'browser-observed API/SSE graph buckets are queued for server retention');
     api.recordJsDebugStatsSampleForTest({
       uptime_seconds: 3661,
@@ -2011,6 +2043,7 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.rangeSeconds, 7200, 'clickable graph range changes the rendered history window');
+    assert.equal(summary.scaleSeconds, 5, 'changing range does not override the selected aggregate bucket size');
     assert.ok(summary.displayBuckets > 0, 'two-hour range displays the retained two-hour bucket');
     api.debugGraphApplyServerHistoryForTest({
       sequence: 18,
@@ -2024,8 +2057,9 @@ async function runEditorPreviewSuite() {
       }],
     });
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.ok(summary.availableRangeSeconds.includes(28800), '8 hour range appears once retained history reaches 8 hours');
-    assert.equal(summary.availableRangeSeconds.includes(57600), false, '16 hour range stays hidden before retained history reaches 16 hours');
+    assert.ok(summary.availableRangeSeconds.includes(28800), '8 hour range remains available');
+    assert.ok(summary.availableRangeSeconds.includes(57600), '16 hour range remains available');
+    assert.ok(summary.availableRangeSeconds.includes(86400), '24 hour range remains available');
     api.debugGraphApplyServerHistoryForTest({
       sequence: 19,
       records: [{
@@ -2037,27 +2071,69 @@ async function runEditorPreviewSuite() {
       }],
     });
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.ok(summary.availableRangeSeconds.includes(57600), '16 hour range appears once retained history reaches 16 hours');
-    api.recordJsDebugEventForTest('sse', {
-      ts: new Date(now - 500).toISOString(),
-      eventType: 'ping',
-      receiveLatencyMs: 2.5,
-      frameBytes: 40,
+    assert.ok(summary.availableRangeSeconds.includes(86400), '24 hour range remains available after retained history grows');
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 20,
+      records: [{
+        start: Math.floor((now - 500) / 1000),
+        duration: 1,
+        sequence: 20,
+        sse_count: 1,
+        latency_total_ms: 2.5,
+        latency_count: 1,
+        bandwidth_bytes: 40,
+      }],
     });
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.ok(summary.rawBuckets > 0, 'recent timing samples stay in one-second buckets');
+    assert.ok(summary.rawBuckets > 0, 'recent server timing samples stay in one-second buckets');
     api.setDebugGraphScaleForTest(10);
+    api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.scaleSeconds, 10, 'clickable graph scale changes the rendered aggregation interval');
+    assert.equal(summary.scaleSeconds, 10, 'selected two-hour graph range keeps the chosen aggregate interval');
     const html = api.debugPanelHtmlForTest();
-    assert.ok(html.includes('10 sec buckets | 2 hours'), 'graph labels the active time scale and selected range');
-    assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"'), 'graph renders long range buttons after enough retained history exists');
-    assert.ok(/data-js-debug-axis-max="count">[0-9.]+\/sec</.test(html), 'count chart Y axis shows per-second rates');
-    assert.ok(/data-js-debug-axis-max="latency">[0-9.]+ (?:ms|s)</.test(html), 'latency chart Y axis shows time units');
-    assert.ok(/data-js-debug-axis-max="bandwidth">[0-9.]+(?:B|kB|MB)\/s</.test(html), 'bandwidth chart Y axis shows byte-per-second units');
+    assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
+    assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range buttons after enough retained history exists');
+    assert.ok(html.includes('API/SSE/sec') && html.includes('Bandwidth/sec'), 'chart headers carry per-second units');
+    assert.ok(/data-js-debug-axis-max="count">[0-9.]+</.test(html), 'count chart Y axis stays terse');
+    assert.ok(/data-js-debug-axis-max="latency">[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
+    assert.ok(/data-js-debug-axis-max="bandwidth">[0-9.]+(?:B|kB|MB)</.test(html), 'bandwidth chart Y axis uses compact byte labels');
     assert.ok(/data-js-debug-axis-max="cpu">[0-9.]+%</.test(html), 'CPU chart Y axis shows percent units');
     assert.ok(html.includes('system avg CPU %'), 'CPU chart includes system average CPU beside yolomux.py CPU');
-    assert.ok(html.includes('uptime 1s') && html.includes('PID=9876') && html.includes('server seq 19'), 'graph renders restarted process metadata with retained sequence');
+    assert.ok(html.includes('uptime 1s') && html.includes('PID=9876') && html.includes('server seq 20'), 'graph renders restarted process metadata with retained sequence');
+  });
+
+  test('YO!stats graph uses the selected time range as the X-axis domain', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 25,
+      records: [{
+        start: Math.floor((now - (60 * 60 * 1000)) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 24,
+        api_count: 10,
+        latency_total_ms: 100,
+        latency_count: 1,
+      }, {
+        start: Math.floor((now - (30 * 60 * 1000)) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 25,
+        api_count: 20,
+        latency_total_ms: 200,
+        latency_count: 1,
+      }],
+    });
+    api.setDebugGraphScaleForTest(10);
+    api.setDebugGraphRangeForTest(86400);
+    const html = api.debugPanelHtmlForTest();
+    const match = html.match(/data-js-debug-series="api"[^>]*points="([^"]+)"/);
+    assert.ok(match, 'API series renders point coordinates');
+    const xValues = match[1].trim().split(/\s+/).map(point => Number(point.split(',')[0]));
+    assert.equal(xValues.length, 2, 'sparse history only renders recorded buckets');
+    assert.ok(xValues[0] > 550, `one-hour-old data stays near the right edge of the 24h graph, got ${xValues[0]}`);
+    assert.ok(xValues[1] > xValues[0] && xValues[1] <= 600, `newer data stays later in the selected 24h graph, got ${xValues.join(',')}`);
+    assert.equal(html.includes('10s buckets | 24h'), false, 'graph omits the redundant bottom scale footer');
   });
 
   test('YO!stats split charts render deterministic Y-axis max labels with units', () => {
@@ -2107,13 +2183,14 @@ async function runEditorPreviewSuite() {
         system_cpu_count: 1,
       }],
     });
-    api.setDebugGraphScaleForTest(10);
+    api.setDebugGraphRangeForTest(300);
     const html = api.debugPanelHtmlForTest();
 
     assert.ok(html.includes('data-js-debug-chart="count"') && html.includes('data-js-debug-chart="latency"') && html.includes('data-js-debug-chart="bandwidth"') && html.includes('data-js-debug-chart="cpu"'), 'YO!stats renders separate charts for unlike units');
-    assert.ok(/data-js-debug-axis-max="count">2\/sec</.test(html), 'count chart Y axis shows per-second API/SSE rates');
-    assert.ok(/data-js-debug-axis-max="latency">5\.0 s</.test(html), 'latency chart Y axis converts large millisecond values to seconds');
-    assert.ok(/data-js-debug-axis-max="bandwidth">1\.0kB\/s</.test(html), 'bandwidth chart Y axis shows per-second bandwidth');
+    assert.ok(html.includes('API/SSE/sec') && html.includes('Bandwidth/sec'), 'chart titles keep the per-second units');
+    assert.ok(/data-js-debug-axis-max="count">2</.test(html), 'count chart Y axis shows compact API/SSE rates');
+    assert.ok(/data-js-debug-axis-max="latency">5s</.test(html), 'latency chart Y axis converts large millisecond values to terse seconds');
+    assert.ok(/data-js-debug-axis-max="bandwidth">1\.0kB</.test(html), 'bandwidth chart Y axis keeps byte labels terse');
     assert.ok(/data-js-debug-axis-max="cpu">100%</.test(html), 'CPU chart Y axis always uses a 0-100% scale');
     assert.ok(html.includes('yolomux.py CPU %') && html.includes('system avg CPU %'), 'CPU legend shows process and system CPU series together');
     assert.ok(html.includes('data-js-debug-x-tick="start"') && html.includes('data-js-debug-x-tick="mid"') && html.includes('data-js-debug-x-tick="end"'), 'split charts render start/mid/end time ticks on the X axis');
@@ -2139,16 +2216,197 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphScaleForTest(10);
     const html = api.debugPanelHtmlForTest();
 
-    assert.ok(/data-js-debug-axis-max="count">4\/sec</.test(html), 'API/SSE per-second axis rounds 3.8/sec to a whole 4/sec');
-    assert.ok(/data-js-debug-axis-mid="count">2\/sec</.test(html), 'API/SSE per-second midpoint stays whole');
-    assert.ok(/data-js-debug-axis-max="latency">200 ms</.test(html), 'latency axis rounds 196ms to 200ms');
-    assert.ok(/data-js-debug-axis-mid="latency">100 ms</.test(html), 'latency midpoint stays readable after rounding');
-    assert.ok(/data-js-debug-axis-max="bandwidth">200kB\/s</.test(html), 'bandwidth axis rounds 140kB/s to 200kB/s');
-    assert.ok(/data-js-debug-axis-mid="bandwidth">100kB\/s</.test(html), 'bandwidth midpoint stays readable after rounding');
+    assert.ok(/data-js-debug-axis-max="count">4</.test(html), 'API/SSE per-second axis rounds 3.8/s to a whole 4');
+    assert.ok(/data-js-debug-axis-mid="count">2</.test(html), 'API/SSE per-second midpoint stays whole');
+    assert.ok(/data-js-debug-axis-max="latency">200ms</.test(html), 'latency axis rounds 196ms to 200ms');
+    assert.ok(/data-js-debug-axis-mid="latency">100ms</.test(html), 'latency midpoint stays readable after rounding');
+    assert.ok(/data-js-debug-axis-max="bandwidth">200kB</.test(html), 'bandwidth axis rounds 140kB/s to 200kB');
+    assert.ok(/data-js-debug-axis-mid="bandwidth">100kB</.test(html), 'bandwidth midpoint stays readable after rounding');
+  });
+
+  await testAsync('YO!stats graph renders 10-sample moving averages for timing series', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const startSeconds = Math.floor((now - 120000) / 10000) * 10;
+    await flushAsyncWork();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 61,
+      records: Array.from({length: 12}, (_, i) => {
+        const value = i + 1;
+        return {
+          start: startSeconds + (i * 10),
+          duration: 10,
+          sequence: 50 + i,
+          api_count: value * 10,
+          sse_count: (13 - value) * 10,
+          latency_total_ms: value * 10,
+          latency_count: 1,
+          bandwidth_bytes: value * 1024 * 10,
+        };
+      }),
+    });
+    api.setDebugGraphScaleForTest(10);
+    const html = api.debugPanelHtmlForTest();
+
+    for (const series of ['api', 'sse', 'latency', 'bandwidth']) {
+      assert.ok(html.includes(`data-js-debug-moving-average="${series}"`), `YO!stats renders a moving-average overlay for ${series}`);
+    }
+    assert.equal(html.includes('data-js-debug-moving-average="cpu"'), false, 'YO!stats does not add an unrequested CPU moving average');
+    assert.equal(html.includes('data-js-debug-moving-average="systemCpu"'), false, 'YO!stats does not add an unrequested system CPU moving average');
+    assert.ok(html.includes('data-js-debug-moving-average-samples="10"'), 'YO!stats labels moving averages with their sample window');
+    assert.ok(html.includes('API 10-sample moving average'), 'YO!stats titles moving-average overlays');
+
+    const movingAverageValues = api.debugGraphMovingAverageValuesForTest(Array.from({length: 12}, (_, i) => i + 1), 10);
+    assert.equal(movingAverageValues.at(-1), 7.5, 'moving average uses the trailing 10 samples for the final value');
+
+    const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.ok(/\.js-debug-line--moving-average\s*\{[\s\S]*stroke-dasharray:\s*0\.75 4\.25/.test(debugPaneCss), 'YO!stats moving-average overlays are rendered as small dotted dashes');
+  });
+
+  test('YO!stats graph renders server-shared agent activity and token area charts', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1', '2']);
+    const now = Date.now();
+    const baselineAt = now - 60000;
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 81,
+      records: [{
+        start: Math.floor(baselineAt / 1000),
+        duration: 1,
+        sequence: 81,
+        ask_agent_total: 2,
+        run_agent_total: 0,
+        transition_agent_total: 1,
+        idle_agent_total: 0,
+        active_agent_total: 3,
+        inactive_agent_total: 0,
+        agent_activity_samples: 1,
+      }],
+    });
+    let baselineSummary = api.debugGraphBucketSummaryForTest(now);
+    assert.ok(baselineSummary.charts.includes('activity'), 'agent activity chart appears after the server baseline sample');
+    assert.equal(baselineSummary.charts.includes('agentTokens'), false, 'agent token chart waits for server token-rate records instead of plotting baselines');
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 82,
+      records: [{
+        start: Math.floor(now / 1000),
+        duration: 1,
+        sequence: 82,
+        ask_agent_total: 1,
+        run_agent_total: 1,
+        transition_agent_total: 0,
+        idle_agent_total: 1,
+        active_agent_total: 2,
+        inactive_agent_total: 1,
+        agent_activity_samples: 1,
+        tokens_per_agent_total: 70,
+        agent_token_samples: 1,
+        agent_token_rates: [
+          {key: '1|0|claude', label: '1:0:claude', total: 60, samples: 1},
+          {key: '1|1|codex', label: '1:1:codex', total: 30, samples: 1},
+          {key: '2|0|codex', label: '2:0:codex', total: 120, samples: 1},
+        ],
+      }],
+    });
+    let summary = api.debugGraphBucketSummaryForTest(now);
+    assert.ok(summary.charts.includes('activity'), 'agent activity chart appears when agent rows exist');
+    assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
+
+    const html = api.debugPanelHtmlForTest();
+    assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
+    assert.ok(html.includes('data-js-debug-chart="agentTokens"') && html.includes('Agent tokens/min'), 'YO!stats renders the optional agent token-rate chart');
+    assert.ok(/data-js-debug-axis-max="activity">3</.test(html), 'agent status Y axis uses the exact stacked ASK+RUN+Transition total');
+    for (const value of [3, 2, 1, 0]) {
+      assert.ok(html.includes(`data-js-debug-axis-tick="activity" data-js-debug-axis-value="${value}"`), `activity chart Y axis shows whole-number tick ${value}`);
+    }
+    for (const series of ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents']) {
+      assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats renders the ${series} area outline`);
+      assert.ok(html.includes(`data-js-debug-area-series="${series}"`), `YO!stats renders the ${series} filled area`);
+      assert.ok(html.includes(`data-js-debug-legend="${series}"`), `YO!stats renders the ${series} legend`);
+    }
+    assert.ok((html.match(/data-js-debug-token-agent="/g) || []).length >= 3, 'YO!stats renders per-agent generated-token series');
+    assert.ok(html.includes('js-debug-area--agentToken') && html.includes('data-js-debug-area-stacked="agentToken:'), 'agent token areas are stacked by agent');
+    assert.ok(/data-js-debug-legend="agentToken:[^"]+"[\s\S]*<span>1:0:claude<\/span>/.test(html), 'per-agent token legend keeps the agent label');
+    assert.equal(/data-js-debug-legend="agentToken:[^"]+"[\s\S]{0,240}<strong>/.test(html), false, 'per-agent token legend omits current token/min values');
+    assert.ok(/data-js-debug-area-series="transitionAgents"[\s\S]{0,180}data-js-debug-area-stacked="transitionAgents"[\s\S]{0,180}data-js-debug-area-total="2"/.test(html), 'transition area is only yellow transition, not idle agents');
+    assert.ok(/data-js-debug-area-series="idleAgents"[\s\S]{0,180}data-js-debug-area-stacked="idleAgents"[\s\S]{0,180}data-js-debug-area-total="3"/.test(html), 'idle area stacks above active status so the top remains the total agent count');
+    assert.ok(/data-js-debug-legend="askAgents"[\s\S]*<span>ASK<\/span>/.test(html), 'prompted agents render an ASK legend label');
+    assert.ok(/data-js-debug-legend="runAgents"[\s\S]*<span>RUN<\/span>/.test(html), 'working agents render a RUN legend label');
+    assert.ok(/data-js-debug-legend="transitionAgents"[\s\S]*<span>Transition<\/span>/.test(html), 'yellow stopped agents render a Transition legend label');
+    assert.ok(/data-js-debug-legend="idleAgents"[\s\S]*<span>Idle<\/span>/.test(html), 'idle agents render a grey idle legend label');
+    assert.equal(/data-js-debug-legend="runAgents"[\s\S]{0,180}<strong>/.test(html), false, 'activity legends omit current counts');
+
+    const noTokenApi = loadYolomux('?debug=1&sessions=debug', ['1']);
+    noTokenApi.clearJsDebugEventsForTest();
+    noTokenApi.debugGraphApplyServerHistoryForTest({
+      sequence: 83,
+      records: [{
+        start: Math.floor(now / 1000),
+        duration: 1,
+        sequence: 83,
+        ask_agent_total: 0,
+        run_agent_total: 1,
+        transition_agent_total: 0,
+        idle_agent_total: 1,
+        active_agent_total: 1,
+        inactive_agent_total: 1,
+        agent_activity_samples: 1,
+      }],
+    });
+    summary = noTokenApi.debugGraphBucketSummaryForTest(now);
+    assert.ok(summary.charts.includes('activity'), 'activity chart is independent from token data');
+    assert.equal(summary.charts.includes('agentTokens'), false, 'agent token chart stays hidden without token counters');
+    const noTokenHtml = noTokenApi.debugPanelHtmlForTest();
+    assert.ok(noTokenHtml.includes('data-js-debug-chart="activity"'), 'activity chart renders without token counters');
+    assert.equal(noTokenHtml.includes('data-js-debug-chart="agentTokens"'), false, 'token chart does not render without numeric token counters');
+  });
+
+  test('YO!stats aligns server activity and latency samples by timestamp', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const sampleStart = Math.floor((now - 30000) / 1000 / 10) * 10;
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 84,
+      records: [{
+        start: sampleStart,
+        duration: 10,
+        sequence: 84,
+        latency_total_ms: 200,
+        latency_count: 1,
+        ask_agent_total: 0,
+        run_agent_total: 1,
+        transition_agent_total: 0,
+        idle_agent_total: 1,
+        active_agent_total: 1,
+        inactive_agent_total: 1,
+        agent_activity_samples: 1,
+      }],
+    });
+    api.setDebugGraphScaleForTest(10);
+    const html = api.debugPanelHtmlForTest();
+    const latencyMatch = html.match(/data-js-debug-series="latency"[^>]*points="([^"]+)"/);
+    const activeMatch = html.match(/data-js-debug-series="runAgents"[^>]*points="([^"]+)"/);
+    assert.ok(latencyMatch && activeMatch, 'latency and activity series both render from server history');
+    const latencyX = Number(latencyMatch[1].trim().split(/\s+/)[0].split(',')[0]);
+    const activeX = Number(activeMatch[1].trim().split(/\s+/)[0].split(',')[0]);
+    assert.equal(activeX, latencyX, 'server activity and latency samples with the same bucket timestamp line up on the X axis');
   });
 
   test('YO!stats graph controls apply on pointer down before refresh can replace buttons', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 71,
+      records: [{
+        start: Math.floor((now - (2 * 60 * 60 * 1000)) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 71,
+        api_count: 1,
+      }],
+    });
     const panel = new TestElement('debug-panel');
     const scale = new TestElement('graph-scale', 'button');
     const range = new TestElement('graph-range', 'button');
@@ -2161,9 +2419,10 @@ async function runEditorPreviewSuite() {
     let prevented = 0;
 
     pointerdown({target: scale, preventDefault() { prevented += 1; }});
-    assert.equal(api.debugGraphBucketSummaryForTest().scaleSeconds, 10, 'single pointerdown applies the graph bucket scale immediately');
+    assert.equal(api.debugGraphBucketSummaryForTest().scaleSeconds, 10, 'single pointerdown applies the graph aggregate bucket size immediately');
     pointerdown({target: range, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'single pointerdown applies the graph time range immediately');
+    assert.equal(api.debugGraphBucketSummaryForTest().scaleSeconds, 10, 'range pointerdown does not overwrite the selected aggregate bucket size');
     assert.equal(prevented, 2, 'graph controls claim pointerdown before a refresh can remove the clicked button');
   });
 

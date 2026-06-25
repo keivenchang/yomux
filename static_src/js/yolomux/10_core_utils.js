@@ -104,7 +104,7 @@ async function redirectToLogin(response) {
 }
 
 function jsDebugPerformanceNow() {
-  if (!debugModeEnabled) return 0;
+  if (!jsDebugCollectionEnabled) return 0;
   const value = globalThis.performance?.now?.();
   return Number.isFinite(value) ? value : Date.now();
 }
@@ -120,7 +120,7 @@ function jsDebugByteLength(text) {
 }
 
 function jsDebugRequestBytes(url, options = {}) {
-  if (!debugModeEnabled) return 0;
+  if (!jsDebugCollectionEnabled) return 0;
   let bytes = jsDebugByteLength(jsDebugUrlText(url));
   const body = options?.body;
   if (typeof body === 'string') bytes += jsDebugByteLength(body);
@@ -130,7 +130,7 @@ function jsDebugRequestBytes(url, options = {}) {
 }
 
 function jsDebugDurationMs(startedAt) {
-  if (!debugModeEnabled || !Number.isFinite(startedAt)) return null;
+  if (!jsDebugCollectionEnabled || !Number.isFinite(startedAt)) return null;
   const duration = jsDebugPerformanceNow() - startedAt;
   return Number.isFinite(duration) ? Number(duration.toFixed(1)) : null;
 }
@@ -150,7 +150,7 @@ function jsDebugErrorText(error) {
 }
 
 function recordApiDebugEvent(url, method, startedAt, result = {}) {
-  if (!debugModeEnabled) return null;
+  if (!jsDebugCollectionEnabled) return null;
   const payload = {
     method,
     url: jsDebugUrlText(url),
@@ -164,7 +164,7 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
 }
 
 function recordApiDebugResponseBytes(event, response) {
-  if (!debugModeEnabled || !event || !response) return;
+  if (!jsDebugCollectionEnabled || !event || !response) return;
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
@@ -172,6 +172,7 @@ function recordApiDebugResponseBytes(event, response) {
     scheduleJsDebugPanelRefresh();
     return;
   }
+  if (typeof response.clone !== 'function') return;
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
     if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
@@ -180,7 +181,7 @@ function recordApiDebugResponseBytes(event, response) {
 }
 
 function recordJsDebugEvent(type, payload = {}) {
-  if (!debugModeEnabled) return null;
+  if (!jsDebugCollectionEnabled) return null;
   const event = {
     id: ++jsDebugEventSeq,
     ts: new Date().toISOString(),
@@ -209,7 +210,7 @@ function clearJsDebugEvents() {
 }
 
 function scheduleJsDebugPanelRefresh() {
-  if (!debugModeEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
+  if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
   if (jsDebugRenderTimer) return;
   jsDebugRenderTimer = setTimeout(() => {
     jsDebugRenderTimer = null;
@@ -218,7 +219,7 @@ function scheduleJsDebugPanelRefresh() {
 }
 
 function installJsDebugEventCapture() {
-  if (!debugModeEnabled || jsDebugEventCaptureInstalled || !window?.addEventListener) return;
+  if (!jsDebugCollectionEnabled || jsDebugEventCaptureInstalled || !window?.addEventListener) return;
   jsDebugEventCaptureInstalled = true;
   window.addEventListener('error', event => {
     recordJsDebugEvent('error', {

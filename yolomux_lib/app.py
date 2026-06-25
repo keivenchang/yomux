@@ -252,6 +252,33 @@ STATS_HISTORY_RAW_BUCKET_SECONDS = 1
 STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 10
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
+STATS_HISTORY_BROWSER_FIELDS = (
+    "api_count",
+    "sse_count",
+    "latency_total_ms",
+    "latency_count",
+    "bandwidth_bytes",
+)
+STATS_HISTORY_SERVER_FIELDS = (
+    *STATS_HISTORY_BROWSER_FIELDS,
+    "cpu_total_percent",
+    "cpu_count",
+    "system_cpu_total_percent",
+    "system_cpu_count",
+    "ask_agent_total",
+    "run_agent_total",
+    "transition_agent_total",
+    "idle_agent_total",
+    "active_agent_total",
+    "inactive_agent_total",
+    "agent_activity_samples",
+    "tokens_per_agent_total",
+    "agent_token_samples",
+)
+STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted"})
+STATS_AGENT_RUN_STATES = frozenset({"working"})
+STATS_AGENT_TRANSITION_STATES = frozenset({"cooldown", "transition"})
+STATS_AGENT_ACTIVE_STATES = STATS_AGENT_ASK_STATES | STATS_AGENT_RUN_STATES | STATS_AGENT_TRANSITION_STATES
 
 
 def current_process_rss_bytes() -> int | None:
@@ -341,6 +368,16 @@ def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
         "cpu_count": 0.0,
         "system_cpu_total_percent": 0.0,
         "system_cpu_count": 0.0,
+        "ask_agent_total": 0.0,
+        "run_agent_total": 0.0,
+        "transition_agent_total": 0.0,
+        "idle_agent_total": 0.0,
+        "active_agent_total": 0.0,
+        "inactive_agent_total": 0.0,
+        "agent_activity_samples": 0.0,
+        "tokens_per_agent_total": 0.0,
+        "agent_token_samples": 0.0,
+        "agent_token_rates": {},
     }
 
 
@@ -352,6 +389,31 @@ def stats_history_positive_number(value: Any) -> float:
     if not math.isfinite(number) or number <= 0:
         return 0.0
     return number
+
+
+def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        source = [{"key": key, **item} if isinstance(item, dict) else {"key": key, "total": item} for key, item in value.items()]
+    elif isinstance(value, list):
+        source = value
+    else:
+        return []
+    records: list[dict[str, Any]] = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        label = str(item.get("label") or key).strip() or key
+        total = stats_history_positive_number(item.get("total", item.get("rate", item.get("value"))))
+        samples = stats_history_positive_number(item.get("samples"))
+        if total and not samples:
+            samples = 1.0
+        if not total and not samples:
+            continue
+        records.append({"key": key, "label": label, "total": total, "samples": samples})
+    return records
 
 
 TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
@@ -940,6 +1002,9 @@ class TmuxWebtermApp:
         self.stats_history_raw_buckets: dict[tuple[int, int], dict[str, Any]] = {}
         self.stats_history_rollup_buckets: dict[tuple[int, int], dict[str, Any]] = {}
         self.stats_history_sequence = 0
+        self.stats_agent_token_lock = threading.Lock()
+        self.stats_agent_token_state: dict[str, dict[str, Any]] = {}
+        self.stats_agent_activity_state: dict[str, dict[str, Any]] = {}
         self.client_events = ClientEventBroker()
         self.client_watch_lock = threading.RLock()
         self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
@@ -1058,7 +1123,25 @@ class TmuxWebtermApp:
             buckets[key] = bucket
         return bucket
 
-    def stats_history_merge_record_locked(self, record: dict[str, Any], now: float) -> None:
+    def stats_history_merge_agent_token_rates_locked(self, bucket: dict[str, Any], rates: Any) -> bool:
+        changed = False
+        token_rates = bucket.get("agent_token_rates")
+        if not isinstance(token_rates, dict):
+            token_rates = {}
+            bucket["agent_token_rates"] = token_rates
+        for item in stats_history_agent_token_rate_records(rates):
+            key = item["key"]
+            existing = token_rates.get(key)
+            if not isinstance(existing, dict):
+                existing = {"label": item["label"], "total": 0.0, "samples": 0.0}
+                token_rates[key] = existing
+            existing["label"] = item["label"] or existing.get("label") or key
+            existing["total"] = float(existing.get("total") or 0.0) + float(item.get("total") or 0.0)
+            existing["samples"] = float(existing.get("samples") or 0.0) + float(item.get("samples") or 0.0)
+            changed = True
+        return changed
+
+    def stats_history_merge_record_locked(self, record: dict[str, Any], now: float, fields: tuple[str, ...] = STATS_HISTORY_BROWSER_FIELDS) -> None:
         sample_time = record.get("start", record.get("time", now))
         try:
             sample_time_float = float(sample_time)
@@ -1068,17 +1151,20 @@ class TmuxWebtermApp:
         if bucket is None:
             return
         changed = False
-        for key in ("api_count", "sse_count", "latency_total_ms", "latency_count", "bandwidth_bytes", "cpu_total_percent", "cpu_count", "system_cpu_total_percent", "system_cpu_count"):
+        for key in fields:
             value = stats_history_positive_number(record.get(key))
             if value:
                 bucket[key] = float(bucket.get(key) or 0.0) + value
                 changed = True
+        if "agent_token_samples" in fields:
+            changed = self.stats_history_merge_agent_token_rates_locked(bucket, record.get("agent_token_rates")) or changed
         if changed:
             bucket["sequence"] = self.stats_history_next_sequence_locked()
 
     def stats_history_merge_bucket_locked(self, target: dict[str, Any], source: dict[str, Any]) -> None:
-        for key in ("api_count", "sse_count", "latency_total_ms", "latency_count", "bandwidth_bytes", "cpu_total_percent", "cpu_count", "system_cpu_total_percent", "system_cpu_count"):
+        for key in STATS_HISTORY_SERVER_FIELDS:
             target[key] = float(target.get(key) or 0.0) + float(source.get(key) or 0.0)
+        self.stats_history_merge_agent_token_rates_locked(target, source.get("agent_token_rates"))
         target["sequence"] = self.stats_history_next_sequence_locked()
 
     def stats_history_compact_locked(self, now: float) -> None:
@@ -1121,6 +1207,25 @@ class TmuxWebtermApp:
                 "cpu_count": float(bucket.get("cpu_count") or 0.0),
                 "system_cpu_total_percent": float(bucket.get("system_cpu_total_percent") or 0.0),
                 "system_cpu_count": float(bucket.get("system_cpu_count") or 0.0),
+                "ask_agent_total": float(bucket.get("ask_agent_total") or 0.0),
+                "run_agent_total": float(bucket.get("run_agent_total") or 0.0),
+                "transition_agent_total": float(bucket.get("transition_agent_total") or 0.0),
+                "idle_agent_total": float(bucket.get("idle_agent_total") or 0.0),
+                "active_agent_total": float(bucket.get("active_agent_total") or 0.0),
+                "inactive_agent_total": float(bucket.get("inactive_agent_total") or 0.0),
+                "agent_activity_samples": float(bucket.get("agent_activity_samples") or 0.0),
+                "tokens_per_agent_total": float(bucket.get("tokens_per_agent_total") or 0.0),
+                "agent_token_samples": float(bucket.get("agent_token_samples") or 0.0),
+                "agent_token_rates": [
+                    {
+                        "key": key,
+                        "label": str(item.get("label") or key),
+                        "total": float(item.get("total") or 0.0),
+                        "samples": float(item.get("samples") or 0.0),
+                    }
+                    for key, item in sorted((bucket.get("agent_token_rates") or {}).items())
+                    if isinstance(item, dict)
+                ],
             })
         return sorted(records, key=lambda item: (item["start"], item["duration"], item["sequence"]))
 
@@ -1158,6 +1263,160 @@ class TmuxWebtermApp:
             except (TypeError, ValueError):
                 since = 0
             return {"ok": True, "history": self.stats_history_payload_locked(max(0, since))}, HTTPStatus.OK
+
+    def stats_agent_window_rows(self) -> list[dict[str, Any]]:
+        self.refresh_sessions(maintenance=False)
+        if not self.sessions:
+            return []
+        sessions, _errors = discover_sessions(self.sessions)
+        if not sessions:
+            return []
+        activity_snapshot = self.activity_snapshot_with_recency()
+        rows: list[dict[str, Any]] = []
+        for session in self.sessions:
+            info = sessions.get(session)
+            if info is None:
+                continue
+            for row in self.agent_window_status_payloads(
+                session,
+                info=info,
+                discovered_sessions=sessions,
+                activity_snapshot=activity_snapshot,
+                include_path_metadata=False,
+            ):
+                item = dict(row)
+                item["session"] = session
+                rows.append(item)
+        return rows
+
+    def stats_agent_is_active(self, row: dict[str, Any]) -> bool:
+        state = str(row.get("state") or "").strip().lower()
+        return state in STATS_AGENT_ACTIVE_STATES
+
+    def stats_agent_transition_seconds(self) -> float:
+        return self.performance_setting_seconds("agent_window_cooldown_seconds", 0.0, 300.0)
+
+    def stats_agent_activity_kind_locked(self, row: dict[str, Any], key: str, sample_time: float, transition_seconds: float) -> str:
+        state = str(row.get("state") or "").strip().lower()
+        previous = self.stats_agent_activity_state.get(key) if key else None
+        previous_kind = str(previous.get("kind") or "") if isinstance(previous, dict) else ""
+        previous_transition_started = self.float_value(previous.get("transition_started") if isinstance(previous, dict) else 0.0, 0.0)
+        transition_started = 0.0
+        kind = "idle"
+        if state in STATS_AGENT_ASK_STATES:
+            kind = "ask"
+        elif state in STATS_AGENT_RUN_STATES:
+            kind = "run"
+        elif state in STATS_AGENT_TRANSITION_STATES:
+            kind = "transition"
+            transition_started = previous_transition_started or sample_time
+        elif transition_seconds > 0:
+            if previous_kind == "run":
+                transition_started = sample_time
+            elif previous_kind == "transition":
+                transition_started = previous_transition_started or sample_time
+            if transition_started and sample_time - transition_started < transition_seconds:
+                kind = "transition"
+            else:
+                transition_started = 0.0
+        if key:
+            self.stats_agent_activity_state[key] = {
+                "state": state,
+                "kind": kind,
+                "time": sample_time,
+                "transition_started": transition_started,
+            }
+        return kind
+
+    def stats_agent_token_count(self, row: dict[str, Any]) -> float | None:
+        transcript = str(row.get("transcript") or "").strip()
+        kind = str(row.get("kind") or "").strip().lower()
+        if not transcript:
+            return None
+        generated_tokens = session_files.transcript_generated_tokens(Path(transcript), kind)
+        if generated_tokens is None:
+            return None
+        return generated_tokens
+
+    def stats_agent_token_key(self, row: dict[str, Any], fallback_index: int) -> str:
+        session = str(row.get("session") or "").strip()
+        window = row.get("window_index")
+        if not isinstance(window, int):
+            window = str(row.get("window") or row.get("window_label") or row.get("label") or "").strip()
+        kind = str(row.get("kind") or "").strip().lower()
+        parts = [session, str(window).strip(), kind]
+        key = "|".join(part for part in parts if part)
+        return key or f"agent-{fallback_index}"
+
+    def stats_agent_token_label(self, row: dict[str, Any]) -> str:
+        session = str(row.get("session") or "").strip()
+        window_label = str(row.get("window_label") or row.get("label") or row.get("window") or "").strip()
+        kind = str(row.get("kind") or "agent").strip() or "agent"
+        return ":".join(part for part in (session, window_label or kind) if part) or kind
+
+    def stats_agent_activity_record(self, sample_time: float) -> dict[str, Any] | None:
+        rows = self.stats_agent_window_rows()
+        if not rows:
+            with self.stats_agent_token_lock:
+                self.stats_agent_token_state.clear()
+                self.stats_agent_activity_state.clear()
+            return None
+        ask_agents = 0
+        run_agents = 0
+        transition_agents = 0
+        idle_agents = 0
+        inactive_agents = 0
+        agent_token_rates: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        transition_seconds = self.stats_agent_transition_seconds()
+        with self.stats_agent_token_lock:
+            for index, row in enumerate(rows):
+                key = self.stats_agent_token_key(row, index)
+                seen_keys.add(key)
+                activity_kind = self.stats_agent_activity_kind_locked(row, key, sample_time, transition_seconds)
+                if activity_kind == "ask":
+                    ask_agents += 1
+                elif activity_kind == "run":
+                    run_agents += 1
+                elif activity_kind == "transition":
+                    transition_agents += 1
+                else:
+                    idle_agents += 1
+                    inactive_agents += 1
+                token_count = self.stats_agent_token_count(row)
+                if token_count is None:
+                    continue
+                label = self.stats_agent_token_label(row)
+                previous = self.stats_agent_token_state.get(key)
+                rate = 0.0
+                if previous and token_count >= float(previous.get("tokens") or 0.0) and sample_time > float(previous.get("time") or 0.0):
+                    elapsed_minutes = max((sample_time - float(previous.get("time") or 0.0)) / 60.0, 1.0 / 60.0)
+                    rate = (token_count - float(previous.get("tokens") or 0.0)) / elapsed_minutes
+                agent_token_rates.append({"key": key, "label": label, "total": max(0.0, rate), "samples": 1.0})
+                self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label}
+            for key in list(self.stats_agent_token_state):
+                if key not in seen_keys:
+                    self.stats_agent_token_state.pop(key, None)
+            for key in list(self.stats_agent_activity_state):
+                if key not in seen_keys:
+                    self.stats_agent_activity_state.pop(key, None)
+        active_agents = max(0, len(rows) - inactive_agents)
+        record: dict[str, Any] = {
+            "time": sample_time,
+            "ask_agent_total": ask_agents,
+            "run_agent_total": run_agents,
+            "transition_agent_total": transition_agents,
+            "idle_agent_total": idle_agents,
+            "active_agent_total": active_agents,
+            "inactive_agent_total": inactive_agents,
+            "agent_activity_samples": 1,
+        }
+        if agent_token_rates:
+            token_rate_total = sum(float(item["total"]) for item in agent_token_rates)
+            record["tokens_per_agent_total"] = token_rate_total / len(agent_token_rates)
+            record["agent_token_samples"] = 1
+            record["agent_token_rates"] = agent_token_rates
+        return record
 
     def stats_sample_payload(self, since: int = 0) -> dict[str, Any]:
         now = time.time()
@@ -1197,15 +1456,19 @@ class TmuxWebtermApp:
                 self.stats_sample_cached_monotonic = monotonic_now
                 self.stats_sample_cached_payload = dict(sample)
                 record_cpu_sample = True
+        agent_record = self.stats_agent_activity_record(sample["time"]) if record_cpu_sample else None
         with self.stats_history_lock:
             if record_cpu_sample:
-                self.stats_history_merge_record_locked({
+                record = {
                     "time": sample["time"],
                     "cpu_total_percent": sample["cpu_percent"],
                     "cpu_count": 1,
                     "system_cpu_total_percent": sample["system_cpu_percent"],
                     "system_cpu_count": 1,
-                }, now)
+                }
+                if agent_record:
+                    record.update(agent_record)
+                self.stats_history_merge_record_locked(record, now, fields=STATS_HISTORY_SERVER_FIELDS)
             self.stats_history_compact_locked(now)
             history = self.stats_history_payload_locked(max(0, since))
         return {

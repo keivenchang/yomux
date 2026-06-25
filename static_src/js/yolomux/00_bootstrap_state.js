@@ -824,6 +824,7 @@ function urlFlagEnabled(name) {
   }
 }
 const debugModeEnabled = urlFlagEnabled('debug');
+const jsDebugCollectionEnabled = true;
 const jsDebugEventLimit = 200;
 const jsDebugRenderDebounceMs = 500;
 let jsDebugEventSeq = 0;

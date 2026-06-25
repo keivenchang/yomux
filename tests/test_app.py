@@ -135,9 +135,122 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
     assert payload["history"]["rollup_bucket_seconds"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS
     assert len(payload["history"]["records"]) <= 3
     assert sum(record["api_count"] for record in payload["history"]["records"]) == 20
-    assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 20
+    assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 0
+    assert sum(record["agent_activity_samples"] for record in payload["history"]["records"]) == 0
     assert any(record["duration"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS for record in payload["history"]["records"])
     assert incremental["history"]["records"] == []
+
+
+def test_stats_sample_payload_records_shared_agent_activity_and_token_rates(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    wall_times = iter([1000.0, 1060.0])
+    monotonic_times = iter([50.0, 110.0])
+    process_times = iter([10.0, 10.5])
+    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
+    claude_transcript = tmp_path / "claude.jsonl"
+    codex_transcript = tmp_path / "codex.jsonl"
+
+    def write_usage_transcripts(claude_tokens: int, codex_tokens: int, mtime: float) -> None:
+        claude_transcript.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": claude_tokens}, "content": []}}) + "\n",
+            encoding="utf-8",
+        )
+        codex_transcript.write_text(
+            json.dumps({"type": "response_item", "payload": {"info": {"total_token_usage": {"output_tokens": codex_tokens}}}}) + "\n",
+            encoding="utf-8",
+        )
+        os.utime(claude_transcript, (mtime, mtime))
+        os.utime(codex_transcript, (mtime, mtime))
+
+    usage_samples = [(100, 200), (1600, 2600)]
+
+    def fake_agent_rows():
+        claude_tokens, codex_tokens = usage_samples.pop(0)
+        write_usage_transcripts(claude_tokens, codex_tokens, 1000.0 + len(usage_samples))
+        return [
+            {"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(claude_transcript)},
+            {"session": "1", "kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex"},
+            {"session": "2", "kind": "codex", "state": "needs-input", "window_index": 0, "window_label": "0:codex", "transcript": str(codex_transcript)},
+        ]
+
+    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
+    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
+    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
+    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", fake_agent_rows)
+    try:
+        first = webapp.stats_sample_payload()
+        second = webapp.stats_sample_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert first["history"]["records"]
+    records = second["history"]["records"]
+    assert sum(record["active_agent_total"] for record in records) == 4
+    assert sum(record["inactive_agent_total"] for record in records) == 2
+    assert sum(record["ask_agent_total"] for record in records) == 2
+    assert sum(record["run_agent_total"] for record in records) == 2
+    assert sum(record["transition_agent_total"] for record in records) == 0
+    assert sum(record["idle_agent_total"] for record in records) == 2
+    assert sum(record["ask_agent_total"] + record["run_agent_total"] + record["transition_agent_total"] + record["idle_agent_total"] for record in records) == 6
+    assert sum(record["agent_activity_samples"] for record in records) == 2
+    token_records = [item for record in records for item in record["agent_token_rates"]]
+    by_key = {record["key"]: record for record in token_records}
+    assert by_key["1|0|claude"]["label"] == "1:0:claude"
+    assert by_key["1|0|claude"]["total"] == 1500.0
+    assert by_key["2|0|codex"]["label"] == "2:0:codex"
+    assert by_key["2|0|codex"]["total"] == 2400.0
+    assert by_key["2|0|codex"]["samples"] == 1.0
+    assert sum(record["agent_token_samples"] for record in records) == 2
+
+
+def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    rows = iter([
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"}],
+        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude"}],
+        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude"}],
+    ])
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
+    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 60.0)
+    try:
+        running = webapp.stats_agent_activity_record(1000.0)
+        transition = webapp.stats_agent_activity_record(1010.0)
+        idle = webapp.stats_agent_activity_record(1071.0)
+    finally:
+        webapp.control_server.stop()
+
+    assert running["run_agent_total"] == 1
+    assert running["transition_agent_total"] == 0
+    assert transition["run_agent_total"] == 0
+    assert transition["transition_agent_total"] == 1
+    assert transition["inactive_agent_total"] == 0
+    assert idle["transition_agent_total"] == 0
+    assert idle["idle_agent_total"] == 1
+    assert idle["inactive_agent_total"] == 1
+
+
+def test_stats_agent_idle_means_not_ask_run_or_transition(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 60.0)
+    try:
+        with webapp.stats_agent_token_lock:
+            active_kind = webapp.stats_agent_activity_kind_locked({"state": "active"}, "active-agent", 1000.0, 60.0)
+            settled_kind = webapp.stats_agent_activity_kind_locked({"state": "settled"}, "settled-agent", 1000.0, 60.0)
+            ask_kind = webapp.stats_agent_activity_kind_locked({"state": "needs-input"}, "ask-agent", 1000.0, 60.0)
+            run_kind = webapp.stats_agent_activity_kind_locked({"state": "working"}, "run-agent", 1000.0, 60.0)
+            transition_kind = webapp.stats_agent_activity_kind_locked({"state": "cooldown"}, "transition-agent", 1000.0, 60.0)
+    finally:
+        webapp.control_server.stop()
+
+    assert active_kind == "idle"
+    assert settled_kind == "idle"
+    assert ask_kind == "ask"
+    assert run_kind == "run"
+    assert transition_kind == "transition"
 
 
 class FakeCodexAppServerStdin:

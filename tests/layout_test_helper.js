@@ -758,6 +758,7 @@ globalThis.__layoutTestApi = {
   debugPanelHtmlForTest: debugPanelHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
+  debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
   recordJsDebugStatsSampleForTest: recordJsDebugStatsSample,
   bindDebugPanelForTest: bindDebugPanel,

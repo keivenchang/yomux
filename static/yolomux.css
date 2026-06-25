@@ -3115,7 +3115,7 @@ body.theme-light .branch-link {
 }
 .js-debug-graph {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   min-width: 0;
   min-height: 180px;
@@ -3181,7 +3181,7 @@ body.theme-light .branch-link {
 }
 .js-debug-chart-shell {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
   min-height: 0;
@@ -3278,6 +3278,9 @@ body.theme-light .branch-link {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.js-debug-area {
+  opacity: 0.18;
+}
 .js-debug-line--api {
   stroke: var(--accent);
 }
@@ -3290,19 +3293,52 @@ body.theme-light .branch-link {
 .js-debug-line--bandwidth {
   stroke: var(--link-soft);
 }
+.js-debug-line--askAgents {
+  stroke: var(--bad);
+}
+.js-debug-line--runAgents {
+  stroke: var(--good);
+}
+.js-debug-line--transitionAgents {
+  stroke: var(--accent-gold);
+}
+.js-debug-line--idleAgents {
+  stroke: var(--muted);
+}
+.js-debug-line--tokensPerAgent {
+  stroke: var(--accent-sky-strong);
+}
+.js-debug-line--agentToken {
+  stroke: var(--js-debug-series-color, var(--accent-sky-strong));
+}
+.js-debug-area--askAgents {
+  fill: var(--bad);
+}
+.js-debug-area--runAgents {
+  fill: var(--good);
+}
+.js-debug-area--transitionAgents {
+  fill: var(--accent-gold);
+}
+.js-debug-area--idleAgents {
+  fill: var(--muted);
+}
+.js-debug-area--tokensPerAgent {
+  fill: var(--accent-sky-strong);
+}
+.js-debug-area--agentToken {
+  fill: var(--js-debug-series-color, var(--accent-sky-strong));
+}
 .js-debug-line--cpu {
   stroke: var(--bad);
 }
 .js-debug-line--systemCpu {
   stroke: var(--accent-sky-strong);
 }
-.js-debug-graph-scale {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding-block-start: 6px;
-  color: var(--muted);
-  font: 600 var(--ui-font-size-xs)/1 var(--mono-font);
+.js-debug-line--moving-average {
+  opacity: 0.82;
+  stroke-width: 1.8;
+  stroke-dasharray: 0.75 4.25;
 }
 .js-debug-legend {
   display: flex;
@@ -3317,10 +3353,6 @@ body.theme-light .branch-link {
   min-width: 0;
   color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.js-debug-legend-item strong {
-  color: var(--text);
-  font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
 }
 .js-debug-legend-swatch {
   width: 10px;
@@ -3339,6 +3371,24 @@ body.theme-light .branch-link {
 }
 .js-debug-legend-swatch--bandwidth {
   color: var(--link-soft);
+}
+.js-debug-legend-swatch--askAgents {
+  color: var(--bad);
+}
+.js-debug-legend-swatch--runAgents {
+  color: var(--good);
+}
+.js-debug-legend-swatch--transitionAgents {
+  color: var(--accent-gold);
+}
+.js-debug-legend-swatch--idleAgents {
+  color: var(--muted);
+}
+.js-debug-legend-swatch--tokensPerAgent {
+  color: var(--accent-sky-strong);
+}
+.js-debug-legend-swatch--agentToken {
+  color: var(--js-debug-series-color, var(--accent-sky-strong));
 }
 .js-debug-legend-swatch--cpu {
   color: var(--bad);
