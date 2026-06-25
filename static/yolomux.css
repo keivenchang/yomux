@@ -7012,31 +7012,14 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   flex-direction: column;
   background: var(--surface-ink);
 }
-/* the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
-   and it fills the available height (head row + scrolling list). */
-.info-subview {
-  display: none;
-  min-height: 0;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-}
-.info-subview.active {
-  display: flex;
-}
-.info-subview .info-list {
-  flex: 1;
-}
-/* #48: the merged info panel has three rows: window-tab strip, the YO!info|YO!agent sub-tab toggle,
-   then the body. Give the sub-tab row a real track so it stays visible. */
+/* Virtual info-style panels have three rows: tab strip, action bar, then scrollable body. */
 .info-panel {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 .info-panel.details-collapsed {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
-/* The segmented sub-tab toggle that switches between YO!info and YO!agent (its own row under the tabs). */
-.info-subtabs {
+.info-actions-bar {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -7045,10 +7028,6 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
      was a black band on the light pane. */
   background: var(--pane-bar-bg, var(--panel2));
   border-block-end: 1px solid var(--line);
-}
-.info-subtab-group {
-  display: flex;
-  min-width: 0;
 }
 .info-subtab-actions {
   display: flex;
@@ -7074,45 +7053,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   color: var(--text);
   font-size: var(--ui-font-size-xs);
 }
-.info-subtab {
-  flex: 0 0 auto;
-  min-height: var(--pane-tab-height);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 14px;
-  border: 1px solid var(--pane-inactive-tab-border);
-  background: var(--pane-inactive-tab-bg);
-  color: var(--pane-tab-text);
-  font: inherit;
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-}
-.info-subtab .session-button-dir {
-  color: inherit;
-  line-height: 1;
-}
-.info-subtab:first-child {
-  border-radius: 6px 0 0 6px;
-}
-.info-subtab:last-child {
-  border-radius: 0 6px 6px 0;
-  border-inline-start: 0;
-}
-.info-subtab.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-}
-.info-subtab:not(.active):hover {
-  color: var(--pane-tab-text);
-  /* a token-based hover tint (the white tint was invisible on a light band). */
-  background: var(--pane-inactive-tab-bg-hover);
-}
 .info-list {
   /* YO!info table scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
      customize scrollbar colors or hover behavior here. */
+  flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 8px 10px;
@@ -7298,9 +7242,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 6px;
+  gap: 4px;
   margin-top: auto;
-  padding: 6px 8px;
+  padding: 5px 6px;
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--line);
@@ -8030,8 +7974,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-chat-form {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 4px;
+  padding: 6px 8px;
   background: color-mix(in srgb, var(--link-soft) 8%, var(--bg));
   border: 1px solid var(--link-soft);
   border-radius: 14px;
@@ -8043,7 +7987,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-chat-input {
   min-width: 0;
   width: 100%;
-  height: 26px;
+  height: 22px;
   padding: 0 2px;
   color: var(--text);
   background: transparent;
@@ -8054,7 +7998,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-chat-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: wrap;
 }
 .yoagent-chat-controls-spacer { flex: 1 1 auto; }
@@ -8063,8 +8007,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 26px;
-  padding: 0 6px 0 9px;
+  height: 24px;
+  padding: 0 5px 0 8px;
   color: var(--text);
   background: var(--panel2);
   border: 1px solid var(--line);
@@ -8105,7 +8049,7 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
 .yoagent-backend-pill select {
   min-width: 0;
   max-width: 100%;
-  height: 22px;
+  height: 20px;
   padding: 0;
   color: inherit;
   background: transparent;

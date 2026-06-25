@@ -709,7 +709,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__files__', '__search_history__', '__prefs__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__files__', '__search_history__', '__prefs__', '3']);
   });
 
   test('t@6373', () => {
@@ -1797,7 +1797,7 @@ async function runEditorPreviewSuite() {
   test('t@6675', () => {
     const api = loadYolomux('?debug=1', ['1', '2']);
     assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 enables the JS Debug pane');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,debug,image-viewer,file-editor');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane when enabled');
     assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'Debug pane serializes to the readable debug item');
     const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
@@ -2437,6 +2437,8 @@ async function runEditorPreviewSuite() {
     assert.equal(/data-yoagent-backend[\s\S]*?<option value="auto"/.test(enabledChatHtml), false, 'YO!agent composer backend selector does not offer Auto');
     assert.equal(/data-yoagent-backend[\s\S]*?<option value="deterministic"/.test(enabledChatHtml), false, 'YO!agent composer backend selector does not offer No agent as a selectable backend');
     assert.ok(enabledChatHtml.includes('yoagent-chat-send-icon'), 'YO!agent send button is a circular arrow icon');
+    assert.ok(enabledChatHtml.includes('>Clear</button>'), 'YO!agent composer uses a compact Clear label');
+    assert.equal(enabledChatHtml.includes('>Clear conversation</button>'), false, 'YO!agent composer does not use the long Clear conversation label');
     assert.ok(enabledChatHtml.indexOf('yoagent-chat-clear') < enabledChatHtml.indexOf('yoagent-chat-send'), 'YO!agent send arrow is the last (far-right) control, after Clear');
     api.setYoagentMessagesForTest([
       {role: 'user', content: 'first question', createdAt: '2026-06-13T17:38:00Z'},
@@ -3418,7 +3420,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/if \(type === 'context_items_ready'\)[\s\S]{0,160}applyContextItemsPayloadFromPush\(payload\.data/.test(source), 'context_items_ready applies direct context payloads');
     assert.ok(/if \(type === 'activity_summary_ready'\)[\s\S]{0,120}applyActivitySummaryPayloadFromPush\(payload\.data\)/.test(source), 'activity_summary_ready applies direct summary payloads');
     assert.ok(/if \(type === 'yoagent_skills_changed'\)[\s\S]{0,160}refreshActivitySummary\(\{force: true/.test(source), 'yoagent_skills_changed refreshes YO!agent context');
-    assert.ok(/if \(type === 'yoagent_jobs_changed'\)[\s\S]*loadYoagentJobs\(\{force: true, silent: true, render: infoPanelSubTab === 'yoagent'[\s\S]*maybeNotifyYoagentJob\(payload\.notification/.test(source), 'yoagent_jobs_changed refreshes jobs and can notify from server-fired jobs');
+    assert.ok(/if \(type === 'yoagent_jobs_changed'\)[\s\S]*loadYoagentJobs\(\{force: true, silent: true, render: yoagentPanelIsActive\(\)[\s\S]*maybeNotifyYoagentJob\(payload\.notification/.test(source), 'yoagent_jobs_changed refreshes jobs and can notify from server-fired jobs');
     assert.ok(/if \(type === 'session_files_ready'\)[\s\S]{0,180}applySessionFilesPayloadFromPush\(payload\.data, payload\.request/.test(source), 'session_files_ready applies direct session-files payloads');
     assert.equal(source.includes('session_files_changed'), false, 'stale session_files_changed refetch event path is removed');
     assert.ok(/if \(type === 'files_changed'\)[\s\S]{0,180}refreshOpenFilesFromPush\(payload\)/.test(source), 'files_changed refreshes visible editor files without waiting for directory payloads');
@@ -3611,8 +3613,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/function yoagentJobsHtml\(\)[\s\S]*yoagent-jobs-list/.test(src), 'YO!agent renders queued jobs as a visible list');
     assert.ok(/data-yoagent-job-confirm/.test(src) && /data-yoagent-job-cancel/.test(src), 'YO!agent job rows expose confirm/cancel controls');
     assert.ok(/async function loadYoagentJobs\(options = \{\}\)[\s\S]*apiFetchJson\('\/api\/yoagent\/jobs'/.test(src), 'YO!agent hydrates jobs from the existing jobs API');
-    assert.ok(/type === 'yoagent_jobs_changed'[\s\S]*loadYoagentJobs\(\{force: true, silent: true, render: infoPanelSubTab === 'yoagent'/.test(src), 'YO!agent job SSE refreshes the visible job list');
-    assert.ok(/\[data-yoagent-job-confirm\][\s\S]*confirmYoagentJob/.test(src) && /\[data-yoagent-job-cancel\][\s\S]*cancelYoagentJob/.test(src), 'YO!agent job controls are delegated from the merged info panel');
+    assert.ok(/type === 'yoagent_jobs_changed'[\s\S]*loadYoagentJobs\(\{force: true, silent: true, render: yoagentPanelIsActive\(\)/.test(src), 'YO!agent job SSE refreshes the visible job list');
+    assert.ok(/\[data-yoagent-job-confirm\][\s\S]*confirmYoagentJob/.test(src) && /\[data-yoagent-job-cancel\][\s\S]*cancelYoagentJob/.test(src), 'YO!agent job controls are delegated from the YO!agent panel');
     assert.ok(/function yoagentShouldScrollBottom\(options, scrollState\)[\s\S]*options\.scrollBottom === true[\s\S]*options\.scrollBottom === false[\s\S]*yoagentScrollbackLocked[\s\S]*scrollState\?\.nearBottom/.test(src), 'YO!agent chat auto-scrolls only when forced or already near the bottom and not manually scrollback-locked');
     assert.ok(/function yoagentChatScrollOwner\(node = document\.getElementById\('yoagent-content'\)\)\s*\{[\s\S]*return node\?\.querySelector\?\.\('\.yoagent-chat-history'\) \|\| node \|\| null;[\s\S]*function scrollYoagentChatToBottom/.test(src), 'YO!agent has one normal scroll owner with only the outer node as a fallback');
     assert.ok(/function scrollYoagentChatToBottom\(node = document\.getElementById\('yoagent-content'\)\)[\s\S]*const owner = yoagentChatScrollOwner\(node\);[\s\S]*owner\.scrollTop = owner\.scrollHeight[\s\S]*yoagentScrollbackLocked = false/.test(src), 'YO!agent bottom-scroll drives only the chosen scroll owner');
@@ -3620,7 +3622,8 @@ async function runEditorPreviewSuite() {
     assert.equal(/yoagentChatScrollState[\s\S]{0,420}(nodeTop|panelTop|panelBody)/.test(src), false, 'YO!agent scroll state does not capture outer list or panel body scroll positions');
     assert.ok(/function restoreYoagentChatScrollState\(node, state\)[\s\S]*const owner = yoagentChatScrollOwner\(node\);[\s\S]*owner\.scrollTop = state\.ownerTop \|\| 0[\s\S]*yoagentScrollbackLocked = state\.nearBottom === false/.test(src), 'YO!agent restores only the chosen scroll owner and preserves the scrollback lock');
     assert.ok(/function installYoagentChatScrollTracker\(node = document\.getElementById\('yoagent-content'\)\)[\s\S]*const history = yoagentChatScrollOwner\(node\);[\s\S]*addEventListener\('scroll'[\s\S]*yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom\(history\)/.test(src), 'YO!agent chat records manual scrollback on the single scroll owner');
-    assert.ok(src.includes("loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'})"), 'YO!agent background result pushes preserve manual scrollback unless the chat is already near bottom');
+    assert.ok(/data-yoagent-chat-form[\s\S]*addEventListener\('wheel'[\s\S]*history\.scrollTop = nextTop/.test(src), 'YO!agent composer wheel events forward to the single history scroll owner');
+    assert.ok(src.includes("loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: 'auto'})"), 'YO!agent background result pushes preserve manual scrollback unless the chat is already near bottom');
     assert.ok(/\.yoagent-transcript-path\s*\{[^}]*display:\s*flex[\s\S]*min-width:\s*0/.test(css), 'YO!agent transcript path row is compact and ellipsizes inside the chat panel');
     assert.ok(/\.yoagent-transcript-value\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'YO!agent transcript path cannot overflow the chat panel');
     assert.ok(/\.yoagent-message\.assistant\s*\{[\s\S]*align-self:\s*flex-start[\s\S]*margin-inline-end:\s*28px[\s\S]*border-color:\s*var\(--active-control-border\)[\s\S]*background:\s*color-mix\(in srgb, var\(--active-control-soft-bg\)/.test(css), 'YO!agent assistant bubbles are left-indented and use the active theme accent');
@@ -3802,13 +3805,12 @@ async function runEditorPreviewSuite() {
     api.setLayoutSlotsForTest(single);
     assert.equal(api.rightmostExistingPaneSlot(), null, 'single-pane layout has no existing right pane');
     api.openYoagentRightPane();
-    assert.equal(api.infoPanelSubTabForTest(), 'yoagent', 'Cmd+Alt+B selects the YO!agent sub-tab');
     let serialized = api.serialize(api.currentSlots());
     const paneList = value => Object.values(value.panes).filter(Boolean).map(canonical);
     const hasPane = (panes, expected) => panes.some(pane => JSON.stringify(pane) === JSON.stringify(expected));
     assert.equal(serialized.tree.split, 'row', 'Cmd+Alt+B creates a right pane from a single-pane layout');
     assert.ok(hasPane(paneList(serialized), {tabs: ['1'], active: '1'}), 'single-pane shortcut keeps the tmux tab alone');
-    assert.ok(hasPane(paneList(serialized), {tabs: ['__info__'], active: '__info__'}), 'single-pane shortcut creates a separate YO!agent pane');
+    assert.ok(hasPane(paneList(serialized), {tabs: ['__yoagent__'], active: '__yoagent__'}), 'single-pane shortcut creates a separate YO!agent pane');
 
     api.rememberFileExplorerOpenIntentForTest(true);
     const finderSingle = api.emptyLayoutSlots();
@@ -3822,12 +3824,12 @@ async function runEditorPreviewSuite() {
     const finderSinglePanes = Object.values(serialized.panes).map(canonical);
     assert.ok(hasPane(finderSinglePanes, {tabs: ['1'], active: '1'}), 'Finder-docked single content pane keeps the tmux tab alone');
     assert.ok(hasPane(finderSinglePanes, {tabs: ['__files__'], active: '__files__'}), 'Finder-docked single content pane keeps Finder alone');
-    assert.ok(hasPane(finderSinglePanes, {tabs: ['__info__'], active: '__info__'}), 'Finder-docked single content pane creates a separate YO!agent pane');
+    assert.ok(hasPane(finderSinglePanes, {tabs: ['__yoagent__'], active: '__yoagent__'}), 'Finder-docked single content pane creates a separate YO!agent pane');
 
     api.rememberFileExplorerOpenIntentForTest(false);
     const split = api.emptyLayoutSlots();
     split[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
-    split.left = api.paneStateWithTabs(['2', '__info__'], '2');
+    split.left = api.paneStateWithTabs(['2', '__yoagent__'], '2');
     split.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(split);
     assert.equal(api.rightmostExistingPaneSlot(), 'slot1', 'right-pane detection uses the layout tree, not only literal right slot names');
@@ -3835,7 +3837,7 @@ async function runEditorPreviewSuite() {
     serialized = api.serialize(api.currentSlots());
     const splitPanes = paneList(serialized);
     assert.ok(hasPane(splitPanes, {tabs: ['2'], active: '2'}), `existing split removes YO!agent from the source pane: ${JSON.stringify(splitPanes)}`);
-    assert.ok(hasPane(splitPanes, {tabs: ['1', '__info__'], active: '__info__'}), `existing split places YO!agent into the right pane: ${JSON.stringify(splitPanes)}`);
+    assert.ok(hasPane(splitPanes, {tabs: ['1', '__yoagent__'], active: '__yoagent__'}), `existing split places YO!agent into the right pane: ${JSON.stringify(splitPanes)}`);
   });
 
   test('t@7321', () => {

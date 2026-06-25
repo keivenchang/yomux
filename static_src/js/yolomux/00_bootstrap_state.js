@@ -785,7 +785,7 @@ function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 function yoagentTabLabel() { return t('brand.tab.agent'); }
-// the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
+// Legacy share/deeplink compatibility only. YO!info and YO!agent are separate tabs.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
 const searchHistoryItemId = '__search_history__';
@@ -896,13 +896,12 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
 }
 const TAB_TYPES = [
   {
-    // YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
-    // toggle. The legacy yoagent/yosup aliases resolve here so saved layouts and bookmarked
-    // ?…=yoagent URLs open the merged pane (the boot deep-link scan pre-selects the YO!agent sub-tab).
+    // YO!info and YO!agent are independent virtual tabs. Legacy yoagent/yosup aliases
+    // resolve to the standalone YO!agent item below.
     key: 'info',
     id: infoItemId,
-    aliases: ['info', infoItemId, 'yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
-    match: item => item === infoItemId || item === yoagentItemId || item === legacyYosupItemId,
+    aliases: ['info', infoItemId],
+    match: item => item === infoItemId,
     label: () => infoTabLabel(),
     shortLabel: () => infoTabLabel(),
     terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
@@ -912,12 +911,35 @@ const TAB_TYPES = [
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     renderAttached: () => {
-      applyInfoSubTab();
       renderInfoPanel();
-      renderYoagentPanel({preserveDraft: true, scrollBottom: false});
     },
     className: () => 'info',
     icon: 'branch-info',
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
+    key: 'yoagent',
+    id: yoagentItemId,
+    aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
+    match: item => item === yoagentItemId || item === legacyYosupItemId,
+    label: () => yoagentTabLabel(),
+    shortLabel: () => yoagentTabLabel(),
+    terminalTitle: () => t('tab.unavailableFor', {name: yoagentTabLabel()}),
+    sortRank: 0.1,
+    param: () => 'yoagent',
+    detail: () => t('menu.file.yoagent.detail'),
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: () => createYoagentPanel(),
+    renderAttached: () => {
+      renderYoagentPanel({preserveDraft: true, scrollBottom: true});
+      showYoagentStartupInfoOnce();
+      loadYoagentConversation({silent: true, scrollBottom: true});
+      loadYoagentJobs({silent: true, scrollBottom: true});
+      prewarmYoagent({scrollBottom: true});
+    },
+    className: () => 'yoagent',
+    icon: 'yoagent',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1024,6 +1046,7 @@ function tabTypeForParam(value) {
 }
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
+function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
@@ -1134,8 +1157,8 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 function virtualTabItems() {
   return debugModeEnabled
-    ? [infoItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId]
-    : [infoItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId];
+    ? [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId]
+    : [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];

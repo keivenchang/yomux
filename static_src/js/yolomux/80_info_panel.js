@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Merged YO!info panel shell and sub-tab routing split from 80_panes_preferences.js.
-
-// ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
-// context), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
-// own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
-// sub-tab is remembered across reloads (infoPanelSubTab).
+// YO!info and YO!agent panel shells split from 80_panes_preferences.js.
 function infoLookbackControlHtml() {
   const options = sessionFileLookbackOptions()
     .map(option => `<option value="${esc(option.hours)}"${option.hours === infoSessionFileLookbackHours ? ' selected' : ''}>${esc(option.label)}</option>`)
@@ -28,32 +23,21 @@ function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
   panel.id = panelDomId(infoItemId);
-  panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
         ${virtualPanelControlsHtml(infoItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel())} / ${esc(yoagentTabLabel())}">
-        <div class="info-subtab-group" role="presentation">
-          <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
-          <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
-        </div>
+      <div class="info-actions-bar">
         <div class="info-subtab-actions">
           ${infoLookbackControlHtml()}
-          <button type="button" class="info-refresh" data-info-subtab-action="info" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
-          <button type="button" class="info-refresh" data-info-subtab-action="yoagent" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+          <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
         </div>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
-        <div class="info-subview" data-info-subview="info">
-          <div id="info-content" class="info-list"></div>
-          <div id="info-watched" class="info-watched"></div>
-        </div>
-        <div class="info-subview yoagent-subview" data-info-subview="yoagent">
-          <div id="yoagent-content" class="info-list yoagent-list"></div>
-        </div>
+        <div id="info-content" class="info-list"></div>
+        <div id="info-watched" class="info-watched"></div>
       </div>`;
   bindPanelShell(panel, infoItemId);
   panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
@@ -61,19 +45,50 @@ function createInfoPanel() {
     refreshTranscripts({force: true});
     refreshActivitySummary({force: true});
   });
+  panel.addEventListener('change', event => {
+    const lookback = event.target.closest('[data-info-lookback]');
+    if (lookback && panel.contains(lookback)) setInfoSessionFileLookbackHours(lookback.value);
+  });
+  renderInfoPanel();
+  return panel;
+}
+
+function createYoagentPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel info-panel yoagent-panel';
+  panel.id = panelDomId(yoagentItemId);
+  panel.innerHTML = `
+      <div class="panel-head">
+        ${virtualPanelControlsHtml(yoagentItemId)}
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+      </div>
+      <div class="info-actions-bar">
+        <div class="info-subtab-actions">
+          <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+        </div>
+      </div>
+      <div class="info-pane panel-overlay-root">
+        <div id="panel-toasts-${yoagentItemId}" class="panel-toast-stack"></div>
+        <div id="yoagent-content" class="info-list yoagent-list"></div>
+      </div>`;
+  bindPanelShell(panel, yoagentItemId);
+  bindYoagentPanel(panel);
+  showYoagentStartupInfoOnce();
+  renderYoagentPanel({scrollBottom: true});
+  loadYoagentConversation({silent: true, scrollBottom: true});
+  loadYoagentJobs({silent: true, scrollBottom: true});
+  refreshActivitySummary({silent: true});
+  prewarmYoagent({scrollBottom: true});
+  return panel;
+}
+
+function bindYoagentPanel(panel) {
   panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
     loadYoagentConversation({force: true, silent: true, scrollBottom: false});
     loadYoagentJobs({silent: true, scrollBottom: false});
     refreshActivitySummary({force: true});
   });
-  panel.querySelectorAll('[data-info-subtab]').forEach(button => {
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      setInfoSubTab(button.dataset.infoSubtab, {focusChat: button.dataset.infoSubtab === 'yoagent'});
-    });
-  });
-  // YO!agent chat interactions (submit / clear / retry / draft) — preserved from the old yoagent panel.
   panel.addEventListener('submit', event => {
     const form = event.target.closest('[data-yoagent-chat-form]');
     if (!form || !panel.contains(form)) return;
@@ -153,11 +168,6 @@ function createInfoPanel() {
     if (input && panel.contains(input)) handleYoagentChatHistoryKeydown(event, input);
   });
   panel.addEventListener('change', event => {
-    const lookback = event.target.closest('[data-info-lookback]');
-    if (lookback && panel.contains(lookback)) {
-      setInfoSessionFileLookbackHours(lookback.value);
-      return;
-    }
     const yoagentSetting = event.target.closest('[data-yoagent-setting-path]');
     if (!yoagentSetting || !panel.contains(yoagentSetting) || readOnlyMode) return;
     const path = yoagentSetting.dataset.yoagentSettingPath || '';
@@ -165,30 +175,11 @@ function createInfoPanel() {
       .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(yoagentComposerBackendKey())}); renderYoagentPanel(); })
       .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
-  applyInfoSubTab(panel);
-  renderInfoPanel();
-  if (infoPanelSubTab === 'yoagent') showYoagentStartupInfoOnce();
-  renderYoagentPanel();
-  if (infoPanelSubTab === 'yoagent') {
-    loadYoagentConversation({silent: true});
-    loadYoagentJobs({silent: true});
-    prewarmYoagent();
-  }
-  return panel;
 }
 
-// The merged YO!info pane keeps its outer chrome and sub-tab row mounted between language changes so the
-// YO!agent chat draft and active sub-tab survive. Re-label those persistent controls in place.
+// Persistent virtual panels keep their chrome mounted between language changes. Re-label those controls in place.
 function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
-  const infoLabel = infoTabLabel();
-  const agentLabel = yoagentTabLabel();
-  const setLabel = (node, label) => {
-    if (!node) return;
-    node.textContent = label;
-    node.title = label;
-    node.setAttribute('aria-label', label);
-  };
   const minimizeLabel = t('pane.minimize');
   const expandLabel = t('pane.expand');
   panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
@@ -198,14 +189,6 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
   panel.querySelectorAll('[data-pane-expand]').forEach(button => {
     button.title = expandLabel;
     button.setAttribute('aria-label', expandLabel);
-  });
-  panel.querySelector('.info-subtabs')?.setAttribute('aria-label', `${infoLabel} / ${agentLabel}`);
-  panel.querySelectorAll('[data-info-subtab]').forEach(button => {
-    const label = button.dataset.infoSubtab === 'yoagent' ? agentLabel : infoLabel;
-    const labelNode = button.querySelector('.session-button-dir') || button;
-    labelNode.textContent = label;
-    button.title = label;
-    button.setAttribute('aria-label', label);
   });
   const infoRefresh = panel.querySelector('[data-info-refresh]');
   if (infoRefresh) {
@@ -218,32 +201,33 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
       infoRefresh.setAttribute('aria-label', label);
     }
   }
+  const lookback = panel.querySelector('.info-lookback-control');
+  if (lookback) lookback.outerHTML = infoLookbackControlHtml();
+}
+
+function relocalizeYoagentPanelChrome(panel = document.getElementById(panelDomId(yoagentItemId))) {
+  if (!panel) return;
+  const minimizeLabel = t('pane.minimize');
+  const expandLabel = t('pane.expand');
+  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
+    button.title = minimizeLabel;
+    button.setAttribute('aria-label', minimizeLabel);
+  });
+  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
+    button.title = expandLabel;
+    button.setAttribute('aria-label', expandLabel);
+  });
   const agentRefresh = panel.querySelector('[data-yoagent-refresh]');
   if (agentRefresh) {
     agentRefresh.textContent = t('yoagent.refresh');
     agentRefresh.title = t('yoagent.refreshTitle');
     agentRefresh.setAttribute('aria-label', t('yoagent.refreshTitle'));
   }
-  const lookback = panel.querySelector('.info-lookback-control');
-  if (lookback) lookback.outerHTML = infoLookbackControlHtml();
-  applyInfoSubTab(panel);
 }
 
-// Reflect the active sub-tab onto the merged panel (button highlight + which sub-view is visible).
+// Compatibility shim for old share/deeplink state. The active tab now owns visibility.
 function applyInfoSubTab(panel = document.getElementById(panelDomId(infoItemId))) {
-  if (!panel) return;
-  panel.dataset.infoSubtab = infoPanelSubTab;
-  panel.querySelectorAll('[data-info-subtab]').forEach(button => {
-    const active = button.dataset.infoSubtab === infoPanelSubTab;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-selected', active ? 'true' : 'false');
-  });
-  panel.querySelectorAll('[data-info-subview]').forEach(view => {
-    view.classList.toggle('active', view.dataset.infoSubview === infoPanelSubTab);
-  });
-  panel.querySelectorAll('[data-info-subtab-action]').forEach(button => {
-    button.hidden = button.dataset.infoSubtabAction !== infoPanelSubTab;
-  });
+  if (panel) panel.dataset.infoSubtab = infoPanelSubTab;
 }
 
 function setInfoSubTab(tab, options = {}) {
@@ -254,30 +238,32 @@ function setInfoSubTab(tab, options = {}) {
   }
   applyInfoSubTab();
   if (next === 'yoagent') {
-    showYoagentStartupInfoOnce();
-    renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
-    loadYoagentConversation({silent: true});
-    loadYoagentJobs({silent: true});
-    refreshActivitySummary({silent: true});
-    prewarmYoagent();
+    selectSession(yoagentItemId, {userInitiated: options.userInitiated === true});
+    activateYoagentPanel({focusChat: options.focusChat === true});
+  } else {
+    selectSession(infoItemId, {userInitiated: options.userInitiated === true});
   }
   scheduleShareUiStatePublish();
 }
 
-// Open the merged YO!info pane on a given sub-tab — used by the File menu, command palette, the topbar
-// activity button, and the boot deep-link for legacy ?…=yoagent / __yoagent__ references.
+function activateYoagentPanel(options = {}) {
+  const scrollBottom = options.scrollBottom ?? true;
+  showYoagentStartupInfoOnce();
+  renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true, scrollBottom});
+  loadYoagentConversation({silent: true, scrollBottom});
+  loadYoagentJobs({silent: true, scrollBottom});
+  refreshActivitySummary({silent: true});
+  prewarmYoagent({scrollBottom});
+}
+
+// Legacy open helper kept for older tests/share replays. New menus target the standalone tab directly.
 async function openInfoSubTab(tab) {
   infoPanelSubTab = normalizedInfoSubTab(tab);
   writeStoredInfoSubTab(infoPanelSubTab);
-  await selectSession(infoItemId);
+  await selectSession(infoPanelSubTab === 'yoagent' ? yoagentItemId : infoItemId);
   applyInfoSubTab();
   if (infoPanelSubTab === 'yoagent') {
-    showYoagentStartupInfoOnce();
-    renderYoagentPanel({preserveDraft: true, focusInput: true});
-    loadYoagentConversation({silent: true});
-    loadYoagentJobs({silent: true});
-    refreshActivitySummary({silent: true});
-    prewarmYoagent();
+    activateYoagentPanel({focusChat: true});
   }
   scheduleShareUiStatePublish();
 }
@@ -316,37 +302,43 @@ function rightmostExistingPaneSlot(slots = layoutSlots) {
 }
 
 function focusYoagentChatSoon() {
-  setTimeout(() => setInfoSubTab('yoagent', {focusChat: true}), 80);
+  setTimeout(() => focusYoagentChatInput(), 80);
 }
 
-function splitInfoItemToRightPane(sourceSlot = null) {
-  const next = layoutWithoutItem(infoItemId);
+function splitVirtualItemToRightPane(item, sourceSlot = null) {
+  const next = layoutWithoutItem(item);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   if (!root) {
     const targetSlot = sourceSlot || slotForNewSession();
     next[layoutTreeKey] = leafNode(targetSlot);
-    next[targetSlot] = paneStateWithTabs([infoItemId], infoItemId);
-    applyLayoutSlots(next, {focusSession: infoItemId, prune: false});
+    next[targetSlot] = paneStateWithTabs([item], item);
+    applyLayoutSlots(next, {focusSession: item, prune: false});
     return;
   }
   const newSlot = nextLayoutSlot(next);
-  next[newSlot] = paneStateWithTabs([infoItemId], infoItemId);
-  next[layoutTreeKey] = splitNode('row', root, leafNode(newSlot), splitPercentForNewItem(infoItemId, 'right'));
-  applyLayoutSlots(next, {focusSession: infoItemId, prune: false});
+  next[newSlot] = paneStateWithTabs([item], item);
+  next[layoutTreeKey] = splitNode('row', root, leafNode(newSlot), splitPercentForNewItem(item, 'right'));
+  applyLayoutSlots(next, {focusSession: item, prune: false});
+}
+
+function splitInfoItemToRightPane(sourceSlot = null) {
+  splitVirtualItemToRightPane(infoItemId, sourceSlot);
 }
 
 function openYoagentRightPane() {
-  const sourceSlot = slotForSession(infoItemId);
+  const sourceSlot = slotForSession(yoagentItemId);
   const targetSlot = rightmostExistingPaneSlot();
   if (targetSlot) {
     if (sourceSlot === targetSlot) {
-      activatePaneTab(targetSlot, infoItemId);
+      activatePaneTab(targetSlot, yoagentItemId);
     } else {
-      moveSessionToSlot(infoItemId, targetSlot, sourceSlot, paneTabs(targetSlot).length);
+      moveSessionToSlot(yoagentItemId, targetSlot, sourceSlot, paneTabs(targetSlot).length);
     }
   } else {
-    splitInfoItemToRightPane(sourceSlot);
+    splitVirtualItemToRightPane(yoagentItemId, sourceSlot);
   }
-  setInfoSubTab('yoagent', {focusChat: true});
+  infoPanelSubTab = 'yoagent';
+  writeStoredInfoSubTab('yoagent');
+  activateYoagentPanel({focusChat: true});
   focusYoagentChatSoon();
 }

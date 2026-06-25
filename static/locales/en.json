@@ -1123,7 +1123,7 @@
   "yoagent.chatFailed": "chat failed: {error}",
   "yoagent.chatPlaceholder": "Ask anything…",
   "yoagent.chatTooLarge": "conversation too large to resume. YO!agent tried a fresh thread; use Clear conversation if it keeps failing.",
-  "yoagent.clear": "Clear conversation",
+  "yoagent.clear": "Clear",
   "yoagent.conversationLoadFailed": "load YO!agent conversation failed: {error}",
   "yoagent.emptyGlobal": "No AI agent activity detected yet.",
   "yoagent.emptyPerSession": "No per-session AI activity detected yet.",

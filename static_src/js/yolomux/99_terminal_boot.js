@@ -568,6 +568,19 @@ function installYoagentChatScrollTracker(node = document.getElementById('yoagent
   history.addEventListener('scroll', () => {
     yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom(history);
   }, {passive: true});
+  const form = node?.querySelector?.('[data-yoagent-chat-form]');
+  if (!form || form.dataset.yoagentWheelForward === 'true') return;
+  form.dataset.yoagentWheelForward = 'true';
+  form.addEventListener('wheel', event => {
+    const maxTop = history.scrollHeight - history.clientHeight;
+    const delta = Number(event.deltaY || 0);
+    if (maxTop <= 0 || !delta) return;
+    const nextTop = Math.max(0, Math.min(maxTop, history.scrollTop + delta));
+    if (nextTop === history.scrollTop) return;
+    event.preventDefault();
+    history.scrollTop = nextTop;
+    yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom(history);
+  }, {passive: false});
 }
 
 function yoagentOpenMessageDetailsState(node = document.getElementById('yoagent-content')) {
@@ -3722,7 +3735,7 @@ function handleClientPushEvent(type, payload = {}) {
     return;
   }
   if (type === 'yoagent_conversation_changed') {
-    loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'}).catch(error => console.warn('YO!agent conversation refresh failed', error));
+    loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: 'auto'}).catch(error => console.warn('YO!agent conversation refresh failed', error));
     return;
   }
   if (type === 'yoagent_stream_delta') {
@@ -3733,13 +3746,13 @@ function handleClientPushEvent(type, payload = {}) {
   }
   if (type === 'yoagent_jobs_changed') {
     if (typeof loadYoagentJobs === 'function') {
-      loadYoagentJobs({force: true, silent: true, render: infoPanelSubTab === 'yoagent', scrollBottom: false}).catch(error => console.warn('YO!agent jobs refresh failed', error));
+      loadYoagentJobs({force: true, silent: true, render: yoagentPanelIsActive(), scrollBottom: false}).catch(error => console.warn('YO!agent jobs refresh failed', error));
     }
     maybeNotifyYoagentJob(payload.notification || {});
     return;
   }
   if (type === 'yoagent_skills_changed') {
-    refreshActivitySummary({force: true, render: infoPanelSubTab === 'yoagent'}).catch(error => console.warn('YO!agent skills refresh failed', error));
+    refreshActivitySummary({force: true, render: yoagentPanelIsActive()}).catch(error => console.warn('YO!agent skills refresh failed', error));
     return;
   }
   if (type === 'session_files_ready') {

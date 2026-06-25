@@ -1618,6 +1618,13 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               const refreshedHistory = document.querySelector('.yoagent-chat-history');
               measured.afterRefreshScrollTop = refreshedHistory?.scrollTop || 0;
               measured.afterRefreshBottomGap = refreshedHistory ? refreshedHistory.scrollHeight - refreshedHistory.clientHeight - refreshedHistory.scrollTop : 0;
+              if (refreshedHistory) refreshedHistory.scrollTop = 0;
+              const formWheelTarget = document.querySelector('[data-yoagent-chat-form]');
+              const formWheelEvent = new WheelEvent('wheel', {deltaY: 240, bubbles: true, cancelable: true});
+              const formWheelResult = formWheelTarget ? formWheelTarget.dispatchEvent(formWheelEvent) : true;
+              await raf();
+              measured.formWheelScrollTop = refreshedHistory?.scrollTop || 0;
+              measured.formWheelPrevented = formWheelEvent.defaultPrevented === true || formWheelResult === false;
               measured.releaseAvailable = typeof releaseChat === 'function';
               measured.activeRequest = active;
               measured.immediate = immediate;
@@ -1692,6 +1699,8 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
         assert metrics["manualScrollTop"] > 0, (label, metrics)
         assert metrics["afterRefreshScrollTop"] > 0, (label, metrics)
         assert metrics["afterRefreshBottomGap"] > 48, (label, metrics)
+        assert metrics["formWheelScrollTop"] > 0, (label, metrics)
+        assert metrics["formWheelPrevented"] is True, (label, metrics)
         screenshot = browser_screenshot_rgb(browser)
         assert screenshot.size[0] >= window_width - 20, (label, screenshot.size)
         assert screenshot.getbbox() is not None, label

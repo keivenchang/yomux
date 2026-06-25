@@ -321,9 +321,9 @@ async function runLayoutRestoreSuite() {
     const api = loadYolomuxWithFileExplorerClosed(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'left'},
-      panes: {left: {tabs: ['__info__'], active: '__info__'}},
+      panes: {left: {tabs: ['__yoagent__'], active: '__yoagent__'}},
     });
-    assert.equal(api.infoPanelSubTabForTest(), 'yoagent', `${yoagentToken} deep-link pre-selects the YO!agent sub-tab`);
+    assert.equal(api.itemParam(api.yoagentItemId), 'yoagent', `${yoagentToken} deep-link opens the standalone YO!agent tab`);
   }
   });
 
@@ -1106,28 +1106,29 @@ async function runLayoutRestoreSuite() {
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'none'), false, 'none threshold suppresses update notifications');
     assert.ok(/function applyUpdateAvailable\(status\)[\s\S]*status\.notify === false[\s\S]*return/.test(source), 'origin/main update cue respects the server-side notify threshold');
     assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
-    // #40: YO!info and YO!agent are merged into ONE panel with a segmented sub-tab toggle; both sub-views
-    // (the metadata table + the AI chat/summary) live in the single info panel and the active one is shown.
-    const createInfoPanelSource = source.slice(source.indexOf('function createInfoPanel()'), source.indexOf('// The merged YO!info pane keeps its outer chrome'));
-    assert.ok(/function createInfoPanel\(\)[\s\S]*?class="info-subtabs"[\s\S]*?data-info-subtab="info"[\s\S]*?data-info-subtab="yoagent"/.test(source), '#40: the merged info panel renders a YO!info/YO!agent sub-tab toggle');
-    assert.ok(/function createInfoPanel\(\)[\s\S]*?data-info-subview="info"[\s\S]*?id="info-content"[\s\S]*?data-info-subview="yoagent"[\s\S]*?id="yoagent-content"/.test(source), '#40: the merged info panel hosts both the metadata and the YO!agent sub-views');
-    assert.ok(/function createInfoPanel\(\)[\s\S]*?class="info-subtab-actions"[\s\S]*?data-info-subtab-action="info"[\s\S]*?data-info-subtab-action="yoagent"/.test(source), '#40: refresh actions live in the YO!info/YO!agent sub-tab bar');
-    assert.equal(createInfoPanelSource.includes('class="panel-detail-row"'), false, '#40: the merged YO!info panel no longer renders a redundant title/info bar');
-    assert.equal(createInfoPanelSource.includes('id="meta-'), false, '#40: the merged YO!info panel no longer renders a subtitle meta bar');
+    // YO!info and YO!agent are independent virtual tabs. YO!info owns repo metadata; YO!agent owns chat/activity.
+    const createInfoPanelSource = source.slice(source.indexOf('function createInfoPanel()'), source.indexOf('function createYoagentPanel()'));
+    const createYoagentPanelSource = source.slice(source.indexOf('function createYoagentPanel()'), source.indexOf('function bindYoagentPanel('));
+    assert.ok(/function createInfoPanel\(\)[\s\S]*?id="info-content"[\s\S]*?id="info-watched"/.test(source), 'YO!info panel hosts only metadata containers');
+    assert.equal(createInfoPanelSource.includes('yoagent-content'), false, 'YO!info panel does not host YO!agent content');
+    assert.ok(/function createYoagentPanel\(\)[\s\S]*?id="yoagent-content"/.test(source), 'YO!agent has its own standalone panel content container');
+    assert.equal(source.includes('class="info-subtabs"'), false, 'YO!info/YO!agent no longer render an inner sub-tab toggle');
+    assert.equal(createInfoPanelSource.includes('class="panel-detail-row"'), false, 'YO!info panel still avoids a redundant title/info bar');
+    assert.equal(createInfoPanelSource.includes('id="meta-'), false, 'YO!info panel still avoids a subtitle meta bar');
     assert.equal(/class="transcript-head info-head"/.test(source), false, '#40: the duplicate sub-view title bar is gone');
-    assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);[\s\S]*?renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
-    assert.ok(/renderAttached:\s*\(\) => \{[\s\S]*?applyInfoSubTab\(\);[\s\S]*?renderInfoPanel\(\);[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, scrollBottom: false\}\);[\s\S]*?\}/.test(source), '#40/#YO!info: info tab registry hook renders both sub-views on attach');
-    assert.ok(/function renderAttachedPanelContent\(item\)[\s\S]*?tabTypeForItem\(item\)\?\.renderAttached[\s\S]*?renderAttached\(item\)/.test(source), '#40/#YO!info: pooled panel attach dispatches through TAB_TYPES');
-    assert.ok(/function renderDropSlot\(slot, session\)[\s\S]*?node\.appendChild\(panel\);\s*renderAttachedPanelContent\(session\);/.test(source), '#40/#YO!info: initial drop-slot attach renders YO!info before metadata polling');
-    assert.ok(/function syncActivePanelsInPlace\(\)[\s\S]*?dropSlot\.replaceChildren\(desired\);[\s\S]*?updatePanelSlot\(desired, item, slot\);[\s\S]*?renderAttachedPanelContent\(item\);/.test(source), '#40/#YO!info: in-place panel swaps also render YO!info after attachment');
-    assert.equal(source.includes('function createYoagentPanel('), false, '#40: the standalone YO!agent panel builder is gone');
-    assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('function relocalizeInfoPanelChrome(') && source.includes('async function openInfoSubTab('), '#40: sub-tab switch + locale + open helpers exist');
-    assert.ok(/function setInfoSubTab[\s\S]*?writeStoredInfoSubTab\(next\)/.test(source), '#40: switching the sub-tab persists it (remembered across reloads)');
-    assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoItemId\)/.test(source), '#40: opening YO!agent activates the merged info pane');
-    assert.ok(/function openYoagentRightPane\(\)[\s\S]*rightmostExistingPaneSlot\(\)[\s\S]*moveSessionToSlot\(infoItemId, targetSlot[\s\S]*splitInfoItemToRightPane\(sourceSlot\)/.test(source), '#40: the YO!agent shortcut places the merged info tab in the right pane');
-    assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)/.test(source), '#40/#50: a language switch relabels persistent YO!info chrome and forces busy YO!agent UI to rebuild in the new locale');
+    assert.ok(/renderAttached:\s*\(\) => \{[\s\S]*?renderInfoPanel\(\);[\s\S]*?\}/.test(source), 'YO!info registry hook renders only YO!info on attach');
+    assert.ok(/key:\s*'yoagent'[\s\S]*?renderAttached:\s*\(\) => \{[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, scrollBottom: false\}\);[\s\S]*?prewarmYoagent\(\);[\s\S]*?\}/.test(source), 'YO!agent registry hook renders and prewarms its own panel');
+    assert.ok(/function renderAttachedPanelContent\(item\)[\s\S]*?tabTypeForItem\(item\)\?\.renderAttached[\s\S]*?renderAttached\(item\)/.test(source), 'pooled panel attach dispatches through TAB_TYPES');
+    assert.ok(/function renderDropSlot\(slot, session\)[\s\S]*?node\.appendChild\(panel\);\s*renderAttachedPanelContent\(session\);/.test(source), 'initial drop-slot attach renders virtual panels before metadata polling');
+    assert.ok(/function syncActivePanelsInPlace\(\)[\s\S]*?dropSlot\.replaceChildren\(desired\);[\s\S]*?updatePanelSlot\(desired, item, slot\);[\s\S]*?renderAttachedPanelContent\(item\);/.test(source), 'in-place panel swaps also render attached virtual panels');
+    assert.ok(source.includes('function createYoagentPanel('), 'standalone YO!agent panel builder exists');
+    assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('async function openInfoSubTab('), 'legacy sub-tab compatibility helpers remain');
+    assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoPanelSubTab === 'yoagent' \? yoagentItemId : infoItemId\)/.test(source), 'legacy YO!agent opener activates the standalone YO!agent tab');
+    assert.ok(/function openYoagentRightPane\(\)[\s\S]*rightmostExistingPaneSlot\(\)[\s\S]*moveSessionToSlot\(yoagentItemId, targetSlot[\s\S]*splitVirtualItemToRightPane\(yoagentItemId, sourceSlot\)/.test(source), 'YO!agent shortcut places the standalone YO!agent tab in the right pane');
+    assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)[\s\S]*?relocalizeYoagentPanelChrome\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)/.test(source), 'a language switch relabels both persistent virtual panels and rebuilds busy YO!agent UI');
     assert.equal(/function virtualPanelControlsHtml\(session\)[\s\S]*terminal-tab/.test(source), false, '#40: Preferences and YO!info virtual pane controls do not render a redundant active-tab pill');
-    assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
+    assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?data-info-refresh/.test(source), 'YO!info refresh chrome is localized in place');
+    assert.ok(/function relocalizeYoagentPanelChrome[\s\S]*?data-yoagent-refresh/.test(source), 'YO!agent refresh chrome is localized in place');
     assert.equal(/function relocalizeInfoPanelChrome[\s\S]*?info\.subtitle/.test(source), false, '#40/#50: no removed YO!info subtitle bar remains to relocalize');
     assert.ok(/let i18nApplyLocaleRequestId = 0/.test(source) && /async function applyLocale[\s\S]*?\+\+i18nApplyLocaleRequestId[\s\S]*?if \(requestId !== i18nApplyLocaleRequestId\) return/.test(source), '#50: overlapping language transitions cannot let an older catalog load repaint after the newer language choice');
     // Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
@@ -1148,31 +1149,26 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function removeFilePanelOwner[\s\S]*?fileEditorViewState\.delete\(item\)[\s\S]*?tabLastActivatedAt\.delete\(item\)/.test(source), '#73: editor view-state + LRU timestamp are dropped on tab close');
     assert.ok(/function renameOpenFilePath[\s\S]*?fileEditorViewState\.set\(newKey[\s\S]*?tabLastActivatedAt\.set\(newKey/.test(source), '#73: editor view-state + LRU timestamp are migrated on rename');
     assert.ok(/function replaceSessionMetadata[\s\S]*?tabLastActivatedAt,\s*\n\s*\]\)/.test(source), '#73: the LRU timestamp is rekeyed across a session rename');
-    const mergedInfoCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/\.info-subview\s*\{[\s\S]*?display:\s*none/.test(mergedInfoCss), '#40: inactive sub-views are hidden');
-    assert.ok(/\.info-subview\.active\s*\{[\s\S]*?display:\s*flex/.test(mergedInfoCss), '#40: the active sub-view is shown');
-    assert.ok(/\.info-subtab\.active\s*\{/.test(mergedInfoCss), '#40: the active sub-tab button is styled');
-    assert.ok(/\.info-subtabs\s*\{[\s\S]*?background:\s*var\(--pane-bar-bg/.test(mergedInfoCss), '#40: YO!info sub-tabs use the same active pane bar background token');
-    assert.ok(/\.info-subtab-actions\s*\{[\s\S]*?margin-inline-start:\s*auto/.test(mergedInfoCss), '#40: the active refresh action sits at the right side of the merged sub-tab bar');
-    assert.ok(/\.info-subtab\.active\s*\{[\s\S]*?background:\s*var\(--pane-tab-active-bg/.test(mergedInfoCss), '#40: active YO!info sub-tab uses the pane active-tab color token');
-    assert.ok(/\.info-subtab \.session-button-dir\s*\{[\s\S]*?color:\s*inherit/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels inherit button contrast instead of forcing white text');
-    assert.ok(/\.info-subtab\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?align-items:\s*center[\s\S]*?line-height:\s*1/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels are vertically centered, including CJK labels');
-    assert.ok(/body\.theme-light \.info-list,[\s\S]*?body\.theme-light \.info-watched\s*\{[\s\S]*?background:\s*#ffffff/.test(mergedInfoCss), '#40: the light-mode YO!info table uses a white surface');
-    assert.ok(mergedInfoCss.includes('--info-branch-column-width: 320px'), 'YO!info Branch column has a named default width token');
-    assert.ok(mergedInfoCss.includes('--info-desc-column-width: 310px'), 'YO!info desc column has a named default width token');
-    assert.ok(/grid-template-columns:[\s\S]*var\(--info-session-column-width\)[\s\S]*var\(--info-path-column-width\)[\s\S]*minmax\(var\(--info-branch-column-width\), var\(--info-branch-column-width\)\)[\s\S]*var\(--info-pr-column-width\)[\s\S]*var\(--info-linear-column-width\)[\s\S]*minmax\(var\(--info-desc-column-width\), 1fr\)[\s\S]*var\(--info-updated-column-width\)/.test(mergedInfoCss), 'YO!info table columns use named width tokens');
-    assert.ok(/min-width:\s*calc\([\s\S]*var\(--info-branch-column-width\)[\s\S]*var\(--info-desc-column-width\)[\s\S]*var\(--info-table-column-gap\) \* 6[\s\S]*var\(--info-table-inline-padding\) \* 2/.test(mergedInfoCss), 'YO!info table minimum width is derived from named column tokens');
-    assert.ok(mergedInfoCss.includes('--info-column-resizer-hit-width: 24px'), 'YO!info column resize target has a named hit-width token');
-    assert.ok(/\.info-resizable-header-cell\s*\{[\s\S]*?overflow:\s*visible/.test(mergedInfoCss), 'YO!info resize handles are not clipped by header cells');
-    assert.ok(/\.info-column-resizer\s*\{[\s\S]*?width:\s*var\(--info-column-resizer-hit-width\)[\s\S]*?cursor:\s*col-resize/.test(mergedInfoCss), 'YO!info headers expose full-width column-resize handles');
+    const infoCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    assert.equal(/\.info-subview\s*\{/.test(infoCss), false, 'old merged sub-view CSS is removed');
+    assert.equal(/\.info-subtab\.active\s*\{/.test(infoCss), false, 'old merged sub-tab active CSS is removed');
+    assert.equal(/\.info-subtabs\s*\{/.test(infoCss), false, 'old merged sub-tab bar CSS is removed');
+    assert.ok(/\.info-actions-bar\s*\{[\s\S]*?background:\s*var\(--pane-bar-bg/.test(infoCss), 'virtual panel action bars use the shared pane bar background token');
+    assert.ok(/\.info-subtab-actions\s*\{[\s\S]*?margin-inline-start:\s*auto/.test(infoCss), 'refresh actions sit at the right side of the action bar');
+    assert.ok(/body\.theme-light \.info-list,[\s\S]*?body\.theme-light \.info-watched\s*\{[\s\S]*?background:\s*#ffffff/.test(infoCss), '#40: the light-mode YO!info table uses a white surface');
+    assert.ok(infoCss.includes('--info-branch-column-width: 320px'), 'YO!info Branch column has a named default width token');
+    assert.ok(infoCss.includes('--info-desc-column-width: 310px'), 'YO!info desc column has a named default width token');
+    assert.ok(/grid-template-columns:[\s\S]*var\(--info-session-column-width\)[\s\S]*var\(--info-path-column-width\)[\s\S]*minmax\(var\(--info-branch-column-width\), var\(--info-branch-column-width\)\)[\s\S]*var\(--info-pr-column-width\)[\s\S]*var\(--info-linear-column-width\)[\s\S]*minmax\(var\(--info-desc-column-width\), 1fr\)[\s\S]*var\(--info-updated-column-width\)/.test(infoCss), 'YO!info table columns use named width tokens');
+    assert.ok(/min-width:\s*calc\([\s\S]*var\(--info-branch-column-width\)[\s\S]*var\(--info-desc-column-width\)[\s\S]*var\(--info-table-column-gap\) \* 6[\s\S]*var\(--info-table-inline-padding\) \* 2/.test(infoCss), 'YO!info table minimum width is derived from named column tokens');
+    assert.ok(infoCss.includes('--info-column-resizer-hit-width: 24px'), 'YO!info column resize target has a named hit-width token');
+    assert.ok(/\.info-resizable-header-cell\s*\{[\s\S]*?overflow:\s*visible/.test(infoCss), 'YO!info resize handles are not clipped by header cells');
+    assert.ok(/\.info-column-resizer\s*\{[\s\S]*?width:\s*var\(--info-column-resizer-hit-width\)[\s\S]*?cursor:\s*col-resize/.test(infoCss), 'YO!info headers expose full-width column-resize handles');
     assert.ok(source.includes('data-info-column-resize="${esc(column)}"'), 'YO!info headers render resize handles through a shared helper');
     assert.ok(source.includes("resizeHandle('branch', t('info.resizeBranchColumn'))"), 'YO!info Branch header renders the resize handle');
     assert.ok(source.includes("resizeHandle('desc', t('info.resizeDescColumn'))"), 'YO!info desc header renders the resize handle');
     assert.ok(/function bindInfoColumnResizers[\s\S]*dataset\.infoColumnResize[\s\S]*setPointerCapture[\s\S]*storageSet\(config\.storageKey/.test(source), 'YO!info column drag persists resized widths through shared config');
-    // #48: the merged info panel gets its own 3-row grid so the YO!info|YO!agent sub-tab row is always
-    // visible (a real track) without a redundant detail/header bar.
-    assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the info panel reserves a row for the sub-tab toggle');
-    assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the sub-tab row survives a collapsed detail header');
+    assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'info-style panels reserve a row for action controls');
+    assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'action row survives a collapsed detail header');
     // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
     assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
     assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');

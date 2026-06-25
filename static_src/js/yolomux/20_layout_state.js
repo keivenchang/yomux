@@ -637,15 +637,14 @@ function readableParamComponentDecode(value) {
   }
 }
 
-// a bookmarked ?…=yoagent / __yoagent__ (or legacy __yosup__) URL opens the merged pane on
-// the YO!agent sub-tab. The aliases resolve to __info__ during normalization (losing the yoagent intent),
-// so detect them in the raw params here and pre-select the sub-tab before the layout is built.
+// Legacy compatibility: old share snapshots may still carry the merged-pane sub-tab marker. New
+// yoagent/yosup URL tokens resolve directly to the standalone YO!agent tab through TAB_TYPES.
 function maybeAdoptYoagentDeepLink(params) {
   const raw = [params.get('tabs') || '', params.get('sessions') || '', params.get('active') || ''].join(',');
   const referencesYoagent = raw
     .split(/[,:|]/)
     .map(value => value.trim())
-    .some(value => tabTypeForParam(value)?.key === 'info' && value !== 'info' && value !== infoItemId);
+    .some(value => tabTypeForParam(value)?.key === 'yoagent');
   if (referencesYoagent) {
     infoPanelSubTab = 'yoagent';
     writeStoredInfoSubTab('yoagent');
@@ -696,7 +695,7 @@ function initialLayoutSlots() {
 
 function debugPanePreferredSlot(slots) {
   const keys = layoutSlotKeys(slots);
-  return keys.find(slot => paneTabs(slot, slots).includes(infoItemId) || paneTabs(slot, slots).includes(prefsItemId))
+  return keys.find(slot => paneTabs(slot, slots).some(item => item === infoItemId || item === yoagentItemId || item === prefsItemId))
     || keys.find(slot => {
       const active = activeItemForSide(slot, slots);
       return active && !isFileExplorerItem(active);
@@ -1753,7 +1752,7 @@ function createTopbarActivityStatus() {
   button.className = 'topbar-activity';
   button.title = 'Open the cross-session AI activity summary';
   button.setAttribute('aria-label', 'AI activity summary across all sessions');
-  button.onclick = () => openInfoSubTab('yoagent');
+  button.onclick = () => selectSession(yoagentItemId, {userInitiated: true});
   return button;
 }
 
@@ -2180,7 +2179,6 @@ function commandPaletteCommandItems() {
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
     run: () => {
-      if (item === infoItemId) return openInfoSubTab('info');
       if (isFileExplorerItem(item)) return selectSession(item, {userInitiated: true});
       return activateTabInExistingPane(item, {preferFocused: true, userInitiated: true});
     },

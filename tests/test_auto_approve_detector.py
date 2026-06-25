@@ -1483,7 +1483,7 @@ def test_ask_user_question_ui_is_needs_input_not_auto_approved():
     # is box-highlighted (no ❯), and a preview box / "Notes:" / "Chat about this" sit between the options
     # and the footer. It must be flagged needs-input, but is NOT a yes/no permission prompt.
     visible_text = "\n".join([
-        "How should the YO!info | YO!agent sub-tab toggle look inside the merged panel?",
+        "How should separate YO!info and YO!agent tabs look?",
         "  1. Segmented control under pane tabs",
         "  2. Pills in the content header",
         "┌──────────────────────────────┐",
@@ -1497,7 +1497,7 @@ def test_ask_user_question_ui_is_needs_input_not_auto_approved():
     assert prompt_detector.detect_prompt(visible_text) is None, "AskUserQuestion is not a yes/no permission prompt"
     state = prompt_detector.agent_screen_state(visible_text)
     assert state["key"] == "needs-input"
-    assert state["text"] == "How should the YO!info | YO!agent sub-tab toggle look inside the merged panel?"
+    assert state["text"] == "How should separate YO!info and YO!agent tabs look?"
 
 
 def test_ask_user_question_no_selector_with_descriptions_keeps_all_options():

@@ -954,7 +954,7 @@ async function loadYoagentConversation(options = {}) {
   if (readOnlyMode || yoagentConversationLoading) return;
   if (yoagentConversationLoaded && options.force !== true) return;
   yoagentConversationLoading = true;
-  if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
   try {
     const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
     applyYoagentConversationPayload(payload);
@@ -972,7 +972,7 @@ async function loadYoagentJobs(options = {}) {
   try {
     const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
     applyYoagentJobsPayload(payload);
-    if (options.render !== false && infoPanelSubTab === 'yoagent') renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
+    if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
     return true;
   } catch (error) {
     if (!options.silent) console.warn('YO!agent jobs refresh failed', error);
@@ -1487,7 +1487,7 @@ async function prewarmYoagent(options = {}) {
   if (shouldRequestStartupAnswer) yoagentStartupLlmRequested = true;
   yoagentPrewarmStarted = true;
   yoagentPrewarming = true;
-  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
   try {
     const payload = await apiFetchJson('/api/yoagent/prewarm', {
       method: 'POST',
@@ -1509,8 +1509,12 @@ async function prewarmYoagent(options = {}) {
   }
 }
 
+function yoagentPanelIsActive() {
+  return itemIsActivePaneTab(yoagentItemId);
+}
+
 function activitySummaryIsVisible() {
-  return infoPanelSubTab === 'yoagent' && itemIsActivePaneTab(infoItemId);
+  return yoagentPanelIsActive();
 }
 
 async function refreshActivitySummary(options = {}) {
@@ -1544,7 +1548,7 @@ async function refreshActivitySummary(options = {}) {
       activitySummaryRefreshing = false;
       renderInfoPanel();
       renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
-      if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+      if (yoagentPanelIsActive()) prewarmYoagent();
     }
   }
 }
@@ -1562,7 +1566,7 @@ function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
   if (options.render === true || options.refreshStartupSnapshot === true) {
     renderInfoPanel();
     renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
-    if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+    if (yoagentPanelIsActive()) prewarmYoagent();
   }
   return true;
 }

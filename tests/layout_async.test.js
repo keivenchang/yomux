@@ -837,10 +837,11 @@ async function runLayoutAsyncSuite() {
     {
       const hostChromeApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
       hostChromeApi.setInfoPanelSubTabForTest('yoagent');
+      await hostChromeApi.selectSession(hostChromeApi.yoagentItemId);
       hostChromeApi.setTabMetaVisibleForTest(false);
       const chromeSnapshot = hostChromeApi.shareUiStateSnapshotForTest().chrome;
       assert.equal(chromeSnapshot.tabMetaVisible, false, 'YO!share snapshots host tab metadata state that is otherwise local-storage-backed');
-      assert.equal(chromeSnapshot.infoSubTab, 'yoagent', 'YO!share snapshots the host YO!info/YO!agent sub-tab');
+      assert.equal(chromeSnapshot.infoSubTab, 'yoagent', 'YO!share snapshots the host YO!agent tab as legacy chrome state');
 
       const shareChromeApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share-chrome', mode: 'ro', session: '1', sessions: ['1']},
@@ -848,7 +849,7 @@ async function runLayoutAsyncSuite() {
       shareChromeApi.setInfoPanelSubTabForTest('info');
       shareChromeApi.setTabMetaVisibleForTest(true);
       await shareChromeApi.applyShareUiStateForTest({chrome: chromeSnapshot});
-      assert.equal(shareChromeApi.infoPanelSubTabForTest(), 'yoagent', 'YO!share clients mirror the host YO!agent sub-tab');
+      assert.equal(shareChromeApi.infoPanelSubTabForTest(), 'yoagent', 'YO!share clients preserve the legacy host YO!agent chrome marker');
       assert.equal(shareChromeApi.tabMetaVisibleForTest(), false, 'YO!share clients mirror the host tab metadata toggle');
     }
 

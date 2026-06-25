@@ -213,7 +213,6 @@ function menuTabCommand(item, options = {}) {
   const active = item === currentActiveMenuItem();
   const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? t('menu.tabs.minimizedDetail') : t('menu.tabs.inactiveDetail')));
   return menuCommand(itemLabel(item), () => {
-    if (item === infoItemId) return openInfoSubTab('info');
     if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item, {userInitiated: true});
     return selectSession(item, {userInitiated: true});
   }, {
@@ -653,7 +652,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
 }
 
 function fileMenuVirtualCommand(item, detail) {
-  return menuCommand(itemLabel(item), () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})), {
+  return menuCommand(itemLabel(item), () => selectSession(item, {userInitiated: true}), {
     checked: itemInLayout(item),
     detail,
     iconHtml: tabTypeIconHtml(item, {menu: true}),
@@ -683,18 +682,13 @@ function appMenuTree() {
           }),
           menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
             checked: itemInLayout(fileExplorerItemId),
-            detail: t('menu.file.browseFiles'),
+            detail: appShortcutText('B'),
             iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
             targetItem: fileExplorerItemId,
           }),
-          fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
           fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
-          // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
-          menuCommand(yoagentTabLabel(), () => openInfoSubTab('yoagent'), {
-            checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',
-            detail: t('menu.file.yoagent.detail'),
-            iconHtml: appMenuUiIcon('yoagent'),
-          }),
+          fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
+          fileMenuVirtualCommand(yoagentItemId, t('menu.file.yoagent.detail')),
           menuCommand(t('menu.file.share'), () => showShareModal(), {
             disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
             detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),

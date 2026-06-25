@@ -1249,11 +1249,11 @@ async function runTabberSuite() {
     assert.ok(/file-explorer-actions-row[\s\S]*fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)/.test(source), 'TS3: Finder toolbar also renders the shared tree sort select');
     assert.ok(/row\.classList\.toggle\('tabber-active-session', data\.type === 'session' && data\.active === true\)/.test(source), 'A5: active-session styling is data-driven only for session rows');
     assert.ok(/current \|\| \(data\.type === 'session' && data\.active === true\)\) row\.setAttribute\('aria-current', 'true'\)/.test(source), 'A3/A5: the current tmux session/window exposes aria-current on the tree row');
-    assert.ok(/row\.dataset\.tabberItem === infoItemId\) openInfoSubTab\('info'\)/.test(source), 'YO!info Tabber row opens the YO!info sub-tab, not the remembered YO!agent sub-tab');
+    assert.ok(/type === 'tab' && row\.dataset\.tabberItem[\s\S]*selectSession\(row\.dataset\.tabberItem, \{userInitiated: true\}\)/.test(source), 'Tabber virtual-tab rows activate their own layout item directly');
     assert.equal(/tabberOpenFile|tabberOpenStatus|tabberOpenRepo|type === 'path'|data-tabber-type="path"/.test(source), false, 'Tabber has no individual-file row data or activation path');
     api.setInfoPanelSubTabForTest('yoagent');
     api.commandPaletteCommandItems().find(item => item.targetItem === api.infoItemId).run();
-    assert.equal(api.infoPanelSubTabForTest(), 'info', 'YO!info-labeled palette rows open YO!info, not the remembered YO!agent sub-tab');
+    assert.equal(api.infoPanelSubTabForTest(), 'yoagent', 'YO!info palette rows no longer mutate the legacy YO!agent chrome marker');
     api.setFileExplorerModeForTest('tabber');
     api.setFileExplorerTreeSortModeForTest('za');
     const tabberToolbarHtml = api.fileExplorerChangesPanelStaticHtmlForTest();

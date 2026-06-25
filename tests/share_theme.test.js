@@ -37,18 +37,17 @@ async function runShareThemeSuite() {
   test('t@2560', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,search-history,preferences,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,image-viewer,file-editor');
     assert.equal(api.debugModeEnabledForTest(), false, 'JS Debug pane is off without the debug=1 URL flag');
     assert.equal(api.resolveLayoutItem('debug'), 'debug', 'debug layout item is ignored while the URL flag is off');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'follower', ready_elsewhere: true}), 'ready', 'follower-owned ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'building'}), 'building', 'building file indexes keep polling');
-    // #40: YO!info and YO!agent are merged into the single info item; the legacy yoagent/yosup aliases
-    // resolve to it so saved layouts and bookmarked ?…=yoagent URLs open the merged pane.
-    assert.equal(api.resolveLayoutItem('yoagent'), api.infoItemId, 'yoagent alias resolves to the merged YO!info item');
-    assert.equal(api.resolveLayoutItem('yosup'), api.infoItemId, 'legacy yosup URL param resolves to the merged item');
-    assert.equal(api.resolveLayoutItem('__yosup__'), api.infoItemId, 'legacy yosup item id resolves to the merged item');
-    assert.equal(api.resolveLayoutItem('__yoagent__'), api.infoItemId, 'legacy yoagent item id resolves to the merged item');
+    // YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open YO!agent.
+    assert.equal(api.resolveLayoutItem('yoagent'), api.yoagentItemId, 'yoagent alias resolves to the standalone YO!agent item');
+    assert.equal(api.resolveLayoutItem('yosup'), api.yoagentItemId, 'legacy yosup URL param resolves to YO!agent');
+    assert.equal(api.resolveLayoutItem('__yosup__'), api.yoagentItemId, 'legacy yosup item id resolves to YO!agent');
+    assert.equal(api.resolveLayoutItem('__yoagent__'), api.yoagentItemId, 'legacy yoagent item id resolves to YO!agent');
     api.setFileExplorerModeForTest('files');
     assert.equal(api.resolveLayoutItem('changes'), api.fileExplorerItemId, 'legacy changes URL param resolves to the Finder pane');
     assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes URL param preselects Finder diff mode');
@@ -59,7 +58,8 @@ async function runShareThemeSuite() {
     assert.equal(api.resolveLayoutItem('search'), api.searchHistoryItemId, 'search alias resolves to the Search & Runs pane');
     assert.equal(api.resolveLayoutItem('history'), api.searchHistoryItemId, 'history alias resolves to the Search & Runs pane');
     assert.equal(api.resolveLayoutItem('run-history'), api.searchHistoryItemId, 'run-history alias resolves to the Search & Runs pane');
-    assert.equal(api.itemParam(api.infoItemId), 'info', 'the merged pane uses the info param');
+    assert.equal(api.itemParam(api.infoItemId), 'info', 'the YO!info pane uses the info param');
+    assert.equal(api.itemParam(api.yoagentItemId), 'yoagent', 'the YO!agent pane uses the yoagent param');
     assert.equal(api.itemParam(api.searchHistoryItemId), 'search-history', 'the Search & Runs pane uses a stable URL param');
     assert.equal(api.tabTypeForItem('__files__').key, 'files');
     assert.equal(api.tabTypeForItem(api.searchHistoryItemId).key, 'search-history');
@@ -1407,8 +1407,7 @@ async function runShareThemeSuite() {
     assert.ok(api.menuTabCommand('__files__').html.includes('app-menu-ui-icon-finder'));
     assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
     assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
-    // #40: a legacy __yoagent__ reference resolves to the merged YO!info item (so it shows the info icon).
-    assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-branch-info'));
+    assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-yoagent'), 'YO!agent has its own tab/menu icon');
     assert.equal(api.menuTabCommand('__changes__').html.includes('app-menu-ui-icon-changes'), false, 'retired standalone Differ no longer has a menu/tab icon');
     assert.ok(api.menuTabCommand('file:/home/test/README.md').html.includes('app-menu-ui-icon-document'));
     assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
@@ -2699,7 +2698,7 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.includes('Preferences'));
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
     assert.equal(fileMenuLabels[0], 'Open file', 'File -> Open file is the first File menu command');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 6)), ['Open file', api.fileExplorerLabel(), 'YO!info', 'Search & Runs', 'YO!agent', 'YO!share...'], 'File menu starts with Open file, then Finder/data/YO commands, then YO!share');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 6)), ['Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!share...'], 'File menu starts with Open file, then Finder/Search/data/YO commands, then YO!share');
     assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
     assert.deepStrictEqual(canonical(fileMenu.items.slice(-3).map(item => item.type === 'separator' ? '---' : item.label)), ['Preferences', '---', 'Log out']);
     for (const label of [api.fileExplorerLabel(), 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'Log out']) {
@@ -2707,6 +2706,11 @@ async function runShareThemeSuite() {
       assert.ok(item?.iconHtml, `File menu ${label} uses the shared icon row`);
       assert.equal(item.className || '', '', `File menu ${label} does not use the raised tab-row scaffold`);
     }
+    const finderMenuItem = fileMenu.items.find(candidate => candidate.label === api.fileExplorerLabel());
+    assert.equal(finderMenuItem.detail, api.appShortcutText('B'), 'File -> Finder shows the same Cmd/Ctrl-B shortcut that toggles the Finder');
+    const macFileMenuApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
+    const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === 'Finder');
+    assert.equal(macFinderMenuItem?.detail, '⌘+B', 'File -> Finder shows Cmd-B on Mac');
     const shareMenuItem = fileMenu.items.find(candidate => candidate.label === 'YO!share...');
     assert.equal(shareMenuItem.detail, 'sharing', 'YO!share menu row avoids target/session counts');
     const shareCommandItem = api.commandPaletteCommandItems().find(candidate => candidate.label === 'File / YO!share...');
@@ -2855,7 +2859,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareMirrorFitTransform\(hostViewport, clientViewport, fit = shareViewFit\)[\s\S]*mode === 'contain' \? Math\.min\(scaleX, scaleY\) : Math\.max\(scaleX, scaleY\)[\s\S]*tx: \(client\.width - width\) \/ 2/.test(shareSource), 'M3: cover/contain transform math is centralized');
       assert.ok(/function applyShareMirrorTransform\(\)[\s\S]*nativeViewport\(\)[\s\S]*--share-mirror-scale[\s\S]*--share-mirror-tx[\s\S]*--share-mirror-ty/.test(shareSource), 'M3: share view applies one root transform from host to client viewport');
       assert.ok(/function scheduleShareUiStatePublish\(options = \{\}\)[\s\S]*shareUiStatePublishTimer[\s\S]*sharePublishUiState\(options\)/.test(shareSource), 'YO!share debounces host UI-state publication');
-      assert.ok(/function applyShareChromeState\(chrome = \{\}\)[\s\S]*tabMetaVisible = chrome\.tabMetaVisible !== false[\s\S]*infoPanelSubTab = normalizedInfoSubTab\(chrome\.infoSubTab\)[\s\S]*renderYoagentPanel/.test(shareSource), 'YO!share applies host-owned tab metadata and YO!agent sub-tab state');
+      assert.ok(/function applyShareChromeState\(chrome = \{\}\)[\s\S]*tabMetaVisible = chrome\.tabMetaVisible !== false[\s\S]*infoPanelSubTab = normalizedInfoSubTab\(chrome\.infoSubTab\)[\s\S]*renderYoagentPanel/.test(shareSource), 'YO!share applies host-owned tab metadata and legacy YO!agent chrome state');
       assert.ok(/function setFileEditorDiffExpandUnchangedForItem[\s\S]*fileEditorDiffExpandOverrides\.set[\s\S]*scheduleShareUiStatePublish\(\)/.test(shareSource), 'per-editor diff expansion changes publish the mirrored editor state');
       assert.ok(/function setRepoDiffRefs\(repo, fromRef, toRef, options = \{\}\)[\s\S]*renderFileExplorerChangesPanels\(\{force: true\}\)[\s\S]*scheduleShareTopologySnapshot\('differ-refs'\)[\s\S]*return true/.test(shareSource), 'Differ FROM/TO changes schedule a full share UI-state snapshot through the topology scheduler');
       assert.ok(/function scheduleShareViewportPublish\(\)[\s\S]*shareViewMode[\s\S]*sharePublish\('viewport', shareViewportSnapshot\(\)\)[\s\S]*}, 150\)/.test(shareSource), 'M1: host resize publishes a debounced viewport frame');
@@ -4602,18 +4606,15 @@ async function runShareThemeSuite() {
       const actual = [...rankValues(row.surface, row.query, row.candidates, row)];
       assert.deepStrictEqual(row.limit ? actual.slice(0, row.limit) : actual, row.expected, row.name);
     }
-    // #40 / YO!info, Finder, and Preferences are the standalone virtual tabs; YO!agent is now a
-    // sub-tab of the merged YO!info pane, so it is NOT a Tabs entry.
+    // YO!info, YO!agent, Finder, Search & Runs, and Preferences are standalone virtual tabs.
     const paletteItems = api.commandPaletteCommandItems();
-    const expectedVirtualLabels = [api.infoItemId, api.fileExplorerItemId, api.searchHistoryItemId, api.prefsItemId].map(api.itemLabel);
+    const expectedVirtualLabels = [api.infoItemId, api.yoagentItemId, api.fileExplorerItemId, api.searchHistoryItemId, api.prefsItemId].map(api.itemLabel);
     const paletteVirtualLabels = paletteItems.filter(item => item.group === 'Tabs' && expectedVirtualLabels.includes(item.label));
     assert.equal(paletteVirtualLabels.length, expectedVirtualLabels.length, 'command palette lists each virtual tab once');
     assert.equal(expectedVirtualLabels.every(label => paletteVirtualLabels.some(item => item.label === label)), true, 'command palette includes all virtual tabs');
     assert.equal(paletteVirtualLabels.every(item => item.group === 'Tabs'), true, 'virtual tab palette entries come from the Tabs group, not duplicate menu commands');
     assert.equal(paletteItems.some(item => item.targetItem === '__changes__'), false, 'retired standalone Differ is absent from the command palette');
-    // YO!agent survives as a File-menu command that opens the merged pane on its sub-tab.
-    assert.ok(paletteItems.some(item => item.group === 'Menu' && /YO!agent$/.test(item.label)), 'command palette offers a YO!agent command (opens the merged pane on its sub-tab)');
-    assert.equal(paletteItems.some(item => item.group === 'Tabs' && item.label === 'YO!agent'), false, 'YO!agent is not a standalone palette tab anymore');
+    assert.ok(paletteItems.some(item => item.group === 'Tabs' && item.targetItem === api.yoagentItemId), 'YO!agent is a standalone palette tab');
     const finderPaletteItem = paletteItems.find(item => item.targetItem === api.fileExplorerItemId);
     assert.ok(finderPaletteItem, 'command palette has a Finder/File Explorer tab row');
     assert.ok(

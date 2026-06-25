@@ -1928,7 +1928,7 @@ function shareBaseUiStateSnapshot(options = {}) {
     terminalDims: shareTerminalDimensionsSnapshot(),
     chrome: {
       tabMetaVisible: tabMetaVisible !== false,
-      infoSubTab: normalizedInfoSubTab(infoPanelSubTab),
+      infoSubTab: yoagentPanelIsActive() ? 'yoagent' : 'info',
     },
     autoApprove: shareAutoApproveStateSnapshot(),
     info: shareInfoStateSnapshot({includeRows: !compact}),
@@ -2150,7 +2150,7 @@ function applyShareChromeState(chrome = {}) {
   if ('infoSubTab' in chrome) {
     infoPanelSubTab = normalizedInfoSubTab(chrome.infoSubTab);
     applyInfoSubTab();
-    if (infoPanelSubTab === 'yoagent') {
+    if (yoagentPanelIsActive()) {
       renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
     }
   }

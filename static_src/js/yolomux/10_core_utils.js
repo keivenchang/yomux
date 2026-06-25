@@ -789,7 +789,7 @@ function writeStoredTabMetaVisible(value) {
   storageSet(tabMetaStorageKey, value ? '1' : '0');
 }
 
-// persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
+// Legacy share/deeplink marker from the old merged YO!info/YO!agent pane.
 function normalizedInfoSubTab(value) {
   return value === 'yoagent' ? 'yoagent' : 'info';
 }

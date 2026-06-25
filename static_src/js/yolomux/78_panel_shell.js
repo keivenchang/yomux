@@ -2033,7 +2033,8 @@ async function openSearchHistoryResult(index) {
   const result = searchHistoryResults()[Number(index)];
   const target = result?.target && typeof result.target === 'object' ? result.target : {};
   if (target.type === 'activity-summary' || target.tab === 'yoagent') {
-    await openInfoSubTab('yoagent');
+    await selectSession(yoagentItemId, {userInitiated: true});
+    activateYoagentPanel({focusChat: true});
     return;
   }
   const session = String(target.session || result?.session || '');

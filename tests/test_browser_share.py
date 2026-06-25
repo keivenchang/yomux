@@ -605,6 +605,8 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
               document.getElementById('mount').append(panel);
               const infoPanel = createInfoPanel();
               document.getElementById('mount').append(infoPanel);
+              const yoagentPanel = createYoagentPanel();
+              document.getElementById('mount').append(yoagentPanel);
               await applyShareUiState({{editor: {{modes: [{{
                 path,
                 item,
@@ -663,9 +665,9 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
                 diffLoaded: openFiles.get(path)?.diffLoaded === true,
                 diffExpandPressed: panel.querySelector('.file-editor-diff-expand-panel')?.getAttribute('aria-pressed') || '',
                 tabMetaHidden: document.body.classList.contains('tab-meta-hidden'),
-                infoSubtab: infoPanel.dataset.infoSubtab || '',
-                yoagentActive: Boolean(infoPanel.querySelector('[data-info-subview="yoagent"]')?.classList.contains('active')),
-                yoagentRendered: Boolean(infoPanel.querySelector('#yoagent-content .yoagent-chat, #yoagent-content .yoagent-global')),
+                legacyInfoSubtab: infoPanelSubTab || '',
+                infoHasYoagentSubview: Boolean(infoPanel.querySelector('[data-info-subview="yoagent"], #yoagent-content')),
+                yoagentPanelPresent: yoagentPanel.classList.contains('yoagent-panel') && Boolean(yoagentPanel.querySelector('#yoagent-content')),
                 lineClasses: Array.from(panel.querySelectorAll('.cm-line')).map(line => line.className).filter(Boolean).slice(0, 40),
                 insertedRows,
                 deletedRows,
@@ -698,9 +700,9 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
     assert metrics["viewMode"] == "diff", metrics
     assert metrics["diffExpandPressed"] == "true", metrics
     assert metrics["tabMetaHidden"] is True, metrics
-    assert metrics["infoSubtab"] == "yoagent", metrics
-    assert metrics["yoagentActive"] is True, metrics
-    assert metrics["yoagentRendered"] is True, metrics
+    assert metrics["legacyInfoSubtab"] == "yoagent", metrics
+    assert metrics["infoHasYoagentSubview"] is False, metrics
+    assert metrics["yoagentPanelPresent"] is True, metrics
     assert metrics["insertedRows"] > 0 and metrics["deletedRows"] > 0, metrics
     assert metrics["hostTop"] > 0, metrics
     assert metrics["afterLocalScrollTop"] == metrics["hostTop"], metrics

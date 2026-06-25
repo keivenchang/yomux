@@ -3936,8 +3936,7 @@ function handleTabberRowActivate(row, event) {
     return false;
   };
   if (type === 'tab' && row.dataset.tabberItem) {
-    if (row.dataset.tabberItem === infoItemId) openInfoSubTab('info');
-    else selectSession(row.dataset.tabberItem, {userInitiated: true});
+    selectSession(row.dataset.tabberItem, {userInitiated: true});
   } else if (type === 'session' && session) {
     openTabberSession(session);
   } else if (type === 'window' && session) {

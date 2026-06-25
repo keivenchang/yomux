@@ -1375,14 +1375,14 @@ def test_dockview_new_virtual_and_file_tabs_open_in_focused_pane(browser, tmp_pa
           activatePaneTab('slot1', '2', {userInitiated: true});
           setFocusedPanelItem('2', {userInitiated: true});
           await openInfoSubTab('yoagent');
-          const infoSlot = slotForItem(infoItemId);
+          const yoagentSlot = slotForItem(yoagentItemId);
           activatePaneTab('slot1', '2', {userInitiated: true});
           setFocusedPanelItem('2', {userInitiated: true});
           const filePath = '/home/test/yolomux.dev/NEWTAB.md';
           const fileItem = await openFileInEditor(filePath, {name: 'NEWTAB.md'}, {userInitiated: true});
           done({
             prefsSlot,
-            infoSlot,
+            yoagentSlot,
             fileSlot: slotForItem(fileItem),
             slot1Tabs: paneTabs('slot1'),
             leftTabs: paneTabs('left'),
@@ -1392,7 +1392,7 @@ def test_dockview_new_virtual_and_file_tabs_open_in_focused_pane(browser, tmp_pa
     )
     assert metrics.get("error") is None, metrics
     assert metrics["prefsSlot"] == "slot1", metrics
-    assert metrics["infoSlot"] == "slot1", metrics
+    assert metrics["yoagentSlot"] == "slot1", metrics
     assert metrics["fileSlot"] == "slot1", metrics
     assert "1" in metrics["leftTabs"], metrics
     assert "2" in metrics["slot1Tabs"], metrics

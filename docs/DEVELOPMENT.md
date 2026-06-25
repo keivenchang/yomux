@@ -96,6 +96,8 @@ Browser/live tests may launch local throwaway HTTP servers, but they must also i
 
 For local verification that should skip login, start the dev server with `YOLOMUX_TEST_AUTH_BYPASS=1`. This is a test-only admin bypass for localhost/dev workflows, useful for direct curls or Selenium checks against `/api/settings` and other login-gated routes. Tests that are not validating auth and only need a logged-in host should use this path instead of minting cookies. Tests that validate setup, login, logout, cookies, Basic auth, readonly/admin role boundaries, share-token scoping, or expected 401/403 behavior must not use it. Do not use it for production or any server reachable by untrusted clients.
 
+For visual or animation bugs, do not declare the issue fixed from source grep, unit assertions, or one screenshot. Reproduce the visible state in a browser/Selenium fixture, capture computed styles for the exact element, and sample at least two rendered frames separated by enough time for the animation to move; for color/glow/pulse bugs, prove `animationName`, nonzero duration, play state, and either changing pixels or changing computed color/filter/box-shadow. If the bug happened only under `prefers-reduced-motion`, test that mode explicitly. Keep raw screenshots and run logs under `/tmp`; commit only the regression test and a short durable note.
+
 ## Dev And Production Servers
 
 Production and development instances can run side-by-side. The project does not require a fixed dev numbering scheme; choose a checkout path, HTTPS port, and user-unit name that match your machine.
