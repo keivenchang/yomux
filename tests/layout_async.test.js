@@ -89,30 +89,60 @@ async function runLayoutAsyncSuite() {
       const api = loadYolomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
+      api.setFilesystemWatchTokenForTest('old-token');
+      api.setFilesystemLastFullAtForTest(Date.now());
       api.setFetchForTest((url, options = {}) => {
         calls.push(String(url));
-        if (String(url) === '/api/fs/batch') {
-          const requestId = JSON.parse(options.body || '{"requests":[]}').requests?.[0]?.id || '';
+        const parsed = new URL(String(url), 'https://yolomux.test');
+        if (parsed.pathname === '/api/fs/watch-diff') {
+          assert.equal(parsed.searchParams.get('since'), 'old-token', 'compact fs_changed asks for the diff from the client-held token');
+          assert.equal(parsed.searchParams.has('full'), false, 'recent keyframe state keeps compact fs_changed on the diff path');
           return Promise.resolve(jsonResponse({
-            responses: [{
-              id: requestId,
-              action: 'list',
+            mode: 'diff',
+            token: 'new-token',
+            since: 'old-token',
+            directories: [{
               path: '/repo',
               ok: true,
               status: 200,
-              payload: {path: '/repo', entries: [{name: 'changed.txt', kind: 'file', mtime: 10, size: 5}]},
+              data: {path: '/repo', entries: [{name: 'changed.txt', kind: 'file', mtime: 10, size: 5}]},
             }],
           }));
         }
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       });
 
-      const refresh = api.refreshFileExplorerFromPushForTest({refresh: true, roots: ['/repo'], change_summary: {roots_changed: 1}});
-      await api.flushFileExplorerFsBatchForTest();
+      const refresh = api.refreshFileExplorerFromPushForTest({refresh: true, mode: 'diff', token: 'server-token', roots: ['/repo'], change_summary: {roots_changed: 1}});
       await refresh;
       await flushAsyncWork();
 
-      assert.ok(calls.includes('/api/fs/batch'), 'compact fs_changed invalidation refetches watched directories');
+      const watchDiffCalls = calls.filter(url => new URL(url, 'https://yolomux.test').pathname === '/api/fs/watch-diff');
+      assert.equal(watchDiffCalls.length, 1, 'compact fs_changed performs one stateless watch-diff request');
+      assert.equal(api.filesystemWatchTokenForTest(), 'new-token', 'watch-diff response advances the client baseline token');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      const calls = [];
+      api.setFileExplorerRootForTest('/repo');
+      api.setFilesystemWatchTokenForTest('old-token');
+      api.setFilesystemLastFullAtForTest(Date.now());
+      api.setFetchForTest(url => {
+        calls.push(String(url));
+        const parsed = new URL(String(url), 'https://yolomux.test');
+        if (parsed.pathname === '/api/fs/watch-diff') {
+          assert.equal(parsed.searchParams.get('full'), '1', 'forced refresh asks for a full filesystem frame');
+          assert.equal(parsed.searchParams.get('since'), 'old-token', 'forced refresh still sends the client baseline token');
+          return Promise.resolve(jsonResponse({mode: 'full', token: 'full-token', directories: []}));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      await api.refreshWatchedFilesystemForTest({full: true});
+
+      const watchDiffCalls = calls.filter(url => new URL(url, 'https://yolomux.test').pathname === '/api/fs/watch-diff');
+      assert.equal(watchDiffCalls.length, 1, 'manual filesystem refresh uses one forced watch-diff request');
+      assert.equal(api.filesystemWatchTokenForTest(), 'full-token', 'full refresh response advances the client baseline token');
     }
 
     {

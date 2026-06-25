@@ -2178,11 +2178,15 @@ async function refreshFileExplorerIfChanged() {
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
 }
 
-async function refreshWatchedFilesystem() {
+async function refreshWatchedFilesystem(options = {}) {
   if (filesystemRefreshInFlight) return;
   filesystemRefreshInFlight = true;
   try {
-    await refreshFileExplorerIfChanged();
+    if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
+      await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+    } else {
+      await refreshFileExplorerIfChanged();
+    }
     await refreshOpenFilesIfChanged();
     if (document.querySelector('.file-explorer-changes-panel')) {
       fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});

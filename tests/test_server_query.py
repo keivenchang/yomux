@@ -436,6 +436,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
     assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_readonly_post_role
+    assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
 
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
@@ -522,6 +523,21 @@ def test_do_get_fs_routes_allow_share_scoped_readonly_file_handlers():
 
     assert calls == [("require_auth", "readonly")]
     assert writes == [("fs-diff", "/api/fs/diff")]
+
+
+def test_do_get_fs_watch_diff_uses_client_since_token_without_tracking_clients():
+    app = SimpleNamespace(
+        filesystem_watch_diff_payload=lambda since_token="", force_full=False: {
+            "since": since_token,
+            "force_full": force_full,
+        }
+    )
+    handler, calls, writes = route_handler("/api/fs/watch-diff?since=old-token", app)
+
+    Handler.do_GET(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"since": "old-token", "force_full": False})]
 
 
 def test_share_scoped_transcripts_payload_filters_to_shared_sessions():
@@ -643,6 +659,7 @@ def test_share_request_allowed_route_matrix(monkeypatch):
         "/api/fs/batch",
         "/api/share/debug-profile",
         "/api/fs/diff?path=/repo/README.md",
+        "/api/fs/watch-diff?since=old-token",
         "/api/fs/read?path=/repo/README.md",
         "/api/fs/raw?path=/repo/README.md",
         "/api/share-stream",

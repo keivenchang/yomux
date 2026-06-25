@@ -549,6 +549,15 @@ def get_fs_diff(request: Any, parsed: Any, route: Route) -> None:
     request.handle_fs_diff(parsed)
 
 
+def get_fs_watch_diff(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    request.write_json(request.server.app.filesystem_watch_diff_payload(
+        since_token=str(query_one(qs, "since", "") or ""),
+        force_full=query_bool(qs, "full"),
+    ))
+
+
 def get_blame(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_blame(parsed)
@@ -1001,6 +1010,7 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/read", "readonly", get_fs_read, group="filesystem"),
     Route("GET", "/api/fs/info", "readonly", get_fs_info, group="filesystem"),
     Route("GET", "/api/fs/diff", "readonly", get_fs_diff, group="filesystem"),
+    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, group="filesystem"),
     Route("GET", "/api/blame", "readonly", get_blame, group="filesystem"),
     Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem"),
     Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, group="filesystem"),

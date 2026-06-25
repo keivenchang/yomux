@@ -37,6 +37,7 @@ class AuthMixin:
         "/api/fs/index-status",
         "/api/fs/info",
         "/api/fs/list",
+        "/api/fs/watch-diff",
         "/api/share",
         "/api/session-files-batch",
         "/api/session-files",

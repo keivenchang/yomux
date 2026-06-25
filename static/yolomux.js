@@ -742,6 +742,9 @@ let serverWatchRootsInFlight = false;
 let serverWatchRootsSyncedAt = 0;
 let serverWatchRootsTimer = null;
 let serverWatchRootsPendingOptions = {};
+let fileExplorerFilesystemWatchToken = '';
+let fileExplorerFilesystemLastFullAt = 0;
+const fileExplorerFilesystemKeyframeMs = 60000;
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms');
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
@@ -10129,6 +10132,27 @@ function invalidateFileExplorerFsCaches() {
   fileExplorerDirectorySignatures.clear();
 }
 
+function invalidateFileExplorerRoots(roots = []) {
+  const normalizedRoots = (Array.isArray(roots) ? roots : [])
+    .map(root => String(root || '').trim())
+    .filter(Boolean)
+    .map(root => normalizeDirectoryPath(root));
+  if (!normalizedRoots.length) return false;
+  const shouldDrop = path => normalizedRoots.some(root => pathIsInsideDirectory(path, root));
+  for (const cache of [
+    fileExplorerDirListingCache,
+    fileExplorerPathInfoCache,
+    fileExplorerDirectorySignatures,
+    fileExplorerKnownEntryNames,
+    fileExplorerNewEntryUntil,
+  ]) {
+    for (const key of Array.from(cache.keys())) {
+      if (shouldDrop(normalizeDirectoryPath(key))) cache.delete(key);
+    }
+  }
+  return normalizedRoots.some(root => pathIsInsideDirectory(currentFileExplorerRoot(), root));
+}
+
 function entriesByDirFromFilesystemPush(payload = {}) {
   const entriesByDir = new Map();
   const directories = Array.isArray(payload.directories) ? payload.directories : [];
@@ -10144,6 +10168,28 @@ function entriesByDirFromFilesystemPush(payload = {}) {
     setLimitedMapEntry(fileExplorerDirListingCache, path, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
   }
   return entriesByDir;
+}
+
+async function fetchFilesystemWatchDiff(options = {}) {
+  const params = new URLSearchParams();
+  if (options.full === true) params.set('full', '1');
+  const since = String((options.since ?? fileExplorerFilesystemWatchToken) || '').trim();
+  if (since) params.set('since', since);
+  return apiFetchJson(`/api/fs/watch-diff?${params.toString()}`);
+}
+
+async function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
+  const fullDue = Date.now() - fileExplorerFilesystemLastFullAt >= fileExplorerFilesystemKeyframeMs;
+  const previousToken = fileExplorerFilesystemWatchToken;
+  const requestedFull = options.full === true || payload.full === true || fullDue || !previousToken;
+  try {
+    const diffPayload = await fetchFilesystemWatchDiff({since: previousToken, full: requestedFull});
+    await refreshFileExplorerFromPush(diffPayload);
+  } catch (error) {
+    console.warn('client fs watch diff refresh failed', error);
+    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    else await refreshFileExplorerIfChanged();
+  }
 }
 
 function fileEntryStatusFromWatchFilePayload(item) {
@@ -10182,11 +10228,18 @@ async function refreshOpenFilesFromPush(payload = {}) {
 }
 
 async function refreshFileExplorerFromPush(payload = {}) {
+  const nextToken = payload?.token ? String(payload.token || '') : '';
   const entriesByDir = entriesByDirFromFilesystemPush(payload);
+  const visibleRootRemoved = invalidateFileExplorerRoots(payload?.removed_roots);
   if (!entriesByDir.size && payload?.refresh === true) {
-    await refreshFileExplorerIfChanged();
+    await refreshFileExplorerFromWatchDiff(payload);
     return;
   }
+  if (nextToken) fileExplorerFilesystemWatchToken = nextToken;
+  if (payload?.mode === 'full' || (Array.isArray(payload?.directories) && payload.directories.length && payload.refresh !== true)) {
+    fileExplorerFilesystemLastFullAt = Date.now();
+  }
+  if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   if (!entriesByDir.size) return;
   fileExplorerPushRefreshDepth += 1;
   try {
@@ -16416,11 +16469,15 @@ async function refreshFileExplorerIfChanged() {
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
 }
 
-async function refreshWatchedFilesystem() {
+async function refreshWatchedFilesystem(options = {}) {
   if (filesystemRefreshInFlight) return;
   filesystemRefreshInFlight = true;
   try {
-    await refreshFileExplorerIfChanged();
+    if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
+      await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+    } else {
+      await refreshFileExplorerIfChanged();
+    }
     await refreshOpenFilesIfChanged();
     if (document.querySelector('.file-explorer-changes-panel')) {
       fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
@@ -47883,7 +47940,7 @@ function refreshAll() {
   refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts({force: true});
   refreshAutoStatuses();
-  refreshWatchedFilesystem();
+  refreshWatchedFilesystem({full: true});
 }
 
 function scheduleReconnectResync(reason = '') {

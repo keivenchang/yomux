@@ -2905,18 +2905,10 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
     monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
     monkeypatch.setattr(webapp, "filesystem_roots_for_watch", lambda sessions: ["/repo"])
-    monkeypatch.setattr(
-        webapp,
-        "filesystem_push_payload",
-        lambda roots: {
-            "roots": roots,
-            "directories": [{"path": "/repo", "status": 200, "ok": True, "data": {"entries": []}}],
-            "listing_summary": {"roots_requested": 1, "roots_listed": 1, "roots_error": 0, "entries_listed": 0, "files_listed": 0, "dirs_listed": 0},
-            "compute_ms": 1.0,
-        },
-    )
+    monkeypatch.setattr(webapp, "filesystem_push_payload", lambda roots: (_ for _ in ()).throw(AssertionError("diff-only fs_changed must not list directories")))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
+        webapp.client_watch_filesystem_last_full_at = time.monotonic()
         webapp.set_session_files_cache(("k",), {"files": []}, HTTPStatus.OK)
         webapp.transcripts_payload_cache = (1.0, {"sessions": {}})
         assert webapp.poll_client_events_once() == []
@@ -2927,13 +2919,113 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     assert [event_type for event_type, _payload in events] == ["settings_changed", "transcripts_changed", "fs_changed"]
     fs_payload = events[-1][1]
     assert fs_payload["refresh"] is True
+    assert fs_payload["mode"] == "diff"
+    assert fs_payload["token"]
     assert "directories" not in fs_payload
     assert fs_payload["change_summary"]["roots_changed"] == 1
     assert fs_payload["change_summary"]["entries_added"] == 1
     assert fs_payload["change_summary"]["entries_removed"] == 1
-    assert fs_payload["listing_summary"]["roots_listed"] == 1
+    assert "listing_summary" not in fs_payload
     assert webapp.session_files_cache != {}
     assert webapp.transcripts_payload_cache is None
+
+
+def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    listed_roots = []
+    signatures = [
+        (("/repo", ("/repo", "dir", 100, 0, (("one.txt", "file", 100, 10),))),),
+        (("/repo", ("/repo", "dir", 200, 0, (("two.txt", "file", 200, 20),))),),
+        (("/repo", ("/repo", "dir", 300, 0, (("three.txt", "file", 300, 30),))),),
+    ]
+
+    def fake_push_payload(roots):
+        listed_roots.append(list(roots))
+        return {
+            "roots": list(roots),
+            "directories": [{"path": root, "status": 200, "ok": True, "data": {"path": root, "entries": []}} for root in roots],
+            "listing_summary": {"roots_requested": len(roots), "roots_listed": len(roots), "roots_error": 0, "entries_listed": 0, "files_listed": 0, "dirs_listed": 0},
+            "compute_ms": 1.0,
+        }
+
+    monkeypatch.setattr(webapp, "filesystem_push_payload", fake_push_payload)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[0]) == ["fs_changed"]
+        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[1]) == ["fs_changed"]
+        webapp.client_watch_filesystem_last_full_at = time.monotonic() - app_module.FILESYSTEM_WATCH_KEYFRAME_SECONDS - 1.0
+        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[2]) == ["fs_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert [payload["mode"] for _event_type, payload in events] == ["full", "diff", "full"]
+    assert events[0][1]["directories"]
+    assert events[1][1]["refresh"] is True
+    assert "directories" not in events[1][1]
+    assert events[2][1]["directories"]
+    assert listed_roots == [["/repo"], ["/repo"]]
+
+
+def test_filesystem_watch_diff_payload_lists_only_changed_roots(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    previous = (
+        ("/repo", ("/repo", "dir", 100, 0, (("old.txt", "file", 100, 10),))),
+        ("/unchanged", ("/unchanged", "dir", 100, 0, (("same.txt", "file", 100, 10),))),
+    )
+    current = (
+        ("/repo", ("/repo", "dir", 200, 0, (("new.txt", "file", 100, 10),))),
+        ("/unchanged", ("/unchanged", "dir", 100, 0, (("same.txt", "file", 100, 10),))),
+        ("/added-root", ("/added-root", "dir", 100, 0, (("fresh.txt", "file", 100, 10),))),
+    )
+    listed_roots = []
+
+    def fake_push_payload(roots):
+        listed_roots.append(list(roots))
+        return {
+            "roots": list(roots),
+            "directories": [
+                {"path": root, "status": 200, "ok": True, "data": {"path": root, "entries": []}}
+                for root in roots
+            ],
+            "listing_summary": {"roots_requested": len(roots), "roots_listed": len(roots), "roots_error": 0, "entries_listed": 0, "files_listed": 0, "dirs_listed": 0},
+            "compute_ms": 1.0,
+        }
+
+    monkeypatch.setattr(webapp, "filesystem_push_payload", fake_push_payload)
+    try:
+        since = webapp.record_filesystem_watch_snapshot(previous)
+        current_token = webapp.record_filesystem_watch_snapshot(current)
+        payload = webapp.filesystem_watch_diff_payload(since)
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["mode"] == "diff"
+    assert payload["since"] == since
+    assert payload["token"] == current_token
+    assert listed_roots == [["/added-root", "/repo"]]
+    assert [item["path"] for item in payload["directories"]] == ["/added-root", "/repo"]
+    assert payload["change_summary"]["roots_changed"] == 2
+
+
+def test_filesystem_watch_diff_payload_returns_full_when_since_is_stale(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    current = (
+        ("/repo", ("/repo", "dir", 200, 0, (("new.txt", "file", 100, 10),))),
+        ("/unchanged", ("/unchanged", "dir", 100, 0, (("same.txt", "file", 100, 10),))),
+    )
+    listed_roots = []
+    monkeypatch.setattr(webapp, "filesystem_push_payload", lambda roots: listed_roots.append(list(roots)) or {"roots": list(roots), "directories": [], "listing_summary": {}, "compute_ms": 1.0})
+    try:
+        token = webapp.record_filesystem_watch_snapshot(current)
+        payload = webapp.filesystem_watch_diff_payload("missing-token")
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["mode"] == "full"
+    assert payload["reason"] == "stale-since"
+    assert payload["token"] == token
+    assert listed_roots == [["/repo", "/unchanged"]]
 
 
 def test_session_files_ready_skips_unchanged_fs_republish(monkeypatch):

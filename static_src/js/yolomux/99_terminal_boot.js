@@ -3371,7 +3371,7 @@ function refreshAll() {
   refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts({force: true});
   refreshAutoStatuses();
-  refreshWatchedFilesystem();
+  refreshWatchedFilesystem({full: true});
 }
 
 function scheduleReconnectResync(reason = '') {

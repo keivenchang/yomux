@@ -245,6 +245,9 @@ SERVER_ACTIVITY_HEARTBEAT_ROTATE_SECONDS = 3600.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
 CLIENT_WATCH_ROOT_LIMIT = 128
 CLIENT_WATCH_FILE_LIMIT = 128
+FILESYSTEM_WATCH_HISTORY_LIMIT = 64
+FILESYSTEM_WATCH_HISTORY_SECONDS = 180.0
+FILESYSTEM_WATCH_KEYFRAME_SECONDS = 60.0
 BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
 BACKGROUND_CLIENT_EVENT_TYPES = frozenset({"background_owner_changed", "background_refresh_done"})
 BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
@@ -547,17 +550,30 @@ def filesystem_signature_entry_map(signature: tuple[Any, ...] | None) -> dict[st
     return result
 
 
-def filesystem_change_summary(previous: tuple[Any, ...] | None, current: tuple[Any, ...] | None) -> dict[str, Any]:
-    def root_map(signature: tuple[Any, ...] | None) -> dict[str, tuple[Any, ...]]:
-        result: dict[str, tuple[Any, ...]] = {}
-        for item in signature or ():
-            if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[1], tuple):
-                continue
-            result[str(item[0])] = item[1]
-        return result
+def filesystem_signature_root_map(signature: tuple[Any, ...] | None) -> dict[str, tuple[Any, ...]]:
+    result: dict[str, tuple[Any, ...]] = {}
+    for item in signature or ():
+        if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[1], tuple):
+            continue
+        result[str(item[0])] = item[1]
+    return result
 
-    previous_by_root = root_map(previous)
-    current_by_root = root_map(current)
+
+def filesystem_changed_roots(previous: tuple[Any, ...] | None, current: tuple[Any, ...] | None) -> tuple[list[str], list[str]]:
+    previous_by_root = filesystem_signature_root_map(previous)
+    current_by_root = filesystem_signature_root_map(current)
+    changed = sorted(
+        root
+        for root, current_signature in current_by_root.items()
+        if previous_by_root.get(root) != current_signature
+    )
+    removed = sorted(set(previous_by_root) - set(current_by_root))
+    return changed, removed
+
+
+def filesystem_change_summary(previous: tuple[Any, ...] | None, current: tuple[Any, ...] | None) -> dict[str, Any]:
+    previous_by_root = filesystem_signature_root_map(previous)
+    current_by_root = filesystem_signature_root_map(current)
     summary: dict[str, Any] = {
         "roots_changed": 0,
         "roots_added": 0,
@@ -821,6 +837,8 @@ class TmuxWebtermApp:
         self.client_watch_transcripts_payload_signature: str = ""
         self.client_watch_activity_summary_signature: str = ""
         self.client_watch_filesystem_payload_signature: str = ""
+        self.client_watch_filesystem_history: list[dict[str, Any]] = []
+        self.client_watch_filesystem_last_full_at = 0.0
         self.client_watch_snapshot_running = False
         self.client_directory_poll_running = False
         self.client_watch_thread: threading.Thread | None = None
@@ -2752,30 +2770,129 @@ class TmuxWebtermApp:
         )
         return ["files_changed"]
 
+    def record_filesystem_watch_snapshot(self, signature: tuple[Any, ...]) -> str:
+        now = time.time()
+        with self.client_watch_lock:
+            if self.client_watch_filesystem_history and self.client_watch_filesystem_history[-1]["signature"] == signature:
+                return str(self.client_watch_filesystem_history[-1]["token"])
+            signature_text = self.client_event_payload_signature(signature)
+            digest = hashlib.sha1(signature_text.encode("utf-8")).hexdigest()[:16]
+            token = f"{int(now * 1000)}-{digest}"
+            self.client_watch_filesystem_history.append({
+                "token": token,
+                "created_at": now,
+                "signature": copy.deepcopy(signature),
+            })
+            min_created_at = now - FILESYSTEM_WATCH_HISTORY_SECONDS
+            self.client_watch_filesystem_history = [
+                record
+                for record in self.client_watch_filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
+                if float(record.get("created_at") or 0.0) >= min_created_at
+            ]
+            return token
+
+    def filesystem_watch_record_for_token(self, token: str) -> dict[str, Any] | None:
+        clean_token = str(token or "").strip()
+        if not clean_token:
+            return None
+        with self.client_watch_lock:
+            for record in self.client_watch_filesystem_history:
+                if record.get("token") == clean_token:
+                    return copy.deepcopy(record)
+        return None
+
+    def latest_filesystem_watch_record(self, refresh: bool = False) -> dict[str, Any] | None:
+        with self.client_watch_lock:
+            if self.client_watch_filesystem_history and not refresh:
+                return copy.deepcopy(self.client_watch_filesystem_history[-1])
+        sessions, _errors = discover_sessions(self.sessions)
+        signature = self.filesystem_roots_watch_signature(sessions)
+        if not signature:
+            return None
+        token = self.record_filesystem_watch_snapshot(signature)
+        return self.filesystem_watch_record_for_token(token)
+
+    def filesystem_watch_signature_for_roots(self, roots: list[str]) -> tuple[Any, ...]:
+        return tuple((root, filesystem_watch_signature(root)) for root in roots[:CLIENT_WATCH_ROOT_LIMIT])
+
+    def filesystem_watch_full_due(self) -> bool:
+        with self.client_watch_lock:
+            return self.client_watch_filesystem_last_full_at <= 0.0 or time.monotonic() - self.client_watch_filesystem_last_full_at >= FILESYSTEM_WATCH_KEYFRAME_SECONDS
+
+    def mark_filesystem_watch_full_sent(self) -> None:
+        with self.client_watch_lock:
+            self.client_watch_filesystem_last_full_at = time.monotonic()
+
+    def filesystem_watch_full_payload(self, record: dict[str, Any], reason: str = "full") -> dict[str, Any]:
+        signature = record.get("signature")
+        roots = sorted(filesystem_signature_root_map(signature).keys())
+        payload = self.filesystem_push_payload(roots)
+        payload["mode"] = "full"
+        payload["reason"] = reason
+        payload["token"] = record.get("token", "")
+        return payload
+
+    def filesystem_watch_diff_payload(self, since_token: str = "", force_full: bool = False) -> dict[str, Any]:
+        current = self.latest_filesystem_watch_record(refresh=force_full)
+        if current is None:
+            return {"mode": "none", "token": "", "directories": [], "removed_roots": []}
+        if force_full:
+            return self.filesystem_watch_full_payload(current, "forced")
+        previous = self.filesystem_watch_record_for_token(since_token)
+        if previous is None:
+            return self.filesystem_watch_full_payload(current, "stale-since")
+        current_signature = current.get("signature")
+        previous_signature = previous.get("signature")
+        if previous.get("token") == current.get("token") or previous_signature == current_signature:
+            return {
+                "mode": "none",
+                "token": current.get("token", ""),
+                "since": previous.get("token", ""),
+                "directories": [],
+                "removed_roots": [],
+                "change_summary": filesystem_change_summary(previous_signature, current_signature),
+            }
+        changed_roots, removed_roots = filesystem_changed_roots(previous_signature, current_signature)
+        payload = self.filesystem_push_payload(changed_roots)
+        payload["mode"] = "diff"
+        payload["token"] = current.get("token", "")
+        payload["since"] = previous.get("token", "")
+        payload["removed_roots"] = removed_roots
+        payload["change_summary"] = filesystem_change_summary(previous_signature, current_signature)
+        return payload
+
     def publish_filesystem_ready_event(
         self,
         roots: list[str],
         trigger: str = "watch",
         change_summary: dict[str, Any] | None = None,
+        current_signature: tuple[Any, ...] | None = None,
+        force_full: bool = False,
     ) -> list[str]:
         if not roots:
             return []
-        payload = self.filesystem_push_payload(roots)
-        signature = self.client_event_payload_signature(payload.get("directories", []))
+        started = time.perf_counter()
+        filesystem_signature = current_signature or self.filesystem_watch_signature_for_roots(roots)
+        token = self.record_filesystem_watch_snapshot(filesystem_signature)
         with self.client_watch_lock:
             previous_signature = self.client_watch_filesystem_payload_signature
-            self.client_watch_filesystem_payload_signature = signature
-        if previous_signature == signature:
+            self.client_watch_filesystem_payload_signature = token
+        if previous_signature == token:
             return []
-        if change_summary is not None:
-            payload["change_summary"] = change_summary
+        full = force_full or trigger != "watch" or self.filesystem_watch_full_due()
+        if full:
+            payload = self.filesystem_push_payload(roots)
+            payload["mode"] = "full"
+            payload["token"] = token
+            self.mark_filesystem_watch_full_sent()
+        else:
             payload = {
-                "roots": payload.get("roots", roots),
+                "roots": roots,
+                "mode": "diff",
                 "refresh": True,
-                "signature": signature,
-                "change_summary": change_summary,
-                "listing_summary": payload.get("listing_summary", {}),
-                "compute_ms": payload.get("compute_ms", 0.0),
+                "token": token,
+                "change_summary": change_summary or {},
+                "compute_ms": round((time.perf_counter() - started) * 1000, 1),
             }
         self.publish_client_event(
             "fs_changed",
@@ -2922,7 +3039,7 @@ class TmuxWebtermApp:
         if filesystem_changed:
             roots = self.filesystem_roots_for_watch(sessions)
             change_summary = filesystem_change_summary(previous_filesystem_signature, filesystem_signature)
-            events.extend(self.publish_filesystem_ready_event(roots, change_summary=change_summary))
+            events.extend(self.publish_filesystem_ready_event(roots, change_summary=change_summary, current_signature=filesystem_signature))
             session_file_events = self.publish_session_files_ready_events(trigger="fs_changed")
             if session_file_events:
                 events.extend(session_file_events)
