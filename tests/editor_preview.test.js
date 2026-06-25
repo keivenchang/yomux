@@ -3392,6 +3392,36 @@ async function runEditorPreviewSuite() {
 
   // browser clients subscribe to server push events for the expensive live datasets.
   test('t@7149', () => {
+    const api = loadYolomux();
+    const ownerPayload = {
+      search_index: {
+        owner: true,
+        status: 'owner',
+        current_server: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
+        owner_server: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
+      },
+    };
+    const readerPayload = {
+      search_index: {
+        owner: false,
+        status: 'follower',
+        current_server: {hostname: 'devhost', port: 8003, project_root: '/home/keivenc/yolomux.dev8002', pid: 222},
+        owner_server: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
+      },
+    };
+    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(ownerPayload).mode, 'indexing server', 'YO!info summary names the connected indexing owner');
+    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload).mode, 'read server', 'YO!info summary names a follower as a read server');
+    api.setBackgroundOwnerStatusPayloadForTest(ownerPayload);
+    const ownerHtml = api.infoServerRoleHtmlForTest();
+    assert.ok(ownerHtml.includes('data-index-role="owner"'), 'YO!info role row marks the connected indexing server');
+    assert.ok(ownerHtml.includes('indexing server'), 'YO!info role row renders indexing server text');
+    assert.ok(ownerHtml.includes('connected devhost:8002'), 'YO!info role row names the connected server');
+    api.setBackgroundOwnerStatusPayloadForTest(readerPayload);
+    const readerHtml = api.infoServerRoleHtmlForTest();
+    assert.ok(readerHtml.includes('data-index-role="reader"'), 'YO!info role row marks read servers');
+    assert.ok(readerHtml.includes('read server'), 'YO!info role row renders read server text');
+    assert.ok(readerHtml.includes('connected devhost:8003'), 'YO!info role row names the connected read server');
+    assert.ok(readerHtml.includes('index owner devhost:8002'), 'YO!info role row names the separate index owner');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes("new EventSource('/api/client-events')"), 'client subscribes to the general server event stream');
     assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'SSE is installed alongside the remaining local ping/log timers');
@@ -3406,14 +3436,17 @@ async function runEditorPreviewSuite() {
     assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)/.test(source), 'client reports background editor files separately from active visible editor files');
     assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
     assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
-    assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']"), 'client listens for the expected push event types');
+    assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']"), 'client listens for the expected push event types');
     assert.ok(/addEventListener\('ready',[\s\S]{0,260}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
+    assert.ok(/addEventListener\('ready',[\s\S]{0,420}refreshBackgroundOwnerStatus\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
     assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
     assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
     const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
     assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (clientEventsConnected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll only runs while client-events is disconnected');
     assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
     assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
+    assert.ok(/if \(type === 'background_owner_changed'\)[\s\S]{0,180}applyBackgroundOwnerStatusPayload\(payload\)/.test(source), 'background_owner_changed applies direct owner status');
+    assert.ok(/if \(type === 'background_refresh_done'\)[\s\S]{0,180}payload\.role === 'search-index'[\s\S]{0,160}refreshBackgroundOwnerStatus\(\{force: true\}\)/.test(source), 'search-index refresh completion refreshes owner status');
     assert.ok(/if \(type === 'tmux_signals_changed'\)[\s\S]{0,120}applyTmuxSignalsPayload\(payload\)/.test(source), 'tmux_signals_changed applies direct payloads');
     assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
     assert.ok(/if \(type === 'transcripts_changed'\)[\s\S]{0,220}applyTranscriptsPayload\(payload\.data, \{refreshAuto: false, refreshContext: false, refreshActivity: false\}\)/.test(source), 'transcripts_changed applies direct metadata payloads');
@@ -3428,6 +3461,9 @@ async function runEditorPreviewSuite() {
     assert.equal(filePushHelper.includes('fetchDirectory'), false, 'files_changed uses the server file signature directly, not a parent-directory listing');
     assert.equal(filePushHelper.includes('refreshOpenFilesIfChanged'), false, 'files_changed does not route through the directory-backed polling helper');
     assert.equal(source.includes('function scheduleSessionFilesPushRefresh()'), false, 'session-files push no longer triggers a client refetch helper');
+    assert.ok(source.includes("apiFetchJson('/api/background/status'"), 'client fetches background-owner status for the YO!info server-role row');
+    assert.ok(source.includes('function infoServerRoleHtml()'), 'YO!info has a server-role row renderer');
+    assert.ok(source.includes('data-index-role="${esc(summary.state)}"'), 'server-role row exposes indexing-owner vs read-server state');
     const watchRootsHelper = source.slice(source.indexOf('function clientServerWatchRoots()'), source.indexOf('function clientServerWatchState()'));
     assert.equal(watchRootsHelper.includes('openFiles.keys()'), false, 'open editor file dirs are not folded into the slower directory watch roots');
     assert.ok(/function applyLayoutSlots[\s\S]*?syncServerWatchRoots\(\)/.test(source), 'layout/tab changes immediately resync the server watch state');

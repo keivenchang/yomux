@@ -8310,6 +8310,59 @@ body.theme-light .yoagent-global .markdown-body pre code {
   background: #151b25;
   font-weight: 700;
 }
+.info-server-role {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: calc(
+    var(--info-session-column-width)
+    + var(--info-path-column-width)
+    + var(--info-branch-column-width)
+    + var(--info-pr-column-width)
+    + var(--info-linear-column-width)
+    + var(--info-desc-column-width)
+    + var(--info-updated-column-width)
+    + (var(--info-table-column-gap) * 6)
+    + (var(--info-table-inline-padding) * 2)
+  );
+  padding: 7px var(--info-table-inline-padding) 8px;
+  border-bottom: 1px solid #263044;
+  color: var(--pane-tab-text);
+  background: color-mix(in srgb, var(--panel2) 82%, var(--panel));
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.info-server-role-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--muted) 18%, transparent);
+}
+.info-server-role[data-index-role="owner"] .info-server-role-dot {
+  background: var(--good);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--good) 22%, transparent);
+}
+.info-server-role[data-index-role="reader"] .info-server-role-dot {
+  background: var(--accent-gold);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-gold) 24%, transparent);
+}
+.info-server-role-label {
+  color: var(--text-muted-cool);
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: var(--ui-font-size-xs);
+}
+.info-server-role-mode {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+.info-server-role-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .info-sort-button {
   width: 100%;
   min-width: 0;

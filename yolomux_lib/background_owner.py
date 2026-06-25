@@ -85,6 +85,7 @@ class BackgroundOwnerRegistry:
         owner_dir: Path = BACKGROUND_OWNER_DIR,
         roles: tuple[str, ...] = BACKGROUND_ROLES,
         on_demote: Callable[[], None] | None = None,
+        on_acquire: Callable[[dict[str, Any]], None] | None = None,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         pid: int | None = None,
@@ -107,6 +108,7 @@ class BackgroundOwnerRegistry:
         self.generation_id = f"{self.started_at_ns}-{self.pid}-{self.nonce[:12]}"
         self.record_path = self.generations_dir / f"{self.generation_id}.json"
         self.on_demote = on_demote
+        self.on_acquire = on_acquire
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
@@ -251,7 +253,7 @@ class BackgroundOwnerRegistry:
         }
         return send_yolomux_control_request(current, request, timeout=BACKGROUND_RELEASE_TIMEOUT_SECONDS)
 
-    def mark_owner_acquired(self, transition: str, owner_record: dict[str, Any] | None = None) -> None:
+    def mark_owner_acquired(self, transition: str, owner_record: dict[str, Any] | None = None) -> dict[str, Any]:
         self.owner = True
         self.status = "owner"
         self.last_error = ""
@@ -262,8 +264,14 @@ class BackgroundOwnerRegistry:
             self.counters["takeover_success"] = self.counters.get("takeover_success", 0) + 1
         self.write_owner_record()
         self.publish_generation()
+        return self.status_payload()
+
+    def notify_owner_acquired(self, status: dict[str, Any]) -> None:
+        if self.on_acquire is not None:
+            self.on_acquire(status)
 
     def attempt_takeover(self) -> bool:
+        acquired_status: dict[str, Any] | None = None
         with self.lock:
             self.publish_generation()
             if not self.is_latest_live_generation():
@@ -278,19 +286,23 @@ class BackgroundOwnerRegistry:
             owner_record = self.read_owner_record()
             if self.acquire_owner_lock():
                 transition = "takeover" if owner_record and owner_record.get("generation_id") != self.generation_id else "acquired"
-                self.mark_owner_acquired(transition, owner_record)
-                return True
-            release = self.request_current_owner_release()
-            if release.get("ok") and self.acquire_owner_lock():
-                self.mark_owner_acquired("takeover", owner_record)
-                return True
-            self.status = "blocked_by_unreachable_owner"
-            self.last_error = str(release.get("error") or "owner lock is held")
-            self.last_transition = "blocked"
-            self.last_transition_details = {"owner": owner_record or {}, "release": release}
-            self.counters["takeover_failed"] = self.counters.get("takeover_failed", 0) + 1
-            self.publish_generation()
-            return False
+                acquired_status = self.mark_owner_acquired(transition, owner_record)
+            else:
+                release = self.request_current_owner_release()
+                if release.get("ok") and self.acquire_owner_lock():
+                    acquired_status = self.mark_owner_acquired("takeover", owner_record)
+                else:
+                    self.status = "blocked_by_unreachable_owner"
+                    self.last_error = str(release.get("error") or "owner lock is held")
+                    self.last_transition = "blocked"
+                    self.last_transition_details = {"owner": owner_record or {}, "release": release}
+                    self.counters["takeover_failed"] = self.counters.get("takeover_failed", 0) + 1
+                    self.publish_generation()
+                    return False
+        if acquired_status is not None:
+            self.notify_owner_acquired(acquired_status)
+            return True
+        return False
 
     def release_owner(self, reason: str = "release") -> None:
         demote = False
@@ -453,6 +465,7 @@ class BackgroundOwnerRegistry:
         latest = self.latest_live_generation()
         owner_record = self.read_owner_record()
         with self.lock:
+            search_index_state = self.role_state(BACKGROUND_ROLE_SEARCH_INDEX).__dict__
             return {
                 "owner": self.owner,
                 "status": self.status,
@@ -464,6 +477,14 @@ class BackgroundOwnerRegistry:
                 "last_transition": self.last_transition,
                 "last_transition_details": dict(self.last_transition_details),
                 "last_error": self.last_error,
+                "search_index": {
+                    "role": BACKGROUND_ROLE_SEARCH_INDEX,
+                    "owner": bool(search_index_state.get("owner")),
+                    "mode": "indexing-server" if search_index_state.get("owner") else "read-server",
+                    "current_server": self.owner_payload(),
+                    "owner_server": owner_record,
+                    "status": search_index_state.get("status") or self.status,
+                },
             }
 
 
@@ -508,7 +529,19 @@ class DisabledBackgroundOwner:
         return {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False}
 
     def status_payload(self) -> dict[str, Any]:
-        return {"owner": True, "status": "disabled", "roles": {}}
+        return {
+            "owner": True,
+            "status": "disabled",
+            "roles": {},
+            "search_index": {
+                "role": BACKGROUND_ROLE_SEARCH_INDEX,
+                "owner": True,
+                "mode": "indexing-server",
+                "current_server": {},
+                "owner_server": {},
+                "status": "disabled",
+            },
+        }
 
 
 def locked_background_owner_state() -> Any:

@@ -916,22 +916,23 @@ class TmuxWebtermApp:
             port=port,
             project_root=str(PROJECT_ROOT),
             on_demote=self.demote_background_owner,
+            on_acquire=self.handle_background_owner_acquired,
         )
         file_index.set_background_owner_checker(self.background_can_run)
         acquired = self.background_owner.start()
-        if acquired:
-            status = self.background_owner.status_payload()
-            transition = str(status.get("last_transition") or "acquired")
-            if transition == "takeover":
-                self.log_event(None, "background_owner_takeover", "Background owner moved to this server", status.get("last_transition_details", {}))
-            else:
-                self.log_event(None, "background_owner_acquired", "Background owner acquired by this server", status.get("generation", {}))
-            self.warm_start_session_files_payload_cache()
-            self.warm_start_tabber_activity_cache()
-            self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
-        elif self.background_owner.status == "blocked_by_unreachable_owner":
+        if not acquired and self.background_owner.status == "blocked_by_unreachable_owner":
             self.log_event(None, "background_owner_blocked", "Background owner takeover blocked", self.background_owner.status_payload())
         return acquired
+
+    def handle_background_owner_acquired(self, status: dict[str, Any]) -> None:
+        transition = str(status.get("last_transition") or "acquired")
+        if transition == "takeover":
+            self.log_event(None, "background_owner_takeover", "Background owner moved to this server", status.get("last_transition_details", {}))
+        else:
+            self.log_event(None, "background_owner_acquired", "Background owner acquired by this server", status.get("generation", {}))
+        self.warm_start_session_files_payload_cache()
+        self.warm_start_tabber_activity_cache()
+        self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
 
     def background_can_run(self, role: str) -> bool:
         return self.background_owner.can_run(role)

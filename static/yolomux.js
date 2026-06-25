@@ -1182,6 +1182,11 @@ let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: 
 let activitySummaryRefreshing = false;
 let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
+let backgroundOwnerStatusPayload = null;
+let backgroundOwnerStatusLoading = false;
+let backgroundOwnerStatusLoaded = false;
+let backgroundOwnerStatusError = '';
+let backgroundOwnerStatusRefreshPromise = null;
 let yoagentStartupActivitySummaryPayload = null;
 let yoagentMessages = [];
 let yoagentPendingWaits = [];
@@ -44755,6 +44760,105 @@ function infoMetadataLoadingHtml() {
   </div>`;
 }
 
+function backgroundServerPortText(record) {
+  const port = Number(record?.port);
+  return Number.isFinite(port) && port > 0 ? `:${Math.trunc(port)}` : '';
+}
+
+function backgroundServerLabel(record, fallback = '') {
+  const source = record && typeof record === 'object' ? record : {};
+  const host = String(source.hostname || fallback || serverHostname || '').trim();
+  const endpoint = host ? `${host}${backgroundServerPortText(source)}` : '';
+  const root = compactHomePath(source.project_root || '');
+  const pid = Number(source.pid);
+  return [
+    endpoint,
+    root,
+    Number.isFinite(pid) && pid > 0 ? `pid ${Math.trunc(pid)}` : '',
+  ].filter(Boolean).join(' · ') || 'this server';
+}
+
+function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
+  const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
+  const role = roles['search-index'] && typeof roles['search-index'] === 'object' ? roles['search-index'] : {};
+  const ownsIndex = searchIndex.owner === true || role.owner === true;
+  const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
+  const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
+  return {
+    ownsIndex,
+    mode: ownsIndex ? 'indexing server' : 'read server',
+    state: ownsIndex ? 'owner' : 'reader',
+    currentLabel: backgroundServerLabel(current),
+    ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
+    status: String(searchIndex.status || role.status || data.status || ''),
+    error: String(data.last_error || ''),
+  };
+}
+
+function infoServerRoleHtml() {
+  if (shareViewMode) return '';
+  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
+    return `<div class="info-server-role loading" data-index-role="loading" role="status">
+      <span class="info-server-role-label">server role</span>
+      <span class="info-server-role-mode">loading</span>
+      <span class="info-server-role-detail">${esc(backgroundServerLabel(null))}</span>
+    </div>`;
+  }
+  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
+    return `<div class="info-server-role error" data-index-role="error" title="${esc(backgroundOwnerStatusError)}">
+      <span class="info-server-role-label">server role</span>
+      <span class="info-server-role-mode">unavailable</span>
+      <span class="info-server-role-detail">${esc(backgroundOwnerStatusError)}</span>
+    </div>`;
+  }
+  if (!backgroundOwnerStatusPayload) return '';
+  const summary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
+  const detailParts = [`connected ${summary.currentLabel}`];
+  if (!summary.ownsIndex) detailParts.push(summary.ownerLabel ? `index owner ${summary.ownerLabel}` : 'index owner pending');
+  if (summary.error) detailParts.push(summary.error);
+  const title = [`Current connected server: ${summary.currentLabel}`, summary.ownerLabel ? `Index owner: ${summary.ownerLabel}` : '', summary.status ? `Status: ${summary.status}` : '', summary.error].filter(Boolean).join('\n');
+  return `<div class="info-server-role" data-index-role="${esc(summary.state)}" title="${esc(title)}">
+    <span class="info-server-role-dot" aria-hidden="true"></span>
+    <span class="info-server-role-label">server role</span>
+    <span class="info-server-role-mode">${esc(summary.mode)}</span>
+    <span class="info-server-role-detail">${esc(detailParts.join(' · '))}</span>
+  </div>`;
+}
+
+function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  backgroundOwnerStatusPayload = payload;
+  backgroundOwnerStatusLoaded = true;
+  backgroundOwnerStatusError = '';
+  backgroundOwnerStatusLoading = false;
+  if (options.render !== false) renderInfoPanel();
+  return true;
+}
+
+async function refreshBackgroundOwnerStatus(options = {}) {
+  if (shareViewMode) return false;
+  if (backgroundOwnerStatusRefreshPromise && options.force !== true) return backgroundOwnerStatusRefreshPromise;
+  backgroundOwnerStatusLoading = !backgroundOwnerStatusPayload;
+  backgroundOwnerStatusError = '';
+  if (options.render !== false) renderInfoPanel();
+  backgroundOwnerStatusRefreshPromise = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
+      return applyBackgroundOwnerStatusPayload(payload, options);
+    } catch (error) {
+      backgroundOwnerStatusError = String(error?.payload?.error || error?.message || error);
+      backgroundOwnerStatusLoading = false;
+      if (options.render !== false) renderInfoPanel();
+      return false;
+    } finally {
+      backgroundOwnerStatusRefreshPromise = null;
+    }
+  })();
+  return backgroundOwnerStatusRefreshPromise;
+}
+
 function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
@@ -44762,26 +44866,27 @@ function renderInfoPanel() {
   applyInfoBranchColumnWidth();
   bindInfoPrContextMenu(node);   // idempotent — "Watch this PR" on the PR column
   renderWatchedPrs();   // the Watched PRs section repaints alongside the branch table
+  const serverRoleHtml = infoServerRoleHtml();
   const rows = infoBranchRows();
   const hasShareRows = shareViewMode && Array.isArray(shareInfoBranchRowsOverride);
   if (!rows.length) {
     if (hasShareRows) {
-      node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
+      node.innerHTML = `${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`;
       return;
     }
     if (transcriptMetaLoading) {
-      node.innerHTML = infoMetadataLoadingHtml();
+      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
       return;
     }
     if (transcriptMetaLoadError) {
-      node.innerHTML = `<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
+      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
       return;
     }
     if (!transcriptMetaLoaded) {
-      node.innerHTML = infoMetadataLoadingHtml();
+      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
       return;
     }
-    node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
+    node.innerHTML = `${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`;
     return;
   }
   const headerCell = (key, label) => {
@@ -44813,7 +44918,7 @@ function renderInfoPanel() {
   </div>`;
     return rowHtml + (row.session && infoSessionDrawerOpen.has(row.session) ? cachedInfoSessionDrawerHtml(row.session) : '');
   }).join('');
-  node.innerHTML = header + body;
+  node.innerHTML = serverRoleHtml + header + body;
   node.querySelectorAll('[data-info-sort]').forEach(button => {
     button.addEventListener('click', () => {
       setInfoBranchSort(button.dataset.infoSort);
@@ -47939,6 +48044,7 @@ function refreshAll() {
   resyncVisibleTerminalRemoteSizes('refresh');
   refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts({force: true});
+  refreshBackgroundOwnerStatus({force: true});
   refreshAutoStatuses();
   refreshWatchedFilesystem({full: true});
 }
@@ -48016,6 +48122,10 @@ async function boot() {
     loadNotifyStatus().catch(error => {
       console.warn('initial notify-status refresh failed', error);
       renderNotifyToggle();
+      return false;
+    });
+    refreshBackgroundOwnerStatus({render: false}).catch(error => {
+      console.warn('initial background-owner status refresh failed', error);
       return false;
     });
     initialAutoStatusesPromise = loadAutoStatuses().catch(error => {
@@ -48279,6 +48389,18 @@ function handleClientPushEvent(type, payload = {}) {
     if (payload.data) applyAutoApprovePayload(payload.data);
     return;
   }
+  if (type === 'background_owner_changed') {
+    if (!applyBackgroundOwnerStatusPayload(payload)) {
+      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+    }
+    return;
+  }
+  if (type === 'background_refresh_done') {
+    if (payload.role === 'search-index') {
+      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
+    }
+    return;
+  }
   if (type === 'tmux_signals_changed') {
     applyTmuxSignalsPayload(payload);
     return;
@@ -48357,13 +48479,14 @@ function installClientEventStream() {
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
+    refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   });
   source.addEventListener('ping', event => {
     clientEventsConnected = true;
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);

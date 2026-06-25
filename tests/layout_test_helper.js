@@ -557,6 +557,14 @@ globalThis.__layoutTestApi = {
   sessionFileLookbackLabelForTest: sessionFileLookbackLabel,
   sessionFileLookbackOptionsForTest: sessionFileLookbackOptions,
   normalizeSessionFileLookbackHoursForTest: normalizeSessionFileLookbackHours,
+  backgroundOwnerSearchIndexSummaryForTest: backgroundOwnerSearchIndexSummary,
+  infoServerRoleHtmlForTest: infoServerRoleHtml,
+  setBackgroundOwnerStatusPayloadForTest(payload) {
+    backgroundOwnerStatusPayload = payload;
+    backgroundOwnerStatusLoaded = Boolean(payload);
+    backgroundOwnerStatusLoading = false;
+    backgroundOwnerStatusError = '';
+  },
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },

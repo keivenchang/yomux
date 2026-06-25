@@ -178,6 +178,31 @@ def test_background_owner_dead_owner_released_lock_allows_newer_acquire(monkeypa
     newer.release_owner("test-cleanup")
 
 
+def test_background_owner_runtime_takeover_notifies_acquire_callback(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda pid: pid != 100)
+    old_owner = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, clock=lambda: 100.0)
+    follower_events = []
+    follower = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=101, clock=lambda: 100.0, on_acquire=lambda status: follower_events.append(status))
+    old_owner.started_at_ns = 20
+    follower.started_at_ns = 10
+    old_owner.publish_generation()
+    follower.publish_generation()
+    assert old_owner.acquire_owner_lock() is True
+    old_owner.owner = True
+    old_owner.status = "owner"
+    old_owner.write_owner_record()
+    old_owner.release_owner_lock()
+
+    follower.heartbeat_once()
+
+    assert follower.is_owner() is True
+    assert follower.status == "owner"
+    assert follower_events
+    assert follower_events[-1]["search_index"]["owner"] is True
+    assert follower_events[-1]["search_index"]["mode"] == "indexing-server"
+    follower.release_owner("test-cleanup")
+
+
 def test_background_owner_recovers_from_missing_or_corrupt_state(monkeypatch, tmp_path):
     monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
     owner_dir = tmp_path / "owner"
@@ -367,6 +392,7 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
 def test_background_owner_required_log_event_names_have_emitters():
     source = (REPO_ROOT / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
 
+    assert "on_acquire=self.handle_background_owner_acquired" in source
     for event_type in (
         "background_owner_acquired",
         "background_owner_released",
@@ -394,6 +420,8 @@ def test_background_owner_status_reports_required_counters(tmp_path):
     assert payload["counters"]["avoided_recomputes"] == 1
     assert payload["counters"]["follower_stale_reads"] == 1
     assert payload["counters"]["search_index_bytes_written"] == 123
+    assert payload["search_index"]["mode"] == "read-server"
+    assert payload["search_index"]["current_server"]["generation_id"] == owner.generation_id
 
 
 def test_background_owner_coalesces_duplicate_local_refresh_requests(tmp_path):

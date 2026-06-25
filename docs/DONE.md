@@ -6,6 +6,10 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-24
 
+### Background indexing owner visibility
+
+- YO!info now shows whether the current browser is connected to the `search-index` owner (`indexing server`) or to a follower (`read server`) and names the connected server plus the index owner. The client loads `/api/background/status` once at startup, refreshes it on manual refresh and EventSource reconnect, and applies `background_owner_changed` pushes directly. Runtime owner takeovers now notify the app through a background-owner acquire callback, so a follower that takes over after a dead indexing owner publishes `background_owner_changed` instead of silently changing only the on-disk owner record. `docs/DEVELOPMENT.md` now spells out the `YOLOMUX_STATE_DIR` layout: `background-owner/`, `search_index/`, `watch-index.json`, and separate per-target auto-approve locks under `locks/`.
+
 ### Filesystem watch diff/keyframe frames
 
 - Implemented MPEG-style filesystem watch frames. The server now records a bounded shared filesystem snapshot history, sends full frames for the first/keyframe/manual paths, sends compact `fs_changed` invalidations for ordinary watch changes, and answers stateless client `GET /api/fs/watch-diff?since=<token>` requests with changed-root diffs or a full stale-token fallback. Browser clients keep their own token, request `full=1` from the top-right refresh path, invalidate removed roots, and no per-client server state is needed for multiple clients per server. Verification: focused filesystem watch and route tests, `node tests/layout_async.test.js`, and full `python3 tools/check.py`.
