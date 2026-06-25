@@ -2730,10 +2730,11 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.includes('YO!stats'));
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
     assert.equal(fileMenuLabels[0], 'Open file', 'File -> Open file is the first File menu command');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 6)), ['Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!share...'], 'File menu starts with Open file, then Finder/Search/data/YO commands, then YO!share');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 7)), ['Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!share...'], 'File menu starts with Open file, then Finder/Search/data/YO commands');
+    const firstYoIndex = fileMenuLabels.indexOf('YO!info');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 4)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!stats after YO!agent');
     assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
-    assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('YO!stats'), 'YO!stats stays near the settings/debug group after Preferences');
-    assert.deepStrictEqual(canonical(fileMenu.items.slice(-4).map(item => item.type === 'separator' ? '---' : item.label)), ['Preferences', 'YO!stats', '---', 'Log out']);
+    assert.deepStrictEqual(canonical(fileMenu.items.slice(-4).map(item => item.type === 'separator' ? '---' : item.label)), ['YO!share...', 'Preferences', '---', 'Log out']);
     for (const label of [api.fileExplorerLabel(), 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
       const item = fileMenu.items.find(candidate => candidate.label === label);
       assert.ok(item?.iconHtml, `File menu ${label} uses the shared icon row`);

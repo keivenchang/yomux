@@ -9120,6 +9120,7 @@ function appMenuTree() {
           fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
           fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
           fileMenuVirtualCommand(yoagentItemId, t('menu.file.yoagent.detail')),
+          debugMenuItem,
           menuCommand(t('menu.file.share'), () => showShareModal(), {
             disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
             detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
@@ -9131,7 +9132,6 @@ function appMenuTree() {
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
             targetItem: prefsItemId,
           }),
-          debugMenuItem,
         ],
         [
           menuCommand(t('menu.file.logout'), logOut, {
