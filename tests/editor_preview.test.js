@@ -1953,8 +1953,9 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.rollupBucketSeconds, 10, 'YO!stats graph rolls old samples into ten-second timing buckets');
     assert.equal(summary.rawBuckets, 0, 'two-hour-old samples are no longer kept as one-second raw buckets');
     assert.ok(summary.rollupBuckets > 0 && summary.rollupBuckets <= 3, 'two-hour-old per-second samples compress into ten-second buckets');
-    assert.equal(summary.rangeSeconds, 60, 'YO!stats graph defaults to the one-minute time range');
-    assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default one-minute range');
+    assert.equal(summary.scaleSeconds, 5, 'YO!stats graph defaults to five-second buckets');
+    assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
+    assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
     assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 86400], 'YO!stats shows short ranges and 24h before 8h/16h data exists');
     assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', 'cpu', 'systemCpu'], 'graph tracks API, SSE, latency, bandwidth, process CPU, and system CPU series');
     assert.ok(summary.pendingServerBuckets > 0, 'browser-observed API/SSE graph buckets are queued for server retention');
@@ -2034,11 +2035,11 @@ async function runEditorPreviewSuite() {
     });
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.rawBuckets > 0, 'recent timing samples stay in one-second buckets');
-    api.setDebugGraphScaleForTest(5);
+    api.setDebugGraphScaleForTest(10);
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.scaleSeconds, 5, 'clickable graph scale changes the rendered aggregation interval');
+    assert.equal(summary.scaleSeconds, 10, 'clickable graph scale changes the rendered aggregation interval');
     const html = api.debugPanelHtmlForTest();
-    assert.ok(html.includes('5 sec buckets | 2 hours'), 'graph labels the active time scale and selected range');
+    assert.ok(html.includes('10 sec buckets | 2 hours'), 'graph labels the active time scale and selected range');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"'), 'graph renders long range buttons after enough retained history exists');
     assert.ok(/data-js-debug-axis-max="count">[0-9.]+\/sec</.test(html), 'count chart Y axis shows per-second rates');
     assert.ok(/data-js-debug-axis-max="latency">[0-9.]+ (?:ms|s)</.test(html), 'latency chart Y axis shows time units');

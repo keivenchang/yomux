@@ -30610,9 +30610,11 @@ function bindPreferencesPanel(panel) {
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // JavaScript debug panel rendering and controls split from 80_panes_preferences.js.
 
+const jsDebugGraphDefaultScaleSeconds = 5;
+const jsDebugGraphDefaultRangeSeconds = 15 * 60;
 let jsDebugSubTab = 'events';
-let jsDebugGraphScaleSeconds = 1;
-let jsDebugGraphRangeSeconds = 60;
+let jsDebugGraphScaleSeconds = jsDebugGraphDefaultScaleSeconds;
+let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugStatsPollTimer = null;
 let jsDebugStatsPollInFlight = false;
 let jsDebugStatsHistoryFlushTimer = null;
@@ -30670,7 +30672,7 @@ function normalizedJsDebugSubTab(value) {
 
 function normalizedJsDebugGraphScale(value) {
   const seconds = Number(value);
-  return jsDebugGraphScaleOptions.includes(seconds) ? seconds : 1;
+  return jsDebugGraphScaleOptions.includes(seconds) ? seconds : jsDebugGraphDefaultScaleSeconds;
 }
 
 function debugGraphOldestBucketStartMs() {
@@ -30697,8 +30699,8 @@ function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
   const seconds = Number(value);
   const options = debugGraphAvailableRangeOptions(nowMs);
   if (options.some(option => option.seconds === seconds)) return seconds;
-  if (options.some(option => option.seconds === 60)) return 60;
-  return options[0]?.seconds || 60;
+  if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
+  return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
 }
 
 function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
@@ -31436,7 +31438,7 @@ function debugGraphSvgHtml(buckets, seriesItems) {
   const last = buckets[buckets.length - 1]?.startMs || first;
   return `<div class="js-debug-chart-shell">
     <div class="js-debug-chart-grid">${jsDebugGraphChartGroups.map(group => debugGraphChartHtml(group, seriesItems, buckets)).join('')}</div>
-    <div class="js-debug-graph-scale"><span>${esc(debugGraphTimeLabel(first))}</span><span>${esc(jsDebugGraphScaleSeconds)} sec buckets | ${esc(jsDebugGraphRangeOptions.find(option => option.seconds === jsDebugGraphRangeSeconds)?.label || 'last min')}</span><span>${esc(debugGraphTimeLabel(last))}</span></div>
+    <div class="js-debug-graph-scale"><span>${esc(debugGraphTimeLabel(first))}</span><span>${esc(jsDebugGraphScaleSeconds)} sec buckets | ${esc(jsDebugGraphRangeOptions.find(option => option.seconds === jsDebugGraphRangeSeconds)?.label || '15 min')}</span><span>${esc(debugGraphTimeLabel(last))}</span></div>
   </div>`;
 }
 
