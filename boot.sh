@@ -94,6 +94,21 @@ export PATH="${HOME}/.local/bin:${HOME}/.local/node-v22.11.0-linux-x64/bin:${PAT
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
 
+# YO!agent's Claude backend runs `claude` non-interactively. On macOS that binary
+# authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT read
+# primaryApiKey from ~/.claude.json the way the Linux build does. The detached server
+# bypasses the ~/bin/claude wrapper (PATH resolves ~/.local/bin/claude first), so mirror
+# that wrapper here: export the stored primaryApiKey as ANTHROPIC_API_KEY when it is not
+# already set. Exported (not passed on argv) so the key never appears in `ps`.
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -r "${HOME}/.claude.json" ]]; then
+  ANTHROPIC_API_KEY="$("$python_bin" -c 'import json, os
+try:
+    print(json.load(open(os.path.expanduser("~/.claude.json"))).get("primaryApiKey") or "")
+except Exception:
+    print("")' 2>/dev/null || true)"
+  [[ -n "$ANTHROPIC_API_KEY" ]] && export ANTHROPIC_API_KEY
+fi
+
 extra_env=()
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
@@ -125,11 +140,26 @@ log_path_for() {
 
 print_launch_command() {
   local port="$1"
+  local log_path
+  log_path="$(log_path_for "$port")"
   build_server_args "$port"
   printf 'PATH=%s\n' "$PATH"
   printf 'cd %q\n' "$repo_root"
-  print_detach_prefix
-  printf 'env TERM=%q PYTHONUNBUFFERED=%q PATH=%q' "$TERM" "$PYTHONUNBUFFERED" "$PATH"
+  if supports_setsid_f; then
+    print_detach_prefix
+    printf 'bash -c %q > /dev/null 2>&1 < /dev/null & disown\n' "$(shell_command_for "$log_path")"
+  else
+    print_python_detach_command "$log_path"
+  fi
+}
+
+supports_setsid_f() {
+  command -v setsid >/dev/null 2>&1 && setsid -f true >/dev/null 2>&1
+}
+
+shell_command_for() {
+  local log_path="$1"
+  printf 'cd %q && exec env TERM=%q PYTHONUNBUFFERED=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$PATH"
   for item in "${extra_env[@]}"; do
     printf ' %q' "$item"
   done
@@ -137,11 +167,69 @@ print_launch_command() {
   for item in "${server_args[@]}"; do
     printf ' %q' "$item"
   done
-  printf ' > %q 2>&1 < /dev/null\n' "$(log_path_for "$port")"
+  printf ' > %q 2>&1 < /dev/null' "$log_path"
 }
 
-supports_setsid_f() {
-  command -v setsid >/dev/null 2>&1 && setsid -f true >/dev/null 2>&1
+python_detach_code='
+import os
+import subprocess
+import sys
+
+repo_root = sys.argv[1]
+log_path = sys.argv[2]
+separator = sys.argv.index("--")
+env = os.environ.copy()
+for item in sys.argv[3:separator]:
+    key, _, value = item.partition("=")
+    if key:
+        env[key] = value
+cmd = sys.argv[separator + 1:]
+with open(log_path, "ab", buffering=0) as log:
+    subprocess.Popen(
+        cmd,
+        cwd=repo_root,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
+    )
+'
+
+python_detach_args=()
+build_python_detach_args() {
+  local log_path="$1"
+  python_detach_args=(
+    "$python_bin"
+    -c "$python_detach_code"
+    "$repo_root"
+    "$log_path"
+    "TERM=$TERM"
+    "PYTHONUNBUFFERED=$PYTHONUNBUFFERED"
+    "PATH=$PATH"
+  )
+  for item in "${extra_env[@]}"; do
+    python_detach_args+=("$item")
+  done
+  python_detach_args+=(
+    --
+    "$python_bin"
+    "${repo_root}/yolomux.py"
+  )
+  for item in "${server_args[@]}"; do
+    python_detach_args+=("$item")
+  done
+}
+
+print_python_detach_command() {
+  local log_path="$1"
+  local item
+  build_python_detach_args "$log_path"
+  printf 'nohup'
+  for item in "${python_detach_args[@]}"; do
+    printf ' %q' "$item"
+  done
+  printf ' > /dev/null 2>&1 < /dev/null & disown\n'
 }
 
 print_detach_prefix() {
@@ -212,15 +300,15 @@ wait_for_port() {
 
 launch_server() {
   local log_path="$1"
+  local shell_command
   if supports_setsid_f; then
-    nohup setsid -f env TERM="$TERM" PYTHONUNBUFFERED="$PYTHONUNBUFFERED" PATH="$PATH" "${extra_env[@]}" \
-      "$python_bin" "${repo_root}/yolomux.py" "${server_args[@]}" \
-      > "$log_path" 2>&1 < /dev/null &
+    shell_command="$(shell_command_for "$log_path")"
+    nohup setsid -f bash -c "$shell_command" > /dev/null 2>&1 < /dev/null &
   else
-    nohup env TERM="$TERM" PYTHONUNBUFFERED="$PYTHONUNBUFFERED" PATH="$PATH" "${extra_env[@]}" \
-      "$python_bin" "${repo_root}/yolomux.py" "${server_args[@]}" \
-      > "$log_path" 2>&1 < /dev/null &
+    build_python_detach_args "$log_path"
+    nohup "${python_detach_args[@]}" > /dev/null 2>&1 < /dev/null &
   fi
+  disown 2>/dev/null || true
 }
 
 restart_port() {
