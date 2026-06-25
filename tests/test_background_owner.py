@@ -15,7 +15,10 @@ from yolomux_lib.background_owner import BACKGROUND_ROLE_SEARCH_INDEX
 from yolomux_lib.background_owner import BACKGROUND_ROLE_TABBER_ACTIVITY
 from yolomux_lib.background_owner import BACKGROUND_ROLE_WATCH_ROOTS
 from yolomux_lib.background_owner import BackgroundOwnerRegistry
+from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
+
+from _git_helpers import git
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -636,6 +639,60 @@ def test_follower_session_files_http_payload_returns_refreshing_elsewhere(monkey
     assert payload["files"] == []
     assert payload["repos"] == []
     assert payload["cache"]["stale"] is True
+    assert payload["cache"]["refreshing_elsewhere"] is True
+    assert owner.refresh_requests == [BACKGROUND_ROLE_SESSION_FILES]
+    assert owner.fallbacks == []
+
+
+def test_follower_session_files_http_placeholder_includes_clean_numbered_workdir_repo(monkeypatch, no_control_socket, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["8002"])
+    owner = FollowerOwner()
+    webapp.background_owner = owner
+    home = tmp_path / "home"
+    repo = tmp_path / "yolomux.dev8002"
+    home.mkdir()
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    pane = PaneInfo(
+        session="8002",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="8002:0.0",
+        current_path=str(home),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="8002", panes=[pane], selected_pane=pane, agents=[])
+    monkeypatch.setattr(app_module.session_files, "session_workdir", lambda session: repo if session == "8002" else home)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not compute missing session-files HTTP payloads")))
+    try:
+        payload, status = webapp.session_files_payload_for_infos("8002", {"8002": info}, 24.0)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["files"] == []
+    assert payload["repos"] == [{
+        "repo": str(repo),
+        "count": 0,
+        "touched_count": 0,
+        "added": 0,
+        "removed": 0,
+        "from_ref": "default",
+        "to_ref": "base",
+        "error": "",
+    }]
+    assert payload["refreshing_elsewhere"] is True
     assert payload["cache"]["refreshing_elsewhere"] is True
     assert owner.refresh_requests == [BACKGROUND_ROLE_SESSION_FILES]
     assert owner.fallbacks == []

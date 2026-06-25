@@ -4071,7 +4071,17 @@ class TmuxWebtermApp:
                         "fallback": True,
                     }
                 else:
-                    payload = {"session": session or "", "files": [], "repos": [], "errors": []}
+                    info = infos.get(session) if session else None
+                    if info is not None:
+                        payload = session_files.refreshing_session_files_payload_for_info(
+                            info,
+                            hours=hours,
+                            from_ref=from_ref,
+                            to_ref=to_ref,
+                            repo_refs=repo_refs,
+                        )
+                    else:
+                        payload = {"session": session or "", "files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
                     status = HTTPStatus.OK
                     cache_meta = {
                         "hit": False,

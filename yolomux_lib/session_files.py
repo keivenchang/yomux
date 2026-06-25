@@ -20,6 +20,7 @@ from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
 from .sessions import find_recent_codex_transcript
 from .sessions import recent_codex_transcript_candidates
+from .workdir import session_workdir
 
 
 CLAUDE_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -670,6 +671,18 @@ def repo_relative_path(path: Path, repo: Path) -> str | None:
         return None
 
 
+def configured_session_repo_candidate(info: SessionInfo) -> str | None:
+    configured = session_workdir(info.session)
+    if not configured.is_dir():
+        return None
+    try:
+        if configured.resolve() == Path.home().resolve():
+            return None
+    except OSError:
+        pass
+    return str(configured)
+
+
 def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     roots: list[str] = []
     candidates: list[str] = []
@@ -677,6 +690,9 @@ def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     if info.selected_pane is not None and info.selected_pane.current_path:
         candidates.append(info.selected_pane.current_path)
     candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
+    configured = configured_session_repo_candidate(info)
+    if configured:
+        candidates.append(configured)
     for value in candidates:
         repo = git_root_for_path(Path(value).expanduser())
         if repo and repo not in roots:
@@ -690,11 +706,57 @@ def session_live_pane_repo_roots(info: SessionInfo) -> list[str]:
     if info.selected_pane is not None and info.selected_pane.current_path:
         candidates.append(info.selected_pane.current_path)
     candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
+    configured = configured_session_repo_candidate(info)
+    if configured:
+        candidates.append(configured)
     for value in candidates:
         repo = git_root_for_path(Path(value).expanduser())
         if repo and repo not in roots:
             roots.append(repo)
     return roots
+
+
+def refreshing_session_files_payload_for_info(
+    info: SessionInfo,
+    hours: float = 24.0,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+    repo_refs: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    refs_active = refs_requested(from_ref, to_ref)
+    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
+    repo_payloads: list[dict[str, Any]] = []
+    for repo_text in session_live_pane_repo_roots(info):
+        repo = Path(repo_text)
+        repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
+        repo_from = str(repo_override.get("from") or "").strip() or from_ref
+        repo_to = str(repo_override.get("to") or "").strip() or to_ref
+        repo_refs_active = refs_requested(repo_from, repo_to)
+        sel_from, sel_to = diff_refs(repo_from, repo_to) if repo_refs_active else ("", "")
+        repo_payload = {
+            "repo": str(repo),
+            "count": 0,
+            "touched_count": 0,
+            "added": 0,
+            "removed": 0,
+            "from_ref": sel_from or "default",
+            "to_ref": sel_to or "base",
+            "error": "",
+        }
+        repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
+        repo_payloads.append(repo_payload)
+    return {
+        "session": info.session,
+        "hours": bounded_session_files_hours(hours),
+        "files": [],
+        "repos": repo_payloads,
+        "refs_by_repo": {},
+        "from_ref": selected_from or "default",
+        "to_ref": selected_to or "base",
+        "errors": [],
+        "warnings": [],
+        "refreshing_elsewhere": True,
+    }
 
 
 def session_file_entry(
@@ -901,8 +963,11 @@ def historical_codex_candidate_cwds(info: SessionInfo) -> list[str]:
     unique: list[str] = []
     for value in candidates:
         text = str(value or "").strip()
-        if text and text not in unique:
-            unique.append(text)
+        if not text:
+            continue
+        repo = git_root_for_path(Path(text).expanduser())
+        if repo and repo not in unique:
+            unique.append(repo)
     return unique
 
 

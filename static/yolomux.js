@@ -49294,6 +49294,12 @@ function handleClientPushEvent(type, payload = {}) {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
     }
+    if (payload.role === 'session-files') {
+      const session = String(payload.session || '');
+      if (!session || session === fileExplorerSessionFilesTargetSession()) {
+        fetchSessionFiles({silent: true}).catch(error => console.warn('session-files refresh failed', error));
+      }
+    }
     return;
   }
   if (type === 'tmux_signals_changed') {

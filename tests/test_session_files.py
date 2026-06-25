@@ -194,6 +194,49 @@ def test_session_files_payload_includes_zero_change_live_pane_repos_from_rendere
         assert any(item["repo"] == str(primary) and item["status"] == "T" for item in payload["files"])
 
 
+def test_session_files_payload_includes_clean_numbered_workdir_repo_when_pane_is_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = tmp_path / "yolomux.dev8002"
+    home.mkdir()
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    pane = PaneInfo(
+        session="8002",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="8002:0.0",
+        current_path=str(home),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="8002", panes=[pane], selected_pane=pane, agents=[])
+    monkeypatch.setattr(session_files, "session_workdir", lambda session: repo if session == "8002" else home)
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=1600)
+
+    assert payload["files"] == []
+    assert payload["repos"] == [{
+        "repo": str(repo),
+        "count": 0,
+        "touched_count": 0,
+        "added": 0,
+        "removed": 0,
+        "from_ref": "default",
+        "to_ref": "base",
+        "error": "",
+    }]
+
+
 def test_session_files_payload_carries_agent_window_attribution(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -456,6 +499,56 @@ def test_historical_codex_transcript_prefers_recent_transcript_with_repo_changes
     monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", lambda: [mentioned, changed])
 
     assert session_files.historical_codex_transcript_for_cwd(str(repo), cutoff=0) == changed
+
+
+def test_historical_codex_candidates_ignore_home_cwd_that_contains_other_repos(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    other = home / "yolomux.dev8003"
+    home.mkdir()
+    other.mkdir()
+    git(other, "init")
+    git(other, "config", "user.email", "test@example.com")
+    git(other, "config", "user.name", "Test User")
+    tracked = other / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(other, "add", "tracked.txt")
+    git(other, "commit", "-m", "base")
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": "git add tracked.txt", "workdir": str(other)}),
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(transcript, (1500, 1500))
+    pane = PaneInfo(
+        session="8002",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="8002:0.0",
+        current_path=str(home),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="8002", panes=[pane], selected_pane=pane, agents=[])
+    monkeypatch.setattr(session_files, "session_workdir", lambda _session: home)
+    monkeypatch.setattr(session_files, "find_recent_codex_transcript", lambda _cwd: None)
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", lambda: [transcript])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=1600)
+
+    assert session_files.historical_codex_candidate_cwds(info) == []
+    assert payload["files"] == []
+    assert payload["repos"] == []
 
 
 def test_file_mtime_or_fallback_preserves_epoch_mtime(tmp_path):
