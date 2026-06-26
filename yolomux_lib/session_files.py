@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import time
@@ -57,7 +58,7 @@ def resolved_change_path(raw_path: str, cwd: str | None) -> Path | None:
         if not cwd:
             return None
         path = Path(cwd).expanduser() / path
-    return path.resolve(strict=False)
+    return Path(os.path.abspath(os.fspath(path)))
 
 
 def file_mtime(path: Path) -> float:

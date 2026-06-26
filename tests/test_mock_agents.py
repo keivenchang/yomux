@@ -315,6 +315,16 @@ def assert_no_startup_ellipsis(box):
     assert "…" not in startup_text
 
 
+def expected_display_cwd(path):
+    cwd = os.fspath(path)
+    home = os.path.expanduser("~")
+    if cwd == home:
+        return "~"
+    if cwd.startswith(home + os.sep):
+        return "~" + cwd[len(home):]
+    return cwd
+
+
 def expected_codex_startup_box(model, effort, directory):
     rows = [
         " >_ OpenAI Codex (v0.142.0)",
@@ -2382,7 +2392,7 @@ def test_tmux_codex_startup_expands_long_model_row_without_ellipsis(visual_tmux)
     booted, pane = visual_tmux.wait_until(session, lambda text: "gpt-5.4-mini medium" in text and "/model to change" in text)
     assert booted, pane
     box = extract_first_box(pane)
-    assert box == expected_codex_startup_box("gpt-5.4-mini", "medium", f"~/{REPO_ROOT.name}")
+    assert box == expected_codex_startup_box("gpt-5.4-mini", "medium", expected_display_cwd(REPO_ROOT))
     assert_no_startup_ellipsis(box)
     assert len({len(line) for line in box}) == 1
 
@@ -2412,7 +2422,7 @@ def test_tmux_codex_compact_startup_keeps_box_after_typing(visual_tmux):
 @pytest.mark.e2e
 @pytest.mark.socket
 def test_tmux_claude_startup_cwd_survives_first_mock_submit(visual_tmux):
-    cwd_row = f"▘▘ ▝▝    ~/{REPO_ROOT.name}"
+    cwd_row = f"▘▘ ▝▝    {expected_display_cwd(REPO_ROOT)}"
     session = visual_tmux.launch(
         "claude-startup-submit",
         [sys.executable, "tools/claude.py", "--mock", "-m", "opus", "--effort", "xhigh", "-C", str(REPO_ROOT)],
