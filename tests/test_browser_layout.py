@@ -2167,6 +2167,7 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
           panelCount: document.querySelectorAll('.panel').length,
           paneTabCount: document.querySelectorAll('.pane-tab').length,
           panelVisible: document.querySelector('#panel-1')?.isConnected === true,
+          notifyActive: document.getElementById('notifyToggle')?.classList.contains('active') === true,
           status: document.getElementById('status').textContent,
           terminalText: document.querySelector('#panel-1 .terminal .xterm')?.textContent || '',
         };
@@ -2190,6 +2191,7 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["panelCount"] >= 1
     assert metrics["paneTabCount"] >= 1
     assert metrics["panelVisible"]
+    assert metrics["notifyActive"] is False
     assert metrics["terminalText"] == "fake terminal"
 
 

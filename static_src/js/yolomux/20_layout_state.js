@@ -3793,11 +3793,11 @@ function setSessionOrder(next) {
   layoutItems = computeLayoutItems();
 }
 
-function updateSessionList(nextSessions) {
+function updateSessionList(nextSessions, options = {}) {
   const next = normalizedSessionOrder(nextSessions);
   if (!next) return false;
   pruneExpiredPendingTmuxSessions();
-  clearConfirmedPendingTmuxSessions(next);
+  if (options.preservePending !== true) clearConfirmedPendingTmuxSessions(next);
   const effectiveNext = sessionOrderIncludingPending(next);
   const changed = effectiveNext.length !== sessions.length || effectiveNext.some((session, index) => session !== sessions[index]);
   if (!changed) {

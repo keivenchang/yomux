@@ -240,6 +240,38 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.pendingTmuxSessionNamesForTest().length, 0, 'fresh server roster clears the pending new-session marker');
   });
 
+  await testAsync('new Xterm tab stays active when create-session is fresh but transcripts lag', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/create-session') {
+        return Promise.resolve(jsonResponse({session: '2', sessions: ['1', '2'], agent: 'term', created: true, ok: true}));
+      }
+      if (parsed.pathname === '/api/ensure-session') {
+        return Promise.resolve(jsonResponse({session: parsed.searchParams.get('session'), created: false, ok: true}));
+      }
+      if (parsed.pathname === '/api/transcripts') {
+        return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {panes: []}}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    await api.createNextSessionForTest('term');
+    await flushAsyncWork();
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['1', '2'], active: '2'},
+    }, 'new Xterm tab opens even when create-session already includes it in the roster');
+    assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['2'], 'create-session roster does not confirm the pending Xterm before transcript metadata catches up');
+
+    await api.applyTranscriptsPayloadForTest({session_order: ['1'], sessions: {'1': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['1', '2'], active: '2'},
+    }, 'stale transcript metadata cannot minimize the freshly created Xterm tab');
+
+    await api.applyTranscriptsPayloadForTest({session_order: ['1', '2'], sessions: {'1': {panes: []}, '2': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.equal(api.pendingTmuxSessionNamesForTest().length, 0, 'fresh transcript metadata confirms the new Xterm');
+  });
+
   test('t@1212', () => {
     const api = loadYolomux('?keep=1');
     assert.equal(api.layoutFromParam('', ''), null, 'empty layout param falls back to default layout');

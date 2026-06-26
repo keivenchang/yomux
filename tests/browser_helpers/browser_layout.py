@@ -1785,7 +1785,10 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           const explicitSession = String(window.__fixtureNextCreatedSession || '').trim();
           const numericSessions = window.__fixtureSessions.map(session => Number(session)).filter(Number.isFinite);
           const session = explicitSession || String((numericSessions.length ? Math.max(...numericSessions) : 0) + 1);
-          return jsonResponse({ok: true, created: true, session, sessions: window.__fixtureSessions.slice(), agent});
+          const createSessions = Array.isArray(window.__fixtureCreateSessionRoster)
+            ? window.__fixtureCreateSessionRoster.slice()
+            : window.__fixtureSessions.slice();
+          return jsonResponse({ok: true, created: true, session, sessions: createSessions, agent});
         }
         if (url.pathname === '/api/rename-session') {
           const session = url.searchParams.get('session') || '';

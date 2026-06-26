@@ -8411,11 +8411,11 @@ function setSessionOrder(next) {
   layoutItems = computeLayoutItems();
 }
 
-function updateSessionList(nextSessions) {
+function updateSessionList(nextSessions, options = {}) {
   const next = normalizedSessionOrder(nextSessions);
   if (!next) return false;
   pruneExpiredPendingTmuxSessions();
-  clearConfirmedPendingTmuxSessions(next);
+  if (options.preservePending !== true) clearConfirmedPendingTmuxSessions(next);
   const effectiveNext = sessionOrderIncludingPending(next);
   const changed = effectiveNext.length !== sessions.length || effectiveNext.some((session, index) => session !== sessions[index]);
   if (!changed) {
@@ -22293,7 +22293,7 @@ async function createNextSession(agent) {
     const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     markPendingTmuxSession(payload.session);
     const previousActive = activeSessions.slice();
-    updateSessionList(payload.sessions || []);
+    updateSessionList(payload.sessions || [], {preservePending: true});
     renderSessionButtons();
     renderPanels(previousActive);
     await placeTmuxSession(payload.session);

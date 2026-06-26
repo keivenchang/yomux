@@ -1444,6 +1444,49 @@ def test_dockview_pending_new_tmux_session_survives_stale_roster_socket_close(br
     assert "2" in metrics["pending"], metrics
 
 
+def test_dockview_new_xterm_survives_stale_transcripts_after_fresh_create_roster(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        available_agents=["term"],
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+        const snapshot = () => ({
+          tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+          active: document.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '',
+          slots: JSON.parse(JSON.stringify(layoutSlots)),
+          pending: pendingTmuxSessionNames(),
+          inactive: inactiveTabItems(),
+          fetches: (window.__bootFetches || []).map(fetch => `${fetch.method} ${fetch.path}${fetch.search}`),
+        });
+        (async () => {
+          window.__fixtureNextCreatedSession = '2';
+          window.__fixtureCreateSessionRoster = ['1', '2'];
+          await createNextSession('term');
+          for (let index = 0; index < 50; index += 1) {
+            const fetches = window.__bootFetches || [];
+            if (fetches.some(fetch => fetch.path === '/api/transcripts')) break;
+            await wait(10);
+          }
+          await wait(0);
+          done(snapshot());
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert "2" in metrics["tabs"], metrics
+    assert metrics["active"] == "2", metrics
+    assert metrics["slots"]["left"]["active"] == "2", metrics
+    assert "2" in metrics["pending"], metrics
+    assert "2" not in metrics["inactive"], metrics
+
+
 def test_dockview_pending_renamed_tmux_session_survives_stale_roster_socket_close(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,

@@ -6103,6 +6103,27 @@ def install_fake_yolomux_state(monkeypatch):
     return state
 
 
+def test_notify_status_defaults_browser_notifications_off(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp([])
+
+    try:
+        assert webapp.notify_status() == {"enabled": False}
+    finally:
+        webapp.control_server.stop()
+
+
+def test_notify_status_respects_browser_notifications_opt_in(monkeypatch):
+    state = install_fake_yolomux_state(monkeypatch)
+    state["notify_enabled"] = True
+    webapp = app_module.TmuxWebtermApp([])
+
+    try:
+        assert webapp.notify_status() == {"enabled": True}
+    finally:
+        webapp.control_server.stop()
+
+
 def test_yoagent_notify_job_create_dedupe_and_cancel(monkeypatch):
     state = install_fake_yolomux_state(monkeypatch)
     events = []

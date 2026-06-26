@@ -79,9 +79,12 @@
   gap: 8px;
 }
 .js-debug-graph-view {
-  --js-debug-idle-agent-status: #111318;
+  --js-debug-idle-agent-status: #3f4754;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
+}
+body.theme-light .js-debug-graph-view {
+  --js-debug-idle-agent-status: var(--editor-line-number);
 }
 .js-debug-toolbar {
   display: flex;

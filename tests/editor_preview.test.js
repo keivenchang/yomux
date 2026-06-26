@@ -1933,7 +1933,8 @@ async function runEditorPreviewSuite() {
     }
     assert.ok(/\.js-debug-chart--legend-footer\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(122px, 1fr\) auto/.test(debugPaneCss), 'YO!stats reserves a footer legend row outside the plot');
     assert.ok(/\.js-debug-chart-legend-footer\s*\{[\s\S]*max-height:\s*44px[\s\S]*overflow:\s*auto/.test(debugPaneCss), 'YO!stats token legends scroll instead of covering the chart');
-    assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*#111318/.test(debugPaneCss), 'YO!stats idle agent status uses a near-black gray token');
+    assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*#3f4754/.test(debugPaneCss), 'YO!stats idle agent status uses a visible dark gray token');
+    assert.ok(/body\.theme-light \.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*var\(--editor-line-number\)/.test(debugPaneCss), 'YO!stats idle agent status uses a brighter light-mode gray token');
     assert.ok(/\.js-debug-area--idleAgents\s*\{[\s\S]*fill:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle stacked area uses the darker idle status fill');
     assert.ok(/\.js-debug-line--idleAgents\s*\{[\s\S]*stroke:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle line uses the darker idle status stroke');
     assert.ok(/\.js-debug-legend-swatch--idleAgents\s*\{[\s\S]*color:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle legend uses the darker idle status color');
