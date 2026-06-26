@@ -3199,8 +3199,10 @@ body.theme-light .branch-link {
   gap: 5px;
   min-width: 0;
   min-height: 150px;
-  padding-block: 2px 6px;
-  border-block-end: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  padding: 7px 8px 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel2) 54%, transparent);
 }
 .js-debug-chart-head {
   display: flex;
@@ -3274,7 +3276,7 @@ body.theme-light .branch-link {
   stroke-width: 1;
 }
 .js-debug-line {
-  stroke-width: 1.4;
+  stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
