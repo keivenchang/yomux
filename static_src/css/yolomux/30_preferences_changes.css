@@ -80,6 +80,8 @@
 }
 .js-debug-graph-view {
   --js-debug-idle-agent-status: #3f4754;
+  --js-debug-api-series: var(--link-soft);
+  --js-debug-sse-series: var(--accent-gold);
   display: grid;
   grid-template-rows: minmax(0, 1fr);
 }
@@ -331,10 +333,10 @@ body.theme-light .js-debug-graph-view {
   opacity: 0.18;
 }
 .js-debug-line--api {
-  stroke: var(--accent);
+  stroke: var(--js-debug-api-series);
 }
 .js-debug-line--sse {
-  stroke: var(--good);
+  stroke: var(--js-debug-sse-series);
 }
 .js-debug-line--latency {
   stroke: var(--accent-gold);
@@ -384,10 +386,10 @@ body.theme-light .js-debug-graph-view {
   opacity: 0.7;
 }
 .js-debug-line--cpu {
-  stroke: var(--bad);
+  stroke: var(--active-accent-bright);
 }
 .js-debug-line--systemCpu {
-  stroke: var(--accent-sky-strong);
+  stroke: var(--bad);
 }
 .js-debug-line--moving-average {
   opacity: 0.82;
@@ -415,10 +417,10 @@ body.theme-light .js-debug-graph-view {
   background: currentColor;
 }
 .js-debug-legend-swatch--api {
-  color: var(--accent);
+  color: var(--js-debug-api-series);
 }
 .js-debug-legend-swatch--sse {
-  color: var(--good);
+  color: var(--js-debug-sse-series);
 }
 .js-debug-legend-swatch--latency {
   color: var(--accent-gold);
@@ -445,10 +447,10 @@ body.theme-light .js-debug-graph-view {
   color: var(--js-debug-series-color, var(--accent-sky-strong));
 }
 .js-debug-legend-swatch--cpu {
-  color: var(--bad);
+  color: var(--active-accent-bright);
 }
 .js-debug-legend-swatch--systemCpu {
-  color: var(--accent-sky-strong);
+  color: var(--bad);
 }
 .js-debug-graph-empty {
   display: grid;
@@ -498,7 +500,7 @@ body.theme-light .js-debug-graph-view {
   --changes-row-hover-bg: var(--active-control-soft-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
   --changes-indent-line: rgba(148, 163, 184, 0.50);
-  --changes-repo-head-bg: color-mix(in srgb, var(--panel2) 88%, var(--text) 12%);
+  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: #a7c7ff;
@@ -775,7 +777,10 @@ body.theme-light .js-debug-graph-view {
 .changes-repo-caret {
   flex: 0 0 auto;
   display: inline-block;
-  width: 12px;
+  width: 16px;
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+  text-align: center;
 }
 .changes-repo-title {
   flex: 1;
@@ -1500,7 +1505,7 @@ body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
   --changes-folder-bg: var(--lt-panel);
   --changes-indent-line: var(--tree-indent-line);
-  --changes-repo-head-bg: var(--panel2);
+  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--lt-muted);
   --changes-icon-text: var(--menu-accent);
@@ -1523,7 +1528,7 @@ body.theme-light .changes-comparison-head {
 }
 body.theme-light .changes-repo-head {
   color: var(--text);
-  background: var(--panel2);
+  background: var(--changes-repo-head-bg);
 }
 body.theme-light .changes-repo-title {
   color: var(--accent-gold);

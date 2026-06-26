@@ -798,8 +798,9 @@ async function runShareThemeSuite() {
     // the filename carries no semibold/bold weight (regular, not big bold white).
     assert.equal(changedFilesCss.includes('.changes-file-row'), false, '#46: modified-file rows use shared Finder file-tree rows, not standalone changes-file-row CSS');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)/.test(changedFilesCss), 'Differ/Finder changes trees use a brighter dark-mode guide line');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*color-mix\(in srgb,\s*var\(--panel2\) 88%,\s*var\(--text\) 12%\)/.test(changedFilesCss), 'Differ/Finder changes repo headers use a brighter dark-mode scoped background token');
-    assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*--changes-indent-line:\s*var\(--tree-indent-line\);[\s\S]*--changes-repo-head-bg:\s*var\(--panel2\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide and repo header tokens stay unchanged');
+    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'Differ/Finder changes repo headers read the same pane bar background as the Sort toolbar');
+    assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*--changes-indent-line:\s*var\(--tree-indent-line\);[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide stays subdued while repo headers share the pane bar token');
+    assert.ok(/\.changes-repo-caret\s*\{[\s\S]*width:\s*16px[\s\S]*font-size:\s*var\(--ui-font-size-sm\)[\s\S]*text-align:\s*center/.test(changedFilesCss), 'Differ/Finder repo disclosure caret is larger than the compact path text');
     assert.equal(/(?:^|\n)\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
     assert.equal(changedFilesCss.includes('.changes-tree-folder'), false, 'Differ folders use the shared Finder tree renderer, not a stale changes-tree-folder CSS path');
     assert.equal(changedFilesSource.includes('function changeFileRowHtml('), false, 'Differ rows are not rendered through the legacy standalone row builder');

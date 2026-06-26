@@ -109,6 +109,78 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
     assert all(0 < item["strokeWidth"] <= 0.5 for item in metrics), metrics
 
 
+def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_path):
+    page = tmp_path / "debug-graph-series-colors.html"
+    page.write_text(page_html("""
+      <section class="js-debug-graph-view" id="debug-graph">
+        <svg class="js-debug-line-chart" viewBox="0 0 20 20" role="img" preserveAspectRatio="none">
+          <path class="js-debug-line js-debug-line--api" d="M0 1L20 1"></path>
+          <path class="js-debug-line js-debug-line--sse" d="M0 3L20 3"></path>
+          <path class="js-debug-line js-debug-line--cpu" d="M0 5L20 5"></path>
+          <path class="js-debug-line js-debug-line--systemCpu" d="M0 7L20 7"></path>
+        </svg>
+        <span class="js-debug-legend-swatch js-debug-legend-swatch--api"></span>
+        <span class="js-debug-legend-swatch js-debug-legend-swatch--sse"></span>
+        <span class="js-debug-legend-swatch js-debug-legend-swatch--cpu"></span>
+        <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
+      #debug-graph { width: 260px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const graph = document.getElementById('debug-graph');
+        const line = name => getComputedStyle(document.querySelector(`.js-debug-line--${name}`)).stroke;
+        const swatch = name => getComputedStyle(document.querySelector(`.js-debug-legend-swatch--${name}`)).color;
+        const colorFor = value => {
+          const probe = document.createElement('span');
+          probe.style.color = value;
+          graph.appendChild(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color;
+        };
+        const colorDistance = (left, right) => {
+          const rgb = color => (String(color).match(/[0-9.]+/g) || []).slice(0, 3).map(Number);
+          const a = rgb(left);
+          const b = rgb(right);
+          return Math.sqrt(((a[0] - b[0]) ** 2) + ((a[1] - b[1]) ** 2) + ((a[2] - b[2]) ** 2));
+        };
+        const read = () => {
+          const values = {
+            line: {api: line('api'), sse: line('sse'), cpu: line('cpu'), systemCpu: line('systemCpu')},
+            legend: {api: swatch('api'), sse: swatch('sse'), cpu: swatch('cpu'), systemCpu: swatch('systemCpu')},
+            expected: {
+              api: colorFor('var(--js-debug-api-series)'),
+              sse: colorFor('var(--js-debug-sse-series)'),
+              cpu: colorFor('var(--active-accent-bright)'),
+              systemCpu: colorFor('var(--bad)'),
+            },
+          };
+          values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
+          return values;
+        };
+        document.body.className = 'theme-dark';
+        const dark = read();
+        document.body.className = 'theme-light';
+        const light = read();
+        return {dark, light};
+        """
+    )
+    for theme in ("dark", "light"):
+        item = metrics[theme]
+        assert item["line"]["api"] == item["legend"]["api"] == item["expected"]["api"], (theme, item)
+        assert item["line"]["sse"] == item["legend"]["sse"] == item["expected"]["sse"], (theme, item)
+        assert item["line"]["cpu"] == item["legend"]["cpu"] == item["expected"]["cpu"], (theme, item)
+        assert item["line"]["systemCpu"] == item["legend"]["systemCpu"] == item["expected"]["systemCpu"], (theme, item)
+        assert item["line"]["api"] != item["line"]["sse"], (theme, item)
+        assert item["line"]["cpu"] != item["line"]["api"], (theme, item)
+        assert item["line"]["cpu"] != item["line"]["systemCpu"], (theme, item)
+        assert item["apiSseDistance"] >= 120, (theme, item)
+
+
 def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
     padding = 24
     left = int((min(rest_rect["left"], peak_rect["left"]) - padding) * dpr)
@@ -1907,6 +1979,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
               const icon = row?.querySelector(':scope > .file-tree-icon');
               const date = row?.querySelector(':scope > .file-tree-date');
               const style = tab ? getComputedStyle(tab) : null;
+              const descriptionStyle = description ? getComputedStyle(description) : null;
               return {
                 row: rectFor(row),
                 tab: rectFor(tab),
@@ -1924,6 +1997,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                 dateWidth: date ? date.getBoundingClientRect().width : 0,
                 tabBg: style?.backgroundColor || '',
                 tabColor: style?.color || '',
+                descriptionColor: descriptionStyle?.color || '',
                 tabHeight: style?.height || '',
                 tabRadius: style?.borderTopLeftRadius || '',
                 tabBorderTop: style?.borderTopColor || '',
@@ -1938,12 +2012,17 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             const activeRow = sessionRows.find(row => row.dataset.tabberSession === '1');
             const inactiveRow = sessionRows.find(row => row.dataset.tabberSession === '2');
             const activeWindowRow = windowRows.find(row => row.dataset.tabberSession === '1');
+            const activeWindowText = activeWindowRow?.querySelector('.tabber-window-text');
             const windowIcons = windowRows.map(row => (row.querySelector('.file-tree-icon')?.textContent || '').trim());
             const nonSessionWithSessionTab = Array.from(document.querySelectorAll('.file-tree-row:not([data-tabber-type="session"]) .tabber-session-tab')).length;
             return {
               active: rowMetrics(activeRow),
               inactive: rowMetrics(inactiveRow),
               activeWindow: rectFor(activeWindowRow),
+              activeWindowTextColor: activeWindowText ? getComputedStyle(activeWindowText).color : '',
+              expectedText: resolvedColor(document.body, 'var(--text)'),
+              expectedActiveText: resolvedColor(document.body, 'var(--pane-tab-active-text)'),
+              expectedMutedText: resolvedColor(document.body, 'var(--muted)'),
               windowIcons,
               nonSessionWithSessionTab,
               sessionCount: sessionRows.length,
@@ -1968,6 +2047,12 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedInactiveBg"], (label, metrics)
         assert metrics["active"]["tabBg"] != metrics["active"]["tabColor"], (label, metrics)
         assert metrics["inactive"]["tabBg"] != metrics["inactive"]["tabColor"], (label, metrics)
+        if theme_class == "theme-light":
+            assert metrics["active"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
+            assert metrics["active"]["descriptionColor"] == metrics["active"]["tabColor"], (label, metrics)
+            assert metrics["inactive"]["tabColor"] == metrics["expectedMutedText"], (label, metrics)
+            assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
+            assert metrics["activeWindowTextColor"] == metrics["expectedText"], (label, metrics)
         assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)
         assert metrics["active"]["tabRadius"] == "6px", (label, metrics)
         assert metrics["active"]["dateDisplay"] != "none", (label, metrics)
@@ -3848,9 +3933,28 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
 
     activate_finder_diff_fixture(browser)
     wait_background("#modified-files-panel .changes-toolbar", tokens["panel"])
+    wait_background("#modified-files-repo-head", tokens["neutral"])
+    repo_caret_metrics = browser.execute_script(
+        """
+        const caret = document.querySelector('#modified-files-repo-head .changes-repo-caret');
+        const title = document.querySelector('#modified-files-repo-head .changes-repo-title');
+        const caretStyle = getComputedStyle(caret);
+        const titleStyle = getComputedStyle(title);
+        return {
+          caretFontSize: parseFloat(caretStyle.fontSize),
+          titleFontSize: parseFloat(titleStyle.fontSize),
+          caretWidth: caret.getBoundingClientRect().width,
+          titleHeight: title.getBoundingClientRect().height,
+        };
+        """
+    )
+    assert repo_caret_metrics["caretFontSize"] > repo_caret_metrics["titleFontSize"], repo_caret_metrics
+    assert repo_caret_metrics["caretWidth"] >= 16, repo_caret_metrics
+    assert repo_caret_metrics["titleHeight"] > 0, repo_caret_metrics
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
     wait_background("#modified-files-panel .changes-toolbar", tokens["accent"])
+    wait_background("#modified-files-repo-head", tokens["accent"])
 
 
 def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_path):

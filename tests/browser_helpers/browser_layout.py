@@ -1390,6 +1390,13 @@ def finder_click_toolbar_fixture_html():
               <div id="modified-files-head" class="file-explorer-changes-head">
                 <span class="changes-title">Differ: '5'</span>
               </div>
+              <section class="changes-repo-group">
+                <button type="button" id="modified-files-repo-head" class="changes-repo-head">
+                  <span class="changes-repo-caret">▾</span>
+                  <span class="changes-repo-title">~/yolomux.dev8002</span>
+                  <span class="changes-repo-totals"><span class="changes-diff-add">+0</span><span class="changes-diff-remove">-0</span><span class="changes-repo-count">0</span></span>
+                </button>
+              </section>
             </div>
           </div>
         </article>

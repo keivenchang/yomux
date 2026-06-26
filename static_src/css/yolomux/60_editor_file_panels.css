@@ -3514,8 +3514,8 @@ body.editor-theme-light .file-editor-native-video {
   --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
 }
 body.theme-light .file-tree-row.tabber-row {
-  --tabber-level0-color: var(--lt-markdown-heading);
-  --tabber-level1-color: var(--lt-code-function);
+  --tabber-level0-color: var(--text);
+  --tabber-level1-color: var(--text);
   --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
 }
@@ -3576,6 +3576,11 @@ body.theme-light .file-tree-row.tabber-row {
   max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-name,
+body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-dir,
+body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-detail {
+  color: currentColor;
 }
 .file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
   --agent-window-icon-size: var(--tabber-agent-icon-size);
