@@ -3496,12 +3496,17 @@ async function runEditorPreviewSuite() {
     const providerSource = linkProviderSource.slice(providerStart, providerEnd);
     assert.ok(/activate: \(\) => \{\}/.test(linkProviderSource), 'xterm link decorations have an explicit no-op left-click handler');
     assert.ok(/decorations: \{underline: true, pointerCursor: false\}/.test(linkProviderSource), 'terminal URL/file references are visibly underlined without showing a left-click pointer affordance');
+    assert.ok(linkProviderSource.includes('function installTerminalFileReferenceUnderlines'), 'existing terminal file refs have a persistent underline overlay owner');
     assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
     assert.ok(/function applyTerminalContainerTheme\(container[\s\S]*dataset\.terminalTheme = resolvedTerminalThemeMode\(terminalThemeMode, mode\)[\s\S]*style\.background = theme\.background/.test(runtimeSource), 'terminal containers carry the resolved terminal theme used by xterm link underline colors');
     assert.ok(/applyTerminalContainerTheme\(container, baseTheme\)/.test(terminalBootSource), 'new terminal containers get the same theme marker as live theme updates');
-    assert.ok(/\.terminal\s*\{[\s\S]*--terminal-link-underline:\s*rgb\(31 91 148 \/ 0\.88\)/.test(terminalCss), 'dark terminal link underlines use subtle dark blue');
-    assert.ok(/\.terminal\[data-terminal-theme="light"\]\s*\{[\s\S]*--terminal-link-underline:\s*rgb\(90 174 245 \/ 0\.84\)/.test(terminalCss), 'light terminal link underlines use subtle light blue');
-    assert.ok(/\.terminal \.xterm-rows span\[style\*="text-decoration: underline"\],[\s\S]*span\[style\*="text-decoration-line: underline"\]\s*\{[\s\S]*text-decoration-color:\s*var\(--terminal-link-underline\) !important[\s\S]*text-decoration-thickness:\s*1px !important[\s\S]*text-underline-offset:\s*2px !important/.test(terminalCss), 'xterm hover-underlined URL/file spans inherit the terminal-theme blue underline');
+    assert.ok(/installTerminalFileReferenceUnderlines\(session, term, container\)/.test(terminalBootSource), 'new terminal containers install persistent existing-file underline overlays');
+    assert.ok(/\.terminal\s*\{[\s\S]*--terminal-file-link-underline:\s*rgb\(125 211 252 \/ 0\.50\)[\s\S]*--terminal-file-link-underline-hover:\s*rgb\(125 211 252 \/ 0\.60\)/.test(terminalCss), 'dark terminal existing-file underlines stay visible on dark backgrounds');
+    assert.ok(/\.terminal\[data-terminal-theme="light"\]\s*\{[\s\S]*--terminal-file-link-underline:\s*rgb\(3 105 161 \/ 0\.48\)[\s\S]*--terminal-file-link-underline-hover:\s*rgb\(3 105 161 \/ 0\.58\)/.test(terminalCss), 'light terminal existing-file underlines stay visible on white backgrounds');
+    assert.ok(/\.terminal-file-link-underlines\s*\{[\s\S]*z-index:\s*var\(--z-terminal-overlay-low\)[\s\S]*pointer-events:\s*none/.test(terminalCss), 'persistent terminal file underlines render above xterm without stealing hover or selection');
+    assert.ok(/\.terminal-file-link-underline\s*\{[\s\S]*border-bottom:\s*1px solid var\(--terminal-file-link-underline\)/.test(terminalCss), 'persistent terminal file underlines are a one-pixel cue');
+    assert.ok(/\.terminal-file-link-underline--hover\s*\{[\s\S]*border-bottom-color:\s*var\(--terminal-file-link-underline-hover\)[\s\S]*border-bottom-width:\s*1px/.test(terminalCss), 'hovered resolved terminal file refs keep a subtle underline overlay');
+    assert.ok(/\.terminal \.xterm-rows span\[style\*="text-decoration: underline"\],[\s\S]*span\[style\*="text-decoration-line: underline"\]\s*\{[\s\S]*text-decoration-color:\s*currentColor !important[\s\S]*text-decoration-thickness:\s*1px !important[\s\S]*text-underline-offset:\s*2px !important/.test(terminalCss), 'xterm hover-underlined URL/file spans use the hovered text color and a subtle underline');
     const first = 'https://claude.com/cai/oauth/authorize?client_id=abc123&scope=org%3Acreate_a';
     const continuations = [
       'pi_key+user%3Aprofile+user%3Ainference&redirect_uri=http%3A%2F%2FlocalhostABCDEF',
@@ -3574,6 +3579,64 @@ async function runEditorPreviewSuite() {
     container.rect = {left: 0, top: 0, width: 800, height: 200, right: 800, bottom: 200};
     term._core = {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}};
     assert.deepStrictEqual(canonical(api.terminalPositionFromClientPoint(term, container, 315, 10)), {x: 32, y: 1}, 'client point maps to the terminal cell used by context-menu hit-testing');
+  });
+
+  testAsync('t@7064', async () => {
+    const api = loadYolomux();
+    const line = 'Open static_src/js/yolomux/00_bootstrap_state.js:283 and missing.js:9';
+    const lines = [terminalLine(line)];
+    const term = {
+      cols: 100,
+      rows: 3,
+      buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}},
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+    };
+    const container = new TestElement('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 1000, height: 60, right: 1000, bottom: 60};
+    const rows = new TestElement('terminal-rows');
+    rows.className = 'xterm-rows';
+    rows.rect = {left: 0, top: 0, width: 1000, height: 60, right: 1000, bottom: 60};
+    container.appendChild(rows);
+
+    const controller = api.installTerminalFileReferenceUnderlines('1', term, container, {
+      targetResolver: async (_session, ref) => (
+        ref.path === 'static_src/js/yolomux/00_bootstrap_state.js'
+          ? {path: `/repo/${ref.path}`}
+          : null
+      ),
+    });
+    const count = await controller.refresh();
+    const layer = container.querySelector(':scope > .terminal-file-link-underlines');
+    assert.equal(count, 1, 'only existing terminal file references get a persistent underline');
+    assert.equal(layer.children.length, 1, 'missing file references do not get underline segments');
+    assert.equal(layer.children[0].dataset.path, '/repo/static_src/js/yolomux/00_bootstrap_state.js');
+    assert.equal(layer.children[0].dataset.text, 'static_src/js/yolomux/00_bootstrap_state.js:283');
+    assert.ok(layer.children[0].dataset.referenceKey.includes('static_src/js/yolomux/00_bootstrap_state.js'), 'overlay segment records a stable file-reference hover key');
+    assert.equal(layer.children[0].style.left, '50px', 'underline starts at the path column');
+    assert.equal(layer.children[0].style.top, '18px', 'underline sits near the row baseline');
+    assert.equal(layer.children[0].style.width, '470px', 'underline width covers the path plus line number');
+    container.listeners.get('mousemove')[0]({clientX: 55, clientY: 10});
+    assert.equal(layer.children[0].classList.contains('terminal-file-link-underline--hover'), true, 'hovering a resolved file reference marks its subtle underline overlay');
+    container.listeners.get('mousemove')[0]({clientX: 930, clientY: 10});
+    assert.equal(layer.children[0].classList.contains('terminal-file-link-underline--hover'), false, 'moving away from the resolved file reference restores the subtle underline');
+    container.listeners.get('mouseleave')[0]();
+    assert.equal(layer.children[0].classList.contains('terminal-file-link-underline--hover'), false, 'leaving the terminal clears the file underline hover state');
+    controller.schedule();
+    assert.equal(layer.children.length, 1, 'terminal writes keep cached existing underline segments visible while async re-resolution catches up');
+    term.buffer.active.viewportY = 10;
+    controller.schedule();
+    assert.equal(layer.children.length, 0, 'underlines clear when the resolved file reference scrolls out of the visible viewport');
+    term.buffer.active.viewportY = 0;
+    controller.schedule();
+    assert.equal(layer.children.length, 1, 'scrolling a cached resolved file reference back into view redraws the underline synchronously');
+    lines[0] = terminalLine('No file references here');
+    controller.schedule();
+    assert.equal(layer.children.length, 0, 'terminal writes clear stale underline segments before async file re-resolution completes');
+    controller.dispose();
+    assert.equal(container.listeners.get('mousemove').length, 0, 'terminal file underline hover listener is removed on dispose');
+    assert.equal(container.listeners.get('mouseleave').length, 0, 'terminal file underline leave listener is removed on dispose');
+    assert.equal(container.querySelector(':scope > .terminal-file-link-underlines'), null, 'underline overlay is removed on dispose');
   });
 
   // (no false merge): a fresh URL on the next flush-left row is its own link, not a continuation.
@@ -4763,9 +4826,12 @@ async function runEditorPreviewSuite() {
       assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.16'), false, '#259 follow-up: the too-dark light overlay alpha is gone');
       assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.13'), false, '#259 follow-up: the still-too-dark light overlay alpha is gone');
       // #258 follow-up: editor toolbar placement is inherited from stable parent zones, not per-button order.
-      assert.ok(/\.file-editor-toolbar-left\s*\{[^}]*flex:\s*0 1 auto/.test(css), 'editor info bar: #/Differ/FROM-TO live in the shared left zone');
+      assert.ok(/\.file-editor-toolbar-left\s*\{[^}]*flex:\s*1 1 auto/.test(css), 'editor info bar: #/Differ/FROM-TO/path live in the shared left zone');
       assert.ok(/\.file-editor-toolbar-center\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%/.test(css), 'editor info bar: font-size controls live in the shared center zone');
       assert.ok(/\.file-editor-toolbar-right\s*\{[^}]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(css), 'editor info bar: edit/preview/tools live in the shared right zone');
+      assert.ok(/className:\s*'file-editor-path'[\s\S]*attributes:\s*\{dir:\s*'ltr'\}/.test(src), 'editor info bar: the file toolbar includes an absolute path text slot');
+      assert.ok(/const pathNode = panel\.querySelector\('\.file-editor-path'\);[\s\S]*pathNode\.textContent = compactHomePath\(path\) \|\| path;[\s\S]*pathNode\.title = path;/.test(src), 'editor info bar: the file path slot shows a home-compacted path and titles the absolute path');
+      assert.ok(/\.file-editor-path\s*\{[^}]*flex:\s*1 1 min\(42vw,\s*72ch\)[\s\S]*direction:\s*ltr/.test(css), 'editor info bar: absolute paths claim toolbar width and render left-to-right');
       assert.equal(/\.file-editor-(?:gutter|diff|diff-expand)-panel\s*\{[^}]*order:/.test(css), false, 'editor info bar: left buttons do not own placement with child order rules');
       assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
       assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');

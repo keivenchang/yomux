@@ -2360,6 +2360,7 @@ function connectTerminalSocket(session, item) {
       } else {
         item.term.write(String(event.data));
       }
+      item.fileUnderlineController?.schedule?.();
       scheduleTerminalBlankScreenRefresh(session);
       scheduleTerminalAttentionHighlight(session);
     } catch (_) {
@@ -2534,8 +2535,10 @@ function startTerminal(session) {
     shareTerminalSkippedResetCount: 0,
     blankScreenRefreshTimer: 0,
     blankScreenRefreshAttempts: 0,
+    fileUnderlineController: null,
   };
   terminals.set(session, item);
+  item.fileUnderlineController = installTerminalFileReferenceUnderlines(session, term, container);
   bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
     setFocusedTerminal(session);

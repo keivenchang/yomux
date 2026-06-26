@@ -1907,7 +1907,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
     // Editor toolbar alignment: left/center/right are owned by parent groups, not per-button spacer hacks.
     assert.ok(/\.file-editor-toolbar-zone\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center/.test(css), 'editor toolbar children inherit shared zone behavior');
-    assert.ok(/\.file-editor-toolbar-left\s*\{[^}]*flex:\s*0 1 auto/.test(css), 'editor toolbar left zone stays pinned left');
+    assert.ok(/\.file-editor-toolbar-left\s*\{[^}]*flex:\s*1 1 auto/.test(css), 'editor toolbar left zone stays pinned left while owning the file path slot');
+    assert.ok(editorLeftTemplate.includes("className: 'file-editor-path'"), 'editor toolbar left zone includes the absolute file path slot');
+    assert.ok(/\.file-editor-path\s*\{[^}]*direction:\s*ltr/.test(css), 'editor toolbar path text renders as a left-to-right absolute path');
     assert.ok(/\.file-editor-toolbar-center\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translate\(-50%, -50%\)/.test(css), 'editor toolbar center zone stays centered');
     assert.ok(/\.file-editor-toolbar-right\s*\{[^}]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(css), 'editor toolbar right zone is the only spacer-backed zone');
     assert.ok(/\.file-editor-diff-panel\s*\{[^}]*min-width:\s*44px/.test(css), 'editor toolbar gives Differ text-button width');

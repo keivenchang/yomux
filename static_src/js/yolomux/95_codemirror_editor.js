@@ -1421,6 +1421,11 @@ function updateFileEditorPanelChrome(panel, path) {
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
   const nameNode = panel.querySelector('.file-editor-title-name');
   if (nameNode) nameNode.textContent = basenameOf(path);
+  const pathNode = panel.querySelector('.file-editor-path');
+  if (pathNode) {
+    pathNode.textContent = compactHomePath(path) || path;
+    pathNode.title = path;
+  }
   const saveButton = panel.querySelector('.file-editor-save-panel');
   if (saveButton) {
     saveButton.hidden = previewOnly || readOnlyMode || state?.kind !== 'text';

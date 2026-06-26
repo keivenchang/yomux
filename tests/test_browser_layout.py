@@ -2384,6 +2384,90 @@ def test_terminal_visible_selection_cleanup_clears_browser_and_xterm_state(brows
     assert metrics["after"]["browserChars"] == 0
 
 
+def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser, tmp_path):
+    page = tmp_path / "terminal-file-reference-underlines.html"
+    page.write_text(page_html("""
+      <section id="dark-terminal" class="terminal" data-terminal-theme="dark">
+        <div class="xterm">
+          <div class="xterm-rows">
+            <span id="dark-link" style="color: rgb(103, 232, 249); text-decoration: underline;">tests/editor_preview.test.js</span>
+          </div>
+        </div>
+        <div class="terminal-file-link-underlines" aria-hidden="true">
+          <div id="dark-rest" class="terminal-file-link-underline" style="left: 64px; top: 30px; width: 264px;"></div>
+          <div id="dark-hover" class="terminal-file-link-underline terminal-file-link-underline--hover" style="left: 64px; top: 54px; width: 264px;"></div>
+        </div>
+      </section>
+      <section id="light-terminal" class="terminal" data-terminal-theme="light">
+        <div class="xterm">
+          <div class="xterm-rows">
+            <span id="light-link" style="color: rgb(2, 132, 199); text-decoration-line: underline;">tests/editor_preview.test.js</span>
+          </div>
+        </div>
+        <div class="terminal-file-link-underlines" aria-hidden="true">
+          <div id="light-rest" class="terminal-file-link-underline" style="left: 64px; top: 30px; width: 264px;"></div>
+          <div id="light-hover" class="terminal-file-link-underline terminal-file-link-underline--hover" style="left: 64px; top: 54px; width: 264px;"></div>
+        </div>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: #111827; }
+      .terminal {
+        width: 420px;
+        height: 72px;
+        margin: 0 0 20px;
+        font: 20px/24px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #dark-terminal { background: #111827; color: #d1d5db; }
+      #light-terminal { background: #ffffff; color: #111827; }
+      .xterm-rows { position: absolute; inset: 8px 12px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const line = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {
+            borderBottomColor: style.borderBottomColor,
+            borderBottomWidth: style.borderBottomWidth,
+          };
+        };
+        const link = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {
+            color: style.color,
+            textDecorationColor: style.textDecorationColor,
+            textDecorationThickness: style.textDecorationThickness,
+          };
+        };
+        const layer = getComputedStyle(document.querySelector('.terminal-file-link-underlines'));
+        return {
+          darkRest: line('dark-rest'),
+          darkHover: line('dark-hover'),
+          lightRest: line('light-rest'),
+          lightHover: line('light-hover'),
+          darkLink: link('dark-link'),
+          lightLink: link('light-link'),
+          layerPointerEvents: layer.pointerEvents,
+          layerZIndex: layer.zIndex,
+        };
+        """
+    )
+    assert metrics["darkRest"]["borderBottomWidth"] == "1px", metrics
+    assert metrics["darkHover"]["borderBottomWidth"] == "1px", metrics
+    assert metrics["lightRest"]["borderBottomWidth"] == "1px", metrics
+    assert metrics["lightHover"]["borderBottomWidth"] == "1px", metrics
+    assert metrics["darkRest"]["borderBottomColor"] == "rgba(125, 211, 252, 0.5)", metrics
+    assert metrics["darkHover"]["borderBottomColor"] == "rgba(125, 211, 252, 0.6)", metrics
+    assert metrics["lightRest"]["borderBottomColor"] == "rgba(3, 105, 161, 0.48)", metrics
+    assert metrics["lightHover"]["borderBottomColor"] == "rgba(3, 105, 161, 0.58)", metrics
+    assert metrics["darkLink"]["textDecorationThickness"] == "1px", metrics
+    assert metrics["lightLink"]["textDecorationThickness"] == "1px", metrics
+    assert metrics["darkLink"]["textDecorationColor"] == metrics["darkLink"]["color"], metrics
+    assert metrics["lightLink"]["textDecorationColor"] == metrics["lightLink"]["color"], metrics
+    assert metrics["layerPointerEvents"] == "none", metrics
+    assert int(metrics["layerZIndex"]) > 0, metrics
+
+
 def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(

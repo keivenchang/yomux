@@ -2492,9 +2492,11 @@ function closeTerminalItem(session, item) {
   if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
   if (item.fitTimer) clearTimeout(item.fitTimer);
   if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  item.fileUnderlineController?.dispose?.();
   item.fitFrame = 0;
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
+  item.fileUnderlineController = null;
   const observer = resizeObservers.get(session);
   if (observer) {
     observer.disconnect();

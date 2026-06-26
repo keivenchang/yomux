@@ -521,6 +521,8 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
                   themeHidden: panel.querySelector('.file-editor-theme-panel')?.hidden === true,
                   previewHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
                   fontHidden: panel.querySelector('.file-editor-preview-font-panel')?.hidden === true,
+                  pathText: panel.querySelector('.file-editor-path')?.textContent || '',
+                  pathTitle: panel.querySelector('.file-editor-path')?.title || '',
                   fontCenterDelta: toolbar && font ? Math.abs((font.left + font.width / 2) - (toolbar.left + toolbar.width / 2)) : 999,
                 }};
               }};
@@ -551,6 +553,8 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["preview"]["popoutHidden"] is False, metrics
     assert metrics["preview"]["themeHidden"] is False, metrics
     assert metrics["preview"]["fontHidden"] is False, metrics
+    assert metrics["preview"]["pathText"] == "~/repo/DONE.md", metrics
+    assert metrics["preview"]["pathTitle"] == "/home/test/repo/DONE.md", metrics
     assert metrics["preview"]["fontCenterDelta"] <= 1.5, metrics
     assert metrics["split"]["modeHidden"] is False, metrics
     assert metrics["split"]["gutterHidden"] is False, metrics
@@ -562,6 +566,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["edit"]["wrapHidden"] is False, metrics
     assert metrics["edit"]["findHidden"] is False, metrics
     assert metrics["edit"]["saveHidden"] is False, metrics
+    assert metrics["edit"]["pathText"] == "~/repo/DONE.md", metrics
 
 
 def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_path):

@@ -3594,6 +3594,250 @@ async function terminalReferenceProviderLinks(session, term, y) {
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
+const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 90;
+
+function terminalFileReferenceKey(reference) {
+  const range = reference?.range || {};
+  const start = range.start || {};
+  const end = range.end || {};
+  return [
+    reference?.path || '',
+    reference?.line || '',
+    reference?.text || '',
+    start.x || 0,
+    start.y || 0,
+    end.x || 0,
+    end.y || 0,
+  ].join('\x1f');
+}
+
+function terminalFileReferenceCacheKey(session, reference) {
+  return [
+    terminalFileReferenceAbsolutePath(session, reference) || reference?.path || '',
+    reference?.line || '',
+    reference?.path || '',
+    reference?.text || '',
+  ].join('\x1f');
+}
+
+function terminalVisibleFileReferences(term) {
+  const rows = Math.max(0, Math.floor(Number(term?.rows || 0)));
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  const refs = [];
+  const seen = new Set();
+  for (let screenRow = 1; screenRow <= rows; screenRow += 1) {
+    for (const ref of terminalWrappedLineReferences(term, viewportY + screenRow)) {
+      if (ref.type !== 'file') continue;
+      const key = terminalFileReferenceKey(ref);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      refs.push(ref);
+    }
+  }
+  return refs;
+}
+
+function terminalFileReferenceUnderlineSegments(term, reference) {
+  const range = reference?.range;
+  if (!range?.start || !range?.end) return [];
+  const cols = Math.max(0, Math.floor(Number(term?.cols || 0)));
+  const rows = Math.max(0, Math.floor(Number(term?.rows || 0)));
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  if (!rows) return [];
+  const firstY = Math.max(range.start.y, viewportY + 1);
+  const lastY = Math.min(range.end.y, viewportY + rows);
+  const segments = [];
+  for (let y = firstY; y <= lastY; y += 1) {
+    let startX = y === range.start.y ? range.start.x : 1;
+    let endX = y === range.end.y ? range.end.x : cols;
+    startX = Math.max(1, Math.floor(Number(startX) || 1));
+    endX = Math.floor(Number(endX) || 0);
+    if (cols > 0) endX = Math.min(cols, endX);
+    if (endX < startX) continue;
+    segments.push({x: startX, y, cells: endX - startX + 1});
+  }
+  return segments;
+}
+
+function terminalFileUnderlineLayer(container) {
+  if (!container) return null;
+  let layer = container.querySelector?.(':scope > .terminal-file-link-underlines') || null;
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'terminal-file-link-underlines';
+    layer.setAttribute('aria-hidden', 'true');
+    container.appendChild(layer);
+  }
+  return layer;
+}
+
+function clearTerminalFileReferenceUnderlines(container) {
+  const layer = container?.querySelector?.(':scope > .terminal-file-link-underlines') || null;
+  layer?.replaceChildren?.();
+  return 0;
+}
+
+function updateTerminalFileReferenceUnderlineHover(container, hoverKey = '') {
+  const layer = container?.querySelector?.(':scope > .terminal-file-link-underlines') || null;
+  const nodes = layer?.querySelectorAll?.('.terminal-file-link-underline') || [];
+  for (const node of nodes) {
+    node.classList?.toggle?.('terminal-file-link-underline--hover', Boolean(hoverKey) && node.dataset.referenceKey === hoverKey);
+  }
+}
+
+function renderTerminalFileReferenceUnderlines(term, container, references, options = {}) {
+  const layer = terminalFileUnderlineLayer(container);
+  if (!layer) return 0;
+  const cell = terminalCellDimensions(term, container);
+  const screen = terminalScreenElement(container);
+  const screenRect = screen?.getBoundingClientRect?.();
+  const containerRect = container?.getBoundingClientRect?.();
+  const cellWidth = Number(cell.width || 0);
+  const cellHeight = Number(cell.height || 0);
+  if (!screenRect || !containerRect || !(cellWidth > 0) || !(cellHeight > 0)) {
+    return clearTerminalFileReferenceUnderlines(container);
+  }
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  const leftOrigin = screenRect.left - containerRect.left;
+  const topOrigin = screenRect.top - containerRect.top;
+  const nodes = [];
+  for (const reference of references || []) {
+    const key = terminalFileReferenceKey(reference);
+    for (const segment of terminalFileReferenceUnderlineSegments(term, reference)) {
+      const screenRow = segment.y - viewportY;
+      if (screenRow < 1) continue;
+      const line = document.createElement('div');
+      line.className = 'terminal-file-link-underline';
+      line.dataset.path = reference.targetPath || reference.path || '';
+      line.dataset.text = reference.text || '';
+      line.dataset.referenceKey = key;
+      if (key && key === options.hoverKey) line.classList.add('terminal-file-link-underline--hover');
+      line.style.left = `${leftOrigin + ((segment.x - 1) * cellWidth)}px`;
+      line.style.top = `${topOrigin + (screenRow * cellHeight) - 2}px`;
+      line.style.width = `${segment.cells * cellWidth}px`;
+      nodes.push(line);
+    }
+  }
+  layer.replaceChildren(...nodes);
+  return nodes.length;
+}
+
+function installTerminalFileReferenceUnderlines(session, term, container, options = {}) {
+  if (!session || !term || !container) return null;
+  const targetResolver = options.targetResolver || terminalFileReferenceTarget;
+  const disposables = [];
+  let disposed = false;
+  let timer = 0;
+  let sequence = 0;
+  let existingReferenceKeys = new Set();
+  const existingReferenceTargets = new Map();
+  let hoverKey = '';
+
+  const setHoverKey = nextKey => {
+    const normalizedKey = nextKey && existingReferenceKeys.has(nextKey) ? nextKey : '';
+    if (normalizedKey === hoverKey) return;
+    hoverKey = normalizedKey;
+    updateTerminalFileReferenceUnderlineHover(container, hoverKey);
+  };
+
+  const updateHover = event => {
+    if (disposed) return;
+    const reference = terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
+    setHoverKey(reference?.type === 'file' ? terminalFileReferenceKey(reference) : '');
+  };
+
+  const clearHover = () => setHoverKey('');
+
+  const renderCached = () => {
+    const existingRefs = [];
+    for (const ref of terminalVisibleFileReferences(term)) {
+      const key = terminalFileReferenceCacheKey(session, ref);
+      const targetPath = existingReferenceTargets.get(key);
+      if (targetPath) existingRefs.push({...ref, targetPath});
+    }
+    existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
+    if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
+    return renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+  };
+
+  const refresh = async () => {
+    if (disposed) return 0;
+    if (timer) {
+      clearTimeout(timer);
+      timer = 0;
+    }
+    const currentSequence = ++sequence;
+    const refs = terminalVisibleFileReferences(term);
+    if (!refs.length) {
+      existingReferenceKeys = new Set();
+      hoverKey = '';
+      return renderTerminalFileReferenceUnderlines(term, container, []);
+    }
+    const targets = await Promise.all(refs.map(ref => (
+      Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
+    )));
+    if (disposed || currentSequence !== sequence) return 0;
+    const existingRefs = refs
+      .map((ref, index) => {
+        const cacheKey = terminalFileReferenceCacheKey(session, ref);
+        if (!targets[index]) {
+          existingReferenceTargets.delete(cacheKey);
+          return null;
+        }
+        const targetPath = targets[index].path || ref.path || '';
+        existingReferenceTargets.set(cacheKey, targetPath);
+        return {...ref, targetPath};
+      })
+      .filter(Boolean);
+    existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
+    if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
+    return renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+  };
+
+  const schedule = () => {
+    if (disposed) return;
+    if (timer) clearTimeout(timer);
+    renderCached();
+    timer = setTimeout(() => {
+      timer = 0;
+      refresh();
+    }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+  };
+
+  const bindTerminalEvent = (name, callback) => {
+    const disposable = typeof term?.[name] === 'function' ? term[name](callback) : null;
+    if (disposable?.dispose) disposables.push(disposable);
+  };
+  bindTerminalEvent('onScroll', schedule);
+  bindTerminalEvent('onResize', schedule);
+  bindTerminalEvent('onRender', schedule);
+  container.addEventListener?.('mousemove', updateHover);
+  container.addEventListener?.('mouseleave', clearHover);
+  disposables.push({
+    dispose() {
+      container.removeEventListener?.('mousemove', updateHover);
+      container.removeEventListener?.('mouseleave', clearHover);
+    },
+  });
+  schedule();
+
+  return {
+    schedule,
+    refresh,
+    dispose() {
+      disposed = true;
+      sequence += 1;
+      if (timer) clearTimeout(timer);
+      timer = 0;
+      disposables.forEach(disposable => {
+        try { disposable.dispose(); } catch (_) {}
+      });
+      clearTerminalFileReferenceUnderlines(container);
+      container.querySelector?.(':scope > .terminal-file-link-underlines')?.remove?.();
+    },
+  };
+}
+
 function installTerminalLinkProvider(session, term) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
@@ -23431,9 +23675,11 @@ function closeTerminalItem(session, item) {
   if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
   if (item.fitTimer) clearTimeout(item.fitTimer);
   if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  item.fileUnderlineController?.dispose?.();
   item.fitFrame = 0;
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
+  item.fileUnderlineController = null;
   const observer = resizeObservers.get(session);
   if (observer) {
     observer.disconnect();
@@ -35343,6 +35589,12 @@ function fileEditorToolbarHtml(item) {
               hidden: true,
               html: diffRefControlsHtml({compact: true}),
             },
+            {
+              kind: 'custom',
+              tagName: 'span',
+              className: 'file-editor-path',
+              attributes: {dir: 'ltr'},
+            },
           ],
         })}
         <div class="file-editor-toolbar-zone file-editor-toolbar-center">
@@ -40412,6 +40664,11 @@ function updateFileEditorPanelChrome(panel, path) {
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
   const nameNode = panel.querySelector('.file-editor-title-name');
   if (nameNode) nameNode.textContent = basenameOf(path);
+  const pathNode = panel.querySelector('.file-editor-path');
+  if (pathNode) {
+    pathNode.textContent = compactHomePath(path) || path;
+    pathNode.title = path;
+  }
   const saveButton = panel.querySelector('.file-editor-save-panel');
   if (saveButton) {
     saveButton.hidden = previewOnly || readOnlyMode || state?.kind !== 'text';
@@ -48565,6 +48822,7 @@ function connectTerminalSocket(session, item) {
       } else {
         item.term.write(String(event.data));
       }
+      item.fileUnderlineController?.schedule?.();
       scheduleTerminalBlankScreenRefresh(session);
       scheduleTerminalAttentionHighlight(session);
     } catch (_) {
@@ -48739,8 +48997,10 @@ function startTerminal(session) {
     shareTerminalSkippedResetCount: 0,
     blankScreenRefreshTimer: 0,
     blankScreenRefreshAttempts: 0,
+    fileUnderlineController: null,
   };
   terminals.set(session, item);
+  item.fileUnderlineController = installTerminalFileReferenceUnderlines(session, term, container);
   bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
     setFocusedTerminal(session);

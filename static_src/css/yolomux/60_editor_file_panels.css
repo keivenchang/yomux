@@ -1,9 +1,11 @@
 .file-editor-path {
-  flex: 1;
+  flex: 1 1 min(42vw, 72ch);
+  min-width: min(22ch, 28vw);
+  max-width: min(64vw, 96ch);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   color: var(--muted);
-  direction: rtl;
+  direction: ltr;
   text-align: start;
 }
 .file-editor-panel {
@@ -2170,7 +2172,7 @@ body.editor-theme-light .file-editor-content {
   min-width: 0;
 }
 .file-editor-toolbar-left {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
 }
 .file-editor-toolbar-center {
   position: absolute;

@@ -1340,6 +1340,8 @@ globalThis.__layoutTestApi = {
   terminalWrappedLineReferences,
   terminalReferenceAtPosition,
   terminalReferenceProviderLinks,
+  terminalFileReferenceUnderlineSegments,
+  installTerminalFileReferenceUnderlines,
   terminalFileReferenceAbsolutePath,
   terminalFileReferenceTarget,
   terminalPositionFromClientPoint,

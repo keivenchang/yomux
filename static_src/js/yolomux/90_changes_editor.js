@@ -2830,6 +2830,12 @@ function fileEditorToolbarHtml(item) {
               hidden: true,
               html: diffRefControlsHtml({compact: true}),
             },
+            {
+              kind: 'custom',
+              tagName: 'span',
+              className: 'file-editor-path',
+              attributes: {dir: 'ltr'},
+            },
           ],
         })}
         <div class="file-editor-toolbar-zone file-editor-toolbar-center">

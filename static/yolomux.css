@@ -6837,7 +6837,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-width: 0;
   max-width: 100%;
   min-height: 0;
-  --terminal-link-underline: rgb(31 91 148 / 0.88);
+  --terminal-file-link-underline: rgb(125 211 252 / 0.50);
+  --terminal-file-link-underline-hover: rgb(125 211 252 / 0.60);
   /* No padding: the terminal sits flush to the pane edges so its box meets the resizer directly (the
      old 2px left/right padding showed a dark sliver at the seam). The former `padding-top: 2px` gave a
      small breathing gap below the Info Bar border, but it just wasted vertical real estate — removed
@@ -6849,11 +6850,29 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-radius: 0;
 }
 .terminal[data-terminal-theme="light"] {
-  --terminal-link-underline: rgb(90 174 245 / 0.84);
+  --terminal-file-link-underline: rgb(3 105 161 / 0.48);
+  --terminal-file-link-underline-hover: rgb(3 105 161 / 0.58);
+}
+.terminal-file-link-underlines {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  overflow: hidden;
+  pointer-events: none;
+}
+.terminal-file-link-underline {
+  position: absolute;
+  height: 0;
+  border-bottom: 1px solid var(--terminal-file-link-underline);
+  pointer-events: none;
+}
+.terminal-file-link-underline--hover {
+  border-bottom-color: var(--terminal-file-link-underline-hover);
+  border-bottom-width: 1px;
 }
 .terminal .xterm-rows span[style*="text-decoration: underline"],
 .terminal .xterm-rows span[style*="text-decoration-line: underline"] {
-  text-decoration-color: var(--terminal-link-underline) !important;
+  text-decoration-color: currentColor !important;
   text-decoration-thickness: 1px !important;
   text-underline-offset: 2px !important;
 }
@@ -10570,11 +10589,13 @@ body.theme-light .file-tree-children::before {
   white-space: nowrap;
 }
 .file-editor-path {
-  flex: 1;
+  flex: 1 1 min(42vw, 72ch);
+  min-width: min(22ch, 28vw);
+  max-width: min(64vw, 96ch);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   color: var(--muted);
-  direction: rtl;
+  direction: ltr;
   text-align: start;
 }
 .file-editor-panel {
@@ -12741,7 +12762,7 @@ body.editor-theme-light .file-editor-content {
   min-width: 0;
 }
 .file-editor-toolbar-left {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
 }
 .file-editor-toolbar-center {
   position: absolute;
