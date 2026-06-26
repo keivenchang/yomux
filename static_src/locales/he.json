@@ -329,7 +329,7 @@
   "menu.tmux.kill": "סגור הפעלת tmux",
   "menu.tmux.kill.for": "סגור הפעלת tmux '{session}'",
   "menu.tmux.limitReached": "המגבלה הושגה",
-  "menu.tmux.newSession": "+ {name}",
+  "menu.tmux.newSession": "new {name}",
   "menu.tmux.noTabFocused": "אין לשונית tmux ממוקדת",
   "menu.tmux.openInPaneFirst": "פתח תחילה את הלשונית בחלונית",
   "menu.tmux.paneDetails": "Info Bar",

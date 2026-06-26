@@ -329,7 +329,7 @@
   "menu.tmux.kill": "إنهاء جلسة tmux",
   "menu.tmux.kill.for": "إنهاء جلسة tmux '{session}'",
   "menu.tmux.limitReached": "تم بلوغ الحد",
-  "menu.tmux.newSession": "+ {name}",
+  "menu.tmux.newSession": "new {name}",
   "menu.tmux.noTabFocused": "لا يوجد تبويب tmux مركّز",
   "menu.tmux.openInPaneFirst": "افتح التبويب في جزء أولاً",
   "menu.tmux.paneDetails": "Info Bar",

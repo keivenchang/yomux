@@ -454,6 +454,7 @@
   --icon-logout: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/%3E%3Cpath d='M16 17l5-5-5-5'/%3E%3Cpath d='M21 12H9'/%3E%3C/svg%3E");
   --icon-finder: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7.5h7l2 2h9v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3Cpath d='M3 7.5V6a2 2 0 0 1 2-2h4.5l2 2H19a2 2 0 0 1 2 2v1.5'/%3E%3C/svg%3E");
   --icon-document: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 3h8l4 4v14H6z'/%3E%3Cpath d='M14 3v5h5'/%3E%3Cpath d='M9 12h6'/%3E%3Cpath d='M9 16h6'/%3E%3C/svg%3E");
+  --icon-shell: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='14' rx='2'/%3E%3Cpath d='m7 10 3 2-3 2'/%3E%3Cpath d='M13 15h4'/%3E%3C/svg%3E");
   --icon-share: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='18' cy='5' r='3'/%3E%3Ccircle cx='6' cy='12' r='3'/%3E%3Ccircle cx='18' cy='19' r='3'/%3E%3Cpath d='M8.6 10.7 15.4 6.3'/%3E%3Cpath d='M8.6 13.3 15.4 17.7'/%3E%3C/svg%3E");
   --icon-gear: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z'/%3E%3Cpath d='M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.3 7.3 0 0 0-1.7-1L15 6.4h-6L8.6 9a7.3 7.3 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.3 7.3 0 0 0 1.7 1l.4 2.6h6l.4-2.6a7.3 7.3 0 0 0 1.7-1l2.4 1 2-3.5z'/%3E%3C/svg%3E");
   --icon-pin: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M5 17h14'/%3E%3Cpath d='M8 3h8l-1 7 3 4H6l3-4z'/%3E%3C/svg%3E");
@@ -1671,6 +1672,9 @@ body.app-vw-lte-760 .topbar-search {
 }
 .app-menu-ui-icon-document {
   --app-menu-ui-icon: var(--icon-document);
+}
+.app-menu-ui-icon-shell {
+  --app-menu-ui-icon: var(--icon-shell);
 }
 .app-menu-ui-icon-share {
   --app-menu-ui-icon: var(--icon-share);
@@ -3059,6 +3063,7 @@ body.theme-light .branch-link {
   gap: 8px;
 }
 .js-debug-graph-view {
+  --js-debug-idle-agent-status: #111318;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
 }
@@ -3204,6 +3209,9 @@ body.theme-light .branch-link {
   border-radius: 6px;
   background: color-mix(in srgb, var(--panel2) 54%, transparent);
 }
+.js-debug-chart--legend-footer {
+  grid-template-rows: auto minmax(122px, 1fr) auto;
+}
 .js-debug-chart-head {
   display: flex;
   align-items: center;
@@ -3218,6 +3226,16 @@ body.theme-light .branch-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.js-debug-chart-legend-footer {
+  min-width: 0;
+  max-height: 44px;
+  padding-block-start: 5px;
+  border-block-start: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  overflow: auto;
+}
+.js-debug-chart-legend-footer .js-debug-legend {
+  row-gap: 5px;
 }
 .js-debug-chart-body {
   display: grid;
@@ -3305,7 +3323,7 @@ body.theme-light .branch-link {
   stroke: var(--accent-gold);
 }
 .js-debug-line--idleAgents {
-  stroke: var(--muted);
+  stroke: var(--js-debug-idle-agent-status);
 }
 .js-debug-line--tokensPerAgent {
   stroke: var(--accent-sky-strong);
@@ -3315,21 +3333,26 @@ body.theme-light .branch-link {
 }
 .js-debug-area--askAgents {
   fill: var(--bad);
+  opacity: 0.7;
 }
 .js-debug-area--runAgents {
   fill: var(--good);
+  opacity: 0.7;
 }
 .js-debug-area--transitionAgents {
   fill: var(--accent-gold);
+  opacity: 0.7;
 }
 .js-debug-area--idleAgents {
-  fill: var(--muted);
+  fill: var(--js-debug-idle-agent-status);
+  opacity: 0.7;
 }
 .js-debug-area--tokensPerAgent {
   fill: var(--accent-sky-strong);
 }
 .js-debug-area--agentToken {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 0.7;
 }
 .js-debug-line--cpu {
   stroke: var(--bad);
@@ -3384,7 +3407,7 @@ body.theme-light .branch-link {
   color: var(--accent-gold);
 }
 .js-debug-legend-swatch--idleAgents {
-  color: var(--muted);
+  color: var(--js-debug-idle-agent-status);
 }
 .js-debug-legend-swatch--tokensPerAgent {
   color: var(--accent-sky-strong);

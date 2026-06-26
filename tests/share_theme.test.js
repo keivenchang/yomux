@@ -2561,11 +2561,11 @@ async function runShareThemeSuite() {
       onClose: () => { hoverCloses += 1; },
     });
     hoverController.openNow();
-    assert.equal(hoverOpens, 1);
+    assert.equal(hoverOpens, 1, 'hover popover openNow calls its onOpen handler once');
     assert.ok(hoverAnchor.classList.contains('popover-open'));
     hoverController.closeNow();
-    assert.equal(hoverCloses, 1);
-    assert.equal(hoverAnchor.classList.contains('popover-open'), false);
+    assert.equal(hoverCloses, 1, 'hover popover closeNow calls its onClose handler once');
+    assert.equal(hoverAnchor.classList.contains('popover-open'), false, 'hover popover closeNow removes the state class');
     const staleAnchor = new TestElement('stale-anchor');
     const stalePopover = new TestElement('stale-popover');
     staleAnchor.appendChild(stalePopover);
@@ -2594,8 +2594,8 @@ async function runShareThemeSuite() {
     appMenuPopover.parentElement = appMenuWrapper;
     appMenuPopover.rect = {left: 900, right: 1380, top: 28, bottom: 400, width: 480, height: 372};
     api.fitAppMenuPopover(appMenuPopover);
-    assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-width'), `${appMenuPopover.rect.width}px`);
-    assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-offset'), '-180px');
+    assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-width'), `${appMenuPopover.rect.width}px`, 'app menu fit width uses the measured popover width');
+    assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-offset'), '-180px', 'app menu fit offset keeps the popover inside the viewport');
     // C14: the menu-width measurer must un-clip the command label + detail spans (they were omitted, so the
     // menu measured to the LABELS and the longer detail sub-lines ellipsized with "…").
     const appMenuMeasureSrc = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2633,11 +2633,15 @@ async function runShareThemeSuite() {
     api.setLayoutSlotsForTest(noMinimizedSlots);
     const tabMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
     const tabMenuLabels = tabMenu.items.map(item => item.label).filter(Boolean);
+    assert.ok(tabMenuLabels.includes('new Claude'), 'Tabs menu owns new Claude');
+    assert.ok(tabMenuLabels.includes('new Codex'), 'Tabs menu owns new Codex');
+    assert.ok(tabMenuLabels.includes('new Xterm'), 'Tabs menu owns new Xterm');
+    assert.ok(tabMenu.items.find(item => item.label === 'new Xterm').iconHtml.includes('app-menu-ui-icon-shell'), 'new Xterm uses the shared shell icon');
     assert.equal(tabMenuLabels.includes('Active'), false);
     assert.equal(tabMenuLabels.includes('Inactive'), false);
     assert.equal(tabMenuLabels.includes('Minimized'), false);
     assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
-    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1);
+    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 2, 'Tabs menu separators only split populated command groups');
     // P0 menu-bar: View → Sort tab list orders the Tabs navigator. 'name' sorts by label (deterministic
     // without session state); 'default' is identity. The View menu exposes the submenu with all 3 modes.
     api.setTabsMenuSortMode('default');
@@ -3797,22 +3801,33 @@ async function runShareThemeSuite() {
     ), 'textWraps', 'M9: wrapped text/control drift is named separately from generic geometry drift');
     const tmuxMenu = menus.find(menu => menu.id === 'tmux');
     const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
+    const tabsMenu = menus.find(menu => menu.id === 'tabs');
+    const tabsMenuLabels = tabsMenu.items.map(item => item.label).filter(Boolean);
     assert.equal(tmuxMenu.items[0].label, 'YO off');
     assert.equal(tmuxMenu.items[0].keepOpen, true);
     assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
-    // New-session items: just the agent name (no "+" prefix); the detail shows the params passed.
-    assert.ok(tmuxMenuLabels.includes('Claude'));
-    assert.ok(tmuxMenuLabels.includes('Codex'));
-    assert.ok(tmuxMenuLabels.includes('Term'), 'Term is always offered (a plain shell), not greyed unavailable');
+    // New-session items use an explicit "new" command label in Tabs; the detail shows the params passed.
+    assert.equal(tmuxMenuLabels.includes('new Claude'), false);
+    assert.equal(tmuxMenuLabels.includes('new Codex'), false);
+    assert.equal(tmuxMenuLabels.includes('new Xterm'), false);
+    assert.ok(tabsMenuLabels.includes('new Claude'));
+    assert.ok(tabsMenuLabels.includes('new Codex'));
+    assert.ok(tabsMenuLabels.includes('new Xterm'), 'Xterm is always offered (a plain shell), not greyed unavailable');
+    assert.ok(tabsMenu.items.find(item => item.label === 'new Xterm').iconHtml.includes('app-menu-ui-icon-shell'), 'Tabs -> new Xterm uses the shell symbol');
     assert.equal(tmuxMenuLabels.includes('+ Claude'), false, 'the "+" prefix is dropped from new-session items');
     api.setAgentAuthForTest({claude: {installed: false, logged_in: false, unavailable_reason: 'not-on-path'}});
-    const missingPathClaude = api.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === 'Claude');
+    const unavailableTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
+    const missingPathClaude = unavailableTabsMenu.items.find(item => item.label === 'new Claude');
     assert.equal(missingPathClaude.disabled, true);
     assert.equal(missingPathClaude.detail, 'Not on server PATH');
     {
       const newSessionSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+      const menuCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(newSessionSrc.includes('function agentLaunchParams(agent)'), 'the launch-params helper exists');
-      assert.ok(/menuCommand\(agentName\(agent\), \(\) => createNextSession\(agent\)/.test(newSessionSrc), 'new-session label is the agent name (no "+"), action launches it');
+      assert.ok(/menuCommand\(newTmuxSessionLabel\(agent\), \(\) => createNextSession\(agent\)/.test(newSessionSrc), 'new-session label uses the "new {name}" locale string, action launches it');
+      assert.ok(/function newTmuxSessionIcon\(agent\)[\s\S]*agent === 'term' \? appMenuUiIcon\('shell'\) : agentIcon\(agent\)/.test(newSessionSrc), 'new Xterm uses the shared shell icon path while Claude/Codex keep agent icons');
+      assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*newTmuxSessionItems\(\),[\s\S]*filteredOpenItems/.test(newSessionSrc), 'Tabs menu owns the new-session commands');
+      assert.ok(menuCss.includes('.app-menu-ui-icon-shell') && menuCss.includes('--icon-shell'), 'shell menu icon CSS is generated');
       assert.ok(/capped \? t\('menu\.tmux\.limitReached'\) : agentLaunchParams\(agent\)/.test(newSessionSrc), 'a launchable new-session item shows the params passed as its detail');
     }
     assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
@@ -4895,8 +4910,11 @@ async function runShareThemeSuite() {
     tmuxOnlySlots.left = namedSessionApi.paneStateWithTabs(['1', 'dynamo2'], '1');
     namedSessionApi.setLayoutSlotsForTest(tmuxOnlySlots);
     namedSessionApi.setTabsMenuSearchTextForTest('do2');
-    const filteredNamedTabs = namedSessionApi.tabMenuItems().filter(item => item.type === 'command');
-    assert.equal(filteredNamedTabs.length, 1);
+    const filteredNamedCommands = namedSessionApi.tabMenuItems().filter(item => item.type === 'command');
+    const filteredNamedTabs = filteredNamedCommands.filter(item => item.targetItem);
+    assert.equal(filteredNamedTabs.length, 1, 'Tabs search filters navigator entries without hiding launch commands');
+    assert.deepEqual(filteredNamedTabs.map(item => item.targetItem), ['dynamo2'], 'Tabs search keeps the matching session command');
+    assert.ok(filteredNamedCommands.some(item => item.label === 'new Xterm'), 'Tabs search keeps new-session commands available');
     assert.ok(Number.isFinite(namedSessionApi.tabSearchScore('dynamo2', 'do2')), 'Tabs search matches the raw session name');
     namedSessionApi.setTabsMenuSearchTextForTest('');
     const tmuxTabActionLabels = namedSessionApi.tabMenuItems().map(item => item.label).filter(Boolean);

@@ -329,7 +329,7 @@
   "menu.tmux.kill": "tmux セッションを終了",
   "menu.tmux.kill.for": "tmux セッション '{session}' を終了",
   "menu.tmux.limitReached": "上限に達しました",
-  "menu.tmux.newSession": "+ {name}",
+  "menu.tmux.newSession": "new {name}",
   "menu.tmux.noTabFocused": "tmux タブがフォーカスされていません",
   "menu.tmux.openInPaneFirst": "先にタブをペインで開いてください",
   "menu.tmux.paneDetails": "Info Bar",

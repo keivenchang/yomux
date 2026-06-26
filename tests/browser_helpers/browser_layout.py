@@ -1780,6 +1780,19 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           return jsonResponse(window.__settingsPayload);
         }
         if (url.pathname === '/api/notify') return jsonResponse({enabled: false});
+        if (url.pathname === '/api/create-session') {
+          const agent = url.searchParams.get('agent') || 'term';
+          const explicitSession = String(window.__fixtureNextCreatedSession || '').trim();
+          const numericSessions = window.__fixtureSessions.map(session => Number(session)).filter(Number.isFinite);
+          const session = explicitSession || String((numericSessions.length ? Math.max(...numericSessions) : 0) + 1);
+          return jsonResponse({ok: true, created: true, session, sessions: window.__fixtureSessions.slice(), agent});
+        }
+        if (url.pathname === '/api/rename-session') {
+          const session = url.searchParams.get('session') || '';
+          const newSession = url.searchParams.get('new_name') || session;
+          const staleSessions = window.__fixtureSessions.filter(item => item !== session);
+          return jsonResponse({ok: true, renamed: true, session, new_session: newSession, sessions: staleSessions});
+        }
         if (url.pathname === '/api/ensure-session') return jsonResponse({ok: true, created: false});
         if (url.pathname === '/api/auto-approve') {
           return jsonResponse(window.__fixtureAutoApprovePayload || {

@@ -5577,6 +5577,13 @@ function pendingTmuxSessionNames() {
   return Array.from(pendingTmuxSessions.keys());
 }
 
+function isPendingTmuxSession(session) {
+  const key = String(session || '').trim();
+  if (!key) return false;
+  pruneExpiredPendingTmuxSessions();
+  return pendingTmuxSessions.has(key);
+}
+
 function markPendingTmuxSession(session) {
   const key = String(session || '').trim();
   if (!key) return '';
@@ -9032,6 +9039,14 @@ function agentUnavailableDetail(agent) {
   return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
 }
 
+function newTmuxSessionLabel(agent) {
+  return t('menu.tmux.newSession', {name: agentName(agent)});
+}
+
+function newTmuxSessionIcon(agent) {
+  return agent === 'term' ? appMenuUiIcon('shell') : agentIcon(agent);
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -9039,10 +9054,10 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    // Drop the "+" prefix (label is just the agent name); when launchable, the detail shows the params
-    // actually passed (the --dangerously-* flags in YOLO mode) so you can see what command will run.
-    return menuCommand(agentName(agent), () => createNextSession(agent), {
-      iconHtml: agentIcon(agent),
+    // When launchable, the detail shows the params actually passed (the --dangerously-* flags in YOLO
+    // mode) so you can see what command will run.
+    return menuCommand(newTmuxSessionLabel(agent), () => createNextSession(agent), {
+      iconHtml: newTmuxSessionIcon(agent),
       disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
         ? t('menu.common.adminOnly')
@@ -9202,6 +9217,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
   const filteredOpenItems = sortTabItemsForMenu(filterTabItemsForSearch(openItems, query));
   const groupedItems = menuGroups(
+    newTmuxSessionItems(),
     filteredOpenItems.map(item => menuTabCommand(item, {toggleYolo: true})),
     backgroundTabMenuItems(),
     inactiveTabMenuItems()
@@ -9333,7 +9349,6 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
-        newTmuxSessionItems(),
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),
@@ -21755,7 +21770,7 @@ function claudeIcon() {
 }
 
 function agentName(kind) {
-  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Term' : '';
+  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Xterm' : '';
 }
 
 function numericSessionName(session) {
@@ -23468,7 +23483,7 @@ function scheduleTerminalReconnect(session, item) {
 
 // A tmux session that is absent from the live roster has been killed (vs a transient disconnect).
 function sessionConfirmedGone(session, order) {
-  return isTmuxSession(session) && Array.isArray(order) && !order.includes(session);
+  return isTmuxSession(session) && !isPendingTmuxSession(session) && Array.isArray(order) && !order.includes(session);
 }
 
 // Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
@@ -30938,7 +30953,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'latency', label: 'Latency', series: ['latency'], unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
   {key: 'activity', label: 'Agent status', series: ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, optional: true, dynamicAgentTokens: true},
+  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, optional: true, dynamicAgentTokens: true, legendPlacement: 'footer'},
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
 ]);
 
@@ -32104,10 +32119,14 @@ function debugGraphChartHtml(group, seriesItems, domain) {
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0));
   const max = debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
-  return `<section class="js-debug-chart" data-js-debug-chart="${esc(group.key)}">
+  const legendPlacement = group.legendPlacement === 'footer' ? 'footer' : 'head';
+  const chartClasses = ['js-debug-chart'];
+  if (legendPlacement === 'footer') chartClasses.push('js-debug-chart--legend-footer');
+  if (group.dynamicAgentTokens === true) chartClasses.push('js-debug-chart--token-agents');
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}"${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <span class="js-debug-chart-title">${esc(group.label)}</span>
-      ${debugGraphLegendHtml(groupSeries)}
+      ${legendPlacement === 'head' ? debugGraphLegendHtml(groupSeries) : ''}
     </div>
     <div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
@@ -32123,6 +32142,7 @@ function debugGraphChartHtml(group, seriesItems, domain) {
         ${debugGraphXAxisHtml(domain)}
       </div>
     </div>
+    ${legendPlacement === 'footer' ? `<div class="js-debug-chart-legend-footer">${debugGraphLegendHtml(groupSeries)}</div>` : ''}
   </section>`;
 }
 

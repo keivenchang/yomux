@@ -473,6 +473,14 @@ function agentUnavailableDetail(agent) {
   return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
 }
 
+function newTmuxSessionLabel(agent) {
+  return t('menu.tmux.newSession', {name: agentName(agent)});
+}
+
+function newTmuxSessionIcon(agent) {
+  return agent === 'term' ? appMenuUiIcon('shell') : agentIcon(agent);
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -480,10 +488,10 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    // Drop the "+" prefix (label is just the agent name); when launchable, the detail shows the params
-    // actually passed (the --dangerously-* flags in YOLO mode) so you can see what command will run.
-    return menuCommand(agentName(agent), () => createNextSession(agent), {
-      iconHtml: agentIcon(agent),
+    // When launchable, the detail shows the params actually passed (the --dangerously-* flags in YOLO
+    // mode) so you can see what command will run.
+    return menuCommand(newTmuxSessionLabel(agent), () => createNextSession(agent), {
+      iconHtml: newTmuxSessionIcon(agent),
       disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
         ? t('menu.common.adminOnly')
@@ -643,6 +651,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
   const filteredOpenItems = sortTabItemsForMenu(filterTabItemsForSearch(openItems, query));
   const groupedItems = menuGroups(
+    newTmuxSessionItems(),
     filteredOpenItems.map(item => menuTabCommand(item, {toggleYolo: true})),
     backgroundTabMenuItems(),
     inactiveTabMenuItems()
@@ -774,7 +783,6 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
-        newTmuxSessionItems(),
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),

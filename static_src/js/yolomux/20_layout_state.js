@@ -959,6 +959,13 @@ function pendingTmuxSessionNames() {
   return Array.from(pendingTmuxSessions.keys());
 }
 
+function isPendingTmuxSession(session) {
+  const key = String(session || '').trim();
+  if (!key) return false;
+  pruneExpiredPendingTmuxSessions();
+  return pendingTmuxSessions.has(key);
+}
+
 function markPendingTmuxSession(session) {
   const key = String(session || '').trim();
   if (!key) return '';

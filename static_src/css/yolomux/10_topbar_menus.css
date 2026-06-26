@@ -922,6 +922,9 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-ui-icon-document {
   --app-menu-ui-icon: var(--icon-document);
 }
+.app-menu-ui-icon-shell {
+  --app-menu-ui-icon: var(--icon-shell);
+}
 .app-menu-ui-icon-share {
   --app-menu-ui-icon: var(--icon-share);
 }

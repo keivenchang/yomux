@@ -1398,6 +1398,98 @@ def test_dockview_new_virtual_and_file_tabs_open_in_focused_pane(browser, tmp_pa
     assert "2" in metrics["slot1Tabs"], metrics
 
 
+def test_dockview_pending_new_tmux_session_survives_stale_roster_socket_close(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        available_agents=["term"],
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+        const socketForSession = session => Array.from(window.__bootSocketInstances || []).reverse().find(socket => {
+          try { return new URL(socket.url).searchParams.get('session') === session; }
+          catch (error) { return false; }
+        });
+        const autoApproveCount = () => (window.__bootFetches || []).filter(fetch => fetch.path === '/api/auto-approve').length;
+        const snapshot = () => ({
+          tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+          active: document.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '',
+          slots: JSON.parse(JSON.stringify(layoutSlots)),
+          pending: pendingTmuxSessionNames(),
+          fetches: (window.__bootFetches || []).map(fetch => `${fetch.method} ${fetch.path}${fetch.search}`),
+        });
+        (async () => {
+          window.__fixtureNextCreatedSession = '2';
+          await createNextSession('term');
+          await wait(0);
+          const socket = socketForSession('2');
+          const beforeAutoApprove = autoApproveCount();
+          if (!socket) return done({error: 'new session socket not opened', ...snapshot()});
+          socket.close();
+          for (let index = 0; index < 50 && autoApproveCount() <= beforeAutoApprove; index += 1) await wait(10);
+          await wait(0);
+          done(snapshot());
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert "2" in metrics["tabs"], metrics
+    assert metrics["active"] == "2", metrics
+    assert metrics["slots"]["left"]["active"] == "2", metrics
+    assert "2" in metrics["pending"], metrics
+
+
+def test_dockview_pending_renamed_tmux_session_survives_stale_roster_socket_close(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=5,6&layout=left&tabs=left:5,6",
+        sessions=["5", "6"],
+        available_agents=["term"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+        const socketForSession = session => Array.from(window.__bootSocketInstances || []).reverse().find(socket => {
+          try { return new URL(socket.url).searchParams.get('session') === session; }
+          catch (error) { return false; }
+        });
+        const autoApproveCount = () => (window.__bootFetches || []).filter(fetch => fetch.path === '/api/auto-approve').length;
+        const snapshot = () => ({
+          tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+          active: document.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '',
+          slots: JSON.parse(JSON.stringify(layoutSlots)),
+          pending: pendingTmuxSessionNames(),
+          fetches: (window.__bootFetches || []).map(fetch => `${fetch.method} ${fetch.path}${fetch.search}`),
+        });
+        (async () => {
+          await renameTmuxSession('5', '55');
+          await wait(0);
+          const socket = socketForSession('55');
+          const beforeAutoApprove = autoApproveCount();
+          if (!socket) return done({error: 'renamed session socket not opened', ...snapshot()});
+          socket.close();
+          for (let index = 0; index < 50 && autoApproveCount() <= beforeAutoApprove; index += 1) await wait(10);
+          await wait(0);
+          done(snapshot());
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert "55" in metrics["tabs"], metrics
+    assert "5" not in metrics["tabs"], metrics
+    assert metrics["active"] == "55", metrics
+    assert metrics["slots"]["left"]["active"] == "55", metrics
+    assert "55" in metrics["pending"], metrics
+
+
 def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
     path = "/repo/app/src/main.py"
     item = f"filediff:{path}"

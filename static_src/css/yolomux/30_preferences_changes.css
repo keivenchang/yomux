@@ -79,6 +79,7 @@
   gap: 8px;
 }
 .js-debug-graph-view {
+  --js-debug-idle-agent-status: #111318;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
 }
@@ -224,6 +225,9 @@
   border-radius: 6px;
   background: color-mix(in srgb, var(--panel2) 54%, transparent);
 }
+.js-debug-chart--legend-footer {
+  grid-template-rows: auto minmax(122px, 1fr) auto;
+}
 .js-debug-chart-head {
   display: flex;
   align-items: center;
@@ -238,6 +242,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.js-debug-chart-legend-footer {
+  min-width: 0;
+  max-height: 44px;
+  padding-block-start: 5px;
+  border-block-start: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  overflow: auto;
+}
+.js-debug-chart-legend-footer .js-debug-legend {
+  row-gap: 5px;
 }
 .js-debug-chart-body {
   display: grid;
@@ -325,7 +339,7 @@
   stroke: var(--accent-gold);
 }
 .js-debug-line--idleAgents {
-  stroke: var(--muted);
+  stroke: var(--js-debug-idle-agent-status);
 }
 .js-debug-line--tokensPerAgent {
   stroke: var(--accent-sky-strong);
@@ -335,21 +349,26 @@
 }
 .js-debug-area--askAgents {
   fill: var(--bad);
+  opacity: 0.7;
 }
 .js-debug-area--runAgents {
   fill: var(--good);
+  opacity: 0.7;
 }
 .js-debug-area--transitionAgents {
   fill: var(--accent-gold);
+  opacity: 0.7;
 }
 .js-debug-area--idleAgents {
-  fill: var(--muted);
+  fill: var(--js-debug-idle-agent-status);
+  opacity: 0.7;
 }
 .js-debug-area--tokensPerAgent {
   fill: var(--accent-sky-strong);
 }
 .js-debug-area--agentToken {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 0.7;
 }
 .js-debug-line--cpu {
   stroke: var(--bad);
@@ -404,7 +423,7 @@
   color: var(--accent-gold);
 }
 .js-debug-legend-swatch--idleAgents {
-  color: var(--muted);
+  color: var(--js-debug-idle-agent-status);
 }
 .js-debug-legend-swatch--tokensPerAgent {
   color: var(--accent-sky-strong);

@@ -831,7 +831,7 @@ function claudeIcon() {
 }
 
 function agentName(kind) {
-  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Term' : '';
+  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Xterm' : '';
 }
 
 function numericSessionName(session) {
@@ -2544,7 +2544,7 @@ function scheduleTerminalReconnect(session, item) {
 
 // A tmux session that is absent from the live roster has been killed (vs a transient disconnect).
 function sessionConfirmedGone(session, order) {
-  return isTmuxSession(session) && Array.isArray(order) && !order.includes(session);
+  return isTmuxSession(session) && !isPendingTmuxSession(session) && Array.isArray(order) && !order.includes(session);
 }
 
 // Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's

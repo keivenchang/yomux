@@ -70,7 +70,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'latency', label: 'Latency', series: ['latency'], unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
   {key: 'activity', label: 'Agent status', series: ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, optional: true, dynamicAgentTokens: true},
+  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, optional: true, dynamicAgentTokens: true, legendPlacement: 'footer'},
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
 ]);
 
@@ -1236,10 +1236,14 @@ function debugGraphChartHtml(group, seriesItems, domain) {
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0));
   const max = debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
-  return `<section class="js-debug-chart" data-js-debug-chart="${esc(group.key)}">
+  const legendPlacement = group.legendPlacement === 'footer' ? 'footer' : 'head';
+  const chartClasses = ['js-debug-chart'];
+  if (legendPlacement === 'footer') chartClasses.push('js-debug-chart--legend-footer');
+  if (group.dynamicAgentTokens === true) chartClasses.push('js-debug-chart--token-agents');
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}"${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <span class="js-debug-chart-title">${esc(group.label)}</span>
-      ${debugGraphLegendHtml(groupSeries)}
+      ${legendPlacement === 'head' ? debugGraphLegendHtml(groupSeries) : ''}
     </div>
     <div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
@@ -1255,6 +1259,7 @@ function debugGraphChartHtml(group, seriesItems, domain) {
         ${debugGraphXAxisHtml(domain)}
       </div>
     </div>
+    ${legendPlacement === 'footer' ? `<div class="js-debug-chart-legend-footer">${debugGraphLegendHtml(groupSeries)}</div>` : ''}
   </section>`;
 }
 

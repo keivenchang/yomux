@@ -329,7 +329,7 @@
   "menu.tmux.kill": "⟦Ķíłł ťɱúẋ šéššíóñ·······⟧",
   "menu.tmux.kill.for": "⟦Ķíłł ťɱúẋ šéššíóñ '{session}'········⟧",
   "menu.tmux.limitReached": "⟦Łíɱíť řéáçĥéđ·····⟧",
-  "menu.tmux.newSession": "⟦+ {name}·⟧",
+  "menu.tmux.newSession": "⟦ñéŵ {name}··⟧",
   "menu.tmux.noTabFocused": "⟦Ñó ťɱúẋ ťáƀ ƒóçúšéđ········⟧",
   "menu.tmux.openInPaneFirst": "⟦Óƥéñ ťĥé ťáƀ íñ á ƥáñé ƒířšť···········⟧",
   "menu.tmux.paneDetails": "⟦Íñƒó Ɓář···⟧",

@@ -329,7 +329,7 @@
   "menu.tmux.kill": "tmux 세션 종료",
   "menu.tmux.kill.for": "tmux 세션 '{session}' 종료",
   "menu.tmux.limitReached": "한도 초과",
-  "menu.tmux.newSession": "+ {name}",
+  "menu.tmux.newSession": "new {name}",
   "menu.tmux.noTabFocused": "포커스된 tmux 탭 없음",
   "menu.tmux.openInPaneFirst": "먼저 창에서 탭을 여세요",
   "menu.tmux.paneDetails": "Info Bar",

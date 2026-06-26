@@ -329,7 +329,7 @@
   "menu.tmux.kill": "tmux-Sitzung beenden",
   "menu.tmux.kill.for": "tmux-Sitzung '{session}' beenden",
   "menu.tmux.limitReached": "Limit erreicht",
-  "menu.tmux.newSession": "+ {name}",
+  "menu.tmux.newSession": "new {name}",
   "menu.tmux.noTabFocused": "Kein tmux-Tab fokussiert",
   "menu.tmux.openInPaneFirst": "Öffne den Tab zuerst in einem Fenster",
   "menu.tmux.paneDetails": "Info Bar",

@@ -969,6 +969,7 @@ globalThis.__layoutTestApi = {
   tmuxSessionNameError,
   replaceTmuxSessionInClient,
   createNextSessionForTest: createNextSession,
+  markPendingTmuxSessionForTest: markPendingTmuxSession,
   pendingTmuxSessionNamesForTest: pendingTmuxSessionNames,
   normalizedSessionOrder,
   fileDropCategory,
