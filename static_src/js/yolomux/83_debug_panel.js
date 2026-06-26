@@ -66,12 +66,12 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'count', label: 'API/SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond'},
   {key: 'latency', label: 'Latency', series: ['latency'], unit: 'ms'},
-  {key: 'bandwidth', label: 'Bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
-  {key: 'activity', label: 'Agent status', series: ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, optional: true, dynamicAgentTokens: true, legendPlacement: 'footer'},
+  {key: 'count', label: 'API/SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond'},
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
+  {key: 'bandwidth', label: 'Bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
+  {key: 'activity', label: 'Agent status', series: ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
+  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, optional: true, dynamicAgentTokens: true, legendPlacement: 'footer'},
 ]);
 
 function normalizedJsDebugSubTab(value) {
@@ -1160,18 +1160,44 @@ function debugGraphIntegerAxisHtml(group, max) {
         : value === 0
           ? ` data-js-debug-axis-zero="${esc(group.key)}"`
           : '';
-      return `<span data-js-debug-axis-tick="${esc(group.key)}" data-js-debug-axis-value="${esc(value)}"${marker}>${esc(debugGraphAxisValueText(value, group.unit))}</span>`;
+      return `<span data-js-debug-axis-tick="${esc(group.key)}" data-js-debug-axis-value="${esc(value)}"${marker}${debugGraphAxisTickStyle(value, axisMax)}>${esc(debugGraphAxisValueText(value, group.unit))}</span>`;
     }).join('')}
   </div>`;
+}
+
+function debugGraphGridLineY(value, chartMax) {
+  const top = 8;
+  const height = 104;
+  const max = Math.max(Number(chartMax) || 0, 1);
+  return top + (1 - (Math.max(0, Number(value) || 0) / max)) * height;
+}
+
+function debugGraphAxisTickStyle(value, chartMax) {
+  const percent = (debugGraphGridLineY(value, chartMax) / 120) * 100;
+  return ` style="--js-debug-axis-y: ${esc(percent.toFixed(3))}%;"`;
+}
+
+function debugGraphGridLinesHtml(group, axisMax) {
+  const max = Math.max(0, Number(axisMax) || 0);
+  const fallbackMax = max > 0 ? max : 1;
+  const values = group.integerGridLines === true
+    ? debugGraphIntegerAxisValues(max)
+    : [fallbackMax, fallbackMax / 2, 0];
+  return values.map(value => {
+    const y = debugGraphGridLineY(value, max).toFixed(1);
+    const axisValue = group.integerGridLines === true ? ` data-js-debug-grid-value="${esc(value)}"` : '';
+    return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="600" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
+  }).join('');
 }
 
 function debugGraphAxisHtml(group, max) {
   const axisMax = Math.max(0, Number(max) || 0);
   if (group.integerAxis === true) return debugGraphIntegerAxisHtml(group, axisMax);
+  const positionMax = axisMax > 0 ? axisMax : 1;
   return `<div class="js-debug-y-axis" data-js-debug-axis="${esc(group.key)}">
-    <span data-js-debug-axis-max="${esc(group.key)}">${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
-    <span data-js-debug-axis-mid="${esc(group.key)}">${esc(debugGraphAxisValueText(axisMax / 2, group.unit))}</span>
-    <span data-js-debug-axis-zero="${esc(group.key)}">${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax / 2, positionMax)}>${esc(debugGraphAxisValueText(axisMax / 2, group.unit))}</span>
+    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
   </div>`;
 }
 
@@ -1249,15 +1275,13 @@ function debugGraphChartHtml(group, seriesItems, domain) {
       ${debugGraphAxisHtml(group, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(group.label)}" preserveAspectRatio="none">
-          <line class="js-debug-grid-line" x1="0" y1="8" x2="600" y2="8"></line>
-          <line class="js-debug-grid-line" x1="0" y1="60" x2="600" y2="60"></line>
-          <line class="js-debug-grid-line" x1="0" y1="112" x2="600" y2="112"></line>
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
+          ${debugGraphGridLinesHtml(group, axisMax)}
           ${plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
         </svg>
-        ${debugGraphXAxisHtml(domain)}
       </div>
+      ${debugGraphXAxisHtml(domain)}
     </div>
     ${legendPlacement === 'footer' ? `<div class="js-debug-chart-legend-footer">${debugGraphLegendHtml(groupSeries)}</div>` : ''}
   </section>`;

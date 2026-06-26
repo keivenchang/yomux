@@ -206,7 +206,7 @@ async function runLayoutRestoreSuite() {
     }, 'a stale transcript push cannot drop the pending renamed tab');
 
     await api.applyTranscriptsPayloadForTest({session_order: ['2', '8002b'], sessions: {'2': {panes: []}, '8002b': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    assert.equal(api.pendingTmuxSessionNamesForTest().length, 0, 'fresh server roster clears the pending renamed-session marker');
+    assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['8002b'], 'fresh server roster does not end the renamed-session grace window before tmux/socket state settles');
   });
 
   await testAsync('new Claude/Codex tab opens before delayed discovery lists it', async () => {
@@ -237,7 +237,7 @@ async function runLayoutRestoreSuite() {
     }, 'stale transcript metadata cannot close the pending new session tab');
 
     await api.applyTranscriptsPayloadForTest({session_order: ['1', '2'], sessions: {'1': {panes: []}, '2': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    assert.equal(api.pendingTmuxSessionNamesForTest().length, 0, 'fresh server roster clears the pending new-session marker');
+    assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['2'], 'fresh server roster does not end the new-session grace window before tmux/socket state settles');
   });
 
   await testAsync('new Xterm tab stays active when create-session is fresh but transcripts lag', async () => {
@@ -269,7 +269,7 @@ async function runLayoutRestoreSuite() {
     }, 'stale transcript metadata cannot minimize the freshly created Xterm tab');
 
     await api.applyTranscriptsPayloadForTest({session_order: ['1', '2'], sessions: {'1': {panes: []}, '2': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    assert.equal(api.pendingTmuxSessionNamesForTest().length, 0, 'fresh transcript metadata confirms the new Xterm');
+    assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['2'], 'fresh transcript metadata does not end the new Xterm grace window before tmux/socket state settles');
   });
 
   test('t@1212', () => {

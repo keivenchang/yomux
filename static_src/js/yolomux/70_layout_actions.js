@@ -1354,7 +1354,7 @@ async function createNextSession(agent) {
     const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     markPendingTmuxSession(payload.session);
     const previousActive = activeSessions.slice();
-    updateSessionList(payload.sessions || [], {preservePending: true});
+    updateSessionList(payload.sessions || []);
     renderSessionButtons();
     renderPanels(previousActive);
     await placeTmuxSession(payload.session);
@@ -1573,6 +1573,7 @@ async function killTmuxSession(session) {
   try {
     const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
+    clearPendingTmuxSession(session);
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
     autoApproveStates.delete(session);

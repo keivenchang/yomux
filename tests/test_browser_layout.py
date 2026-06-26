@@ -53,6 +53,62 @@ def _working_agent_glyph_html(kind, element_id):
     return _agent_status_glyph_html(kind, "working", element_id)
 
 
+def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
+    page = tmp_path / "debug-agent-status-axis-guides.html"
+    page.write_text(page_html("""
+      <section class="js-debug-chart debug-chart-fixture" data-js-debug-chart="activity">
+        <div class="js-debug-chart-head">
+          <span class="js-debug-chart-title">Agent status</span>
+        </div>
+        <div class="js-debug-chart-body">
+          <div class="js-debug-y-axis js-debug-y-axis--integer" data-js-debug-axis="activity">
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="3" data-js-debug-axis-max="activity" style="--js-debug-axis-y: 6.667%;">3</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="2" style="--js-debug-axis-y: 35.556%;">2</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="1" style="--js-debug-axis-y: 64.444%;">1</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="0" data-js-debug-axis-zero="activity" style="--js-debug-axis-y: 93.333%;">0</span>
+          </div>
+          <div class="js-debug-plot">
+            <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="3" x1="0" y1="8.0" x2="600" y2="8.0" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="2" x1="0" y1="42.7" x2="600" y2="42.7" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="1" x1="0" y1="77.3" x2="600" y2="77.3" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="0" x1="0" y1="112.0" x2="600" y2="112.0" vector-effect="non-scaling-stroke"></line>
+            </svg>
+          </div>
+          <div class="js-debug-x-axis" data-js-debug-x-axis>
+            <span data-js-debug-x-tick="start">start</span>
+            <span data-js-debug-x-tick="mid">mid</span>
+            <span data-js-debug-x-tick="end">end</span>
+          </div>
+        </div>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: #111827; color: #e5e7eb; }
+      .debug-chart-fixture { width: 560px; height: 260px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const svg = document.querySelector('.js-debug-line-chart');
+        const svgRect = svg.getBoundingClientRect();
+        return ['3', '2', '1', '0'].map(value => {
+          const tick = document.querySelector(`[data-js-debug-axis-value="${value}"]`);
+          const line = document.querySelector(`[data-js-debug-grid-value="${value}"]`);
+          const tickRect = tick.getBoundingClientRect();
+          const tickCenterY = tickRect.top + tickRect.height / 2;
+          const lineY = svgRect.top + (Number(line.getAttribute('y1')) / 120) * svgRect.height;
+          return {
+            value,
+            deltaY: Math.abs(tickCenterY - lineY),
+            strokeWidth: Number.parseFloat(getComputedStyle(line).strokeWidth),
+          };
+        });
+        """
+    )
+    assert max(item["deltaY"] for item in metrics) <= 0.75, metrics
+    assert all(0 < item["strokeWidth"] <= 0.5 for item in metrics), metrics
+
+
 def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
     padding = 24
     left = int((min(rest_rect["left"], peak_rect["left"]) - padding) * dpr)

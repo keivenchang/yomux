@@ -3797,7 +3797,7 @@ function updateSessionList(nextSessions, options = {}) {
   const next = normalizedSessionOrder(nextSessions);
   if (!next) return false;
   pruneExpiredPendingTmuxSessions();
-  if (options.preservePending !== true) clearConfirmedPendingTmuxSessions(next);
+  if (options.clearConfirmedPending === true) clearConfirmedPendingTmuxSessions(next);
   const effectiveNext = sessionOrderIncludingPending(next);
   const changed = effectiveNext.length !== sessions.length || effectiveNext.some((session, index) => session !== sessions[index]);
   if (!changed) {

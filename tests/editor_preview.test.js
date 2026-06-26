@@ -1933,6 +1933,8 @@ async function runEditorPreviewSuite() {
     }
     assert.ok(/\.js-debug-chart--legend-footer\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(122px, 1fr\) auto/.test(debugPaneCss), 'YO!stats reserves a footer legend row outside the plot');
     assert.ok(/\.js-debug-chart-legend-footer\s*\{[\s\S]*max-height:\s*44px[\s\S]*overflow:\s*auto/.test(debugPaneCss), 'YO!stats token legends scroll instead of covering the chart');
+    assert.ok(/\.js-debug-y-axis span\s*\{[\s\S]*position:\s*absolute[\s\S]*top:\s*var\(--js-debug-axis-y/.test(debugPaneCss), 'YO!stats Y-axis labels use chart-coordinate positioning');
+    assert.ok(/\.js-debug-grid-line\s*\{[\s\S]*stroke-width:\s*0\.4/.test(debugPaneCss), 'YO!stats grid guide lines are very thin');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*#3f4754/.test(debugPaneCss), 'YO!stats idle agent status uses a visible dark gray token');
     assert.ok(/body\.theme-light \.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*var\(--editor-line-number\)/.test(debugPaneCss), 'YO!stats idle agent status uses a brighter light-mode gray token');
     assert.ok(/\.js-debug-area--idleAgents\s*\{[\s\S]*fill:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle stacked area uses the darker idle status fill');
@@ -2105,10 +2107,10 @@ async function runEditorPreviewSuite() {
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range buttons after enough retained history exists');
     assert.ok(html.includes('API/SSE/sec') && html.includes('Bandwidth/sec'), 'chart headers carry per-second units');
-    assert.ok(/data-js-debug-axis-max="count">[0-9.]+</.test(html), 'count chart Y axis stays terse');
-    assert.ok(/data-js-debug-axis-max="latency">[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
-    assert.ok(/data-js-debug-axis-max="bandwidth">[0-9.]+(?:B|kB|MB)</.test(html), 'bandwidth chart Y axis uses compact byte labels');
-    assert.ok(/data-js-debug-axis-max="cpu">[0-9.]+%</.test(html), 'CPU chart Y axis shows percent units');
+    assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
+    assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
+    assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>[0-9.]+(?:B|kB|MB)</.test(html), 'bandwidth chart Y axis uses compact byte labels');
+    assert.ok(/data-js-debug-axis-max="cpu"[^>]*>[0-9.]+%</.test(html), 'CPU chart Y axis shows percent units');
     assert.ok(html.includes('system avg CPU %'), 'CPU chart includes system average CPU beside yolomux.py CPU');
     assert.ok(html.includes('uptime 1s') && html.includes('PID=9876') && html.includes('server seq 20'), 'graph renders restarted process metadata with retained sequence');
   });
@@ -2199,10 +2201,10 @@ async function runEditorPreviewSuite() {
 
     assert.ok(html.includes('data-js-debug-chart="count"') && html.includes('data-js-debug-chart="latency"') && html.includes('data-js-debug-chart="bandwidth"') && html.includes('data-js-debug-chart="cpu"'), 'YO!stats renders separate charts for unlike units');
     assert.ok(html.includes('API/SSE/sec') && html.includes('Bandwidth/sec'), 'chart titles keep the per-second units');
-    assert.ok(/data-js-debug-axis-max="count">2</.test(html), 'count chart Y axis shows compact API/SSE rates');
-    assert.ok(/data-js-debug-axis-max="latency">5s</.test(html), 'latency chart Y axis converts large millisecond values to terse seconds');
-    assert.ok(/data-js-debug-axis-max="bandwidth">1\.0kB</.test(html), 'bandwidth chart Y axis keeps byte labels terse');
-    assert.ok(/data-js-debug-axis-max="cpu">100%</.test(html), 'CPU chart Y axis always uses a 0-100% scale');
+    assert.ok(/data-js-debug-axis-max="count"[^>]*>2</.test(html), 'count chart Y axis shows compact API/SSE rates');
+    assert.ok(/data-js-debug-axis-max="latency"[^>]*>5s</.test(html), 'latency chart Y axis converts large millisecond values to terse seconds');
+    assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>1\.0kB</.test(html), 'bandwidth chart Y axis keeps byte labels terse');
+    assert.ok(/data-js-debug-axis-max="cpu"[^>]*>100%</.test(html), 'CPU chart Y axis always uses a 0-100% scale');
     assert.ok(html.includes('yolomux.py CPU %') && html.includes('system avg CPU %'), 'CPU legend shows process and system CPU series together');
     assert.ok(html.includes('data-js-debug-x-tick="start"') && html.includes('data-js-debug-x-tick="mid"') && html.includes('data-js-debug-x-tick="end"'), 'split charts render start/mid/end time ticks on the X axis');
   });
@@ -2227,12 +2229,12 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphScaleForTest(10);
     const html = api.debugPanelHtmlForTest();
 
-    assert.ok(/data-js-debug-axis-max="count">4</.test(html), 'API/SSE per-second axis rounds 3.8/s to a whole 4');
-    assert.ok(/data-js-debug-axis-mid="count">2</.test(html), 'API/SSE per-second midpoint stays whole');
-    assert.ok(/data-js-debug-axis-max="latency">200ms</.test(html), 'latency axis rounds 196ms to 200ms');
-    assert.ok(/data-js-debug-axis-mid="latency">100ms</.test(html), 'latency midpoint stays readable after rounding');
-    assert.ok(/data-js-debug-axis-max="bandwidth">200kB</.test(html), 'bandwidth axis rounds 140kB/s to 200kB');
-    assert.ok(/data-js-debug-axis-mid="bandwidth">100kB</.test(html), 'bandwidth midpoint stays readable after rounding');
+    assert.ok(/data-js-debug-axis-max="count"[^>]*>4</.test(html), 'API/SSE per-second axis rounds 3.8/s to a whole 4');
+    assert.ok(/data-js-debug-axis-mid="count"[^>]*>2</.test(html), 'API/SSE per-second midpoint stays whole');
+    assert.ok(/data-js-debug-axis-max="latency"[^>]*>200ms</.test(html), 'latency axis rounds 196ms to 200ms');
+    assert.ok(/data-js-debug-axis-mid="latency"[^>]*>100ms</.test(html), 'latency midpoint stays readable after rounding');
+    assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>200kB</.test(html), 'bandwidth axis rounds 140kB/s to 200kB');
+    assert.ok(/data-js-debug-axis-mid="bandwidth"[^>]*>100kB</.test(html), 'bandwidth midpoint stays readable after rounding');
   });
 
   await testAsync('YO!stats graph renders 10-sample moving averages for timing series', async () => {
@@ -2323,6 +2325,7 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.charts.includes('activity'), 'agent activity chart appears when agent rows exist');
     assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
+    assert.deepStrictEqual([...summary.charts], ['latency', 'count', 'cpu', 'bandwidth', 'activity', 'agentTokens'], 'YO!stats charts render in scan order: latency, API/SSE, CPU, bandwidth, agent status, agent tokens');
 
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
@@ -2331,9 +2334,14 @@ async function runEditorPreviewSuite() {
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
     assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-body') < agentTokenChartHtml.indexOf('js-debug-chart-legend-footer'), 'agent token legend renders after the plot body, not over the chart');
     assert.equal(agentTokenChartHtml.slice(0, agentTokenChartHtml.indexOf('js-debug-chart-body')).includes('data-js-debug-legend="agentToken:'), false, 'agent token header does not contain the busy per-agent legend');
-    assert.ok(/data-js-debug-axis-max="activity">3</.test(html), 'agent status Y axis uses the exact stacked ASK+RUN+Transition total');
+    assert.ok(/data-js-debug-axis-max="activity"[^>]*>3</.test(html), 'agent status Y axis uses the exact stacked ASK+RUN+Transition total');
     for (const value of [3, 2, 1, 0]) {
       assert.ok(html.includes(`data-js-debug-axis-tick="activity" data-js-debug-axis-value="${value}"`), `activity chart Y axis shows whole-number tick ${value}`);
+      assert.ok(html.includes(`data-js-debug-grid-line="activity" data-js-debug-grid-value="${value}"`), `activity chart draws a horizontal grid line for whole-number tick ${value}`);
+      const axisMatch = html.match(new RegExp(`data-js-debug-axis-value="${value}"[^>]*--js-debug-axis-y: ([0-9.]+)%`));
+      const gridMatch = html.match(new RegExp(`data-js-debug-grid-line="activity" data-js-debug-grid-value="${value}"[^>]* y1="([0-9.]+)"`));
+      assert.ok(axisMatch && gridMatch, `activity chart exposes comparable axis/grid coordinates for tick ${value}`);
+      assert.ok(Math.abs(Number(axisMatch[1]) - ((Number(gridMatch[1]) / 120) * 100)) < 0.05, `activity chart aligns label and grid line for tick ${value}`);
     }
     for (const series of ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents']) {
       assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats renders the ${series} area outline`);

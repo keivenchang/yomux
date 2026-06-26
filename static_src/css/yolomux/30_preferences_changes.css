@@ -259,25 +259,33 @@ body.theme-light .js-debug-graph-view {
 .js-debug-chart-body {
   display: grid;
   grid-template-columns: minmax(58px, auto) minmax(0, 1fr);
-  gap: 8px;
+  grid-template-rows: minmax(104px, 1fr) auto;
+  gap: 3px 8px;
   min-width: 0;
   min-height: 0;
 }
 .js-debug-y-axis {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
+  position: relative;
+  display: block;
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
-  padding-block-end: 16px;
+  min-height: 104px;
   color: var(--muted);
   font: 700 10px/1 var(--mono-font);
   text-align: end;
   white-space: nowrap;
 }
+.js-debug-y-axis span {
+  position: absolute;
+  inset-inline: 0;
+  top: var(--js-debug-axis-y, 0%);
+  transform: translateY(-50%);
+}
 .js-debug-plot {
   display: grid;
-  grid-template-rows: minmax(104px, 1fr) auto;
-  gap: 3px;
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
   min-height: 0;
 }
@@ -289,6 +297,8 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-x-axis {
   display: flex;
+  grid-column: 2;
+  grid-row: 2;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -310,7 +320,7 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-grid-line {
   stroke: color-mix(in srgb, var(--line) 72%, transparent);
-  stroke-width: 1;
+  stroke-width: 0.4;
 }
 .js-debug-line {
   stroke-width: 1;
