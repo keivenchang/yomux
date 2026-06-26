@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import socket
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ from .common import CONTROL_SOCKET_DIR
 
 
 CONTROL_MAX_BYTES = 65536
+CONTROL_SOCKET_PATH_LIMIT = 100
 LOGGER = logging.getLogger(__name__)
 
 
@@ -22,7 +25,14 @@ class ControlRequestError(Exception):
 
 def control_socket_path(token: str | None = None, pid: int | None = None) -> Path:
     suffix = f"-{token}" if token else ""
-    return CONTROL_SOCKET_DIR / f"yolomux-{pid or os.getpid()}{suffix}.sock"
+    filename = f"yolomux-{pid or os.getpid()}{suffix}.sock"
+    path = CONTROL_SOCKET_DIR / filename
+    if len(os.fsencode(str(path))) < CONTROL_SOCKET_PATH_LIMIT:
+        return path
+    digest = hashlib.sha1(os.fsencode(str(CONTROL_SOCKET_DIR))).hexdigest()[:12]
+    uid = getattr(os, "getuid", lambda: "nouid")()
+    root = Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())
+    return root / f"ycs-{uid}-{digest}" / filename
 
 
 def send_yolomux_control_request(owner: dict[str, Any] | None, request: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:

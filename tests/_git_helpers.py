@@ -15,7 +15,12 @@ import subprocess
 
 def git(repo, *args):
     """Run `git -C <repo> <args>`, raising on failure; returns the CompletedProcess (for `.stdout`)."""
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, text=True)
+    return subprocess.run(
+        ["git", "-c", "init.defaultBranch=master", "-C", str(repo), *args],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
 
 
 def init_repo(repo):
