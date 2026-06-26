@@ -372,6 +372,47 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes inside an old four-pane URL still selects Finder diff mode');
   });
 
+  test('layout URL carries editor viewport line state across reload', () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/home/test/yolomux.dev8002/docs/specs/GUI.md';
+    const item = api.registerFileEditorLayoutItemForTest(path);
+    api.setOpenFileStateForTest(path, {mtime: 1, size: 64, kind: 'text', original: 'one\ntwo\nthree\nfour\n', content: 'one\ntwo\nthree\nfour\n', dirty: false});
+    api.setLayoutSlotsForTest({
+      [api.layoutTreeKey]: api.leafNode('left'),
+      left: api.paneStateWithTabs([item], item),
+    });
+    const panel = new TestElement('editor-panel');
+    panel.dataset.layoutItem = item;
+    panel.dataset.filePath = path;
+    const scrollDOM = {scrollTop: 420, scrollLeft: 7, clientHeight: 200};
+    const doc = {
+      length: 19,
+      lines: 4,
+      lineAt(pos) {
+        if (Number(pos) >= 14) return {number: 4, from: 14};
+        if (Number(pos) >= 8) return {number: 3, from: 8};
+        if (Number(pos) >= 4) return {number: 2, from: 4};
+        return {number: 1, from: 0};
+      },
+    };
+    panel._cmView = {
+      scrollDOM,
+      visibleRanges: [{from: 8, to: 14}],
+      state: {doc, selection: {main: {anchor: 16, head: 16}, ranges: [{from: 16, to: 16, anchor: 16, head: 16}]}},
+      scrollSnapshot() { return {kind: 'not-json-url-state'}; },
+    };
+    api.captureFileEditorPanelViewStateForTest(item, panel);
+    const params = parseUrl(api.syncInitialLayoutUrlForTest());
+    const state = JSON.parse(params.get('state'));
+    const mode = state.editor.modes.find(entry => entry.item === item);
+    assert.equal(mode.viewState.line, 3, 'URL editor state records the first visible CodeMirror line');
+    assert.equal(mode.viewState.top, 420, 'URL editor state keeps the scroll offset fallback');
+
+    const restored = loadYolomux(`?${params.toString()}`, ['1']);
+    assert.equal(restored.fileEditorViewStateForTest(item).line, 3, 'reload seeds the editor view-state line from URL state');
+    assert.equal(restored.pendingFileEditorLineTargetForTest(item), 3, 'reload schedules the saved line through the shared editor line-target path');
+  });
+
   test('t@1270', () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=3&layout=left&tabs=left:3,2');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
@@ -1046,6 +1087,21 @@ async function runLayoutRestoreSuite() {
     });
     assert.deepStrictEqual(Array.from(api.diffRefFromSuggestions('/repo/app', historyPath)).map(item => item.short), ['HEAD', 'abc123d', '9876543'], 'file editor FROM picker uses file-specific history when it exists');
     assert.ok(api.diffRefControlsHtml({compact: true, repo: '/repo/app', path: historyPath}).includes(`data-diff-ref-path="${historyPath}"`), 'editor FROM/TO controls carry the file path for file-scoped history');
+    api.setFileExplorerSessionFilesPayloadForTest({
+      session: '8002',
+      loaded: true,
+      files: [],
+      repos: [{repo: '/home/test/yolomux.dev8002'}],
+      refs_by_repo: {'/home/test/yolomux.dev8002': [
+        {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
+        {ref: 'current', short: 'current', subject: 'working tree'},
+        {ref: 'ec78c03adedae7e925692238da9cfad23eb03c5f', short: 'ec78c03a', subject: 'Stabilize tab lifecycle and stats guides'},
+      ]},
+      errors: [],
+    });
+    const differRefs = api.diffRefFromSuggestions('~/yolomux.dev8002');
+    assert.deepStrictEqual(canonical(differRefs.map(item => item.short)), ['HEAD', 'ec78c03a'], 'Differ FROM picker finds previous SHA even when repo keys need home-path normalization');
+    assert.deepStrictEqual(canonical(api.diffRefPopoverItems('HEAD', {suggestions: differRefs, showAll: true}).map(item => item.short)), ['HEAD', 'ec78c03a'], 'opening the Differ FROM picker shows the previous SHA instead of filtering to only HEAD');
     assert.notEqual(
       api.codeMirrorConfigSignature(codePath, {mode: 'diff', expand: false}),
       api.codeMirrorConfigSignature(codePath, {mode: 'diff', expand: true}),
@@ -1583,6 +1639,43 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item);'), 'terminal WS close roster-confirms before reconnecting');
     assert.ok(/sessionConfirmedGone\(session, order\)\)\s*\{\s*pruneDeadSession\(session\);/.test(source), 'a confirmed-gone session is pruned immediately');
     assert.ok(/scheduleTerminalReconnect\(session, item\);\s*\}\s*$/m.test(source) || source.includes('scheduleTerminalReconnect(session, item);'), 'a transient disconnect still reconnects');
+  });
+
+  await testAsync('exited Xterm tab prunes even when auto-approve roster is stale', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
+    const fetches = [];
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      fetches.push(parsed.pathname + parsed.search);
+      if (parsed.pathname === '/api/ensure-session') {
+        return Promise.resolve(jsonResponse({error: 'session no longer exists: 2'}, 404));
+      }
+      if (parsed.pathname === '/api/auto-approve') {
+        return Promise.resolve(jsonResponse({
+          session_order: ['1', '2'],
+          sessions: {
+            '1': {target: '1', enabled: false, last_action: 'off'},
+            '2': {target: '2', enabled: false, last_action: 'off'},
+          },
+          rules: {path: '/tmp/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+        }));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    const socket = {readyState: WebSocket.CLOSED, closeCount: 0, close() { this.closeCount += 1; }};
+    const term = {disposeCount: 0, dispose() { this.disposeCount += 1; }};
+    const item = api.registerTerminalForTest('2', term, socket);
+
+    await api.confirmSessionGoneOrReconnectForTest('2', item);
+    await flushAsyncWork();
+
+    assert.ok(fetches.includes('/api/ensure-session?session=2'), 'websocket close checks the exact tmux session before consulting cached rosters');
+    assert.equal(fetches.includes('/api/auto-approve'), false, 'stale auto-approve roster is not consulted once ensure-session says the session is gone');
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['1'], active: '1'},
+    }, 'dead Xterm tab is removed instead of staying on the last [exited] terminal frame');
+    assert.equal(socket.closeCount, 1, 'dead terminal socket is closed during prune');
+    assert.equal(term.disposeCount, 1, 'dead terminal xterm instance is disposed during prune');
   });
 
   test('t@2147', () => {

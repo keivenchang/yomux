@@ -181,6 +181,209 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["apiSseDistance"] >= 120, (theme, item)
 
 
+def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && typeof renderDebugPanels === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const now = Date.now();
+        const records = [];
+        for (let index = 0; index < 6; index += 1) {
+          records.push({
+            start: Math.floor((now - ((240 - (index * 30)) * 1000)) / 1000),
+            duration: 1,
+            sequence: 200 + index,
+            api_count: index + 1,
+            sse_count: index,
+            latency_total_ms: 12 + index,
+            latency_count: 1,
+            bandwidth_bytes: 1024 * (index + 1),
+            cpu_total_percent: 8 + index,
+            cpu_count: 1,
+            system_cpu_total_percent: 24 + index,
+            system_cpu_count: 1,
+          });
+        }
+        debugGraphApplyServerHistory({sequence: 300, records});
+        setDebugGraphRange(300);
+        renderDebugPanels({force: true});
+
+        let panel = document.querySelector('.js-debug-panel');
+        let graph = panel?.querySelector('[data-js-debug-graph]');
+        let slider = graph?.querySelector('[data-js-debug-range-slider]');
+        const stops = Array.from(graph?.querySelectorAll('datalist option[data-js-debug-range]') || [])
+          .map(option => Number(option.dataset.jsDebugRange));
+        let svgs = Array.from(graph?.querySelectorAll('.js-debug-line-chart') || []);
+        if (!panel || !graph || !slider || svgs.length < 2) {
+          return {error: 'missing graph fixture', stops, svgCount: svgs.length};
+        }
+
+        const sliderRect = slider.getBoundingClientRect();
+        const sliderPointerDefaultAllowed = slider.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 2,
+          pointerType: 'mouse',
+          button: 0,
+          buttons: 1,
+          clientX: sliderRect.left + (sliderRect.width / 2),
+          clientY: sliderRect.top + (sliderRect.height / 2),
+        }));
+        const sliderSurvivedPointerDown = graph.querySelector('[data-js-debug-range-slider]') === slider;
+        slider.value = '7.4';
+        slider.dispatchEvent(new Event('input', {bubbles: true, cancelable: true}));
+        const sliderValueDuringInput = slider.value;
+        const sliderSurvivedInputDrag = graph.querySelector('[data-js-debug-range-slider]') === slider;
+        refreshDebugPanelsFromEvents();
+        const sliderSurvivedPassiveRefreshDuringDrag = graph.querySelector('[data-js-debug-range-slider]') === slider;
+        slider.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+        const sliderValueAfterSnap = slider.value;
+        const sliderInputGrid = document.querySelector('[data-js-debug-chart-grid]');
+        const sliderInputSeconds = (Number(sliderInputGrid?.dataset.jsDebugDomainEnd) - Number(sliderInputGrid?.dataset.jsDebugDomainStart)) / 1000;
+        setDebugGraphRange(300);
+        renderDebugPanels({force: true});
+
+        panel = document.querySelector('.js-debug-panel');
+        graph = panel?.querySelector('[data-js-debug-graph]');
+        slider = graph?.querySelector('[data-js-debug-range-slider]');
+        svgs = Array.from(graph?.querySelectorAll('.js-debug-line-chart') || []);
+        if (!panel || !graph || !slider || svgs.length < 2) {
+          return {error: 'missing graph after slider reset', stops, svgCount: svgs.length};
+        }
+
+        const first = svgs[0];
+        const second = svgs[1];
+        const rect = first.getBoundingClientRect();
+        const y = rect.top + (rect.height / 2);
+        const startX = rect.left + (rect.width * 0.25);
+        const endX = rect.left + (rect.width * 0.65);
+        const eventInit = clientX => ({
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: 'mouse',
+          button: 0,
+          buttons: 1,
+          clientX,
+          clientY: y,
+        });
+        first.dispatchEvent(new PointerEvent('pointermove', eventInit(startX)));
+        const hoverFirst = first.querySelector('[data-js-debug-hover-line]');
+        const hoverSecond = second.querySelector('[data-js-debug-hover-line]');
+        const hoverFirstX = hoverFirst.getAttribute('x1');
+        const hoverSecondX = hoverSecond.getAttribute('x1');
+        const hoverOpacity = getComputedStyle(hoverFirst).opacity;
+
+        first.dispatchEvent(new PointerEvent('pointerdown', eventInit(startX)));
+        first.dispatchEvent(new PointerEvent('pointermove', eventInit(endX)));
+        const selection = first.querySelector('[data-js-debug-selection-rect]');
+        const selecting = graph.classList.contains('js-debug-graph--selecting');
+        const selectionOpacity = getComputedStyle(selection).opacity;
+        const selectionWidth = Number(selection.getAttribute('width'));
+        first.dispatchEvent(new PointerEvent('pointerup', eventInit(endX)));
+
+        const zoomGrid = document.querySelector('[data-js-debug-chart-grid]');
+        const reset = document.querySelector('[data-js-debug-zoom-reset]');
+        const zoomed = zoomGrid?.dataset.jsDebugZoomed === 'true';
+        const zoomStart = Number(zoomGrid?.dataset.jsDebugDomainStart);
+        const zoomEnd = Number(zoomGrid?.dataset.jsDebugDomainEnd);
+        const resetControl = reset?.closest('[data-js-debug-range-control]');
+        const label = resetControl?.querySelector('[data-js-debug-range-label]');
+        const sliderAfterZoom = resetControl?.querySelector('[data-js-debug-range-slider]');
+        const resetRect = reset?.getBoundingClientRect();
+        const resetControlRect = resetControl?.getBoundingClientRect();
+        const labelRect = label?.getBoundingClientRect();
+        const sliderAfterZoomRect = sliderAfterZoom?.getBoundingClientRect();
+        const resetRightGap = resetRect && resetControlRect ? resetControlRect.right - resetRect.right : NaN;
+        const sliderLeftSpacer = labelRect && resetControlRect ? labelRect.left - resetControlRect.left : NaN;
+        reset?.dispatchEvent(new PointerEvent('pointerdown', eventInit(endX)));
+        const afterResetGrid = document.querySelector('[data-js-debug-chart-grid]');
+
+        return {
+          stops,
+          sliderMin: slider.min,
+          sliderMax: slider.max,
+          sliderStep: slider.step,
+          sliderValue: slider.value,
+          sliderPointerDefaultAllowed,
+          sliderSurvivedPointerDown,
+          sliderSurvivedInputDrag,
+          sliderSurvivedPassiveRefreshDuringDrag,
+          sliderValueDuringInput,
+          sliderValueAfterSnap,
+          sliderInputSeconds,
+          hoverFirstX,
+          hoverSecondX,
+          hoverOpacity,
+          selecting,
+          selectionOpacity,
+          selectionWidth,
+          zoomed,
+          zoomSeconds: (zoomEnd - zoomStart) / 1000,
+          resetText: reset?.textContent || '',
+          resetRightGap,
+          sliderLeftSpacer,
+          resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
+        };
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["stops"] == [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], metrics
+    assert metrics["sliderMin"] == "0"
+    assert metrics["sliderMax"] == "9"
+    assert metrics["sliderStep"] == "any", metrics
+    assert metrics["sliderValue"] == "1"
+    assert metrics["sliderPointerDefaultAllowed"] is True, metrics
+    assert metrics["sliderSurvivedPointerDown"] is True, metrics
+    assert metrics["sliderSurvivedInputDrag"] is True, metrics
+    assert metrics["sliderSurvivedPassiveRefreshDuringDrag"] is True, metrics
+    assert metrics["sliderValueDuringInput"] == "7.4", metrics
+    assert metrics["sliderValueAfterSnap"] == "7", metrics
+    assert 28790 <= metrics["sliderInputSeconds"] <= 28810, metrics
+    assert metrics["hoverFirstX"] == metrics["hoverSecondX"] == "150.0", metrics
+    assert float(metrics["hoverOpacity"]) > 0.0, metrics
+    assert metrics["selecting"] is True, metrics
+    assert float(metrics["selectionOpacity"]) > 0.0, metrics
+    assert 235 <= metrics["selectionWidth"] <= 245, metrics
+    assert metrics["zoomed"] is True, metrics
+    assert 118 <= metrics["zoomSeconds"] <= 122, metrics
+    assert metrics["resetText"] == "Reset", metrics
+    assert 0 <= metrics["resetRightGap"] <= 1.5, metrics
+    assert metrics["sliderLeftSpacer"] >= 40, metrics
+    assert metrics["resetZoomed"] is False, metrics
+
+    slider = browser.find_element("css selector", "[data-js-debug-range-slider]")
+    slider_rect = slider.rect
+    ActionChains(browser).move_to_element(slider).click_and_hold().move_by_offset(
+        max(60, int(slider_rect["width"] * 0.35)),
+        0,
+    ).release().perform()
+    drag_metrics = browser.execute_script(
+        """
+        const slider = document.querySelector('[data-js-debug-range-slider]');
+        const grid = document.querySelector('[data-js-debug-chart-grid]');
+        return {
+          value: Number(slider?.value),
+          rangeSeconds: (Number(grid?.dataset.jsDebugDomainEnd) - Number(grid?.dataset.jsDebugDomainStart)) / 1000,
+          sliderExists: Boolean(slider),
+        };
+        """
+    )
+    assert drag_metrics["sliderExists"] is True, drag_metrics
+    assert drag_metrics["value"] > 1, drag_metrics
+    assert drag_metrics["value"] == round(drag_metrics["value"]), drag_metrics
+    assert drag_metrics["rangeSeconds"] > 300, drag_metrics
+
+
 def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
     padding = 24
     left = int((min(rest_rect["left"], peak_rect["left"]) - padding) * dpr)

@@ -3142,7 +3142,7 @@ body.theme-light .js-debug-graph-view {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  justify-self: start;
+  justify-self: stretch;
   min-width: 0;
 }
 .js-debug-graph-control-group {
@@ -3182,6 +3182,49 @@ body.theme-light .js-debug-graph-view {
 .js-debug-range-button:not(.active):hover {
   color: var(--text);
   background: var(--pane-inactive-tab-bg-hover);
+}
+.js-debug-range-slider-control {
+  display: grid;
+  flex: 1 1 420px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(150px, 280px) auto auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.js-debug-range-slider-control datalist {
+  display: none;
+}
+.js-debug-range-label,
+.js-debug-range-end-label {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  white-space: nowrap;
+}
+.js-debug-range-label {
+  grid-column: 2;
+  min-width: 34px;
+  color: var(--text);
+}
+.js-debug-range-slider {
+  grid-column: 3;
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--active-accent-bright);
+}
+.js-debug-range-end-label {
+  grid-column: 4;
+}
+.js-debug-zoom-reset {
+  grid-column: 5;
+  justify-self: end;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
 }
 .js-debug-graph-meta {
   min-width: 0;
@@ -3312,6 +3355,31 @@ body.theme-light .js-debug-graph-view {
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+.js-debug-hover-line {
+  opacity: 0;
+  stroke: color-mix(in srgb, var(--text) 46%, transparent);
+  stroke-width: 0.8;
+  pointer-events: none;
+}
+.js-debug-selection-rect {
+  opacity: 0;
+  fill: color-mix(in srgb, var(--active-accent-bright) 35%, transparent);
+  stroke: color-mix(in srgb, var(--active-accent-bright) 72%, transparent);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.js-debug-graph--hovering .js-debug-hover-line {
+  opacity: 1;
+}
+.js-debug-graph--selecting .js-debug-selection-rect {
+  opacity: 1;
+}
+.js-debug-disconnect-line {
+  stroke: var(--bad);
+  stroke-width: 5;
+  stroke-linecap: butt;
+  opacity: 0.95;
 }
 .js-debug-area {
   opacity: 0.18;
@@ -10095,6 +10163,22 @@ body.app-vw-lte-980 .tabs {
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
 }
+.file-tree-row.kind-dir.loading-children > .file-tree-icon {
+  position: relative;
+}
+.file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  animation: metadata-refresh-spin 0.7s linear infinite;
+  opacity: 0.9;
+}
+.file-tree-row.kind-dir.loading-children > .file-tree-icon {
+  color: var(--accent-lime);
+}
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
   color: var(--accent-lime);
   font-weight: 700;
@@ -10379,6 +10463,9 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
 body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
 body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
+}
+body.theme-light .file-tree-row.kind-dir.loading-children > .file-tree-icon {
+  color: var(--good);
 }
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
   color: var(--good);

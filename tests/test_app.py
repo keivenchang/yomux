@@ -141,6 +141,90 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
     assert incremental["history"]["records"] == []
 
 
+def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    now = 200000.0
+    monkeypatch.setattr(app_module.time, "time", lambda: now)
+    try:
+        with webapp.stats_history_lock:
+            webapp.stats_history_merge_record_locked(
+                {
+                    "start": now,
+                    "cpu_total_percent": 25,
+                    "cpu_count": 1,
+                    "system_cpu_total_percent": 40,
+                    "system_cpu_count": 1,
+                    "ask_agent_total": 1,
+                    "run_agent_total": 1,
+                    "idle_agent_total": 2,
+                    "active_agent_total": 2,
+                    "inactive_agent_total": 2,
+                    "agent_activity_samples": 1,
+                },
+                now,
+                fields=app_module.STATS_HISTORY_SERVER_FIELDS,
+                client_id=None,
+            )
+        client_a, status_a = webapp.record_stats_history_payload({
+            "client_id": "client-a",
+            "records": [{"start": now, "api_count": 2, "latency_total_ms": 30, "latency_count": 2, "bandwidth_bytes": 1000}],
+        })
+        client_b, status_b = webapp.record_stats_history_payload({
+            "client_id": "client-b",
+            "records": [{"start": now, "api_count": 7, "sse_count": 3, "latency_total_ms": 90, "latency_count": 3, "bandwidth_bytes": 3000}],
+        })
+        with webapp.stats_history_lock:
+            history_a = webapp.stats_history_payload_locked(0, client_id="client-a")
+            history_b = webapp.stats_history_payload_locked(0, client_id="client-b")
+            history_a_after_b = webapp.stats_history_payload_locked(client_a["history"]["sequence"], client_id="client-a")
+    finally:
+        webapp.control_server.stop()
+
+    assert status_a == HTTPStatus.OK
+    assert status_b == HTTPStatus.OK
+    assert sum(record["api_count"] for record in history_a["records"]) == 2
+    assert sum(record["sse_count"] for record in history_a["records"]) == 0
+    assert sum(record["latency_count"] for record in history_a["records"]) == 2
+    assert sum(record["bandwidth_bytes"] for record in history_a["records"]) == 1000
+    assert sum(record["api_count"] for record in history_b["records"]) == 7
+    assert sum(record["sse_count"] for record in history_b["records"]) == 3
+    assert sum(record["latency_count"] for record in history_b["records"]) == 3
+    assert sum(record["bandwidth_bytes"] for record in history_b["records"]) == 3000
+    assert sum(record["cpu_count"] for record in history_a["records"]) == 1
+    assert sum(record["cpu_count"] for record in history_b["records"]) == 1
+    assert sum(record["agent_activity_samples"] for record in history_a["records"]) == 1
+    assert sum(record["agent_activity_samples"] for record in history_b["records"]) == 1
+    assert history_a_after_b["sequence"] == client_b["history"]["sequence"]
+    assert history_a_after_b["records"] == []
+
+
+def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    clock = {"wall": 1000.0, "monotonic": 50.0, "process": 10.0}
+    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
+    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
+    monkeypatch.setattr(app_module.time, "time", lambda: clock["wall"])
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock["monotonic"])
+    monkeypatch.setattr(app_module.time, "process_time", lambda: clock["process"])
+    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
+    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
+    try:
+        first = webapp.record_stats_global_sample()
+        clock.update({"wall": 1002.0, "monotonic": 52.0, "process": 10.5})
+        second = webapp.record_stats_global_sample()
+        with webapp.stats_history_lock:
+            history = webapp.stats_history_payload_locked(0, client_id="client-a")
+    finally:
+        webapp.control_server.stop()
+
+    assert first["cpu_percent"] == 0.0
+    assert second["cpu_percent"] == 25.0
+    assert sum(record["cpu_count"] for record in history["records"]) == 2
+    assert sum(record["system_cpu_count"] for record in history["records"]) == 2
+    assert sum(record["api_count"] for record in history["records"]) == 0
+
+
 def test_stats_sample_payload_records_shared_agent_activity_and_token_rates(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     wall_times = iter([1000.0, 1060.0])

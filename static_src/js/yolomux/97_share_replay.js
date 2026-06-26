@@ -1784,6 +1784,7 @@ function shareEditorModesSnapshot() {
         left: Math.max(0, Math.round(Number(viewState.scrollLeft || 0))),
         anchor: Math.max(0, Math.round(Number(viewState.anchor || 0))),
         head: Math.max(0, Math.round(Number(viewState.head ?? viewState.anchor ?? 0))),
+        line: Math.max(0, Math.round(Number(viewState.line || 0))),
       };
     }
     if (cleanMode === 'diff') {
@@ -1820,6 +1821,7 @@ function shareRememberEditorViewState(payload = {}, top = 0, left = 0) {
     scrollLeft: Math.max(0, Math.round(Number(left || 0))),
     anchor: Math.max(0, Math.round(Number(payload.anchor ?? previous.anchor ?? 0))),
     head: Math.max(0, Math.round(Number(payload.head ?? payload.anchor ?? previous.head ?? previous.anchor ?? 0))),
+    line: Math.max(0, Math.round(Number(payload.line ?? previous.line ?? 0))),
     scrollSnapshot: previous.scrollSnapshot || null,
   });
 }
@@ -1843,7 +1845,10 @@ function shareApplyEditorModeEntry(entry = {}) {
       item: cleanItem,
       anchor: viewState.anchor,
       head: viewState.head,
+      line: viewState.line,
     }, viewState.top, viewState.left);
+    const line = Math.floor(Number(viewState.line) || 0);
+    if (line > 0 && typeof requestFileEditorLineTarget === 'function') requestFileEditorLineTarget(key, line);
   }
   if (mode === 'diff') {
     const state = openFiles.get(path) || (cleanItem ? ensureFileState(path) : null);
@@ -2449,6 +2454,10 @@ function shareScrollPayloadForElement(element) {
     if (selection) {
       payload.anchor = Math.max(0, Number(selection.anchor || 0));
       payload.head = Math.max(0, Number(selection.head ?? selection.anchor ?? 0));
+    }
+    if (typeof fileEditorVisibleLineNumber === 'function') {
+      const line = fileEditorVisibleLineNumber(view);
+      if (line > 0) payload.line = line;
     }
   } else if (descriptor.kind === 'finder') {
     payload.mode = descriptor.mode || '';

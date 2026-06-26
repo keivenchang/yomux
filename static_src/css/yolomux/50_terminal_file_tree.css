@@ -3274,6 +3274,22 @@ body.app-vw-lte-980 .tabs {
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
 }
+.file-tree-row.kind-dir.loading-children > .file-tree-icon {
+  position: relative;
+}
+.file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  animation: metadata-refresh-spin 0.7s linear infinite;
+  opacity: 0.9;
+}
+.file-tree-row.kind-dir.loading-children > .file-tree-icon {
+  color: var(--accent-lime);
+}
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
   color: var(--accent-lime);
   font-weight: 700;
@@ -3558,6 +3574,9 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
 body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
 body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
+}
+body.theme-light .file-tree-row.kind-dir.loading-children > .file-tree-icon {
+  color: var(--good);
 }
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
   color: var(--good);

@@ -249,18 +249,21 @@ SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 60 * 60
 STATS_HISTORY_RAW_BUCKET_SECONDS = 1
-STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 10
+STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 30
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
+STATS_HISTORY_SAMPLER_SECONDS = 1.0
+STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
+STATS_HISTORY_CLIENT_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 STATS_HISTORY_BROWSER_FIELDS = (
     "api_count",
     "sse_count",
     "latency_total_ms",
     "latency_count",
     "bandwidth_bytes",
+    "disconnected_ms",
 )
 STATS_HISTORY_SERVER_FIELDS = (
-    *STATS_HISTORY_BROWSER_FIELDS,
     "cpu_total_percent",
     "cpu_count",
     "system_cpu_total_percent",
@@ -359,11 +362,13 @@ def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
         "start": start,
         "duration": duration,
         "sequence": 0,
+        "server_sequence": 0,
         "api_count": 0.0,
         "sse_count": 0.0,
         "latency_total_ms": 0.0,
         "latency_count": 0.0,
         "bandwidth_bytes": 0.0,
+        "disconnected_ms": 0.0,
         "cpu_total_percent": 0.0,
         "cpu_count": 0.0,
         "system_cpu_total_percent": 0.0,
@@ -378,7 +383,28 @@ def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
         "tokens_per_agent_total": 0.0,
         "agent_token_samples": 0.0,
         "agent_token_rates": {},
+        "clients": {},
     }
+
+
+def stats_history_empty_client_bucket() -> dict[str, Any]:
+    return {
+        "sequence": 0,
+        "api_count": 0.0,
+        "sse_count": 0.0,
+        "latency_total_ms": 0.0,
+        "latency_count": 0.0,
+        "bandwidth_bytes": 0.0,
+        "disconnected_ms": 0.0,
+    }
+
+
+def stats_history_client_id(value: Any = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    cleaned = STATS_HISTORY_CLIENT_ID_RE.sub("-", raw)
+    return cleaned[:STATS_HISTORY_CLIENT_ID_MAX_LENGTH]
 
 
 def stats_history_positive_number(value: Any) -> float:
@@ -998,6 +1024,10 @@ class TmuxWebtermApp:
         self.stats_sample_last_system_cpu_times: tuple[float, float] | None = None
         self.stats_sample_cached_monotonic: float | None = None
         self.stats_sample_cached_payload: dict[str, Any] | None = None
+        self.stats_history_sampler_lock = threading.Lock()
+        self.stats_history_sampler_thread: threading.Thread | None = None
+        self.stats_history_sampler_stop_event = threading.Event()
+        self.stats_history_sampler_running = False
         self.stats_history_lock = threading.RLock()
         self.stats_history_raw_buckets: dict[tuple[int, int], dict[str, Any]] = {}
         self.stats_history_rollup_buckets: dict[tuple[int, int], dict[str, Any]] = {}
@@ -1106,6 +1136,16 @@ class TmuxWebtermApp:
         self.stats_history_sequence += 1
         return self.stats_history_sequence
 
+    def stats_history_mark_server_changed_locked(self, bucket: dict[str, Any]) -> None:
+        sequence = self.stats_history_next_sequence_locked()
+        bucket["sequence"] = max(int(bucket.get("sequence") or 0), sequence)
+        bucket["server_sequence"] = max(int(bucket.get("server_sequence") or 0), sequence)
+
+    def stats_history_mark_client_changed_locked(self, bucket: dict[str, Any], client_bucket: dict[str, Any]) -> None:
+        sequence = self.stats_history_next_sequence_locked()
+        bucket["sequence"] = max(int(bucket.get("sequence") or 0), sequence)
+        client_bucket["sequence"] = max(int(client_bucket.get("sequence") or 0), sequence)
+
     def stats_history_bucket_locked(self, sample_time: float, now: float) -> dict[str, Any] | None:
         if not math.isfinite(sample_time) or sample_time < now - STATS_HISTORY_RETENTION_SECONDS:
             return None
@@ -1122,6 +1162,17 @@ class TmuxWebtermApp:
             bucket = stats_history_empty_bucket(start, bucket_seconds)
             buckets[key] = bucket
         return bucket
+
+    def stats_history_client_bucket_locked(self, bucket: dict[str, Any], client_id: str) -> dict[str, Any]:
+        clients = bucket.get("clients")
+        if not isinstance(clients, dict):
+            clients = {}
+            bucket["clients"] = clients
+        client_bucket = clients.get(client_id)
+        if not isinstance(client_bucket, dict):
+            client_bucket = stats_history_empty_client_bucket()
+            clients[client_id] = client_bucket
+        return client_bucket
 
     def stats_history_merge_agent_token_rates_locked(self, bucket: dict[str, Any], rates: Any) -> bool:
         changed = False
@@ -1141,7 +1192,13 @@ class TmuxWebtermApp:
             changed = True
         return changed
 
-    def stats_history_merge_record_locked(self, record: dict[str, Any], now: float, fields: tuple[str, ...] = STATS_HISTORY_BROWSER_FIELDS) -> None:
+    def stats_history_merge_record_locked(
+        self,
+        record: dict[str, Any],
+        now: float,
+        fields: tuple[str, ...] = STATS_HISTORY_BROWSER_FIELDS,
+        client_id: str | None = "",
+    ) -> None:
         sample_time = record.get("start", record.get("time", now))
         try:
             sample_time_float = float(sample_time)
@@ -1151,21 +1208,42 @@ class TmuxWebtermApp:
         if bucket is None:
             return
         changed = False
+        if client_id is None:
+            for key in fields:
+                value = stats_history_positive_number(record.get(key))
+                if value:
+                    bucket[key] = float(bucket.get(key) or 0.0) + value
+                    changed = True
+            if "agent_token_samples" in fields:
+                changed = self.stats_history_merge_agent_token_rates_locked(bucket, record.get("agent_token_rates")) or changed
+            if changed:
+                self.stats_history_mark_server_changed_locked(bucket)
+            return
+        client_bucket = self.stats_history_client_bucket_locked(bucket, stats_history_client_id(client_id))
         for key in fields:
             value = stats_history_positive_number(record.get(key))
             if value:
-                bucket[key] = float(bucket.get(key) or 0.0) + value
+                client_bucket[key] = float(client_bucket.get(key) or 0.0) + value
                 changed = True
-        if "agent_token_samples" in fields:
-            changed = self.stats_history_merge_agent_token_rates_locked(bucket, record.get("agent_token_rates")) or changed
         if changed:
-            bucket["sequence"] = self.stats_history_next_sequence_locked()
+            self.stats_history_mark_client_changed_locked(bucket, client_bucket)
 
     def stats_history_merge_bucket_locked(self, target: dict[str, Any], source: dict[str, Any]) -> None:
         for key in STATS_HISTORY_SERVER_FIELDS:
             target[key] = float(target.get(key) or 0.0) + float(source.get(key) or 0.0)
         self.stats_history_merge_agent_token_rates_locked(target, source.get("agent_token_rates"))
-        target["sequence"] = self.stats_history_next_sequence_locked()
+        target["server_sequence"] = max(int(target.get("server_sequence") or 0), int(source.get("server_sequence") or 0))
+        target["sequence"] = max(int(target.get("sequence") or 0), int(source.get("sequence") or 0), int(target.get("server_sequence") or 0))
+        source_clients = source.get("clients")
+        if isinstance(source_clients, dict):
+            for client_id, source_client in source_clients.items():
+                if not isinstance(source_client, dict):
+                    continue
+                target_client = self.stats_history_client_bucket_locked(target, str(client_id))
+                for key in STATS_HISTORY_BROWSER_FIELDS:
+                    target_client[key] = float(target_client.get(key) or 0.0) + float(source_client.get(key) or 0.0)
+                target_client["sequence"] = max(int(target_client.get("sequence") or 0), int(source_client.get("sequence") or 0))
+                target["sequence"] = max(int(target.get("sequence") or 0), int(target_client.get("sequence") or 0))
 
     def stats_history_compact_locked(self, now: float) -> None:
         raw_cutoff = now - STATS_HISTORY_RAW_WINDOW_SECONDS
@@ -1188,21 +1266,36 @@ class TmuxWebtermApp:
             if float(bucket.get("start") or 0.0) < retention_cutoff:
                 self.stats_history_rollup_buckets.pop(key, None)
 
-    def stats_history_records_locked(self, since: int = 0) -> list[dict[str, Any]]:
+    def stats_history_record_client_bucket_locked(self, bucket: dict[str, Any], client_id: str) -> dict[str, Any] | None:
+        clients = bucket.get("clients")
+        if isinstance(clients, dict):
+            client_bucket = clients.get(client_id)
+            if isinstance(client_bucket, dict):
+                return client_bucket
+        if client_id == "" and not isinstance(clients, dict):
+            return bucket
+        return None
+
+    def stats_history_records_locked(self, since: int = 0, client_id: str = "") -> list[dict[str, Any]]:
         records = []
+        clean_client_id = stats_history_client_id(client_id)
         for bucket in [*self.stats_history_rollup_buckets.values(), *self.stats_history_raw_buckets.values()]:
-            sequence = int(bucket.get("sequence") or 0)
+            client_bucket = self.stats_history_record_client_bucket_locked(bucket, clean_client_id)
+            server_sequence = int(bucket.get("server_sequence") or 0)
+            client_sequence = int(client_bucket.get("sequence") or 0) if isinstance(client_bucket, dict) else 0
+            sequence = max(server_sequence, client_sequence)
             if sequence <= since:
                 continue
             records.append({
                 "start": int(bucket.get("start") or 0),
                 "duration": int(bucket.get("duration") or 0),
                 "sequence": sequence,
-                "api_count": float(bucket.get("api_count") or 0.0),
-                "sse_count": float(bucket.get("sse_count") or 0.0),
-                "latency_total_ms": float(bucket.get("latency_total_ms") or 0.0),
-                "latency_count": float(bucket.get("latency_count") or 0.0),
-                "bandwidth_bytes": float(bucket.get("bandwidth_bytes") or 0.0),
+                "api_count": float(client_bucket.get("api_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+                "sse_count": float(client_bucket.get("sse_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+                "latency_total_ms": float(client_bucket.get("latency_total_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+                "latency_count": float(client_bucket.get("latency_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+                "bandwidth_bytes": float(client_bucket.get("bandwidth_bytes") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+                "disconnected_ms": float(client_bucket.get("disconnected_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
                 "cpu_total_percent": float(bucket.get("cpu_total_percent") or 0.0),
                 "cpu_count": float(bucket.get("cpu_count") or 0.0),
                 "system_cpu_total_percent": float(bucket.get("system_cpu_total_percent") or 0.0),
@@ -1229,19 +1322,21 @@ class TmuxWebtermApp:
             })
         return sorted(records, key=lambda item: (item["start"], item["duration"], item["sequence"]))
 
-    def stats_history_payload_locked(self, since: int = 0) -> dict[str, Any]:
+    def stats_history_payload_locked(self, since: int = 0, client_id: str = "") -> dict[str, Any]:
         return {
             "sequence": self.stats_history_sequence,
-            "records": self.stats_history_records_locked(since),
+            "records": self.stats_history_records_locked(since, client_id=client_id),
             "retention_seconds": STATS_HISTORY_RETENTION_SECONDS,
             "raw_window_seconds": STATS_HISTORY_RAW_WINDOW_SECONDS,
             "rollup_bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS,
+            "client_id": stats_history_client_id(client_id),
         }
 
     def record_stats_history_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         if not isinstance(payload, dict):
             return {"error": "payload must be an object"}, HTTPStatus.BAD_REQUEST
         now = time.time()
+        client_id = stats_history_client_id(payload.get("client_id", payload.get("client", "")))
         with self.stats_history_lock:
             if payload.get("clear") is True:
                 self.stats_history_raw_buckets.clear()
@@ -1256,13 +1351,13 @@ class TmuxWebtermApp:
                 return {"error": f"records limit is {STATS_HISTORY_POST_MAX_RECORDS}"}, HTTPStatus.BAD_REQUEST
             for record in records:
                 if isinstance(record, dict):
-                    self.stats_history_merge_record_locked(record, now)
+                    self.stats_history_merge_record_locked(record, now, client_id=client_id)
             self.stats_history_compact_locked(now)
             try:
                 since = int(payload.get("since") or 0)
             except (TypeError, ValueError):
                 since = 0
-            return {"ok": True, "history": self.stats_history_payload_locked(max(0, since))}, HTTPStatus.OK
+            return {"ok": True, "history": self.stats_history_payload_locked(max(0, since), client_id=client_id)}, HTTPStatus.OK
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
         self.refresh_sessions(maintenance=False)
@@ -1418,7 +1513,7 @@ class TmuxWebtermApp:
             record["agent_token_rates"] = agent_token_rates
         return record
 
-    def stats_sample_payload(self, since: int = 0) -> dict[str, Any]:
+    def current_stats_sample(self) -> tuple[dict[str, Any], bool]:
         now = time.time()
         monotonic_now = time.monotonic()
         with self.stats_sample_lock:
@@ -1456,7 +1551,12 @@ class TmuxWebtermApp:
                 self.stats_sample_cached_monotonic = monotonic_now
                 self.stats_sample_cached_payload = dict(sample)
                 record_cpu_sample = True
+        return sample, record_cpu_sample
+
+    def record_stats_global_sample(self) -> dict[str, Any]:
+        sample, record_cpu_sample = self.current_stats_sample()
         agent_record = self.stats_agent_activity_record(sample["time"]) if record_cpu_sample else None
+        now = float(sample.get("time") or time.time())
         with self.stats_history_lock:
             if record_cpu_sample:
                 record = {
@@ -1468,9 +1568,50 @@ class TmuxWebtermApp:
                 }
                 if agent_record:
                     record.update(agent_record)
-                self.stats_history_merge_record_locked(record, now, fields=STATS_HISTORY_SERVER_FIELDS)
+                self.stats_history_merge_record_locked(record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
             self.stats_history_compact_locked(now)
-            history = self.stats_history_payload_locked(max(0, since))
+        return sample
+
+    def stats_history_sampler_loop(self) -> None:
+        try:
+            while not self.stats_history_sampler_stop_event.is_set():
+                started = time.monotonic()
+                try:
+                    self.record_stats_global_sample()
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self.log_event(None, "stats_history_error", f"Stats history sample failed: {exc}", {})
+                elapsed = max(0.0, time.monotonic() - started)
+                if self.stats_history_sampler_stop_event.wait(max(0.1, STATS_HISTORY_SAMPLER_SECONDS - elapsed)):
+                    return
+        finally:
+            with self.stats_history_sampler_lock:
+                self.stats_history_sampler_running = False
+
+    def start_stats_history_sampler(self) -> bool:
+        with self.stats_history_sampler_lock:
+            if self.stats_history_sampler_running:
+                thread = self.stats_history_sampler_thread
+                if thread is not None and thread.is_alive():
+                    return False
+            self.stats_history_sampler_stop_event.clear()
+            self.stats_history_sampler_running = True
+            worker = threading.Thread(target=self.stats_history_sampler_loop, name="stats-history-sampler", daemon=True)
+            self.stats_history_sampler_thread = worker
+            worker.start()
+            return True
+
+    def stop_stats_history_sampler(self) -> None:
+        self.stats_history_sampler_stop_event.set()
+        with self.stats_history_sampler_lock:
+            thread = self.stats_history_sampler_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+    def stats_sample_payload(self, since: int = 0, client_id: str = "") -> dict[str, Any]:
+        sample = self.record_stats_global_sample()
+        with self.stats_history_lock:
+            self.stats_history_compact_locked(float(sample.get("time") or time.time()))
+            history = self.stats_history_payload_locked(max(0, since), client_id=client_id)
         return {
             "ok": True,
             **sample,

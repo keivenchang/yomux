@@ -27,6 +27,7 @@ function renderPanels(previousActive = [], options = {}) {
   bindDropTargets();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
+  scheduleAgentWindowActivityAnimationSync();
   if (options.prune === false) {
     if (responsiveLayoutPruneTimer) {
       clearTimeout(responsiveLayoutPruneTimer);
@@ -1848,6 +1849,7 @@ function updatePanelWindowStepButtons(session, info) {
   if (!bars.length) {
     insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
+    if (changed) scheduleAgentWindowActivityAnimationSync(panel || document);
     if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
@@ -1860,6 +1862,7 @@ function updatePanelWindowStepButtons(session, info) {
     }
   });
   syncTmuxWindowBarOverflow(session);
+  if (changed) scheduleAgentWindowActivityAnimationSync(panel || document);
   if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
 }
 

@@ -2398,11 +2398,15 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_pointer_stop = threading.Event()
         if hasattr(self.app, "start_tabber_activity_cache_warmer"):
             self.app.start_tabber_activity_cache_warmer()
+        if hasattr(self.app, "start_stats_history_sampler"):
+            self.app.start_stats_history_sampler()
         if hasattr(self.app, "start_update_check_thread"):
             self.app.start_update_check_thread()
 
     def server_close(self) -> None:
         self.share_pointer_stop.set()
+        if hasattr(self.app, "stop_stats_history_sampler"):
+            self.app.stop_stats_history_sampler()
         if hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
         super().server_close()

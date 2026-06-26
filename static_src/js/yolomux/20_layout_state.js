@@ -658,6 +658,179 @@ function maybeAdoptFileExplorerModeDeepLink(params) {
   writeStoredFileExplorerMode(fileExplorerMode);
 }
 
+function layoutUrlStateFromParams(params) {
+  const raw = params?.get?.('state') || '';
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function layoutUrlStringArray(values, limit = 1000) {
+  if (!Array.isArray(values)) return [];
+  const out = [];
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text) continue;
+    out.push(text);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function layoutUrlReplaceSet(target, values, limit = 1000) {
+  if (!target?.clear) return;
+  target.clear();
+  for (const value of layoutUrlStringArray(values, limit)) target.add(value);
+}
+
+function applyLayoutUrlFinderSeed(finder = {}) {
+  if (!finder || typeof finder !== 'object') return;
+  if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
+  if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
+  if ('root' in finder) {
+    const root = String(finder.root || '').trim();
+    if (root) fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+  }
+  if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
+    fileExplorerChangesSelectedSession = String(finder.session || '').trim();
+    fileExplorerExplicitSyncSession = fileExplorerChangesSelectedSession;
+  }
+  if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
+  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
+  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
+  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
+  if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
+  if ('diffRefsByRepo' in finder) {
+    diffRefsByRepo = typeof shareCleanDiffRefsByRepo === 'function'
+      ? shareCleanDiffRefsByRepo(finder.diffRefsByRepo)
+      : {};
+  }
+  if ('expanded' in finder) layoutUrlReplaceSet(fileExplorerExpanded, finder.expanded);
+  if ('selectedPaths' in finder) layoutUrlReplaceSet(fileExplorerSelectedPaths, finder.selectedPaths);
+  if ('selectionAnchor' in finder) fileExplorerSelectionAnchor = String(finder.selectionAnchor || '');
+  if ('selectionLead' in finder) fileExplorerSelectionLead = String(finder.selectionLead || '');
+  if ('changesFolderCollapsed' in finder) layoutUrlReplaceSet(changesFolderCollapsed, finder.changesFolderCollapsed);
+  if ('changesRepoCollapsed' in finder) layoutUrlReplaceSet(changesRepoCollapsed, finder.changesRepoCollapsed);
+  if ('tabberCollapsed' in finder) layoutUrlReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
+}
+
+function applyLayoutUrlEditorSeed(editor = {}) {
+  if (!editor || typeof editor !== 'object') return;
+  if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
+  if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
+  if ('themeMode' in editor) fileEditorThemeMode = normalizeEditorThemeMode(editor.themeMode);
+  if ('previewDisplayMode' in editor) fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(editor.previewDisplayMode);
+  if ('wrapEnabled' in editor) fileEditorWrapEnabled = editor.wrapEnabled === true;
+  if ('lineNumbersEnabled' in editor) fileEditorLineNumbersEnabled = editor.lineNumbersEnabled === true;
+  if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
+  if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
+  if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
+  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) {
+    if (typeof shareApplyEditorModeEntry === 'function') shareApplyEditorModeEntry(entry);
+  }
+}
+
+function applyLayoutUrlPreferencesSeed(preferences = {}) {
+  if (!preferences || typeof preferences !== 'object') return;
+  if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
+  if (Array.isArray(preferences.collapsedSections)) {
+    collapsedPreferenceSections = new Set(layoutUrlStringArray(preferences.collapsedSections, 200));
+  }
+  if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
+}
+
+function applyLayoutUrlStateSeed(state) {
+  if (!state || typeof state !== 'object') return false;
+  applyLayoutUrlFinderSeed(state.finder || {});
+  applyLayoutUrlEditorSeed(state.editor || {});
+  applyLayoutUrlPreferencesSeed(state.preferences || {});
+  layoutUrlStateFromQuery = state;
+  layoutUrlStateApplied = false;
+  return true;
+}
+
+function maybeAdoptLayoutStateDeepLink(params) {
+  const state = layoutUrlStateFromParams(params);
+  if (!state) return;
+  applyLayoutUrlStateSeed(state);
+}
+
+function layoutUrlCaptureCurrentPaneState() {
+  for (const item of paneItems(layoutSlots)) {
+    capturePaneViewStateForItemIfPresent(item);
+  }
+}
+
+function layoutUrlStateSnapshot() {
+  layoutUrlCaptureCurrentPaneState();
+  const state = {v: 1};
+  if (paneItems(layoutSlots).some(isFileExplorerItem) && typeof shareFinderStateSnapshot === 'function') {
+    state.finder = shareFinderStateSnapshot({compact: false});
+  }
+  if (typeof shareEditorStateSnapshot === 'function') {
+    const editor = shareEditorStateSnapshot({compact: false});
+    if (editor?.modes?.length) state.editor = editor;
+  }
+  if (paneItems(layoutSlots).includes(prefsItemId) && typeof sharePreferencesStateSnapshot === 'function') {
+    state.preferences = sharePreferencesStateSnapshot({compact: false});
+  }
+  if (typeof shareScrollStateSnapshot === 'function') {
+    const scroll = shareScrollStateSnapshot();
+    if (scroll.length) state.scroll = scroll;
+  }
+  return Object.keys(state).length > 1 ? state : null;
+}
+
+function layoutUrlStateParamValue() {
+  const state = layoutUrlStateSnapshot();
+  if (!state) return '';
+  try {
+    return readableParamComponent(JSON.stringify(state));
+  } catch (_) {
+    return '';
+  }
+}
+
+function applyPendingLayoutUrlState() {
+  if (layoutUrlStateApplied) return false;
+  const state = layoutUrlStateFromQuery;
+  if (!state || typeof state !== 'object') {
+    layoutUrlStateApplied = true;
+    return false;
+  }
+  if (Array.isArray(state.scroll) && typeof applyShareScrollSnapshot === 'function') {
+    applyShareScrollSnapshot(state.scroll);
+    requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));
+    setTimeout(() => applyShareScrollSnapshot(state.scroll), 0);
+  }
+  layoutUrlStateApplied = true;
+  return true;
+}
+
+function schedulePendingLayoutUrlStateApply() {
+  if (!layoutUrlStateFromQuery || layoutUrlStateApplied) return;
+  requestAnimationFrame(applyPendingLayoutUrlState);
+  setTimeout(applyPendingLayoutUrlState, 0);
+}
+
+function scheduleLayoutUrlStateRefresh() {
+  if (shareViewMode) return;
+  if (layoutUrlStateRefreshTimer) return;
+  layoutUrlStateRefreshTimer = setTimeout(() => {
+    layoutUrlStateRefreshTimer = null;
+    updateActiveSessionParam();
+  }, 250);
+}
+
+function refreshLayoutUrlStateSoon() {
+  scheduleLayoutUrlStateRefresh();
+}
+
 function shareBootstrapLayoutParams() {
   if (!shareViewMode || !shareBootstrap) return null;
   const params = new URLSearchParams();
@@ -676,6 +849,7 @@ function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
+  if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
@@ -1117,6 +1291,7 @@ function schedulePaneViewStateCapture(item, panel) {
     pendingPaneViewStateCaptures.delete(item);
     const currentPanel = panelNodes.get(item) || panel;
     capturePaneViewState(item, currentPanel);
+    refreshLayoutUrlStateSoon();
   });
 }
 
@@ -3922,6 +4097,7 @@ function updateActiveSessionParam() {
   params.delete('layout');
   params.delete('tabs');
   params.delete('finder');
+  params.delete('state');
   const queryParts = [];
   const inactiveItems = inactiveTabItems();
   if (activeSessions.length || inactiveItems.length) {
@@ -3934,6 +4110,8 @@ function updateActiveSessionParam() {
     if (paneItems(layoutSlots).some(isFileExplorerItem)) {
       queryParts.push(`finder=${readableParamComponent(normalizeFileExplorerMode(fileExplorerMode))}`);
     }
+    const state = layoutUrlStateParamValue();
+    if (state) queryParts.push(`state=${state}`);
   }
   const remaining = params.toString();
   if (remaining) queryParts.push(remaining);
@@ -3944,5 +4122,6 @@ function updateActiveSessionParam() {
 }
 
 function syncInitialLayoutUrl() {
+  schedulePendingLayoutUrlStateApply();
   updateActiveSessionParam();
 }

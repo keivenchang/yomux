@@ -2321,9 +2321,10 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
+  const pendingExpansion = !differMode && entry.kind === 'dir' && fileExplorerPendingExpansions.has(fullPath);
   const expanded = entry.kind === 'dir' && (differMode
     ? !changesFolderCollapsed.has(fullPath)
-    : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
+    : (pendingExpansion || options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
@@ -2343,6 +2344,7 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
     differMode,
     compact,
     expanded,
+    pendingExpansion,
     indexedDirectory,
     indexedDescendantDirectory,
     paddingLeft: fileTreeRowPadding(depth, compact),
@@ -2385,6 +2387,7 @@ function applyFileTreeRowDataset(row, state) {
   row.classList.toggle(CLS.selected, state.selected);
   row.classList.toggle('expanded', state.expanded);
   row.classList.toggle(CLS.collapsed, entry.kind === 'dir' && !state.expanded);
+  row.classList.toggle('loading-children', state.pendingExpansion);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('indexed-directory', state.indexedDirectory);
   row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
@@ -2546,7 +2549,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     const collapseSet = renderOptions.collapsedSet instanceof Set ? renderOptions.collapsedSet : null;
     const expandSet = renderOptions.expandedSet instanceof Set ? renderOptions.expandedSet : fileExplorerExpanded;
     const dirExpanded = collapseSet ? !collapseSet.has(fullPath)
-      : (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (renderOptions.autoExpand === true || expandSet.has(fullPath)));
+      : (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (fileExplorerPendingExpansions.has(fullPath) || renderOptions.autoExpand === true || expandSet.has(fullPath)));
     if (entry.kind === 'dir' && dirExpanded) {
       const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);

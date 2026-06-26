@@ -3195,6 +3195,7 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
+  scheduleAgentWindowActivityAnimationSync(panel || document);
   updatePanelInfoBarMeta(session, info);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
@@ -3906,6 +3907,7 @@ function installClientEventStream() {
   clientEventsSource = source;
   source.addEventListener('ready', event => {
     clientEventsConnected = true;
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
@@ -3913,12 +3915,17 @@ function installClientEventStream() {
   });
   source.addEventListener('ping', event => {
     clientEventsConnected = true;
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
-  source.onerror = () => { clientEventsConnected = false; };
+  source.onerror = () => {
+    clientEventsConnected = false;
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+  };
   for (const type of ['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
+      if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);
       handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));

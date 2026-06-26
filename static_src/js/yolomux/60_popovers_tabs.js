@@ -6,9 +6,26 @@ function toggleHiddenFiles() {
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
+function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
+  if (!row) return;
+  row.classList.toggle('expanded', expanded);
+  row.classList.toggle(CLS.collapsed, !expanded);
+  row.classList.toggle('loading-children', loading);
+  row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const icon = row.querySelector('.file-tree-icon');
+  if (icon) icon.textContent = expanded ? '▾' : '▸';
+}
+
 async function expandDirectoryRow(row, fullPath, options = {}) {
+  fileExplorerPendingExpansions.add(fullPath);
+  syncDirectoryRowExpansionVisual(row, true, true);
   const entries = await fetchDirectory(fullPath);
-  if (!entries) return;
+  fileExplorerPendingExpansions.delete(fullPath);
+  if (!entries) {
+    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
+    else syncDirectoryRowExpansionVisual(row, true, false);
+    return;
+  }
   if (options.manual === true) {
     forgetFileExplorerSyncManualCollapse(fullPath);
     resetFileExplorerAppliedSyncPlan();
@@ -20,12 +37,12 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
   // be free to restore a directory across sync-target switches.
   if (options.auto === true && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
+    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
+    else syncDirectoryRowExpansionVisual(row, true, false);
     return;
   }
   fileExplorerExpanded.add(fullPath);
-  row.classList.add('expanded');
-  row.setAttribute('aria-expanded', 'true');
-  row.querySelector('.file-tree-icon').textContent = '▾';
+  syncDirectoryRowExpansionVisual(row, true, false);
   const existingChildren = childContainerForRow(row, fullPath);
   const children = existingChildren || createFileTreeChildContainer(fullPath);
   const nextDepth = fileTreeRowDepth(row) + 1;
@@ -33,6 +50,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();
   scheduleShareUiStatePublish();
+  refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -42,14 +60,14 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
     resetFileExplorerAppliedSyncPlan();
   }
   fileExplorerExpanded.delete(fullPath);
-  row.classList.remove('expanded');
-  row.setAttribute('aria-expanded', 'false');
-  row.querySelector('.file-tree-icon').textContent = '▸';
+  fileExplorerPendingExpansions.delete(fullPath);
+  syncDirectoryRowExpansionVisual(row, false, false);
   Array.from(row.parentElement?.children || [])
     .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
     .forEach(node => node.remove());
   rememberFileExplorerSyncExpandedState();
   scheduleShareUiStatePublish();
+  refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -416,19 +434,31 @@ function yoloMarkerHtml(session, auto, options = {}) {
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
-function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI status indicator must follow the same working condition as the YO state, while keeping the
-  // Claude/Codex symbol static and putting the glow on the separate green ball. Prefer a window literally
-  // reporting STATE_KEY.working; otherwise, when the session is working only via the screen-state proxy
-  // (a working screen key with no per-window working row), present the current/first agent window as
-  // working so the separate ball appears instead of the indicator vanishing.
+function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
+  // The tab's AI status indicator summarizes the most urgent visible agent-window ball. Window buttons
+  // render their own balls, and the tab must mirror the strongest one: red attention, then yellow stopped
+  // cooldown, then green working. When the only working signal is the session screen proxy, fall back to
+  // the current/first agent window as a synthetic working row so the tab still shows the green ball.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
   if (!agents.length) return null;
-  const working = agents.filter(agent => agentWindowIsWorkingState(agent?.state));
-  const literal = working.find(agent => agentWindowPayloadCurrent(agent) === true) || working[0] || null;
-  if (literal) return literal;
-  if (!sessionYoloIsWorking(session, payload)) return null;
+  let selected = null;
+  const screenWorking = sessionYoloIsWorking(session, payload);
+  for (const agent of agents) {
+    const item = typeof agentWindowActivityIconForStatusItem === 'function'
+      ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
+      : null;
+    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(item.state)) continue;
+    const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
+    if (screenWorking && item.state === 'cooldown' && !explicitStopped) continue;
+    const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
+    const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
+    const current = agentWindowPayloadCurrent(agent) === true;
+    const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
+    if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
+  }
+  if (selected) return selected.agent;
+  if (!screenWorking) return null;
   const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
   if (!candidate || agentWindowIsAttentionState(candidate.state)) return null;
   return {...candidate, state: STATE_KEY.working};
@@ -437,9 +467,9 @@ function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveSta
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const yoloHtml = yoloMarkerHtml(session, auto, {...options, yoloWorking: false, payload});
-  const workingAgent = sessionWorkingAgentWindowForTab(session, info, payload);
-  if (workingAgent) {
-    const iconHtml = agentWindowActivityIconHtmlForStatus(workingAgent, workingAgent.kind, session);
+  const statusAgent = sessionStatusAgentWindowForTab(session, info, payload);
+  if (statusAgent) {
+    const iconHtml = agentWindowActivityIconHtmlForStatus(statusAgent, statusAgent.kind, session);
     if (iconHtml) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }

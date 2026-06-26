@@ -986,6 +986,41 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const pendingApi = loadYolomux('', ['1']);
+      const container = new TestElement('finder-tree');
+      const longPath = '/repo/this/is/a/very/long/path/that/takes/time';
+      const parent = longPath.slice(0, longPath.lastIndexOf('/'));
+      const name = longPath.slice(longPath.lastIndexOf('/') + 1);
+      pendingApi.renderTreeChildrenForTest(container, parent, [{name, kind: 'dir'}], 0);
+      const row = container.children.find(node => node?.dataset?.path === longPath);
+      let resolveBatch = null;
+      pendingApi.setFetchForTest((url, options = {}) => {
+        if (!String(url).startsWith('/api/fs/batch')) return Promise.resolve(jsonResponse({}));
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        return new Promise(resolve => {
+          resolveBatch = () => resolve(jsonResponse({responses: requests.map(request => ({
+            id: request.id,
+            ok: true,
+            status: 200,
+            payload: {path: request.path, entries: [{name: 'child.txt', kind: 'file'}]},
+          }))}));
+        });
+      });
+      const expandPromise = pendingApi.expandDirectoryRowForTest(row, longPath, {manual: true});
+      const flushPromise = pendingApi.flushFileExplorerFsBatchForTest();
+      await flushAsyncWork();
+      assert.equal(row.getAttribute('aria-expanded'), 'true', 'Finder directory shows expanded immediately while the backend listing is pending');
+      assert.equal(row.classList.contains('loading-children'), true, 'Finder directory shows a pending expansion spinner while listing is in flight');
+      assert.ok(resolveBatch, 'directory expansion issued the backend listing request');
+      resolveBatch();
+      await flushPromise;
+      await expandPromise;
+      assert.equal(row.getAttribute('aria-expanded'), 'true', 'Finder directory remains expanded after the backend listing resolves');
+      assert.equal(row.classList.contains('loading-children'), false, 'Finder directory clears the pending spinner after the backend listing resolves');
+      assert.ok(container.children.some(node => node?.classList?.contains('file-tree-children') && node.dataset.parent === longPath), 'resolved directory listing renders the child container');
+    }
+
+    {
       const syncTreeApi = loadYolomux('', ['1']);
       syncTreeApi.setFileExplorerRootMode('sync', {sync: false});
       syncTreeApi.setFileExplorerRootForTest('/home/test');

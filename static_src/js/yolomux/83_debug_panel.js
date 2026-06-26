@@ -16,7 +16,13 @@ let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
 let jsDebugStatsServerRssBytes = null;
-const jsDebugGraphScaleOptions = Object.freeze([1, 5, 10]);
+let jsDebugStatsClientId = '';
+let jsDebugStatsClientConnected = null;
+let jsDebugStatsDisconnectStartedAtMs = null;
+let jsDebugGraphZoomDomain = null;
+let jsDebugGraphSelectionState = null;
+let jsDebugGraphRangeSliderDragging = false;
+const jsDebugGraphScaleOptions = Object.freeze([1, 5, 10, 30]);
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 60, label: '1m'},
   {seconds: 5 * 60, label: '5m'},
@@ -32,10 +38,13 @@ const jsDebugGraphRangeOptions = Object.freeze([
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
 const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
 const jsDebugGraphRawBucketMs = 1000;
-const jsDebugGraphRollupBucketMs = 10 * 1000;
+const jsDebugGraphRollupBucketMs = 30 * 1000;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollMs = 1000;
 const jsDebugStatsHistoryFlushMs = 3000;
+const jsDebugStatsHistoryPostMaxRecords = 1000;
+const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
+const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphMovingAverageSeries = new Set(['api', 'sse', 'latency', 'bandwidth']);
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
@@ -94,6 +103,34 @@ function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
 function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
   return jsDebugGraphRangeSeconds;
+}
+
+function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  return Math.max(0, options.findIndex(option => option.seconds === normalized));
+}
+
+function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
+  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
+}
+
+function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
+  const startMs = Number(domain?.startMs);
+  const endMs = Number(domain?.endMs);
+  return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs - startMs >= 1000;
+}
+
+function clearDebugGraphZoom({render = true} = {}) {
+  jsDebugGraphZoomDomain = null;
+  jsDebugGraphSelectionState = null;
+  if (!render) return;
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    graph.className = debugGraphClassName();
+    graph.innerHTML = debugGraphInnerHtml();
+  }
 }
 
 function debugEventCounts() {
@@ -319,6 +356,7 @@ function debugGraphNewBucket(startMs, durationMs) {
     latencyTotalMs: 0,
     latencyCount: 0,
     bandwidthBytes: 0,
+    disconnectedMs: 0,
     cpuTotalPercent: 0,
     cpuCount: 0,
     systemCpuTotalPercent: 0,
@@ -342,6 +380,7 @@ function debugGraphBucketHasData(bucket) {
     || Number(bucket?.sseCount || 0)
     || Number(bucket?.latencyCount || 0)
     || Number(bucket?.bandwidthBytes || 0)
+    || Number(bucket?.disconnectedMs || 0)
     || Number(bucket?.cpuCount || 0)
     || Number(bucket?.systemCpuCount || 0)
     || Number(bucket?.agentActivitySamples || 0)
@@ -396,6 +435,46 @@ function debugGraphServerBucketRefForTime(timeMs, nowMs = Date.now()) {
   };
 }
 
+function jsDebugStatsRandomHex(bytes = 12) {
+  const count = Math.max(1, Math.floor(Number(bytes) || 1));
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const values = new Uint8Array(count);
+    crypto.getRandomValues(values);
+    return [...values].map(value => value.toString(16).padStart(2, '0')).join('');
+  }
+  return Array.from({length: count}, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join('');
+}
+
+function jsDebugStatsStorageGet(key) {
+  try {
+    return window.sessionStorage?.getItem(key) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function jsDebugStatsStorageSet(key, value) {
+  try {
+    window.sessionStorage?.setItem(key, String(value || ''));
+  } catch (_) {
+  }
+}
+
+function jsDebugStatsStorageRemove(key) {
+  try {
+    window.sessionStorage?.removeItem(key);
+  } catch (_) {
+  }
+}
+
+function jsDebugStatsClientIdForRequest() {
+  if (jsDebugStatsClientId) return jsDebugStatsClientId;
+  const stored = jsDebugStatsStorageGet(jsDebugStatsClientStorageKey).trim();
+  jsDebugStatsClientId = stored || `client-${Date.now().toString(36)}-${jsDebugStatsRandomHex(8)}`;
+  jsDebugStatsStorageSet(jsDebugStatsClientStorageKey, jsDebugStatsClientId);
+  return jsDebugStatsClientId;
+}
+
 function debugGraphAddBucketData(bucket, data = {}) {
   if (!bucket) return;
   bucket.apiCount += Number(data.apiCount || 0);
@@ -407,6 +486,8 @@ function debugGraphAddBucketData(bucket, data = {}) {
   }
   const bytes = Number(data.bandwidthBytes || 0);
   if (Number.isFinite(bytes) && bytes > 0) bucket.bandwidthBytes += bytes;
+  const disconnectedMs = Number(data.disconnectedMs || 0);
+  if (Number.isFinite(disconnectedMs) && disconnectedMs > 0) bucket.disconnectedMs += disconnectedMs;
   const cpuPercent = Number(data.cpuPercent);
   if (Number.isFinite(cpuPercent)) {
     bucket.cpuTotalPercent += Math.max(0, cpuPercent);
@@ -483,6 +564,7 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
       latency_total_ms: 0,
       latency_count: 0,
       bandwidth_bytes: 0,
+      disconnected_ms: 0,
       cpu_total_percent: 0,
       cpu_count: 0,
       system_cpu_total_percent: 0,
@@ -499,6 +581,8 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
   }
   const bytes = Number(data.bandwidthBytes || 0);
   if (Number.isFinite(bytes) && bytes > 0) record.bandwidth_bytes += bytes;
+  const disconnectedMs = Number(data.disconnectedMs || 0);
+  if (Number.isFinite(disconnectedMs) && disconnectedMs > 0) record.disconnected_ms += disconnectedMs;
   scheduleJsDebugStatsHistoryFlush();
 }
 
@@ -520,6 +604,7 @@ function debugGraphMergeBucket(target, source) {
   target.latencyTotalMs += source.latencyTotalMs || 0;
   target.latencyCount += source.latencyCount || 0;
   target.bandwidthBytes += source.bandwidthBytes || 0;
+  target.disconnectedMs += source.disconnectedMs || 0;
   target.cpuTotalPercent += source.cpuTotalPercent || 0;
   target.cpuCount += source.cpuCount || 0;
   target.systemCpuTotalPercent += source.systemCpuTotalPercent || 0;
@@ -602,6 +687,57 @@ function recordApiDebugResponseBytesForGraph(event, responseBytes) {
   debugGraphQueueServerDelta(bucket, {bandwidthBytes: delta});
 }
 
+function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
+  if (!jsDebugCollectionEnabled) return;
+  const spanStart = Number(startMs);
+  const spanEnd = Number(endMs);
+  if (!Number.isFinite(spanStart) || !Number.isFinite(spanEnd) || spanEnd <= spanStart) return;
+  const nowMs = Date.now();
+  let cursor = Math.max(spanStart, nowMs - jsDebugGraphRetentionMs);
+  const boundedEnd = Math.min(spanEnd, nowMs);
+  while (cursor < boundedEnd) {
+    const bucketRef = debugGraphServerBucketRefForTime(cursor, nowMs);
+    if (!bucketRef) break;
+    const bucketStart = Number(bucketRef.startMs) || cursor;
+    const bucketEnd = bucketStart + Math.max(jsDebugGraphRawBucketMs, Number(bucketRef.durationMs) || jsDebugGraphRawBucketMs);
+    const overlapStart = Math.max(cursor, bucketStart);
+    const overlapEnd = Math.min(boundedEnd, bucketEnd);
+    const disconnectedMs = Math.max(0, overlapEnd - overlapStart);
+    if (disconnectedMs > 0) {
+      const bucket = debugGraphBucketForTime(overlapStart, nowMs);
+      debugGraphAddBucketData(bucket, {disconnectedMs});
+      debugGraphQueueServerDelta(bucketRef, {disconnectedMs});
+    }
+    cursor = Math.max(overlapEnd, cursor + 1);
+  }
+  compactJsDebugGraphBuckets(nowMs);
+  scheduleJsDebugPanelRefresh();
+}
+
+function recordJsDebugClientEventsConnectionState(connected) {
+  const nextConnected = connected === true;
+  if (jsDebugStatsClientConnected === nextConnected) return;
+  jsDebugStatsClientConnected = nextConnected;
+  const nowMs = Date.now();
+  if (!nextConnected) {
+    jsDebugStatsDisconnectStartedAtMs = nowMs;
+    jsDebugStatsStorageSet(jsDebugStatsDisconnectedStorageKey, String(nowMs));
+    const bucket = debugGraphBucketForTime(nowMs, nowMs);
+    debugGraphAddBucketData(bucket, {disconnectedMs: 1});
+    scheduleJsDebugPanelRefresh();
+    return;
+  }
+  const storedStart = Number(jsDebugStatsStorageGet(jsDebugStatsDisconnectedStorageKey));
+  const startMs = Number.isFinite(Number(jsDebugStatsDisconnectStartedAtMs))
+    ? Number(jsDebugStatsDisconnectStartedAtMs)
+    : storedStart;
+  jsDebugStatsDisconnectStartedAtMs = null;
+  jsDebugStatsStorageRemove(jsDebugStatsDisconnectedStorageKey);
+  if (Number.isFinite(startMs) && startMs > 0 && nowMs > startMs) recordJsDebugDisconnectedSpan(startMs, nowMs);
+  flushJsDebugStatsHistory();
+  scheduleJsDebugPanelRefresh();
+}
+
 function recordJsDebugStatsSample(payload = {}) {
   if (!jsDebugCollectionEnabled || !payload || typeof payload !== 'object') return;
   const nextPid = Number(payload.pid);
@@ -664,6 +800,7 @@ function debugGraphApplyServerRecord(record) {
   bucket.latencyTotalMs = Math.max(bucket.latencyTotalMs, Number(record.latency_total_ms || 0));
   bucket.latencyCount = Math.max(bucket.latencyCount, Number(record.latency_count || 0));
   bucket.bandwidthBytes = Math.max(bucket.bandwidthBytes, Number(record.bandwidth_bytes || 0));
+  bucket.disconnectedMs = Math.max(bucket.disconnectedMs, Number(record.disconnected_ms || 0));
   bucket.cpuTotalPercent = Math.max(bucket.cpuTotalPercent, Number(record.cpu_total_percent || 0));
   bucket.cpuCount = Math.max(bucket.cpuCount, Number(record.cpu_count || 0));
   bucket.systemCpuTotalPercent = Math.max(bucket.systemCpuTotalPercent, Number(record.system_cpu_total_percent || 0));
@@ -742,24 +879,29 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
 
 function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGraphScaleSeconds, rangeSeconds = jsDebugGraphRangeSeconds) {
   compactJsDebugGraphBuckets(nowMs);
-  const activeRangeSeconds = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = normalizedJsDebugGraphScale(scaleSeconds) * 1000;
-  const cutoffMs = nowMs - (activeRangeSeconds * 1000);
   const buckets = new Map();
   for (const bucket of jsDebugGraphRollupBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, cutoffMs, nowMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
   }
   for (const bucket of jsDebugGraphRawBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, cutoffMs, nowMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
 
 function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
-  const endMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const fallbackEndMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  if (debugGraphZoomDomainValid()) {
+    const startMs = Math.max(fallbackEndMs - jsDebugGraphRetentionMs, Number(jsDebugGraphZoomDomain.startMs));
+    const endMs = Math.max(startMs + 1000, Number(jsDebugGraphZoomDomain.endMs));
+    return {startMs, endMs, rangeSeconds: (endMs - startMs) / 1000, zoomed: true};
+  }
+  const endMs = fallbackEndMs;
   const activeRangeSeconds = normalizedJsDebugGraphRange(rangeSeconds, endMs);
   const durationMs = Math.max(1000, activeRangeSeconds * 1000);
-  return {startMs: endMs - durationMs, endMs, rangeSeconds: activeRangeSeconds};
+  return {startMs: endMs - durationMs, endMs, rangeSeconds: activeRangeSeconds, zoomed: false};
 }
 
 function debugGraphBucketRate(bucket, value) {
@@ -789,13 +931,16 @@ function debugGraphBucketValue(bucket, key) {
 
 function debugGraphBucketHasSeriesData(bucket, key) {
   if (!bucket) return false;
+  if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
   if (key === 'askAgents' || key === 'runAgents' || key === 'transitionAgents' || key === 'idleAgents') return Number(bucket.agentActivitySamples || 0) > 0;
   if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
     const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
-    return Number(item?.samples || 0) > 0;
+      return Number(item?.samples || 0) > 0;
   }
+  if (key === 'cpu') return Number(bucket.cpuCount || 0) > 0;
+  if (key === 'systemCpu') return Number(bucket.systemCpuCount || 0) > 0;
   return debugGraphBucketValue(bucket, key) > 0;
 }
 
@@ -1020,11 +1165,15 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
   const options = debugGraphAvailableRangeOptions(nowMs);
   if (!options.length) return '';
-  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.tab.graph'))} time range">
-    ${options.map(option => {
-      const active = option.seconds === activeRange;
-      return `<button type="button" class="js-debug-range-button${active ? ' active' : ''}" data-js-debug-range="${option.seconds}" aria-pressed="${active ? 'true' : 'false'}">${esc(option.label)}</button>`;
-    }).join('')}
+  const sliderId = 'js-debug-range-options';
+  const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
+  const zoomed = debugGraphZoomDomainValid();
+  return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(zoomed ? 'Zoom' : jsDebugGraphRangeLabel(activeRange, nowMs))}</span>
+    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.tab.graph'))} time range">
+    <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
+    <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
+    ${zoomed ? '<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>Reset</button>' : ''}
   </div>`;
 }
 
@@ -1072,6 +1221,54 @@ function debugGraphPointForValue(value, timeMs, chartMax, domain) {
   const x = Math.max(0, Math.min(width, rawX));
   const y = top + (1 - (Math.max(0, value) / max)) * height;
   return [x.toFixed(1), y.toFixed(1)];
+}
+
+function debugGraphXForTime(timeMs, domain) {
+  const width = 600;
+  const startMs = Number(domain?.startMs);
+  const endMs = Number(domain?.endMs);
+  const spanMs = Math.max(1, endMs - startMs);
+  if (!Number.isFinite(Number(timeMs)) || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0;
+  return Math.max(0, Math.min(width, ((Number(timeMs) - startMs) / spanMs) * width));
+}
+
+function debugGraphDisconnectedActiveStartMs() {
+  const inMemory = Number(jsDebugStatsDisconnectStartedAtMs);
+  if (Number.isFinite(inMemory) && inMemory > 0) return inMemory;
+  const stored = Number(jsDebugStatsStorageGet(jsDebugStatsDisconnectedStorageKey));
+  return Number.isFinite(stored) && stored > 0 ? stored : NaN;
+}
+
+function debugGraphDisconnectedSegments(buckets, domain) {
+  const startMs = Number(domain?.startMs);
+  const endMs = Number(domain?.endMs);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return [];
+  const segments = [];
+  for (const bucket of buckets || []) {
+    if (Number(bucket?.disconnectedMs || 0) <= 0) continue;
+    const bucketStart = Number(bucket.startMs);
+    const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+    if (!Number.isFinite(bucketStart)) continue;
+    const segmentStart = Math.max(startMs, bucketStart);
+    const segmentEnd = Math.min(endMs, bucketStart + bucketDuration);
+    if (segmentEnd > segmentStart) segments.push({startMs: segmentStart, endMs: segmentEnd});
+  }
+  const activeStart = debugGraphDisconnectedActiveStartMs();
+  if (Number.isFinite(activeStart) && endMs > activeStart) {
+    segments.push({startMs: Math.max(startMs, activeStart), endMs});
+  }
+  return segments
+    .filter(segment => segment.endMs > segment.startMs)
+    .sort((a, b) => a.startMs - b.startMs)
+    .reduce((merged, segment) => {
+      const previous = merged.at(-1);
+      if (previous && segment.startMs <= previous.endMs) {
+        previous.endMs = Math.max(previous.endMs, segment.endMs);
+      } else {
+        merged.push({...segment});
+      }
+      return merged;
+    }, []);
 }
 
 function debugGraphSeriesPlotValues(series) {
@@ -1132,6 +1329,20 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
   const points = debugGraphPolylinePoints(series.movingAverageValues || [], series.movingAverageTimes || [], chartMax, domain);
   if (!points) return '';
   return `<polyline class="js-debug-line js-debug-line--${esc(series.key)} js-debug-line--moving-average" data-js-debug-moving-average="${esc(series.key)}" data-js-debug-moving-average-samples="${esc(jsDebugGraphMovingAverageSamples)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"><title>${esc(series.label)} ${jsDebugGraphMovingAverageSamples}-sample moving average</title></polyline>`;
+}
+
+function debugGraphDisconnectedOverlayHtml(buckets, domain) {
+  const y = 116;
+  return debugGraphDisconnectedSegments(buckets, domain).map((segment, index) => {
+    const x1 = debugGraphXForTime(segment.startMs, domain).toFixed(1);
+    const x2 = debugGraphXForTime(segment.endMs, domain).toFixed(1);
+    if (x1 === x2) return '';
+    return `<line class="js-debug-disconnect-line" data-js-debug-disconnect-line="${esc(index)}" data-js-debug-disconnect-start="${esc(Math.floor(segment.startMs))}" data-js-debug-disconnect-end="${esc(Math.floor(segment.endMs))}" x1="${esc(x1)}" y1="${esc(y)}" x2="${esc(x2)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"><title>Client disconnected</title></line>`;
+  }).join('');
+}
+
+function debugGraphInteractionOverlayHtml() {
+  return '<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="8" width="0" height="104"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="8" x2="0" y2="116" vector-effect="non-scaling-stroke"></line>';
 }
 
 function debugGraphLegendHtml(seriesItems) {
@@ -1256,7 +1467,7 @@ function debugGraphChartAxisMax(group, rawMax) {
   return debugGraphNiceAxisMax(rawMax, group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain) {
+function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   const plotSeries = group.stacked === true ? debugGraphStackedSeries(groupSeries) : groupSeries;
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0));
@@ -1279,6 +1490,8 @@ function debugGraphChartHtml(group, seriesItems, domain) {
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${debugGraphDisconnectedOverlayHtml(buckets, domain)}
+          ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
       ${debugGraphXAxisHtml(domain)}
@@ -1290,12 +1503,12 @@ function debugGraphChartHtml(group, seriesItems, domain) {
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
   return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid">${chartGroups.map(group => debugGraphChartHtml(group, seriesItems, domain)).join('')}</div>
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${chartGroups.map(group => debugGraphChartHtml(group, seriesItems, domain, buckets)).join('')}</div>
   </div>`;
 }
 
 function debugGraphClassName(nowMs = Date.now()) {
-  return `js-debug-graph${debugGraphDisplayBuckets(nowMs).length ? '' : ' js-debug-graph--empty'}`;
+  return `js-debug-graph${debugGraphDisplayBuckets(nowMs).length ? '' : ' js-debug-graph--empty'}${debugGraphZoomDomainValid() ? ' js-debug-graph--zoomed' : ''}`;
 }
 
 function debugGraphInnerHtml() {
@@ -1327,12 +1540,16 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     eventRefs: jsDebugGraphEventBuckets.size,
     scaleSeconds: jsDebugGraphScaleSeconds,
     rangeSeconds: jsDebugGraphRangeSeconds,
+    zoomed: debugGraphZoomDomainValid(),
+    zoomRangeSeconds: debugGraphZoomDomainValid() ? (Number(jsDebugGraphZoomDomain.endMs) - Number(jsDebugGraphZoomDomain.startMs)) / 1000 : 0,
     availableRangeSeconds,
     retentionHours: jsDebugGraphRetentionMs / 60 / 60 / 1000,
     rawWindowSeconds: jsDebugGraphRawWindowMs / 1000,
     rollupBucketSeconds: jsDebugGraphRollupBucketMs / 1000,
     serverSequence: jsDebugStatsServerSequence,
     pendingServerBuckets: jsDebugGraphPendingServerBuckets.size,
+    disconnectedBuckets: buckets.filter(bucket => Number(bucket.disconnectedMs || 0) > 0).length,
+    clientId: jsDebugStatsClientIdForRequest(),
     uptimeSeconds: jsDebugStatsServerUptimeSeconds,
     series: jsDebugGraphSeries.map(series => series.key),
     charts: debugGraphVisibleChartGroups(debugGraphSeriesData(buckets)).map(group => group.key),
@@ -1344,7 +1561,8 @@ async function pollJsDebugStatsSample() {
   if (jsDebugStatsPollInFlight || typeof apiFetchJsonQuiet !== 'function') return;
   jsDebugStatsPollInFlight = true;
   try {
-    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}`, {cache: 'no-store'});
+    const clientId = jsDebugStatsClientIdForRequest();
+    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {
@@ -1364,24 +1582,30 @@ async function flushJsDebugStatsHistory() {
   if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushInFlight || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
   const records = [...jsDebugGraphPendingServerBuckets.values()]
     .map(record => ({...record}))
-    .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.cpu_count || record.system_cpu_count);
-  jsDebugGraphPendingServerBuckets.clear();
+    .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.disconnected_ms || record.cpu_count || record.system_cpu_count)
+    .sort((a, b) => (Number(a.start) - Number(b.start)) || (Number(a.duration) - Number(b.duration)));
+  const chunk = records.slice(0, jsDebugStatsHistoryPostMaxRecords);
+  const held = records.slice(jsDebugStatsHistoryPostMaxRecords);
+  for (const record of chunk) {
+    const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+    jsDebugGraphPendingServerBuckets.delete(key);
+  }
   if (!records.length) return;
   jsDebugStatsHistoryFlushInFlight = true;
   try {
     const payload = await apiFetchJsonQuiet('/api/stats-history', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({since: jsDebugStatsServerSequence || 0, records}),
+      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, records: chunk}),
     });
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
   } catch (_error) {
-    for (const record of records) {
+    for (const record of chunk) {
       const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
       const existing = jsDebugGraphPendingServerBuckets.get(key);
       if (existing) {
-        for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
+        for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'disconnected_ms', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
           existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
         }
       } else {
@@ -1389,6 +1613,10 @@ async function flushJsDebugStatsHistory() {
       }
     }
   } finally {
+    for (const record of held) {
+      const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+      if (!jsDebugGraphPendingServerBuckets.has(key)) jsDebugGraphPendingServerBuckets.set(key, record);
+    }
     jsDebugStatsHistoryFlushInFlight = false;
     if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
   }
@@ -1408,7 +1636,7 @@ function clearJsDebugServerHistory() {
   apiFetchJsonQuiet('/api/stats-history', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({clear: true}),
+    body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), clear: true}),
   }).then(payload => {
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
@@ -1529,7 +1757,7 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
   const graph = panel.querySelector('[data-js-debug-graph]');
-  if (graph) {
+  if (graph && !jsDebugGraphRangeSliderDragging) {
     graph.className = debugGraphClassName();
     graph.innerHTML = debugGraphInnerHtml();
   }
@@ -1570,16 +1798,204 @@ function setDebugGraphScale(value) {
   }
 }
 
-function setDebugGraphRange(value) {
+function setDebugGraphRange(value, {render = true} = {}) {
+  jsDebugGraphZoomDomain = null;
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
+  if (!render) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     graph.className = debugGraphClassName();
     graph.innerHTML = debugGraphInnerHtml();
   }
 }
 
+function debugGraphRangeSliderIndex(slider, options = debugGraphAvailableRangeOptions()) {
+  const rawValue = Number(slider?.value);
+  const value = Number.isFinite(rawValue) ? rawValue : 0;
+  return Math.max(0, Math.min(options.length - 1, Math.round(value)));
+}
+
+function debugGraphRangeOptionForSlider(slider) {
+  const options = debugGraphAvailableRangeOptions();
+  const index = debugGraphRangeSliderIndex(slider, options);
+  return options[index] || null;
+}
+
+function updateDebugGraphRangeSliderLabel(slider, option) {
+  const label = slider?.closest?.('[data-js-debug-range-control]')?.querySelector?.('[data-js-debug-range-label]');
+  if (label && option) label.textContent = option.label;
+}
+
+function setDebugGraphRangeFromSlider(slider, {render = true, snap = false} = {}) {
+  const options = debugGraphAvailableRangeOptions();
+  const index = debugGraphRangeSliderIndex(slider, options);
+  const option = options[index];
+  if (!option) return false;
+  if (snap) slider.value = String(index);
+  setDebugGraphRange(option.seconds, {render});
+  updateDebugGraphRangeSliderLabel(slider, option);
+  return true;
+}
+
+function debugGraphPointerRatioFromRect(clientX, rect) {
+  const left = Number(rect?.left);
+  const width = Number(rect?.width);
+  if (!Number.isFinite(Number(clientX)) || !Number.isFinite(left) || !Number.isFinite(width) || width <= 0) return null;
+  return Math.max(0, Math.min(1, (Number(clientX) - left) / width));
+}
+
+function debugGraphPointerRatioForEvent(event) {
+  const svg = event?.target?.closest?.('.js-debug-line-chart');
+  if (!svg) return null;
+  return debugGraphPointerRatioFromRect(event.clientX, svg.getBoundingClientRect());
+}
+
+function debugGraphSetInteractionLines(panel, ratio) {
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (!graph || ratio == null) return;
+  const x = (Math.max(0, Math.min(1, Number(ratio))) * 600).toFixed(1);
+  graph.classList.add('js-debug-graph--hovering');
+  graph.querySelectorAll('[data-js-debug-hover-line]').forEach(line => {
+    line.setAttribute('x1', x);
+    line.setAttribute('x2', x);
+  });
+}
+
+function debugGraphClearInteractionLines(panel) {
+  if (jsDebugGraphSelectionState) return;
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (graph) graph.classList.remove('js-debug-graph--hovering');
+}
+
+function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (!graph) return;
+  const start = Math.max(0, Math.min(1, Number(startRatio)));
+  const end = Math.max(0, Math.min(1, Number(endRatio)));
+  const x = Math.min(start, end) * 600;
+  const width = Math.abs(end - start) * 600;
+  graph.classList.add('js-debug-graph--selecting');
+  graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
+    rect.setAttribute('x', x.toFixed(1));
+    rect.setAttribute('width', width.toFixed(1));
+  });
+}
+
+function debugGraphClearSelectionRects(panel) {
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (!graph) return;
+  graph.classList.remove('js-debug-graph--selecting');
+  graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
+    rect.setAttribute('x', '0');
+    rect.setAttribute('width', '0');
+  });
+}
+
+function debugGraphGridDomain(panel) {
+  const grid = panel?.querySelector?.('[data-js-debug-chart-grid]');
+  const startMs = Number(grid?.dataset?.jsDebugDomainStart);
+  const endMs = Number(grid?.dataset?.jsDebugDomainEnd);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return debugGraphDomain();
+  return {startMs, endMs, rangeSeconds: (endMs - startMs) / 1000};
+}
+
+function debugGraphSelectionRatioForEvent(event, selection = jsDebugGraphSelectionState) {
+  if (!selection) return null;
+  return debugGraphPointerRatioFromRect(event?.clientX, selection.rect);
+}
+
+function handleDebugGraphPointerDown(event, panel) {
+  const ratio = debugGraphPointerRatioForEvent(event);
+  if (ratio == null || event.button > 0) return false;
+  event.preventDefault();
+  const svg = event.target.closest('.js-debug-line-chart');
+  jsDebugGraphSelectionState = {
+    panel,
+    rect: svg.getBoundingClientRect(),
+    domain: debugGraphGridDomain(panel),
+    startRatio: ratio,
+    currentRatio: ratio,
+  };
+  debugGraphSetInteractionLines(panel, ratio);
+  debugGraphSetSelectionRects(panel, ratio, ratio);
+  return true;
+}
+
+function handleDebugGraphPointerMove(event, panel) {
+  if (jsDebugGraphSelectionState?.panel === panel) {
+    const ratio = debugGraphSelectionRatioForEvent(event);
+    if (ratio == null) return;
+    jsDebugGraphSelectionState.currentRatio = ratio;
+    debugGraphSetInteractionLines(panel, ratio);
+    debugGraphSetSelectionRects(panel, jsDebugGraphSelectionState.startRatio, ratio);
+    return;
+  }
+  const ratio = debugGraphPointerRatioForEvent(event);
+  if (ratio == null) return;
+  debugGraphSetInteractionLines(panel, ratio);
+}
+
+function handleDebugGraphPointerUp(event, panel) {
+  const selection = jsDebugGraphSelectionState;
+  if (!selection || selection.panel !== panel) return;
+  const ratio = debugGraphSelectionRatioForEvent(event);
+  if (ratio != null) selection.currentRatio = ratio;
+  const start = Math.max(0, Math.min(1, Number(selection.startRatio)));
+  const end = Math.max(0, Math.min(1, Number(selection.currentRatio)));
+  debugGraphClearSelectionRects(panel);
+  jsDebugGraphSelectionState = null;
+  const minRatio = Math.min(start, end);
+  const maxRatio = Math.max(start, end);
+  const domain = selection.domain;
+  const spanMs = Math.max(1, Number(domain.endMs) - Number(domain.startMs));
+  const selectedMs = (maxRatio - minRatio) * spanMs;
+  if (selectedMs >= 1000 && Math.abs(maxRatio - minRatio) >= 0.01) {
+    jsDebugGraphZoomDomain = {
+      startMs: Number(domain.startMs) + (minRatio * spanMs),
+      endMs: Number(domain.startMs) + (maxRatio * spanMs),
+    };
+    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+      graph.className = debugGraphClassName();
+      graph.innerHTML = debugGraphInnerHtml();
+    }
+  } else {
+    debugGraphSetInteractionLines(panel, end);
+  }
+}
+
+function cancelDebugGraphSelection(panel) {
+  if (jsDebugGraphSelectionState?.panel !== panel) return;
+  debugGraphClearSelectionRects(panel);
+  jsDebugGraphSelectionState = null;
+}
+
 function handleDebugGraphControlEvent(event, panel) {
+  const reset = event.target.closest('[data-js-debug-zoom-reset]');
+  if (reset && panel.contains(reset)) {
+    event.preventDefault();
+    clearDebugGraphZoom();
+    return true;
+  }
+  const slider = event.target.closest('[data-js-debug-range-slider]');
+  if (slider && panel.contains(slider)) {
+    if (event.type === 'pointerdown') {
+      jsDebugGraphRangeSliderDragging = true;
+      return false;
+    }
+    if (event.type === 'input') {
+      jsDebugGraphRangeSliderDragging = true;
+      return setDebugGraphRangeFromSlider(slider, {render: false});
+    }
+    if (event.type === 'change' || event.type === 'pointerup') {
+      jsDebugGraphRangeSliderDragging = false;
+      return setDebugGraphRangeFromSlider(slider, {snap: true});
+    }
+    if (event.type === 'pointercancel') {
+      jsDebugGraphRangeSliderDragging = false;
+      return false;
+    }
+    return false;
+  }
   const range = event.target.closest('[data-js-debug-range]');
   if (range && panel.contains(range)) {
     event.preventDefault();
@@ -1599,6 +2015,27 @@ function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
   panel.addEventListener('pointerdown', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    handleDebugGraphPointerDown(event, panel);
+  });
+  panel.addEventListener('pointermove', event => {
+    handleDebugGraphPointerMove(event, panel);
+  });
+  panel.addEventListener('pointerleave', () => {
+    debugGraphClearInteractionLines(panel);
+  });
+  panel.addEventListener('pointerup', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    handleDebugGraphPointerUp(event, panel);
+  });
+  panel.addEventListener('pointercancel', event => {
+    handleDebugGraphControlEvent(event, panel);
+    cancelDebugGraphSelection(panel);
+  });
+  panel.addEventListener('input', event => {
+    handleDebugGraphControlEvent(event, panel);
+  });
+  panel.addEventListener('change', event => {
     handleDebugGraphControlEvent(event, panel);
   });
   panel.addEventListener('click', event => {

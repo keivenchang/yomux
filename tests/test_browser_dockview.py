@@ -1229,6 +1229,111 @@ def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(bro
     assert data["dotWorkingTone"] is True, data
 
 
+def test_dockview_tab_agent_ball_uses_most_urgent_window_state(browser, tmp_path):
+    stopped_ts = int(time.time()) - 5
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+            ],
+        },
+    }
+
+    def load_with(agent_windows):
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1&layout=left&tabs=left:1",
+            sessions=["1"],
+            transcript_sessions=transcript_sessions,
+            auto_approve_payload={
+                "session_order": ["1"],
+                "sessions": {
+                    "1": {
+                        "target": "1",
+                        "enabled": True,
+                        "agent_windows": agent_windows,
+                    },
+                },
+                "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+            },
+        )
+        wait_for_dockview(browser, min_tabs=1)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script("return document.querySelectorAll('.tmux-window-button .agent-window-status-dot').length >= 2")
+        )
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const nodes = [
+                  document.querySelector('.dockview-pane-tab[data-pane-tab="1"] .agent-window-activity'),
+                  ...document.querySelectorAll('.tmux-window-button .agent-window-activity'),
+                ].filter(Boolean);
+                if (nodes.length < 3) return false;
+                const delays = nodes.map(node => getComputedStyle(node).getPropertyValue('--attention-animation-delay').trim());
+                return delays.every(Boolean) && new Set(delays).size === 1;
+                """
+            )
+        )
+        return browser.execute_script(
+            """
+            const read = selector => {
+              const root = document.querySelector(selector);
+              const wrap = root?.querySelector('.agent-window-activity');
+              const dot = root?.querySelector('.agent-window-status-dot');
+              const icon = root?.querySelector('.agent-window-agent-icon');
+              const delay = wrap ? getComputedStyle(wrap).getPropertyValue('--attention-animation-delay').trim() : '';
+              const dotStyle = dot ? getComputedStyle(dot) : null;
+              const animation = dot?.getAnimations?.().find(item => item.animationName === 'attention-ring-fade') || null;
+              return {
+                found: !!root,
+                wrapState: wrap ? Array.from(wrap.classList).find(name => name.startsWith('agent-window-activity--')) : '',
+                iconState: icon ? Array.from(icon.classList).find(name => name.startsWith('agent-window-agent-icon--')) : '',
+                attention: dot ? dot.classList.contains('status-indicator--attention') : false,
+                cooldown: dot ? dot.classList.contains('status-indicator--cooldown') : false,
+                working: dot ? dot.classList.contains('status-indicator--working') : false,
+                delay,
+                delaySeconds: Number((delay.match(/-?[0-9.]+/) || [0])[0]),
+                animationName: dotStyle?.animationName || '',
+                animationDuration: dotStyle?.animationDuration || '',
+                animationDelay: dotStyle?.animationDelay || '',
+                animationTiming: dotStyle?.animationTimingFunction || '',
+                animationCurrentTime: Number(animation?.currentTime || 0),
+              };
+            };
+            return {
+              tab: read('.dockview-pane-tab[data-pane-tab="1"]'),
+              claude: read('.tmux-window-button[data-window-index="0"]'),
+              codex: read('.tmux-window-button[data-window-index="1"]'),
+            };
+            """
+        )
+
+    red_case = load_with([
+        {"kind": "claude", "state": "needs-input", "window_index": 0, "window_label": "0:claude"},
+        {"kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex", "working_stopped_ts": stopped_ts},
+    ])
+    assert red_case["claude"]["attention"] is True, red_case
+    assert red_case["codex"]["cooldown"] is True, red_case
+    assert red_case["tab"]["attention"] is True, red_case
+    assert red_case["tab"]["iconState"] == red_case["claude"]["iconState"], red_case
+
+    yellow_case = load_with([
+        {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"},
+        {"kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex", "working_stopped_ts": stopped_ts},
+    ])
+    assert yellow_case["claude"]["working"] is True, yellow_case
+    assert yellow_case["codex"]["cooldown"] is True, yellow_case
+    assert yellow_case["tab"]["cooldown"] is True, yellow_case
+    assert yellow_case["tab"]["iconState"] == yellow_case["codex"]["iconState"], yellow_case
+    assert yellow_case["tab"]["animationName"] == yellow_case["codex"]["animationName"], yellow_case
+    assert yellow_case["tab"]["animationDuration"] == yellow_case["codex"]["animationDuration"], yellow_case
+    assert yellow_case["tab"]["animationTiming"] == yellow_case["codex"]["animationTiming"], yellow_case
+    assert yellow_case["tab"]["delay"] == yellow_case["codex"]["delay"], yellow_case
+    assert yellow_case["tab"]["animationDelay"] == yellow_case["codex"]["animationDelay"], yellow_case
+
+
 def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):
     transcript_sessions = {
         "1": {

@@ -1016,6 +1016,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   dockviewSyncMountedPanels();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
+  scheduleAgentWindowActivityAnimationSync();
   if (options.prune === false) {
     if (responsiveLayoutPruneTimer) {
       clearTimeout(responsiveLayoutPruneTimer);
@@ -1657,6 +1658,7 @@ function dockviewRefreshTabs() {
   });
   dockviewSyncHeaderBackgroundDragSources();
   dockviewSyncHeaderActionReservations();
+  scheduleAgentWindowActivityAnimationSync();
 }
 
 function syncDockviewTabActiveClass(tab, api = null) {

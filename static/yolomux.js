@@ -253,6 +253,7 @@ const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenTogg
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileExplorerQuickAccess = document.getElementById('fileExplorerQuickAccess');
 const fileExplorerExpanded = new Set();
+const fileExplorerPendingExpansions = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
@@ -575,6 +576,9 @@ const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 const pendingFileEditorLineTargets = new Map();  // layout item -> line target to apply after async CodeMirror load
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
+let layoutUrlStateFromQuery = null;
+let layoutUrlStateApplied = false;
+let layoutUrlStateRefreshTimer = null;
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = shareBootstrapFinderRoot() || null;
@@ -629,6 +633,7 @@ let fileExplorerSessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesLoading = false;
 const fileExplorerSessionFilesGuard = makeGenerationGuard();
 let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
+let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const fileExplorerExpandedBySyncTarget = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
 const fileExplorerSyncManualCollapsedByTarget = new Map();
@@ -637,6 +642,9 @@ let fileExplorerVisibleSyncSession = '';
 let fileExplorerVisibleSyncRoot = '';
 let fileExplorerLastInteractionAt = 0;
 let fileExplorerRefreshDeferred = false;
+const fileExplorerSelectedPaths = new Set();
+let fileExplorerSelectionAnchor = null;
+let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
 let sessionFilesSortMode = 'newest';
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
@@ -1281,7 +1289,6 @@ let runHistoryPayload = {runs: []};
 let runHistoryLoading = false;
 let runHistoryError = '';
 let notificationsEnabled = false;
-let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
@@ -1347,9 +1354,6 @@ const linkContextMenu = createContextMenuController();
 const watchedPrContextMenu = createContextMenuController();   // "Watch this PR" on YO!info PR cells
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 let sessionRenameDialog = null;
-const fileExplorerSelectedPaths = new Set();
-let fileExplorerSelectionAnchor = null;
-let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
 let fileExplorerPathError = '';
@@ -5520,6 +5524,179 @@ function maybeAdoptFileExplorerModeDeepLink(params) {
   writeStoredFileExplorerMode(fileExplorerMode);
 }
 
+function layoutUrlStateFromParams(params) {
+  const raw = params?.get?.('state') || '';
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function layoutUrlStringArray(values, limit = 1000) {
+  if (!Array.isArray(values)) return [];
+  const out = [];
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text) continue;
+    out.push(text);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function layoutUrlReplaceSet(target, values, limit = 1000) {
+  if (!target?.clear) return;
+  target.clear();
+  for (const value of layoutUrlStringArray(values, limit)) target.add(value);
+}
+
+function applyLayoutUrlFinderSeed(finder = {}) {
+  if (!finder || typeof finder !== 'object') return;
+  if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
+  if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
+  if ('root' in finder) {
+    const root = String(finder.root || '').trim();
+    if (root) fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+  }
+  if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
+    fileExplorerChangesSelectedSession = String(finder.session || '').trim();
+    fileExplorerExplicitSyncSession = fileExplorerChangesSelectedSession;
+  }
+  if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
+  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
+  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
+  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
+  if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
+  if ('diffRefsByRepo' in finder) {
+    diffRefsByRepo = typeof shareCleanDiffRefsByRepo === 'function'
+      ? shareCleanDiffRefsByRepo(finder.diffRefsByRepo)
+      : {};
+  }
+  if ('expanded' in finder) layoutUrlReplaceSet(fileExplorerExpanded, finder.expanded);
+  if ('selectedPaths' in finder) layoutUrlReplaceSet(fileExplorerSelectedPaths, finder.selectedPaths);
+  if ('selectionAnchor' in finder) fileExplorerSelectionAnchor = String(finder.selectionAnchor || '');
+  if ('selectionLead' in finder) fileExplorerSelectionLead = String(finder.selectionLead || '');
+  if ('changesFolderCollapsed' in finder) layoutUrlReplaceSet(changesFolderCollapsed, finder.changesFolderCollapsed);
+  if ('changesRepoCollapsed' in finder) layoutUrlReplaceSet(changesRepoCollapsed, finder.changesRepoCollapsed);
+  if ('tabberCollapsed' in finder) layoutUrlReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
+}
+
+function applyLayoutUrlEditorSeed(editor = {}) {
+  if (!editor || typeof editor !== 'object') return;
+  if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
+  if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
+  if ('themeMode' in editor) fileEditorThemeMode = normalizeEditorThemeMode(editor.themeMode);
+  if ('previewDisplayMode' in editor) fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(editor.previewDisplayMode);
+  if ('wrapEnabled' in editor) fileEditorWrapEnabled = editor.wrapEnabled === true;
+  if ('lineNumbersEnabled' in editor) fileEditorLineNumbersEnabled = editor.lineNumbersEnabled === true;
+  if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
+  if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
+  if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
+  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) {
+    if (typeof shareApplyEditorModeEntry === 'function') shareApplyEditorModeEntry(entry);
+  }
+}
+
+function applyLayoutUrlPreferencesSeed(preferences = {}) {
+  if (!preferences || typeof preferences !== 'object') return;
+  if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
+  if (Array.isArray(preferences.collapsedSections)) {
+    collapsedPreferenceSections = new Set(layoutUrlStringArray(preferences.collapsedSections, 200));
+  }
+  if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
+}
+
+function applyLayoutUrlStateSeed(state) {
+  if (!state || typeof state !== 'object') return false;
+  applyLayoutUrlFinderSeed(state.finder || {});
+  applyLayoutUrlEditorSeed(state.editor || {});
+  applyLayoutUrlPreferencesSeed(state.preferences || {});
+  layoutUrlStateFromQuery = state;
+  layoutUrlStateApplied = false;
+  return true;
+}
+
+function maybeAdoptLayoutStateDeepLink(params) {
+  const state = layoutUrlStateFromParams(params);
+  if (!state) return;
+  applyLayoutUrlStateSeed(state);
+}
+
+function layoutUrlCaptureCurrentPaneState() {
+  for (const item of paneItems(layoutSlots)) {
+    capturePaneViewStateForItemIfPresent(item);
+  }
+}
+
+function layoutUrlStateSnapshot() {
+  layoutUrlCaptureCurrentPaneState();
+  const state = {v: 1};
+  if (paneItems(layoutSlots).some(isFileExplorerItem) && typeof shareFinderStateSnapshot === 'function') {
+    state.finder = shareFinderStateSnapshot({compact: false});
+  }
+  if (typeof shareEditorStateSnapshot === 'function') {
+    const editor = shareEditorStateSnapshot({compact: false});
+    if (editor?.modes?.length) state.editor = editor;
+  }
+  if (paneItems(layoutSlots).includes(prefsItemId) && typeof sharePreferencesStateSnapshot === 'function') {
+    state.preferences = sharePreferencesStateSnapshot({compact: false});
+  }
+  if (typeof shareScrollStateSnapshot === 'function') {
+    const scroll = shareScrollStateSnapshot();
+    if (scroll.length) state.scroll = scroll;
+  }
+  return Object.keys(state).length > 1 ? state : null;
+}
+
+function layoutUrlStateParamValue() {
+  const state = layoutUrlStateSnapshot();
+  if (!state) return '';
+  try {
+    return readableParamComponent(JSON.stringify(state));
+  } catch (_) {
+    return '';
+  }
+}
+
+function applyPendingLayoutUrlState() {
+  if (layoutUrlStateApplied) return false;
+  const state = layoutUrlStateFromQuery;
+  if (!state || typeof state !== 'object') {
+    layoutUrlStateApplied = true;
+    return false;
+  }
+  if (Array.isArray(state.scroll) && typeof applyShareScrollSnapshot === 'function') {
+    applyShareScrollSnapshot(state.scroll);
+    requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));
+    setTimeout(() => applyShareScrollSnapshot(state.scroll), 0);
+  }
+  layoutUrlStateApplied = true;
+  return true;
+}
+
+function schedulePendingLayoutUrlStateApply() {
+  if (!layoutUrlStateFromQuery || layoutUrlStateApplied) return;
+  requestAnimationFrame(applyPendingLayoutUrlState);
+  setTimeout(applyPendingLayoutUrlState, 0);
+}
+
+function scheduleLayoutUrlStateRefresh() {
+  if (shareViewMode) return;
+  if (layoutUrlStateRefreshTimer) return;
+  layoutUrlStateRefreshTimer = setTimeout(() => {
+    layoutUrlStateRefreshTimer = null;
+    updateActiveSessionParam();
+  }, 250);
+}
+
+function refreshLayoutUrlStateSoon() {
+  scheduleLayoutUrlStateRefresh();
+}
+
 function shareBootstrapLayoutParams() {
   if (!shareViewMode || !shareBootstrap) return null;
   const params = new URLSearchParams();
@@ -5538,6 +5715,7 @@ function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
+  if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
@@ -5979,6 +6157,7 @@ function schedulePaneViewStateCapture(item, panel) {
     pendingPaneViewStateCaptures.delete(item);
     const currentPanel = panelNodes.get(item) || panel;
     capturePaneViewState(item, currentPanel);
+    refreshLayoutUrlStateSoon();
   });
 }
 
@@ -8784,6 +8963,7 @@ function updateActiveSessionParam() {
   params.delete('layout');
   params.delete('tabs');
   params.delete('finder');
+  params.delete('state');
   const queryParts = [];
   const inactiveItems = inactiveTabItems();
   if (activeSessions.length || inactiveItems.length) {
@@ -8796,6 +8976,8 @@ function updateActiveSessionParam() {
     if (paneItems(layoutSlots).some(isFileExplorerItem)) {
       queryParts.push(`finder=${readableParamComponent(normalizeFileExplorerMode(fileExplorerMode))}`);
     }
+    const state = layoutUrlStateParamValue();
+    if (state) queryParts.push(`state=${state}`);
   }
   const remaining = params.toString();
   if (remaining) queryParts.push(remaining);
@@ -8806,6 +8988,7 @@ function updateActiveSessionParam() {
 }
 
 function syncInitialLayoutUrl() {
+  schedulePendingLayoutUrlStateApply();
   updateActiveSessionParam();
 }
 function menuCommand(label, action, options = {}) {
@@ -12639,9 +12822,10 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
+  const pendingExpansion = !differMode && entry.kind === 'dir' && fileExplorerPendingExpansions.has(fullPath);
   const expanded = entry.kind === 'dir' && (differMode
     ? !changesFolderCollapsed.has(fullPath)
-    : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
+    : (pendingExpansion || options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
@@ -12661,6 +12845,7 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
     differMode,
     compact,
     expanded,
+    pendingExpansion,
     indexedDirectory,
     indexedDescendantDirectory,
     paddingLeft: fileTreeRowPadding(depth, compact),
@@ -12703,6 +12888,7 @@ function applyFileTreeRowDataset(row, state) {
   row.classList.toggle(CLS.selected, state.selected);
   row.classList.toggle('expanded', state.expanded);
   row.classList.toggle(CLS.collapsed, entry.kind === 'dir' && !state.expanded);
+  row.classList.toggle('loading-children', state.pendingExpansion);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('indexed-directory', state.indexedDirectory);
   row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
@@ -12864,7 +13050,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     const collapseSet = renderOptions.collapsedSet instanceof Set ? renderOptions.collapsedSet : null;
     const expandSet = renderOptions.expandedSet instanceof Set ? renderOptions.expandedSet : fileExplorerExpanded;
     const dirExpanded = collapseSet ? !collapseSet.has(fullPath)
-      : (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (renderOptions.autoExpand === true || expandSet.has(fullPath)));
+      : (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (fileExplorerPendingExpansions.has(fullPath) || renderOptions.autoExpand === true || expandSet.has(fullPath)));
     if (entry.kind === 'dir' && dirExpanded) {
       const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);
@@ -14496,6 +14682,15 @@ function agentWindowStateRank(state) {
   return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, [STATE_KEY.idle]: 3}[agentWindowStateKey(state)] ?? 9;
 }
 
+function agentWindowActivityVisualRank(state) {
+  const tone = agentWindowActivityTone(state);
+  if (tone === 'attention') return 0;
+  if (tone === 'cooldown') return 1;
+  if (tone === STATE_KEY.working) return 2;
+  if (tone === 'active') return 3;
+  return 9;
+}
+
 function agentWindowKind(value) {
   const key = String(value || '').trim().toLowerCase();
   return key === 'claude' || key === 'codex' ? key : '';
@@ -14675,6 +14870,48 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
 
 const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
+let agentWindowActivityAnimationSyncFrame = 0;
+let agentWindowActivityMutationObserver = null;
+
+function mutationTouchesAgentWindowActivity(mutation) {
+  for (const node of mutation?.addedNodes || []) {
+    if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.querySelector?.('.agent-window-activity')) return true;
+  }
+  return false;
+}
+
+function ensureAgentWindowActivityMutationObserver() {
+  if (agentWindowActivityMutationObserver || typeof MutationObserver !== 'function' || !document?.body) return;
+  agentWindowActivityMutationObserver = new MutationObserver(mutations => {
+    if (mutations.some(mutationTouchesAgentWindowActivity)) scheduleAgentWindowActivityAnimationSync();
+  });
+  agentWindowActivityMutationObserver.observe(document.body, {childList: true, subtree: true});
+}
+
+function syncAgentWindowActivityAnimationDelays(root = document) {
+  const scope = root?.querySelectorAll ? root : document;
+  const nodes = Array.from(scope?.querySelectorAll?.('.agent-window-activity') || []);
+  if (!nodes.length) return;
+  const delay = attentionAnimationDelay();
+  for (const node of nodes) {
+    if (!node?.style || !node.querySelector?.('.agent-window-status-dot')) continue;
+    node.style.setProperty('--attention-animation-delay', delay);
+  }
+}
+
+function scheduleAgentWindowActivityAnimationSync(root = document) {
+  ensureAgentWindowActivityMutationObserver();
+  syncAgentWindowActivityAnimationDelays(root);
+  if (agentWindowActivityAnimationSyncFrame && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(agentWindowActivityAnimationSyncFrame);
+  }
+  if (typeof requestAnimationFrame !== 'function') return;
+  agentWindowActivityAnimationSyncFrame = requestAnimationFrame(() => {
+    agentWindowActivityAnimationSyncFrame = 0;
+    syncAgentWindowActivityAnimationDelays(root);
+  });
+}
 
 function agentWindowActivityTransitionKey(agentKey, options = {}) {
   const explicit = String(options.transitionKey || '').trim();
@@ -14751,6 +14988,25 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   return null;
 }
 
+function agentWindowActivityOptionsForStatus(agent, session = '', options = {}) {
+  return {
+    session,
+    window: agent?.window,
+    window_index: agent?.window_index,
+    pane: agent?.pane,
+    pane_target: agent?.pane_target,
+    current: agentWindowPayloadCurrent(agent) === true,
+    window_active: agent?.window_active === true,
+    working_stopped_ts: agent?.working_stopped_ts,
+    ...options,
+  };
+}
+
+function agentWindowActivityIconForStatusItem(agent, agentKey = agent?.kind, session = '', options = {}) {
+  const itemOptions = agentWindowActivityOptionsForStatus(agent, session, options);
+  return agentWindowActivityIcon(agentKey, agent?.state, agentWindowIdleSeconds(agent, itemOptions.nowSeconds), itemOptions);
+}
+
 function agentWindowStatusDotHtml(item) {
   if (!item) return '';
   if (!['attention', 'cooldown', STATE_KEY.working].includes(item.state)) return '';
@@ -14767,7 +15023,7 @@ function agentWindowStatusDotHtml(item) {
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return '';
-  const item = agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const item = options.item || agentWindowActivityIcon(kind, state, idleSeconds, options);
   const stateKey = item?.state || 'idle-recent';
   const label = item?.label || agentLabel(kind);
   const agentClasses = [
@@ -14784,15 +15040,10 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
 }
 
 function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
+  const options = agentWindowActivityOptionsForStatus(agent, session);
   return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
-    session,
-    window: agent?.window,
-    window_index: agent?.window_index,
-    pane: agent?.pane,
-    pane_target: agent?.pane_target,
-    current: agentWindowPayloadCurrent(agent) === true,
-    window_active: agent?.window_active === true,
-    working_stopped_ts: agent?.working_stopped_ts,
+    ...options,
+    item: agentWindowActivityIconForStatusItem(agent, agentKey, session, options),
   });
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -19630,9 +19881,26 @@ function toggleHiddenFiles() {
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
+function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
+  if (!row) return;
+  row.classList.toggle('expanded', expanded);
+  row.classList.toggle(CLS.collapsed, !expanded);
+  row.classList.toggle('loading-children', loading);
+  row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const icon = row.querySelector('.file-tree-icon');
+  if (icon) icon.textContent = expanded ? '▾' : '▸';
+}
+
 async function expandDirectoryRow(row, fullPath, options = {}) {
+  fileExplorerPendingExpansions.add(fullPath);
+  syncDirectoryRowExpansionVisual(row, true, true);
   const entries = await fetchDirectory(fullPath);
-  if (!entries) return;
+  fileExplorerPendingExpansions.delete(fullPath);
+  if (!entries) {
+    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
+    else syncDirectoryRowExpansionVisual(row, true, false);
+    return;
+  }
   if (options.manual === true) {
     forgetFileExplorerSyncManualCollapse(fullPath);
     resetFileExplorerAppliedSyncPlan();
@@ -19644,12 +19912,12 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
   // be free to restore a directory across sync-target switches.
   if (options.auto === true && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
+    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
+    else syncDirectoryRowExpansionVisual(row, true, false);
     return;
   }
   fileExplorerExpanded.add(fullPath);
-  row.classList.add('expanded');
-  row.setAttribute('aria-expanded', 'true');
-  row.querySelector('.file-tree-icon').textContent = '▾';
+  syncDirectoryRowExpansionVisual(row, true, false);
   const existingChildren = childContainerForRow(row, fullPath);
   const children = existingChildren || createFileTreeChildContainer(fullPath);
   const nextDepth = fileTreeRowDepth(row) + 1;
@@ -19657,6 +19925,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();
   scheduleShareUiStatePublish();
+  refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -19666,14 +19935,14 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
     resetFileExplorerAppliedSyncPlan();
   }
   fileExplorerExpanded.delete(fullPath);
-  row.classList.remove('expanded');
-  row.setAttribute('aria-expanded', 'false');
-  row.querySelector('.file-tree-icon').textContent = '▸';
+  fileExplorerPendingExpansions.delete(fullPath);
+  syncDirectoryRowExpansionVisual(row, false, false);
   Array.from(row.parentElement?.children || [])
     .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
     .forEach(node => node.remove());
   rememberFileExplorerSyncExpandedState();
   scheduleShareUiStatePublish();
+  refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -20040,19 +20309,31 @@ function yoloMarkerHtml(session, auto, options = {}) {
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
-function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI status indicator must follow the same working condition as the YO state, while keeping the
-  // Claude/Codex symbol static and putting the glow on the separate green ball. Prefer a window literally
-  // reporting STATE_KEY.working; otherwise, when the session is working only via the screen-state proxy
-  // (a working screen key with no per-window working row), present the current/first agent window as
-  // working so the separate ball appears instead of the indicator vanishing.
+function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
+  // The tab's AI status indicator summarizes the most urgent visible agent-window ball. Window buttons
+  // render their own balls, and the tab must mirror the strongest one: red attention, then yellow stopped
+  // cooldown, then green working. When the only working signal is the session screen proxy, fall back to
+  // the current/first agent window as a synthetic working row so the tab still shows the green ball.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
   if (!agents.length) return null;
-  const working = agents.filter(agent => agentWindowIsWorkingState(agent?.state));
-  const literal = working.find(agent => agentWindowPayloadCurrent(agent) === true) || working[0] || null;
-  if (literal) return literal;
-  if (!sessionYoloIsWorking(session, payload)) return null;
+  let selected = null;
+  const screenWorking = sessionYoloIsWorking(session, payload);
+  for (const agent of agents) {
+    const item = typeof agentWindowActivityIconForStatusItem === 'function'
+      ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
+      : null;
+    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(item.state)) continue;
+    const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
+    if (screenWorking && item.state === 'cooldown' && !explicitStopped) continue;
+    const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
+    const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
+    const current = agentWindowPayloadCurrent(agent) === true;
+    const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
+    if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
+  }
+  if (selected) return selected.agent;
+  if (!screenWorking) return null;
   const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
   if (!candidate || agentWindowIsAttentionState(candidate.state)) return null;
   return {...candidate, state: STATE_KEY.working};
@@ -20061,9 +20342,9 @@ function sessionWorkingAgentWindowForTab(session, info, payload = autoApproveSta
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const yoloHtml = yoloMarkerHtml(session, auto, {...options, yoloWorking: false, payload});
-  const workingAgent = sessionWorkingAgentWindowForTab(session, info, payload);
-  if (workingAgent) {
-    const iconHtml = agentWindowActivityIconHtmlForStatus(workingAgent, workingAgent.kind, session);
+  const statusAgent = sessionStatusAgentWindowForTab(session, info, payload);
+  if (statusAgent) {
+    const iconHtml = agentWindowActivityIconHtmlForStatus(statusAgent, statusAgent.kind, session);
     if (iconHtml) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
@@ -22526,6 +22807,17 @@ async function ensureSession(session) {
   }
 }
 
+async function tmuxSessionExistsForReconnect(session) {
+  if (readOnlyMode) return null;
+  try {
+    await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
+    return true;
+  } catch (error) {
+    if (error?.status === 404) return false;
+    return null;
+  }
+}
+
 async function createNextSession(agent) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
@@ -23758,6 +24050,16 @@ async function confirmSessionGoneOrReconnect(session, item) {
   if (item.confirmingGone) return;
   item.confirmingGone = true;
   try {
+    const exists = await tmuxSessionExistsForReconnect(session);
+    if (item.manualClose || terminals.get(session) !== item) return;
+    if (exists === false) {
+      pruneDeadSession(session);
+      return;
+    }
+    if (exists === true) {
+      scheduleTerminalReconnect(session, item);
+      return;
+    }
     let order = null;
     try {
       const payload = await apiFetchJson('/api/auto-approve');
@@ -25314,6 +25616,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   dockviewSyncMountedPanels();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
+  scheduleAgentWindowActivityAnimationSync();
   if (options.prune === false) {
     if (responsiveLayoutPruneTimer) {
       clearTimeout(responsiveLayoutPruneTimer);
@@ -25955,6 +26258,7 @@ function dockviewRefreshTabs() {
   });
   dockviewSyncHeaderBackgroundDragSources();
   dockviewSyncHeaderActionReservations();
+  scheduleAgentWindowActivityAnimationSync();
 }
 
 function syncDockviewTabActiveClass(tab, api = null) {
@@ -26171,6 +26475,7 @@ function renderPanels(previousActive = [], options = {}) {
   bindDropTargets();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
+  scheduleAgentWindowActivityAnimationSync();
   if (options.prune === false) {
     if (responsiveLayoutPruneTimer) {
       clearTimeout(responsiveLayoutPruneTimer);
@@ -27992,6 +28297,7 @@ function updatePanelWindowStepButtons(session, info) {
   if (!bars.length) {
     insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
+    if (changed) scheduleAgentWindowActivityAnimationSync(panel || document);
     if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
@@ -28004,6 +28310,7 @@ function updatePanelWindowStepButtons(session, info) {
     }
   });
   syncTmuxWindowBarOverflow(session);
+  if (changed) scheduleAgentWindowActivityAnimationSync(panel || document);
   if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
 }
 
@@ -31146,7 +31453,13 @@ let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
 let jsDebugStatsServerRssBytes = null;
-const jsDebugGraphScaleOptions = Object.freeze([1, 5, 10]);
+let jsDebugStatsClientId = '';
+let jsDebugStatsClientConnected = null;
+let jsDebugStatsDisconnectStartedAtMs = null;
+let jsDebugGraphZoomDomain = null;
+let jsDebugGraphSelectionState = null;
+let jsDebugGraphRangeSliderDragging = false;
+const jsDebugGraphScaleOptions = Object.freeze([1, 5, 10, 30]);
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 60, label: '1m'},
   {seconds: 5 * 60, label: '5m'},
@@ -31162,10 +31475,13 @@ const jsDebugGraphRangeOptions = Object.freeze([
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
 const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
 const jsDebugGraphRawBucketMs = 1000;
-const jsDebugGraphRollupBucketMs = 10 * 1000;
+const jsDebugGraphRollupBucketMs = 30 * 1000;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollMs = 1000;
 const jsDebugStatsHistoryFlushMs = 3000;
+const jsDebugStatsHistoryPostMaxRecords = 1000;
+const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
+const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphMovingAverageSeries = new Set(['api', 'sse', 'latency', 'bandwidth']);
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
@@ -31224,6 +31540,34 @@ function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
 function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
   return jsDebugGraphRangeSeconds;
+}
+
+function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  return Math.max(0, options.findIndex(option => option.seconds === normalized));
+}
+
+function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
+  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
+}
+
+function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
+  const startMs = Number(domain?.startMs);
+  const endMs = Number(domain?.endMs);
+  return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs - startMs >= 1000;
+}
+
+function clearDebugGraphZoom({render = true} = {}) {
+  jsDebugGraphZoomDomain = null;
+  jsDebugGraphSelectionState = null;
+  if (!render) return;
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    graph.className = debugGraphClassName();
+    graph.innerHTML = debugGraphInnerHtml();
+  }
 }
 
 function debugEventCounts() {
@@ -31449,6 +31793,7 @@ function debugGraphNewBucket(startMs, durationMs) {
     latencyTotalMs: 0,
     latencyCount: 0,
     bandwidthBytes: 0,
+    disconnectedMs: 0,
     cpuTotalPercent: 0,
     cpuCount: 0,
     systemCpuTotalPercent: 0,
@@ -31472,6 +31817,7 @@ function debugGraphBucketHasData(bucket) {
     || Number(bucket?.sseCount || 0)
     || Number(bucket?.latencyCount || 0)
     || Number(bucket?.bandwidthBytes || 0)
+    || Number(bucket?.disconnectedMs || 0)
     || Number(bucket?.cpuCount || 0)
     || Number(bucket?.systemCpuCount || 0)
     || Number(bucket?.agentActivitySamples || 0)
@@ -31526,6 +31872,46 @@ function debugGraphServerBucketRefForTime(timeMs, nowMs = Date.now()) {
   };
 }
 
+function jsDebugStatsRandomHex(bytes = 12) {
+  const count = Math.max(1, Math.floor(Number(bytes) || 1));
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const values = new Uint8Array(count);
+    crypto.getRandomValues(values);
+    return [...values].map(value => value.toString(16).padStart(2, '0')).join('');
+  }
+  return Array.from({length: count}, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join('');
+}
+
+function jsDebugStatsStorageGet(key) {
+  try {
+    return window.sessionStorage?.getItem(key) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function jsDebugStatsStorageSet(key, value) {
+  try {
+    window.sessionStorage?.setItem(key, String(value || ''));
+  } catch (_) {
+  }
+}
+
+function jsDebugStatsStorageRemove(key) {
+  try {
+    window.sessionStorage?.removeItem(key);
+  } catch (_) {
+  }
+}
+
+function jsDebugStatsClientIdForRequest() {
+  if (jsDebugStatsClientId) return jsDebugStatsClientId;
+  const stored = jsDebugStatsStorageGet(jsDebugStatsClientStorageKey).trim();
+  jsDebugStatsClientId = stored || `client-${Date.now().toString(36)}-${jsDebugStatsRandomHex(8)}`;
+  jsDebugStatsStorageSet(jsDebugStatsClientStorageKey, jsDebugStatsClientId);
+  return jsDebugStatsClientId;
+}
+
 function debugGraphAddBucketData(bucket, data = {}) {
   if (!bucket) return;
   bucket.apiCount += Number(data.apiCount || 0);
@@ -31537,6 +31923,8 @@ function debugGraphAddBucketData(bucket, data = {}) {
   }
   const bytes = Number(data.bandwidthBytes || 0);
   if (Number.isFinite(bytes) && bytes > 0) bucket.bandwidthBytes += bytes;
+  const disconnectedMs = Number(data.disconnectedMs || 0);
+  if (Number.isFinite(disconnectedMs) && disconnectedMs > 0) bucket.disconnectedMs += disconnectedMs;
   const cpuPercent = Number(data.cpuPercent);
   if (Number.isFinite(cpuPercent)) {
     bucket.cpuTotalPercent += Math.max(0, cpuPercent);
@@ -31613,6 +32001,7 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
       latency_total_ms: 0,
       latency_count: 0,
       bandwidth_bytes: 0,
+      disconnected_ms: 0,
       cpu_total_percent: 0,
       cpu_count: 0,
       system_cpu_total_percent: 0,
@@ -31629,6 +32018,8 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
   }
   const bytes = Number(data.bandwidthBytes || 0);
   if (Number.isFinite(bytes) && bytes > 0) record.bandwidth_bytes += bytes;
+  const disconnectedMs = Number(data.disconnectedMs || 0);
+  if (Number.isFinite(disconnectedMs) && disconnectedMs > 0) record.disconnected_ms += disconnectedMs;
   scheduleJsDebugStatsHistoryFlush();
 }
 
@@ -31650,6 +32041,7 @@ function debugGraphMergeBucket(target, source) {
   target.latencyTotalMs += source.latencyTotalMs || 0;
   target.latencyCount += source.latencyCount || 0;
   target.bandwidthBytes += source.bandwidthBytes || 0;
+  target.disconnectedMs += source.disconnectedMs || 0;
   target.cpuTotalPercent += source.cpuTotalPercent || 0;
   target.cpuCount += source.cpuCount || 0;
   target.systemCpuTotalPercent += source.systemCpuTotalPercent || 0;
@@ -31732,6 +32124,57 @@ function recordApiDebugResponseBytesForGraph(event, responseBytes) {
   debugGraphQueueServerDelta(bucket, {bandwidthBytes: delta});
 }
 
+function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
+  if (!jsDebugCollectionEnabled) return;
+  const spanStart = Number(startMs);
+  const spanEnd = Number(endMs);
+  if (!Number.isFinite(spanStart) || !Number.isFinite(spanEnd) || spanEnd <= spanStart) return;
+  const nowMs = Date.now();
+  let cursor = Math.max(spanStart, nowMs - jsDebugGraphRetentionMs);
+  const boundedEnd = Math.min(spanEnd, nowMs);
+  while (cursor < boundedEnd) {
+    const bucketRef = debugGraphServerBucketRefForTime(cursor, nowMs);
+    if (!bucketRef) break;
+    const bucketStart = Number(bucketRef.startMs) || cursor;
+    const bucketEnd = bucketStart + Math.max(jsDebugGraphRawBucketMs, Number(bucketRef.durationMs) || jsDebugGraphRawBucketMs);
+    const overlapStart = Math.max(cursor, bucketStart);
+    const overlapEnd = Math.min(boundedEnd, bucketEnd);
+    const disconnectedMs = Math.max(0, overlapEnd - overlapStart);
+    if (disconnectedMs > 0) {
+      const bucket = debugGraphBucketForTime(overlapStart, nowMs);
+      debugGraphAddBucketData(bucket, {disconnectedMs});
+      debugGraphQueueServerDelta(bucketRef, {disconnectedMs});
+    }
+    cursor = Math.max(overlapEnd, cursor + 1);
+  }
+  compactJsDebugGraphBuckets(nowMs);
+  scheduleJsDebugPanelRefresh();
+}
+
+function recordJsDebugClientEventsConnectionState(connected) {
+  const nextConnected = connected === true;
+  if (jsDebugStatsClientConnected === nextConnected) return;
+  jsDebugStatsClientConnected = nextConnected;
+  const nowMs = Date.now();
+  if (!nextConnected) {
+    jsDebugStatsDisconnectStartedAtMs = nowMs;
+    jsDebugStatsStorageSet(jsDebugStatsDisconnectedStorageKey, String(nowMs));
+    const bucket = debugGraphBucketForTime(nowMs, nowMs);
+    debugGraphAddBucketData(bucket, {disconnectedMs: 1});
+    scheduleJsDebugPanelRefresh();
+    return;
+  }
+  const storedStart = Number(jsDebugStatsStorageGet(jsDebugStatsDisconnectedStorageKey));
+  const startMs = Number.isFinite(Number(jsDebugStatsDisconnectStartedAtMs))
+    ? Number(jsDebugStatsDisconnectStartedAtMs)
+    : storedStart;
+  jsDebugStatsDisconnectStartedAtMs = null;
+  jsDebugStatsStorageRemove(jsDebugStatsDisconnectedStorageKey);
+  if (Number.isFinite(startMs) && startMs > 0 && nowMs > startMs) recordJsDebugDisconnectedSpan(startMs, nowMs);
+  flushJsDebugStatsHistory();
+  scheduleJsDebugPanelRefresh();
+}
+
 function recordJsDebugStatsSample(payload = {}) {
   if (!jsDebugCollectionEnabled || !payload || typeof payload !== 'object') return;
   const nextPid = Number(payload.pid);
@@ -31794,6 +32237,7 @@ function debugGraphApplyServerRecord(record) {
   bucket.latencyTotalMs = Math.max(bucket.latencyTotalMs, Number(record.latency_total_ms || 0));
   bucket.latencyCount = Math.max(bucket.latencyCount, Number(record.latency_count || 0));
   bucket.bandwidthBytes = Math.max(bucket.bandwidthBytes, Number(record.bandwidth_bytes || 0));
+  bucket.disconnectedMs = Math.max(bucket.disconnectedMs, Number(record.disconnected_ms || 0));
   bucket.cpuTotalPercent = Math.max(bucket.cpuTotalPercent, Number(record.cpu_total_percent || 0));
   bucket.cpuCount = Math.max(bucket.cpuCount, Number(record.cpu_count || 0));
   bucket.systemCpuTotalPercent = Math.max(bucket.systemCpuTotalPercent, Number(record.system_cpu_total_percent || 0));
@@ -31872,24 +32316,29 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
 
 function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGraphScaleSeconds, rangeSeconds = jsDebugGraphRangeSeconds) {
   compactJsDebugGraphBuckets(nowMs);
-  const activeRangeSeconds = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = normalizedJsDebugGraphScale(scaleSeconds) * 1000;
-  const cutoffMs = nowMs - (activeRangeSeconds * 1000);
   const buckets = new Map();
   for (const bucket of jsDebugGraphRollupBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, cutoffMs, nowMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
   }
   for (const bucket of jsDebugGraphRawBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, cutoffMs, nowMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
 
 function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
-  const endMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const fallbackEndMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  if (debugGraphZoomDomainValid()) {
+    const startMs = Math.max(fallbackEndMs - jsDebugGraphRetentionMs, Number(jsDebugGraphZoomDomain.startMs));
+    const endMs = Math.max(startMs + 1000, Number(jsDebugGraphZoomDomain.endMs));
+    return {startMs, endMs, rangeSeconds: (endMs - startMs) / 1000, zoomed: true};
+  }
+  const endMs = fallbackEndMs;
   const activeRangeSeconds = normalizedJsDebugGraphRange(rangeSeconds, endMs);
   const durationMs = Math.max(1000, activeRangeSeconds * 1000);
-  return {startMs: endMs - durationMs, endMs, rangeSeconds: activeRangeSeconds};
+  return {startMs: endMs - durationMs, endMs, rangeSeconds: activeRangeSeconds, zoomed: false};
 }
 
 function debugGraphBucketRate(bucket, value) {
@@ -31919,13 +32368,16 @@ function debugGraphBucketValue(bucket, key) {
 
 function debugGraphBucketHasSeriesData(bucket, key) {
   if (!bucket) return false;
+  if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
   if (key === 'askAgents' || key === 'runAgents' || key === 'transitionAgents' || key === 'idleAgents') return Number(bucket.agentActivitySamples || 0) > 0;
   if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
     const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
-    return Number(item?.samples || 0) > 0;
+      return Number(item?.samples || 0) > 0;
   }
+  if (key === 'cpu') return Number(bucket.cpuCount || 0) > 0;
+  if (key === 'systemCpu') return Number(bucket.systemCpuCount || 0) > 0;
   return debugGraphBucketValue(bucket, key) > 0;
 }
 
@@ -32150,11 +32602,15 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
   const options = debugGraphAvailableRangeOptions(nowMs);
   if (!options.length) return '';
-  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.tab.graph'))} time range">
-    ${options.map(option => {
-      const active = option.seconds === activeRange;
-      return `<button type="button" class="js-debug-range-button${active ? ' active' : ''}" data-js-debug-range="${option.seconds}" aria-pressed="${active ? 'true' : 'false'}">${esc(option.label)}</button>`;
-    }).join('')}
+  const sliderId = 'js-debug-range-options';
+  const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
+  const zoomed = debugGraphZoomDomainValid();
+  return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(zoomed ? 'Zoom' : jsDebugGraphRangeLabel(activeRange, nowMs))}</span>
+    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.tab.graph'))} time range">
+    <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
+    <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
+    ${zoomed ? '<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>Reset</button>' : ''}
   </div>`;
 }
 
@@ -32202,6 +32658,54 @@ function debugGraphPointForValue(value, timeMs, chartMax, domain) {
   const x = Math.max(0, Math.min(width, rawX));
   const y = top + (1 - (Math.max(0, value) / max)) * height;
   return [x.toFixed(1), y.toFixed(1)];
+}
+
+function debugGraphXForTime(timeMs, domain) {
+  const width = 600;
+  const startMs = Number(domain?.startMs);
+  const endMs = Number(domain?.endMs);
+  const spanMs = Math.max(1, endMs - startMs);
+  if (!Number.isFinite(Number(timeMs)) || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0;
+  return Math.max(0, Math.min(width, ((Number(timeMs) - startMs) / spanMs) * width));
+}
+
+function debugGraphDisconnectedActiveStartMs() {
+  const inMemory = Number(jsDebugStatsDisconnectStartedAtMs);
+  if (Number.isFinite(inMemory) && inMemory > 0) return inMemory;
+  const stored = Number(jsDebugStatsStorageGet(jsDebugStatsDisconnectedStorageKey));
+  return Number.isFinite(stored) && stored > 0 ? stored : NaN;
+}
+
+function debugGraphDisconnectedSegments(buckets, domain) {
+  const startMs = Number(domain?.startMs);
+  const endMs = Number(domain?.endMs);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return [];
+  const segments = [];
+  for (const bucket of buckets || []) {
+    if (Number(bucket?.disconnectedMs || 0) <= 0) continue;
+    const bucketStart = Number(bucket.startMs);
+    const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+    if (!Number.isFinite(bucketStart)) continue;
+    const segmentStart = Math.max(startMs, bucketStart);
+    const segmentEnd = Math.min(endMs, bucketStart + bucketDuration);
+    if (segmentEnd > segmentStart) segments.push({startMs: segmentStart, endMs: segmentEnd});
+  }
+  const activeStart = debugGraphDisconnectedActiveStartMs();
+  if (Number.isFinite(activeStart) && endMs > activeStart) {
+    segments.push({startMs: Math.max(startMs, activeStart), endMs});
+  }
+  return segments
+    .filter(segment => segment.endMs > segment.startMs)
+    .sort((a, b) => a.startMs - b.startMs)
+    .reduce((merged, segment) => {
+      const previous = merged.at(-1);
+      if (previous && segment.startMs <= previous.endMs) {
+        previous.endMs = Math.max(previous.endMs, segment.endMs);
+      } else {
+        merged.push({...segment});
+      }
+      return merged;
+    }, []);
 }
 
 function debugGraphSeriesPlotValues(series) {
@@ -32262,6 +32766,20 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
   const points = debugGraphPolylinePoints(series.movingAverageValues || [], series.movingAverageTimes || [], chartMax, domain);
   if (!points) return '';
   return `<polyline class="js-debug-line js-debug-line--${esc(series.key)} js-debug-line--moving-average" data-js-debug-moving-average="${esc(series.key)}" data-js-debug-moving-average-samples="${esc(jsDebugGraphMovingAverageSamples)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"><title>${esc(series.label)} ${jsDebugGraphMovingAverageSamples}-sample moving average</title></polyline>`;
+}
+
+function debugGraphDisconnectedOverlayHtml(buckets, domain) {
+  const y = 116;
+  return debugGraphDisconnectedSegments(buckets, domain).map((segment, index) => {
+    const x1 = debugGraphXForTime(segment.startMs, domain).toFixed(1);
+    const x2 = debugGraphXForTime(segment.endMs, domain).toFixed(1);
+    if (x1 === x2) return '';
+    return `<line class="js-debug-disconnect-line" data-js-debug-disconnect-line="${esc(index)}" data-js-debug-disconnect-start="${esc(Math.floor(segment.startMs))}" data-js-debug-disconnect-end="${esc(Math.floor(segment.endMs))}" x1="${esc(x1)}" y1="${esc(y)}" x2="${esc(x2)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"><title>Client disconnected</title></line>`;
+  }).join('');
+}
+
+function debugGraphInteractionOverlayHtml() {
+  return '<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="8" width="0" height="104"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="8" x2="0" y2="116" vector-effect="non-scaling-stroke"></line>';
 }
 
 function debugGraphLegendHtml(seriesItems) {
@@ -32386,7 +32904,7 @@ function debugGraphChartAxisMax(group, rawMax) {
   return debugGraphNiceAxisMax(rawMax, group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain) {
+function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   const plotSeries = group.stacked === true ? debugGraphStackedSeries(groupSeries) : groupSeries;
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0));
@@ -32409,6 +32927,8 @@ function debugGraphChartHtml(group, seriesItems, domain) {
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${debugGraphDisconnectedOverlayHtml(buckets, domain)}
+          ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
       ${debugGraphXAxisHtml(domain)}
@@ -32420,12 +32940,12 @@ function debugGraphChartHtml(group, seriesItems, domain) {
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
   return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid">${chartGroups.map(group => debugGraphChartHtml(group, seriesItems, domain)).join('')}</div>
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${chartGroups.map(group => debugGraphChartHtml(group, seriesItems, domain, buckets)).join('')}</div>
   </div>`;
 }
 
 function debugGraphClassName(nowMs = Date.now()) {
-  return `js-debug-graph${debugGraphDisplayBuckets(nowMs).length ? '' : ' js-debug-graph--empty'}`;
+  return `js-debug-graph${debugGraphDisplayBuckets(nowMs).length ? '' : ' js-debug-graph--empty'}${debugGraphZoomDomainValid() ? ' js-debug-graph--zoomed' : ''}`;
 }
 
 function debugGraphInnerHtml() {
@@ -32457,12 +32977,16 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     eventRefs: jsDebugGraphEventBuckets.size,
     scaleSeconds: jsDebugGraphScaleSeconds,
     rangeSeconds: jsDebugGraphRangeSeconds,
+    zoomed: debugGraphZoomDomainValid(),
+    zoomRangeSeconds: debugGraphZoomDomainValid() ? (Number(jsDebugGraphZoomDomain.endMs) - Number(jsDebugGraphZoomDomain.startMs)) / 1000 : 0,
     availableRangeSeconds,
     retentionHours: jsDebugGraphRetentionMs / 60 / 60 / 1000,
     rawWindowSeconds: jsDebugGraphRawWindowMs / 1000,
     rollupBucketSeconds: jsDebugGraphRollupBucketMs / 1000,
     serverSequence: jsDebugStatsServerSequence,
     pendingServerBuckets: jsDebugGraphPendingServerBuckets.size,
+    disconnectedBuckets: buckets.filter(bucket => Number(bucket.disconnectedMs || 0) > 0).length,
+    clientId: jsDebugStatsClientIdForRequest(),
     uptimeSeconds: jsDebugStatsServerUptimeSeconds,
     series: jsDebugGraphSeries.map(series => series.key),
     charts: debugGraphVisibleChartGroups(debugGraphSeriesData(buckets)).map(group => group.key),
@@ -32474,7 +32998,8 @@ async function pollJsDebugStatsSample() {
   if (jsDebugStatsPollInFlight || typeof apiFetchJsonQuiet !== 'function') return;
   jsDebugStatsPollInFlight = true;
   try {
-    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}`, {cache: 'no-store'});
+    const clientId = jsDebugStatsClientIdForRequest();
+    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {
@@ -32494,24 +33019,30 @@ async function flushJsDebugStatsHistory() {
   if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushInFlight || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
   const records = [...jsDebugGraphPendingServerBuckets.values()]
     .map(record => ({...record}))
-    .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.cpu_count || record.system_cpu_count);
-  jsDebugGraphPendingServerBuckets.clear();
+    .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.disconnected_ms || record.cpu_count || record.system_cpu_count)
+    .sort((a, b) => (Number(a.start) - Number(b.start)) || (Number(a.duration) - Number(b.duration)));
+  const chunk = records.slice(0, jsDebugStatsHistoryPostMaxRecords);
+  const held = records.slice(jsDebugStatsHistoryPostMaxRecords);
+  for (const record of chunk) {
+    const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+    jsDebugGraphPendingServerBuckets.delete(key);
+  }
   if (!records.length) return;
   jsDebugStatsHistoryFlushInFlight = true;
   try {
     const payload = await apiFetchJsonQuiet('/api/stats-history', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({since: jsDebugStatsServerSequence || 0, records}),
+      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, records: chunk}),
     });
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
   } catch (_error) {
-    for (const record of records) {
+    for (const record of chunk) {
       const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
       const existing = jsDebugGraphPendingServerBuckets.get(key);
       if (existing) {
-        for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
+        for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'disconnected_ms', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
           existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
         }
       } else {
@@ -32519,6 +33050,10 @@ async function flushJsDebugStatsHistory() {
       }
     }
   } finally {
+    for (const record of held) {
+      const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+      if (!jsDebugGraphPendingServerBuckets.has(key)) jsDebugGraphPendingServerBuckets.set(key, record);
+    }
     jsDebugStatsHistoryFlushInFlight = false;
     if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
   }
@@ -32538,7 +33073,7 @@ function clearJsDebugServerHistory() {
   apiFetchJsonQuiet('/api/stats-history', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({clear: true}),
+    body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), clear: true}),
   }).then(payload => {
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
@@ -32659,7 +33194,7 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
   const graph = panel.querySelector('[data-js-debug-graph]');
-  if (graph) {
+  if (graph && !jsDebugGraphRangeSliderDragging) {
     graph.className = debugGraphClassName();
     graph.innerHTML = debugGraphInnerHtml();
   }
@@ -32700,16 +33235,204 @@ function setDebugGraphScale(value) {
   }
 }
 
-function setDebugGraphRange(value) {
+function setDebugGraphRange(value, {render = true} = {}) {
+  jsDebugGraphZoomDomain = null;
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
+  if (!render) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     graph.className = debugGraphClassName();
     graph.innerHTML = debugGraphInnerHtml();
   }
 }
 
+function debugGraphRangeSliderIndex(slider, options = debugGraphAvailableRangeOptions()) {
+  const rawValue = Number(slider?.value);
+  const value = Number.isFinite(rawValue) ? rawValue : 0;
+  return Math.max(0, Math.min(options.length - 1, Math.round(value)));
+}
+
+function debugGraphRangeOptionForSlider(slider) {
+  const options = debugGraphAvailableRangeOptions();
+  const index = debugGraphRangeSliderIndex(slider, options);
+  return options[index] || null;
+}
+
+function updateDebugGraphRangeSliderLabel(slider, option) {
+  const label = slider?.closest?.('[data-js-debug-range-control]')?.querySelector?.('[data-js-debug-range-label]');
+  if (label && option) label.textContent = option.label;
+}
+
+function setDebugGraphRangeFromSlider(slider, {render = true, snap = false} = {}) {
+  const options = debugGraphAvailableRangeOptions();
+  const index = debugGraphRangeSliderIndex(slider, options);
+  const option = options[index];
+  if (!option) return false;
+  if (snap) slider.value = String(index);
+  setDebugGraphRange(option.seconds, {render});
+  updateDebugGraphRangeSliderLabel(slider, option);
+  return true;
+}
+
+function debugGraphPointerRatioFromRect(clientX, rect) {
+  const left = Number(rect?.left);
+  const width = Number(rect?.width);
+  if (!Number.isFinite(Number(clientX)) || !Number.isFinite(left) || !Number.isFinite(width) || width <= 0) return null;
+  return Math.max(0, Math.min(1, (Number(clientX) - left) / width));
+}
+
+function debugGraphPointerRatioForEvent(event) {
+  const svg = event?.target?.closest?.('.js-debug-line-chart');
+  if (!svg) return null;
+  return debugGraphPointerRatioFromRect(event.clientX, svg.getBoundingClientRect());
+}
+
+function debugGraphSetInteractionLines(panel, ratio) {
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (!graph || ratio == null) return;
+  const x = (Math.max(0, Math.min(1, Number(ratio))) * 600).toFixed(1);
+  graph.classList.add('js-debug-graph--hovering');
+  graph.querySelectorAll('[data-js-debug-hover-line]').forEach(line => {
+    line.setAttribute('x1', x);
+    line.setAttribute('x2', x);
+  });
+}
+
+function debugGraphClearInteractionLines(panel) {
+  if (jsDebugGraphSelectionState) return;
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (graph) graph.classList.remove('js-debug-graph--hovering');
+}
+
+function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (!graph) return;
+  const start = Math.max(0, Math.min(1, Number(startRatio)));
+  const end = Math.max(0, Math.min(1, Number(endRatio)));
+  const x = Math.min(start, end) * 600;
+  const width = Math.abs(end - start) * 600;
+  graph.classList.add('js-debug-graph--selecting');
+  graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
+    rect.setAttribute('x', x.toFixed(1));
+    rect.setAttribute('width', width.toFixed(1));
+  });
+}
+
+function debugGraphClearSelectionRects(panel) {
+  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  if (!graph) return;
+  graph.classList.remove('js-debug-graph--selecting');
+  graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
+    rect.setAttribute('x', '0');
+    rect.setAttribute('width', '0');
+  });
+}
+
+function debugGraphGridDomain(panel) {
+  const grid = panel?.querySelector?.('[data-js-debug-chart-grid]');
+  const startMs = Number(grid?.dataset?.jsDebugDomainStart);
+  const endMs = Number(grid?.dataset?.jsDebugDomainEnd);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return debugGraphDomain();
+  return {startMs, endMs, rangeSeconds: (endMs - startMs) / 1000};
+}
+
+function debugGraphSelectionRatioForEvent(event, selection = jsDebugGraphSelectionState) {
+  if (!selection) return null;
+  return debugGraphPointerRatioFromRect(event?.clientX, selection.rect);
+}
+
+function handleDebugGraphPointerDown(event, panel) {
+  const ratio = debugGraphPointerRatioForEvent(event);
+  if (ratio == null || event.button > 0) return false;
+  event.preventDefault();
+  const svg = event.target.closest('.js-debug-line-chart');
+  jsDebugGraphSelectionState = {
+    panel,
+    rect: svg.getBoundingClientRect(),
+    domain: debugGraphGridDomain(panel),
+    startRatio: ratio,
+    currentRatio: ratio,
+  };
+  debugGraphSetInteractionLines(panel, ratio);
+  debugGraphSetSelectionRects(panel, ratio, ratio);
+  return true;
+}
+
+function handleDebugGraphPointerMove(event, panel) {
+  if (jsDebugGraphSelectionState?.panel === panel) {
+    const ratio = debugGraphSelectionRatioForEvent(event);
+    if (ratio == null) return;
+    jsDebugGraphSelectionState.currentRatio = ratio;
+    debugGraphSetInteractionLines(panel, ratio);
+    debugGraphSetSelectionRects(panel, jsDebugGraphSelectionState.startRatio, ratio);
+    return;
+  }
+  const ratio = debugGraphPointerRatioForEvent(event);
+  if (ratio == null) return;
+  debugGraphSetInteractionLines(panel, ratio);
+}
+
+function handleDebugGraphPointerUp(event, panel) {
+  const selection = jsDebugGraphSelectionState;
+  if (!selection || selection.panel !== panel) return;
+  const ratio = debugGraphSelectionRatioForEvent(event);
+  if (ratio != null) selection.currentRatio = ratio;
+  const start = Math.max(0, Math.min(1, Number(selection.startRatio)));
+  const end = Math.max(0, Math.min(1, Number(selection.currentRatio)));
+  debugGraphClearSelectionRects(panel);
+  jsDebugGraphSelectionState = null;
+  const minRatio = Math.min(start, end);
+  const maxRatio = Math.max(start, end);
+  const domain = selection.domain;
+  const spanMs = Math.max(1, Number(domain.endMs) - Number(domain.startMs));
+  const selectedMs = (maxRatio - minRatio) * spanMs;
+  if (selectedMs >= 1000 && Math.abs(maxRatio - minRatio) >= 0.01) {
+    jsDebugGraphZoomDomain = {
+      startMs: Number(domain.startMs) + (minRatio * spanMs),
+      endMs: Number(domain.startMs) + (maxRatio * spanMs),
+    };
+    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+      graph.className = debugGraphClassName();
+      graph.innerHTML = debugGraphInnerHtml();
+    }
+  } else {
+    debugGraphSetInteractionLines(panel, end);
+  }
+}
+
+function cancelDebugGraphSelection(panel) {
+  if (jsDebugGraphSelectionState?.panel !== panel) return;
+  debugGraphClearSelectionRects(panel);
+  jsDebugGraphSelectionState = null;
+}
+
 function handleDebugGraphControlEvent(event, panel) {
+  const reset = event.target.closest('[data-js-debug-zoom-reset]');
+  if (reset && panel.contains(reset)) {
+    event.preventDefault();
+    clearDebugGraphZoom();
+    return true;
+  }
+  const slider = event.target.closest('[data-js-debug-range-slider]');
+  if (slider && panel.contains(slider)) {
+    if (event.type === 'pointerdown') {
+      jsDebugGraphRangeSliderDragging = true;
+      return false;
+    }
+    if (event.type === 'input') {
+      jsDebugGraphRangeSliderDragging = true;
+      return setDebugGraphRangeFromSlider(slider, {render: false});
+    }
+    if (event.type === 'change' || event.type === 'pointerup') {
+      jsDebugGraphRangeSliderDragging = false;
+      return setDebugGraphRangeFromSlider(slider, {snap: true});
+    }
+    if (event.type === 'pointercancel') {
+      jsDebugGraphRangeSliderDragging = false;
+      return false;
+    }
+    return false;
+  }
   const range = event.target.closest('[data-js-debug-range]');
   if (range && panel.contains(range)) {
     event.preventDefault();
@@ -32729,6 +33452,27 @@ function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
   panel.addEventListener('pointerdown', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    handleDebugGraphPointerDown(event, panel);
+  });
+  panel.addEventListener('pointermove', event => {
+    handleDebugGraphPointerMove(event, panel);
+  });
+  panel.addEventListener('pointerleave', () => {
+    debugGraphClearInteractionLines(panel);
+  });
+  panel.addEventListener('pointerup', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    handleDebugGraphPointerUp(event, panel);
+  });
+  panel.addEventListener('pointercancel', event => {
+    handleDebugGraphControlEvent(event, panel);
+    cancelDebugGraphSelection(panel);
+  });
+  panel.addEventListener('input', event => {
+    handleDebugGraphControlEvent(event, panel);
+  });
+  panel.addEventListener('change', event => {
     handleDebugGraphControlEvent(event, panel);
   });
   panel.addEventListener('click', event => {
@@ -32960,6 +33704,16 @@ let diffRefPopoverListenersInstalled = false;
 
 // C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
 // a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
+function diffRefRepoRefs(refsByRepo, repo) {
+  if (!repo || !refsByRepo || typeof refsByRepo !== 'object') return null;
+  if (Array.isArray(refsByRepo[repo])) return refsByRepo[repo];
+  const normalizedRepo = normalizeDirectoryPath(expandUserPath(repo));
+  for (const [key, refs] of Object.entries(refsByRepo)) {
+    if (normalizeDirectoryPath(expandUserPath(key)) === normalizedRepo && Array.isArray(refs)) return refs;
+  }
+  return null;
+}
+
 function diffRefSuggestions(repo) {
   const suggestions = [
     {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
@@ -32992,7 +33746,7 @@ function diffRefSuggestions(repo) {
     ? fileExplorerSessionFilesPayload.refs_by_repo
     : {};
   if (repo) {
-    addRefs(refsByRepo[repo]);
+    addRefs(diffRefRepoRefs(refsByRepo, repo));
   } else {
     for (const refs of Object.values(refsByRepo)) addRefs(refs);
   }
@@ -35994,6 +36748,26 @@ function fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM) {
   return true;
 }
 
+function fileEditorVisibleLineNumber(view) {
+  const doc = view?.state?.doc;
+  if (!doc || typeof doc.lineAt !== 'function') return 0;
+  const ranges = Array.isArray(view.visibleRanges) ? view.visibleRanges : [];
+  const visibleFrom = Number(ranges[0]?.from);
+  if (Number.isFinite(visibleFrom)) {
+    try { return Math.max(1, Math.floor(Number(doc.lineAt(visibleFrom)?.number) || 0)); } catch (_) {}
+  }
+  const blocks = Array.from(view.viewportLineBlocks || []);
+  const blockFrom = Number(blocks[0]?.from);
+  if (Number.isFinite(blockFrom)) {
+    try { return Math.max(1, Math.floor(Number(doc.lineAt(blockFrom)?.number) || 0)); } catch (_) {}
+  }
+  const head = Number(view.state?.selection?.main?.head);
+  if (Number.isFinite(head)) {
+    try { return Math.max(1, Math.floor(Number(doc.lineAt(head)?.number) || 0)); } catch (_) {}
+  }
+  return 0;
+}
+
 function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
@@ -36006,6 +36780,7 @@ function captureFileEditorPanelViewState(item, panel) {
     scrollLeft: scrollDOM.scrollLeft || 0,
     anchor: Number(selection?.anchor || 0),
     head: Number(selection?.head || selection?.anchor || 0),
+    line: fileEditorVisibleLineNumber(view),
     scrollSnapshot: typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null,
   });
 }
@@ -43929,6 +44704,7 @@ function shareEditorModesSnapshot() {
         left: Math.max(0, Math.round(Number(viewState.scrollLeft || 0))),
         anchor: Math.max(0, Math.round(Number(viewState.anchor || 0))),
         head: Math.max(0, Math.round(Number(viewState.head ?? viewState.anchor ?? 0))),
+        line: Math.max(0, Math.round(Number(viewState.line || 0))),
       };
     }
     if (cleanMode === 'diff') {
@@ -43965,6 +44741,7 @@ function shareRememberEditorViewState(payload = {}, top = 0, left = 0) {
     scrollLeft: Math.max(0, Math.round(Number(left || 0))),
     anchor: Math.max(0, Math.round(Number(payload.anchor ?? previous.anchor ?? 0))),
     head: Math.max(0, Math.round(Number(payload.head ?? payload.anchor ?? previous.head ?? previous.anchor ?? 0))),
+    line: Math.max(0, Math.round(Number(payload.line ?? previous.line ?? 0))),
     scrollSnapshot: previous.scrollSnapshot || null,
   });
 }
@@ -43988,7 +44765,10 @@ function shareApplyEditorModeEntry(entry = {}) {
       item: cleanItem,
       anchor: viewState.anchor,
       head: viewState.head,
+      line: viewState.line,
     }, viewState.top, viewState.left);
+    const line = Math.floor(Number(viewState.line) || 0);
+    if (line > 0 && typeof requestFileEditorLineTarget === 'function') requestFileEditorLineTarget(key, line);
   }
   if (mode === 'diff') {
     const state = openFiles.get(path) || (cleanItem ? ensureFileState(path) : null);
@@ -44594,6 +45374,10 @@ function shareScrollPayloadForElement(element) {
     if (selection) {
       payload.anchor = Math.max(0, Number(selection.anchor || 0));
       payload.head = Math.max(0, Number(selection.head ?? selection.anchor ?? 0));
+    }
+    if (typeof fileEditorVisibleLineNumber === 'function') {
+      const line = fileEditorVisibleLineNumber(view);
+      if (line > 0) payload.line = line;
     }
   } else if (descriptor.kind === 'finder') {
     payload.mode = descriptor.mode || '';
@@ -49657,6 +50441,7 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
+  scheduleAgentWindowActivityAnimationSync(panel || document);
   updatePanelInfoBarMeta(session, info);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
@@ -50368,6 +51153,7 @@ function installClientEventStream() {
   clientEventsSource = source;
   source.addEventListener('ready', event => {
     clientEventsConnected = true;
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
@@ -50375,12 +51161,17 @@ function installClientEventStream() {
   });
   source.addEventListener('ping', event => {
     clientEventsConnected = true;
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
-  source.onerror = () => { clientEventsConnected = false; };
+  source.onerror = () => {
+    clientEventsConnected = false;
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+  };
   for (const type of ['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
+      if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);
       handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));

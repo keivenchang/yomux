@@ -68,6 +68,15 @@ function agentWindowStateRank(state) {
   return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, [STATE_KEY.idle]: 3}[agentWindowStateKey(state)] ?? 9;
 }
 
+function agentWindowActivityVisualRank(state) {
+  const tone = agentWindowActivityTone(state);
+  if (tone === 'attention') return 0;
+  if (tone === 'cooldown') return 1;
+  if (tone === STATE_KEY.working) return 2;
+  if (tone === 'active') return 3;
+  return 9;
+}
+
 function agentWindowKind(value) {
   const key = String(value || '').trim().toLowerCase();
   return key === 'claude' || key === 'codex' ? key : '';
@@ -247,6 +256,48 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
 
 const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
+let agentWindowActivityAnimationSyncFrame = 0;
+let agentWindowActivityMutationObserver = null;
+
+function mutationTouchesAgentWindowActivity(mutation) {
+  for (const node of mutation?.addedNodes || []) {
+    if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.querySelector?.('.agent-window-activity')) return true;
+  }
+  return false;
+}
+
+function ensureAgentWindowActivityMutationObserver() {
+  if (agentWindowActivityMutationObserver || typeof MutationObserver !== 'function' || !document?.body) return;
+  agentWindowActivityMutationObserver = new MutationObserver(mutations => {
+    if (mutations.some(mutationTouchesAgentWindowActivity)) scheduleAgentWindowActivityAnimationSync();
+  });
+  agentWindowActivityMutationObserver.observe(document.body, {childList: true, subtree: true});
+}
+
+function syncAgentWindowActivityAnimationDelays(root = document) {
+  const scope = root?.querySelectorAll ? root : document;
+  const nodes = Array.from(scope?.querySelectorAll?.('.agent-window-activity') || []);
+  if (!nodes.length) return;
+  const delay = attentionAnimationDelay();
+  for (const node of nodes) {
+    if (!node?.style || !node.querySelector?.('.agent-window-status-dot')) continue;
+    node.style.setProperty('--attention-animation-delay', delay);
+  }
+}
+
+function scheduleAgentWindowActivityAnimationSync(root = document) {
+  ensureAgentWindowActivityMutationObserver();
+  syncAgentWindowActivityAnimationDelays(root);
+  if (agentWindowActivityAnimationSyncFrame && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(agentWindowActivityAnimationSyncFrame);
+  }
+  if (typeof requestAnimationFrame !== 'function') return;
+  agentWindowActivityAnimationSyncFrame = requestAnimationFrame(() => {
+    agentWindowActivityAnimationSyncFrame = 0;
+    syncAgentWindowActivityAnimationDelays(root);
+  });
+}
 
 function agentWindowActivityTransitionKey(agentKey, options = {}) {
   const explicit = String(options.transitionKey || '').trim();
@@ -323,6 +374,25 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   return null;
 }
 
+function agentWindowActivityOptionsForStatus(agent, session = '', options = {}) {
+  return {
+    session,
+    window: agent?.window,
+    window_index: agent?.window_index,
+    pane: agent?.pane,
+    pane_target: agent?.pane_target,
+    current: agentWindowPayloadCurrent(agent) === true,
+    window_active: agent?.window_active === true,
+    working_stopped_ts: agent?.working_stopped_ts,
+    ...options,
+  };
+}
+
+function agentWindowActivityIconForStatusItem(agent, agentKey = agent?.kind, session = '', options = {}) {
+  const itemOptions = agentWindowActivityOptionsForStatus(agent, session, options);
+  return agentWindowActivityIcon(agentKey, agent?.state, agentWindowIdleSeconds(agent, itemOptions.nowSeconds), itemOptions);
+}
+
 function agentWindowStatusDotHtml(item) {
   if (!item) return '';
   if (!['attention', 'cooldown', STATE_KEY.working].includes(item.state)) return '';
@@ -339,7 +409,7 @@ function agentWindowStatusDotHtml(item) {
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return '';
-  const item = agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const item = options.item || agentWindowActivityIcon(kind, state, idleSeconds, options);
   const stateKey = item?.state || 'idle-recent';
   const label = item?.label || agentLabel(kind);
   const agentClasses = [
@@ -356,14 +426,9 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
 }
 
 function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
+  const options = agentWindowActivityOptionsForStatus(agent, session);
   return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
-    session,
-    window: agent?.window,
-    window_index: agent?.window_index,
-    pane: agent?.pane,
-    pane_target: agent?.pane_target,
-    current: agentWindowPayloadCurrent(agent) === true,
-    window_active: agent?.window_active === true,
-    working_stopped_ts: agent?.working_stopped_ts,
+    ...options,
+    item: agentWindowActivityIconForStatusItem(agent, agentKey, session, options),
   });
 }

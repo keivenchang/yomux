@@ -1343,6 +1343,17 @@ async function ensureSession(session) {
   }
 }
 
+async function tmuxSessionExistsForReconnect(session) {
+  if (readOnlyMode) return null;
+  try {
+    await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
+    return true;
+  } catch (error) {
+    if (error?.status === 404) return false;
+    return null;
+  }
+}
+
 async function createNextSession(agent) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
@@ -2575,6 +2586,16 @@ async function confirmSessionGoneOrReconnect(session, item) {
   if (item.confirmingGone) return;
   item.confirmingGone = true;
   try {
+    const exists = await tmuxSessionExistsForReconnect(session);
+    if (item.manualClose || terminals.get(session) !== item) return;
+    if (exists === false) {
+      pruneDeadSession(session);
+      return;
+    }
+    if (exists === true) {
+      scheduleTerminalReconnect(session, item);
+      return;
+    }
     let order = null;
     try {
       const payload = await apiFetchJson('/api/auto-approve');

@@ -1772,6 +1772,22 @@ async function runEditorPreviewSuite() {
     assert.ok(agentPopover.includes('tmux window 0:claude'), 'working agent row labels the tmux window explicitly');
     assert.ok(agentPopover.includes('tmux window 1:codex'), 'ASK? agent row labels the tmux window explicitly');
     assert.equal(agentPopover.includes('tmux window tmux window'), false, 'agent row does not double-label tmux window');
+    api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: '4:1::codex', scheduleRefresh: false});
+    api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
+      {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude'},
+      {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', working_stopped_ts: Math.floor(Date.now() / 1000) - 5},
+    ]});
+    const redTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[^"]*agent-window-agent-icon--attention[\s\S]*agent-window-status-dot[^"]*status-indicator--attention/.test(redTabHtml), 'tab status ball uses the most urgent window: red attention beats yellow cooldown');
+    assert.equal(/session-agent-activity-marker[\s\S]*agent-icon codex[^"]*agent-window-agent-icon--cooldown/.test(redTabHtml), false, 'tab does not show a lower-priority yellow ball when any window is red');
+    api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: '4:1::codex', scheduleRefresh: false});
+    api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
+      {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
+      {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', working_stopped_ts: Math.floor(Date.now() / 1000) - 5},
+    ]});
+    const yellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon codex[^"]*agent-window-agent-icon--cooldown[\s\S]*agent-window-status-dot[^"]*status-indicator--cooldown/.test(yellowTabHtml), 'tab status ball uses the most urgent window: yellow cooldown beats green working');
+    assert.equal(/session-agent-activity-marker[\s\S]*agent-icon claude[^"]*agent-window-agent-icon--working/.test(yellowTabHtml), false, 'tab does not show a lower-priority green ball when any window is yellow');
     const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
     for (const file of localeFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
@@ -1906,12 +1922,14 @@ async function runEditorPreviewSuite() {
       assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats graph renders the ${series} line`);
       assert.ok(html.includes(`data-js-debug-legend="${series}"`), `YO!stats graph renders the ${series} legend entry`);
     }
-    for (const scale of ['1', '5', '10']) {
+    for (const scale of ['1', '5', '10', '30']) {
       assert.ok(html.includes(`data-js-debug-scale="${scale}"`), `YO!stats graph renders the ${scale}s aggregate button`);
     }
     for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '28800', '57600', '86400']) {
-      assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph renders the ${range}s range button`);
+      assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph exposes the ${range}s range slider tick`);
     }
+    assert.ok(html.includes('data-js-debug-range-slider') && html.includes('data-js-debug-range-label'), 'YO!stats uses a compact range slider instead of a row of range buttons');
+    assert.ok(html.includes('step="any"'), 'YO!stats range slider moves smoothly while still snapping to preset ranges on release');
     assert.equal(html.includes('data-js-debug-graph-bar'), false, 'YO!stats graph is a line graph, not timing bars');
     assert.ok(html.includes('data-js-debug-uptime="2m 5s"') && html.includes('yolomux.py uptime 2m 5s') && html.includes('PID=4242') && html.includes('rss 128 MiB'), 'YO!stats graph shows yolomux.py uptime and process stats');
     assert.ok(html.includes('total 123/456 MB up/down'), 'YO!stats graph shows cumulative upload/download totals in MB');
@@ -1927,6 +1945,7 @@ async function runEditorPreviewSuite() {
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
     assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-area--runAgents') && debugPaneCss.includes('.js-debug-area--agentToken') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, area/line graph styling, and legends');
+    assert.ok(debugPaneCss.includes('.js-debug-range-slider') && debugPaneCss.includes('.js-debug-hover-line') && debugPaneCss.includes('.js-debug-selection-rect'), 'YO!stats ships compact range slider plus hover and selection overlays');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
     assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-api-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API line and legend share the API series color');
     assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE line and legend share the distinct SSE series color');
@@ -2011,13 +2030,13 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.retentionHours, 24, 'YO!stats graph keeps a 24 hour retention window');
     assert.equal(summary.rawWindowSeconds, 3600, 'YO!stats graph keeps high-resolution raw buckets for the last hour');
-    assert.equal(summary.rollupBucketSeconds, 10, 'YO!stats graph rolls old samples into ten-second timing buckets');
+    assert.equal(summary.rollupBucketSeconds, 30, 'YO!stats graph rolls old samples into thirty-second timing buckets');
     assert.equal(summary.rawBuckets, 0, 'two-hour-old samples are no longer kept as one-second raw buckets');
-    assert.ok(summary.rollupBuckets > 0 && summary.rollupBuckets <= 3, 'two-hour-old per-second samples compress into ten-second buckets');
+    assert.ok(summary.rollupBuckets > 0 && summary.rollupBuckets <= 2, 'two-hour-old per-second samples compress into thirty-second buckets');
     assert.equal(summary.scaleSeconds, 5, 'YO!stats graph defaults to five-second aggregate buckets');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
-    assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range buttons available');
+    assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
     assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', 'askAgents', 'runAgents', 'transitionAgents', 'idleAgents', 'tokensPerAgent', 'cpu', 'systemCpu'], 'graph tracks API, SSE, latency, bandwidth, agent activity, agent tokens, process CPU, and system CPU series');
     assert.ok(summary.pendingServerBuckets > 0, 'browser-observed API/SSE graph buckets are queued for server retention');
     api.recordJsDebugStatsSampleForTest({
@@ -2110,7 +2129,7 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.scaleSeconds, 10, 'selected two-hour graph range keeps the chosen aggregate interval');
     const html = api.debugPanelHtmlForTest();
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
-    assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range buttons after enough retained history exists');
+    assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range slider stops');
     assert.ok(html.includes('API/SSE/sec') && html.includes('Bandwidth/sec'), 'chart headers carry per-second units');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
@@ -2439,12 +2458,18 @@ async function runEditorPreviewSuite() {
     const panel = new TestElement('debug-panel');
     const scale = new TestElement('graph-scale', 'button');
     const range = new TestElement('graph-range', 'button');
+    const slider = new TestElement('graph-range-slider', 'input');
     scale.dataset.jsDebugScale = '10';
     range.dataset.jsDebugRange = '7200';
+    slider.dataset.jsDebugRangeSlider = '';
+    slider.value = '7';
     panel.appendChild(scale);
     panel.appendChild(range);
+    panel.appendChild(slider);
     api.bindDebugPanelForTest(panel);
     const pointerdown = panel.listeners.get('pointerdown')[0];
+    const input = panel.listeners.get('input')[0];
+    const change = panel.listeners.get('change')[0];
     let prevented = 0;
 
     pointerdown({target: scale, preventDefault() { prevented += 1; }});
@@ -2453,31 +2478,155 @@ async function runEditorPreviewSuite() {
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'single pointerdown applies the graph time range immediately');
     assert.equal(api.debugGraphBucketSummaryForTest().scaleSeconds, 10, 'range pointerdown does not overwrite the selected aggregate bucket size');
     assert.equal(prevented, 2, 'graph controls claim pointerdown before a refresh can remove the clicked button');
+    pointerdown({type: 'pointerdown', target: slider, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'range slider pointerdown leaves native dragging to the browser');
+    assert.equal(prevented, 2, 'range slider pointerdown is not claimed before native input can fire');
+    slider.value = '7.4';
+    input({type: 'input', target: slider, preventDefault() {}});
+    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider input updates state without claiming native dragging');
+    assert.equal(slider.value, '7.4', 'range slider input keeps fractional thumb position while dragging');
+    change({type: 'change', target: slider, preventDefault() {}});
+    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider change commits the matching range stop after dragging');
+    assert.equal(slider.value, '7', 'range slider change snaps the thumb to the nearest preset stop');
+  });
+
+  test('YO!stats hover guides sync across charts and drag-select zooms with reset', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 72,
+      records: [{
+        start: Math.floor((now - 60000) / 1000),
+        duration: 1,
+        sequence: 72,
+        api_count: 1,
+      }],
+    });
+    api.setDebugGraphRangeForTest(300);
+    const panel = new TestElement('debug-panel');
+    const graph = new TestElement('graph');
+    graph.dataset.jsDebugGraph = '';
+    graph.className = 'js-debug-graph';
+    const grid = new TestElement('grid');
+    grid.dataset.jsDebugChartGrid = '';
+    grid.dataset.jsDebugDomainStart = String(now - 300000);
+    grid.dataset.jsDebugDomainEnd = String(now);
+    const svgA = new TestElement('svg-a', 'svg');
+    svgA.className = 'js-debug-line-chart';
+    svgA.rect = {left: 100, top: 0, width: 200, height: 120, right: 300, bottom: 120};
+    const svgB = new TestElement('svg-b', 'svg');
+    svgB.className = 'js-debug-line-chart';
+    svgB.rect = {left: 500, top: 0, width: 200, height: 120, right: 700, bottom: 120};
+    for (const svg of [svgA, svgB]) {
+      const hover = new TestElement(`${svg.id}-hover`, 'line');
+      hover.dataset.jsDebugHoverLine = '';
+      const selection = new TestElement(`${svg.id}-selection`, 'rect');
+      selection.dataset.jsDebugSelectionRect = '';
+      svg.appendChild(hover);
+      svg.appendChild(selection);
+      grid.appendChild(svg);
+    }
+    graph.appendChild(grid);
+    panel.appendChild(graph);
+    api.bindDebugPanelForTest(panel);
+    const pointerdown = panel.listeners.get('pointerdown')[0];
+    const pointermove = panel.listeners.get('pointermove')[0];
+    const pointerup = panel.listeners.get('pointerup')[0];
+
+    pointermove({target: svgA, clientX: 150});
+    assert.ok(graph.classList.contains('js-debug-graph--hovering'), 'hovering a chart enables the shared hover guide');
+    assert.equal(svgA.querySelector('[data-js-debug-hover-line]').getAttribute('x1'), '150.0', 'hover guide uses the hovered chart time ratio');
+    assert.equal(svgB.querySelector('[data-js-debug-hover-line]').getAttribute('x1'), '150.0', 'hover guide is synchronized into sibling charts');
+
+    let prevented = 0;
+    pointerdown({target: svgA, clientX: 120, button: 0, preventDefault() { prevented += 1; }});
+    pointermove({target: svgA, clientX: 220});
+    assert.ok(graph.classList.contains('js-debug-graph--selecting'), 'dragging over a chart shows the zoom selection rectangle');
+    assert.equal(svgA.querySelector('[data-js-debug-selection-rect]').getAttribute('width'), '300.0', 'selection rectangle spans the dragged time range');
+    pointerup({target: svgA, clientX: 220});
+    let summary = api.debugGraphBucketSummaryForTest(now);
+    assert.ok(prevented === 1 && summary.zoomed, 'drag-select claims the pointer and creates a graph zoom domain');
+    assert.ok(summary.zoomRangeSeconds > 140 && summary.zoomRangeSeconds < 160, `zoom range follows selected chart ratio, got ${summary.zoomRangeSeconds}`);
+
+    const reset = new TestElement('graph-reset', 'button');
+    reset.dataset.jsDebugZoomReset = '';
+    panel.appendChild(reset);
+    pointerdown({target: reset, preventDefault() { prevented += 1; }});
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.zoomed, false, 'Reset clears the drag-selected zoom domain');
   });
 
   await testAsync('YO!stats stats polling does not count itself as API timing', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
+    await flushAsyncWork();
     api.clearJsDebugEventsForTest();
     api.setFetchForTest((url, options = {}) => {
-      requests.push({url: String(url), method: String(options.method || 'GET')});
+      requests.push({url: String(url), method: String(options.method || 'GET'), body: options.body || ''});
       return Promise.resolve(jsonResponse({ok: true, history: {sequence: 0, records: []}}));
     });
 
-    await api.apiFetchJsonQuietForTest('/api/stats-sample?since=0', {cache: 'no-store'});
-    await api.apiFetchJsonQuietForTest('/api/stats-history', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({records: []}),
-    });
-
-    assert.deepStrictEqual(requests, [
-      {url: '/api/stats-sample?since=0', method: 'GET'},
-      {url: '/api/stats-history', method: 'POST'},
-    ], 'YO!stats polling uses the quiet JSON fetch path for sample and history requests');
-    assert.equal(api.jsDebugEventsForTest().length, 0, 'quiet stats sample/history calls do not create API debug events');
+    await api.pollJsDebugStatsSampleForTest();
     api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 1});
+    await api.flushJsDebugStatsHistoryForTest();
+
+    const sampleRequest = requests.find(request => request.url.startsWith('/api/stats-sample?'));
+    const historyRequest = requests.find(request => request.url === '/api/stats-history');
+    assert.ok(sampleRequest, 'YO!stats polling fetches a stats sample');
+    assert.ok(historyRequest, 'YO!stats polling flushes browser history through the quiet path');
+    const sampleUrl = new URL(sampleRequest.url, 'http://localhost');
+    const body = JSON.parse(historyRequest.body);
+    assert.equal(sampleRequest.method, 'GET', 'YO!stats sample uses GET');
+    assert.equal(historyRequest.method, 'POST', 'YO!stats history uses POST');
+    assert.equal(sampleUrl.searchParams.get('since'), '0', 'YO!stats sample keeps incremental since state');
+    assert.ok(sampleUrl.searchParams.get('client_id'), 'YO!stats sample includes the per-tab client id');
+    assert.equal(body.client_id, sampleUrl.searchParams.get('client_id'), 'YO!stats history posts the same per-tab client id');
+    assert.ok(body.records.some(record => record.api_count === 1), 'YO!stats history posts browser API counters for this client');
     assert.equal(api.jsDebugEventsForTest().length, 1, 'regular debug event recording remains enabled');
+  });
+
+  await testAsync('YO!stats renders disconnected client gaps as a bottom red baseline', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET'), body: options.body || ''});
+      return Promise.resolve(jsonResponse({ok: true, history: {sequence: 0, records: []}}));
+    });
+    const now = Date.now();
+    api.recordJsDebugStatsSampleForTest({
+      history: {
+        sequence: 101,
+        records: [{
+          start: Math.floor((now - 5000) / 1000),
+          duration: 1,
+          sequence: 101,
+          cpu_total_percent: 0,
+          cpu_count: 1,
+          system_cpu_total_percent: 0,
+          system_cpu_count: 1,
+        }],
+      },
+    });
+    api.recordJsDebugDisconnectedSpanForTest(now - 4000, now - 1000);
+    const html = api.debugPanelHtmlForTest();
+
+    assert.ok(html.includes('data-js-debug-disconnect-line='), 'YO!stats renders a disconnected-client line in the chart SVG');
+    assert.ok(html.includes('class="js-debug-disconnect-line"') && html.includes('Client disconnected'), 'disconnected-client line is the named red baseline overlay');
+    assert.ok(api.debugGraphBucketSummaryForTest(now).disconnectedBuckets > 0, 'disconnected spans are kept as graph bucket data');
+
+    await api.flushJsDebugStatsHistoryForTest();
+    const historyRequest = requests.find(request => request.url === '/api/stats-history' && request.body.includes('disconnected_ms'));
+    assert.ok(historyRequest, 'YO!stats posts disconnected spans to server history');
+    const body = JSON.parse(historyRequest.body);
+    assert.ok(body.client_id, 'disconnected span history is tied to the per-tab client id');
+    assert.ok(body.records.some(record => Number(record.disconnected_ms || 0) > 0), 'disconnected span history includes disconnected_ms');
+
+    const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.ok(/\.js-debug-disconnect-line\s*\{[\s\S]*stroke:\s*var\(--bad\)[\s\S]*stroke-width:\s*5/.test(debugPaneCss), 'disconnected-client baseline is a thick red line');
+    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(terminalBootSource.includes('recordJsDebugClientEventsConnectionState(false)') && terminalBootSource.includes('recordJsDebugClientEventsConnectionState(true)'), 'client-events SSE transitions feed YO!stats disconnected spans');
   });
 
   test('session popover lists agent windows with working durations and idle recency', () => {
@@ -4137,8 +4286,8 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
     assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
     assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']"), 'client listens for the expected push event types');
-    assert.ok(/addEventListener\('ready',[\s\S]{0,260}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
-    assert.ok(/addEventListener\('ready',[\s\S]{0,420}refreshBackgroundOwnerStatus\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
+    assert.ok(/addEventListener\('ready',[\s\S]{0,360}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
+    assert.ok(/addEventListener\('ready',[\s\S]{0,520}refreshBackgroundOwnerStatus\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
     assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
     assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
     const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');

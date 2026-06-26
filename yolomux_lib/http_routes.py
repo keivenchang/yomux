@@ -253,7 +253,8 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     if error:
         request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
         return
-    request.write_json(request.server.app.stats_sample_payload(since=since or 0))
+    client_id = (qs.get("client_id") or qs.get("client") or [""])[0]
+    request.write_json(request.server.app.stats_sample_payload(since=since or 0, client_id=client_id))
 
 
 def post_stats_history(request: Any, parsed: Any, route: Route) -> None:

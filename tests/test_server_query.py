@@ -49,12 +49,12 @@ def test_get_agent_auth_honors_force_query():
 def test_get_stats_sample_uses_app_payload():
     writes = []
     calls = []
-    app = SimpleNamespace(stats_sample_payload=lambda since=0: calls.append(since) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
+    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="": calls.append((since, client_id)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
     request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
 
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=9"), None)
+    http_routes.get_stats_sample(request, SimpleNamespace(query="since=9&client_id=client-a"), None)
 
-    assert calls == [9]
+    assert calls == [(9, "client-a")]
     assert writes == [(HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123})]
 
 
@@ -506,13 +506,13 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     app = SimpleNamespace(
         transcripts_payload=lambda force=False: {"transcripts": [], "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
-        stats_sample_payload=lambda since=0: {"ok": True, "cpu_percent": 1.25, "since": since},
+        stats_sample_payload=lambda since=0, client_id="": {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id},
     )
 
-    handler, calls, writes = route_handler("/api/stats-sample?since=2", app)
+    handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2})]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a"})]
 
     handler, calls, writes = route_handler("/api/transcripts?force=1", app)
     Handler.do_GET(handler)

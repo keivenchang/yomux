@@ -760,10 +760,15 @@ globalThis.__layoutTestApi = {
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
+  pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
+  jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
+  recordJsDebugClientEventsConnectionStateForTest: recordJsDebugClientEventsConnectionState,
+  recordJsDebugDisconnectedSpanForTest: recordJsDebugDisconnectedSpan,
   recordJsDebugStatsSampleForTest: recordJsDebugStatsSample,
   bindDebugPanelForTest: bindDebugPanel,
   setDebugGraphScaleForTest: setDebugGraphScale,
   setDebugGraphRangeForTest: setDebugGraphRange,
+  clearDebugGraphZoomForTest: clearDebugGraphZoom,
   clearJsDebugEventsForTest: clearJsDebugEvents,
   jsDebugEventsForTest() { return jsDebugEvents.map(event => ({...event})); },
   jsDebugTextForClipboardForTest: jsDebugTextForClipboard,
@@ -930,7 +935,9 @@ globalThis.__layoutTestApi = {
   openFileQuickOpen,
   testElementForId(id) { return document.getElementById(id); },
   registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
-    terminals.set(session, {term, socket, container: document.getElementById('terminal-pane-' + session)});
+    const item = {term, socket, container: document.getElementById('terminal-pane-' + session)};
+    terminals.set(session, item);
+    return item;
   },
   terminalAttentionQuestionTextsForTest: terminalAttentionQuestionTexts,
   terminalAttentionQuestionRowForTest: terminalAttentionQuestionRow,
@@ -969,6 +976,7 @@ globalThis.__layoutTestApi = {
   tmuxSessionNameError,
   replaceTmuxSessionInClient,
   createNextSessionForTest: createNextSession,
+  confirmSessionGoneOrReconnectForTest: confirmSessionGoneOrReconnect,
   markPendingTmuxSessionForTest: markPendingTmuxSession,
   pendingTmuxSessionNamesForTest: pendingTmuxSessionNames,
   normalizedSessionOrder,
@@ -1175,6 +1183,9 @@ globalThis.__layoutTestApi = {
     const state = fileEditorViewState.get(item);
     return state ? {...state} : null;
   },
+  pendingFileEditorLineTargetForTest(item) {
+    return pendingFileEditorLineTargets.get(item) || null;
+  },
   renderFileEditorPanelShouldCaptureViewStateForTest: renderFileEditorPanelShouldCaptureViewState,
   renderFileEditorPanel,
   setFileEditorPanelStatusForTest: setFileEditorPanelStatus,
@@ -1199,6 +1210,8 @@ globalThis.__layoutTestApi = {
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = [], options = {}) {
     renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
   },
+  expandDirectoryRowForTest: expandDirectoryRow,
+  collapseDirectoryRowForTest: collapseDirectoryRow,
   setFileExplorerRepoInfoForTest(path, repo) {
     fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), repo);
   },

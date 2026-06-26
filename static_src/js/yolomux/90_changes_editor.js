@@ -201,6 +201,16 @@ let diffRefPopoverListenersInstalled = false;
 
 // C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
 // a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
+function diffRefRepoRefs(refsByRepo, repo) {
+  if (!repo || !refsByRepo || typeof refsByRepo !== 'object') return null;
+  if (Array.isArray(refsByRepo[repo])) return refsByRepo[repo];
+  const normalizedRepo = normalizeDirectoryPath(expandUserPath(repo));
+  for (const [key, refs] of Object.entries(refsByRepo)) {
+    if (normalizeDirectoryPath(expandUserPath(key)) === normalizedRepo && Array.isArray(refs)) return refs;
+  }
+  return null;
+}
+
 function diffRefSuggestions(repo) {
   const suggestions = [
     {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
@@ -233,7 +243,7 @@ function diffRefSuggestions(repo) {
     ? fileExplorerSessionFilesPayload.refs_by_repo
     : {};
   if (repo) {
-    addRefs(refsByRepo[repo]);
+    addRefs(diffRefRepoRefs(refsByRepo, repo));
   } else {
     for (const refs of Object.values(refsByRepo)) addRefs(refs);
   }
@@ -3235,6 +3245,26 @@ function fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM) {
   return true;
 }
 
+function fileEditorVisibleLineNumber(view) {
+  const doc = view?.state?.doc;
+  if (!doc || typeof doc.lineAt !== 'function') return 0;
+  const ranges = Array.isArray(view.visibleRanges) ? view.visibleRanges : [];
+  const visibleFrom = Number(ranges[0]?.from);
+  if (Number.isFinite(visibleFrom)) {
+    try { return Math.max(1, Math.floor(Number(doc.lineAt(visibleFrom)?.number) || 0)); } catch (_) {}
+  }
+  const blocks = Array.from(view.viewportLineBlocks || []);
+  const blockFrom = Number(blocks[0]?.from);
+  if (Number.isFinite(blockFrom)) {
+    try { return Math.max(1, Math.floor(Number(doc.lineAt(blockFrom)?.number) || 0)); } catch (_) {}
+  }
+  const head = Number(view.state?.selection?.main?.head);
+  if (Number.isFinite(head)) {
+    try { return Math.max(1, Math.floor(Number(doc.lineAt(head)?.number) || 0)); } catch (_) {}
+  }
+  return 0;
+}
+
 function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
@@ -3247,6 +3277,7 @@ function captureFileEditorPanelViewState(item, panel) {
     scrollLeft: scrollDOM.scrollLeft || 0,
     anchor: Number(selection?.anchor || 0),
     head: Number(selection?.head || selection?.anchor || 0),
+    line: fileEditorVisibleLineNumber(view),
     scrollSnapshot: typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null,
   });
 }
