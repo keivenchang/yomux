@@ -7690,8 +7690,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   justify-content: flex-end;
 }
 .info-tree-search-control {
-  min-width: min(260px, 100%);
-  flex: 0 1 340px;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 180px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -9020,6 +9021,8 @@ body.theme-light .yoagent-global .markdown-body pre code {
   --info-tree-disclosure-color: var(--neutral-text-cool);
   --info-tree-tab-color: var(--pane-tab-active-bg);
   --info-tree-tab-color-hover: var(--pane-tab-active-border);
+  --info-tree-tmux-window-color: var(--pane-tab-active-bg);
+  --info-tree-tmux-window-color-hover: var(--pane-tab-active-border);
   --info-tree-ai-color: var(--icon-code);
   --info-tree-ai-color-hover: #bae6fd;
   --info-tree-path-color: var(--text);
@@ -9119,6 +9122,10 @@ body.theme-light .info-tree {
   --info-tree-dimension-color: var(--info-tree-tab-color);
   --info-tree-dimension-hover: var(--info-tree-tab-color-hover);
 }
+.info-tree-group[data-info-dimension="tmux-window"] > summary {
+  --info-tree-dimension-color: var(--info-tree-tmux-window-color);
+  --info-tree-dimension-hover: var(--info-tree-tmux-window-color-hover);
+}
 .info-tree-group[data-info-dimension="ai"] > summary {
   --info-tree-dimension-color: var(--info-tree-ai-color);
   --info-tree-dimension-hover: var(--info-tree-ai-color-hover);
@@ -9144,6 +9151,9 @@ body.theme-light .info-tree {
   color: var(--info-tree-dimension-color);
 }
 .info-tree-group[data-info-dimension="tab"] > summary .info-tree-group-dimension {
+  text-transform: none;
+}
+.info-tree-group[data-info-dimension="tmux-window"] > summary .info-tree-group-dimension {
   text-transform: none;
 }
 .info-tree-group[data-info-dimension="branch"] > summary .info-tree-group-dimension {

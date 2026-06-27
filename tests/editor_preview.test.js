@@ -3541,15 +3541,16 @@ async function runEditorPreviewSuite() {
       '/repo/path-1111',
       '/repo/path-9',
     ], 'YO!info Path grouping stays lexical instead of extracting numbers');
-    const missingSortRecords = [
-      {tabKey: '__no_tab__', tabLabel: 'No tab', aiKey: 'no-ai::No AI', aiLabel: 'No AI', pathKey: '__no_path__', pathLabel: 'No path', branchKey: '__no_branch__', branchLabel: 'No branch', prKey: '__no_pr__', prLabel: 'No PR', prTitle: 'No PR', linearKey: '__no_linear__', linearLabel: 'No Linear', linearTitle: 'No Linear'},
-      {tabKey: 'zeta-tab', tabLabel: 'zeta-tab', aiKey: 'z:codex', aiLabel: 'z:codex', pathKey: '/zeta', pathLabel: '/zeta', branchKey: 'zeta', branchLabel: 'zeta', prKey: '#200', prLabel: '#200 zeta PR', prTitle: '#200 zeta PR', prNumber: 200, linearKey: 'ZZZ-200', linearLabel: 'ZZZ-200', linearTitle: 'ZZZ-200 zeta issue'},
-      {tabKey: 'alpha-tab', tabLabel: 'alpha-tab', aiKey: '0:claude', aiLabel: '0:claude', pathKey: '/alpha', pathLabel: '/alpha', branchKey: 'alpha', branchLabel: 'alpha', prKey: '#100', prLabel: '#100 alpha PR', prTitle: '#100 alpha PR', prNumber: 100, linearKey: 'AAA-100', linearLabel: 'AAA-100', linearTitle: 'AAA-100 alpha issue'},
-    ];
-    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['tab'], {key: 'tab', dir: 'asc'}).children.map(group => group.label)), ['alpha-tab', 'zeta-tab', 'No tab'], 'YO!info A-Z Tab grouping treats No tab as after z');
-    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['ai'], {key: 'ai', dir: 'asc'}).children.map(group => group.label)), ['0:claude', 'z:codex', 'No AI'], 'YO!info A-Z AI grouping treats No AI as after z');
-    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'asc'}).children.map(group => group.label)), ['AAA-100 alpha issue', 'ZZZ-200 zeta issue', 'No Linear'], 'YO!info A-Z Linear grouping treats No Linear as after z');
-    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'asc'}).children.map(group => group.label)), ['#100 alpha PR', '#200 zeta PR', 'No PR'], 'YO!info A-Z PR grouping treats No PR as after numbered PRs');
+	    const missingSortRecords = [
+	      {tabKey: '__no_tab__', tabLabel: 'No tab', aiKey: 'no-ai::No AI', aiLabel: 'No AI', pathKey: '__no_path__', pathLabel: 'No path', branchKey: '__no_branch__', branchLabel: 'No branch', prKey: '__no_pr__', prLabel: 'No PR', prTitle: 'No PR', linearKey: '__no_linear__', linearLabel: 'No Linear', linearTitle: 'No Linear'},
+	      {tabKey: 'zeta-tab', tabSession: 'zeta-tab', tabLabel: 'zeta-tab', aiKey: 'z:codex', aiKind: 'codex', aiWindow: 'z', aiWindowIndex: 'z', aiLabel: 'z:codex', pathKey: '/zeta', pathLabel: '/zeta', branchKey: 'zeta', branchLabel: 'zeta', prKey: '#200', prLabel: '#200 zeta PR', prTitle: '#200 zeta PR', prNumber: 200, linearKey: 'ZZZ-200', linearLabel: 'ZZZ-200', linearTitle: 'ZZZ-200 zeta issue'},
+	      {tabKey: 'alpha-tab', tabSession: 'alpha-tab', tabLabel: 'alpha-tab', aiKey: '0:claude', aiKind: 'claude', aiWindow: '0', aiWindowIndex: '0', aiLabel: '0:claude', pathKey: '/alpha', pathLabel: '/alpha', branchKey: 'alpha', branchLabel: 'alpha', prKey: '#100', prLabel: '#100 alpha PR', prTitle: '#100 alpha PR', prNumber: 100, linearKey: 'AAA-100', linearLabel: 'AAA-100', linearTitle: 'AAA-100 alpha issue'},
+	    ];
+	    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['tab'], {key: 'tab', dir: 'asc'}).children.map(group => group.label)), ['alpha-tab', 'zeta-tab', 'No tab'], 'YO!info A-Z Tab grouping treats No tab as after z');
+	    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['tab', 'tmux-window'], {key: 'name', dir: 'asc'}).children[0].children.map(group => group.label)), ['0:claude'], 'YO!info tmux sub-window grouping sorts by window index under the Tab parent');
+	    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['tab', 'ai'], {key: 'ai', dir: 'asc'}).children[0].children.map(group => group.label)), ['claude'], 'YO!info AI grouping sorts by agent identity under the Tab parent');
+	    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'asc'}).children.map(group => group.label)), ['AAA-100 alpha issue', 'ZZZ-200 zeta issue', 'No Linear'], 'YO!info A-Z Linear grouping treats No Linear as after z');
+	    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'asc'}).children.map(group => group.label)), ['#100 alpha PR', '#200 zeta PR', 'No PR'], 'YO!info A-Z PR grouping treats No PR as after numbered PRs');
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'desc'}).children.map(group => group.label)), ['ZZZ-200 zeta issue', 'AAA-100 alpha issue', 'No Linear'], 'YO!info reverse Linear grouping keeps No Linear after real Linear issues');
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'desc'}).children.map(group => group.label)), ['#200 zeta PR', '#100 alpha PR', 'No PR'], 'YO!info reverse PR grouping keeps No PR after numbered PRs');
     assert.deepStrictEqual(canonical(api.infoGroupingPresetsForTest().map(preset => `${preset.key}:${preset.label}:${preset.grouping.join('>')}`)), [
@@ -3565,18 +3566,39 @@ async function runEditorPreviewSuite() {
     const storedGroupingFor = grouping => loadYolomux('', ['stored'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {'yolomux.info2.grouping.v1': JSON.stringify(grouping)},
     }).currentInfoGroupingForTest();
-    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'ai', 'path', 'branch'])), ['tab', 'path'], 'YO!info migrates the old stored Tab-first quick grouping to Tab > Path');
-    assert.deepStrictEqual(canonical(storedGroupingFor(['path', 'branch', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the old stored Path-first quick grouping to Path > Branch');
-    assert.deepStrictEqual(canonical(storedGroupingFor(['branch', 'path', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the removed stored branch-first quick grouping to Path > Branch');
-    assert.deepStrictEqual(canonical(storedGroupingFor(['ai', 'tab', 'path', 'branch'])), ['linear', 'pr'], 'YO!info migrates the removed stored AI-first quick grouping to Linear > PR');
-    api.setInfoGroupingForTest(['ai', 'tab', 'path', 'branch']);
-    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['ai', 'tab', 'path', 'branch'], 'YO!info manual grouping selectors still allow an AI-first four-level order');
+	    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'ai', 'path', 'branch'])), ['tab', 'path'], 'YO!info migrates the old stored Tab-first quick grouping to Tab > Path');
+	    assert.deepStrictEqual(canonical(storedGroupingFor(['path', 'branch', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the old stored Path-first quick grouping to Path > Branch');
+	    assert.deepStrictEqual(canonical(storedGroupingFor(['branch', 'path', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the removed stored branch-first quick grouping to Path > Branch');
+	    assert.deepStrictEqual(canonical(storedGroupingFor(['ai', 'tab', 'path', 'branch'])), ['linear', 'pr'], 'YO!info migrates the removed stored AI-first quick grouping to Linear > PR');
+	    api.setInfoGroupingForTest(['ai', 'tab', 'path', 'branch']);
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'branch'], 'YO!info manual grouping selectors reject AI in the first Order by dropdown');
+	    api.setInfoGroupingForTest(['tab', 'path', 'ai']);
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'ai'], 'YO!info manual grouping selectors still allow AI after the first Order by dropdown');
+	    api.setInfoGroupingForTest(['path', 'tmux-window', 'branch']);
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['path', 'branch'], 'YO!info rejects tmux sub-window unless the first Order by dropdown is Tab');
+	    api.setInfoGroupingForTest(['tab', 'tmux-window', 'ai', 'path']);
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window', 'ai', 'path'], 'YO!info allows tmux sub-window only as the second Order by dropdown after Tab');
+	    const optionValuesForLevel = (html, level) => {
+	      const match = html.match(new RegExp(`<select data-info-group-level="${level}"[^>]*>([\\s\\S]*?)<\\/select>`));
+	      assert.ok(match, `YO!info renders Order by select ${level + 1}`);
+	      return [...match[1].matchAll(/<option value="([^"]*)"/g)].map(matchItem => matchItem[1]);
+	    };
+	    const tabFirstControlsHtml = api.infoGroupingControlsHtmlForTest();
+	    assert.ok(!optionValuesForLevel(tabFirstControlsHtml, 0).includes('ai') && !optionValuesForLevel(tabFirstControlsHtml, 0).includes('tmux-window'), 'YO!info first Order by dropdown excludes AI and tmux sub-window');
+	    assert.ok(optionValuesForLevel(tabFirstControlsHtml, 1).includes('tmux-window') && optionValuesForLevel(tabFirstControlsHtml, 1).includes('ai'), 'YO!info second Order by dropdown includes tmux sub-window and AI when the first dropdown is Tab');
+	    assert.equal(optionValuesForLevel(tabFirstControlsHtml, 2).includes('tmux-window'), false, 'YO!info tmux sub-window is not available past the second Order by dropdown');
+	    api.setInfoGroupingForTest(['path', 'branch']);
+	    const pathFirstControlsHtml = api.infoGroupingControlsHtmlForTest();
+	    assert.equal(optionValuesForLevel(pathFirstControlsHtml, 1).includes('tmux-window'), false, 'YO!info hides tmux sub-window when the first Order by dropdown is not Tab');
 
-    const aiTree = api.infoGroupTree(records, ['ai', 'tab', 'path', 'branch']);
-    assert.ok(aiTree.children.some(group => group.dimension === 'ai' && group.label === '0:codex' && group.count === 3), 'grouping by AI is not secretly split by Tab when two tabs have the same agent label');
-    const html = api.infoTreeHtmlForTest(records, ['ai', 'tab', 'path', 'branch']);
-    assert.ok(html.includes('data-info-grouping="ai,tab,path,branch"') && html.includes('data-info-sort="date:desc"') && html.includes('data-info-dimension="ai"') && html.includes('0:claude') && html.includes('0:codex'), 'YO!info renders a tree for the selected grouping and sort order');
-    assert.ok(html.includes('info-tree-item-last'), 'YO!info marks the final child at each tree level so CSS can draw an angle connector instead of a tee');
+	    const tabAiTree = api.infoGroupTree(records, ['tab', 'ai', 'path', 'branch']);
+	    assert.deepStrictEqual(canonical(tabAiTree.children.find(group => group.label === 'tab-a').children.map(group => `${group.dimension}:${group.label}:${group.count}`)), ['ai:claude:2', 'ai:codex:1'], 'grouping by AI under Tab groups by agent identity, not by tmux sub-window label');
+	    const tmuxWindowTree = api.infoGroupTree(records, ['tab', 'tmux-window', 'path']);
+	    assert.deepStrictEqual(canonical(tmuxWindowTree.children.find(group => group.label === 'tab-a').children.map(group => `${group.dimension}:${group.label}:${group.count}`)), ['tmux-window:0:claude:2', 'tmux-window:0:codex:1'], 'grouping by tmux sub-window under Tab groups by the owning sub-window label');
+	    const html = api.infoTreeHtmlForTest(records, ['tab', 'tmux-window', 'path']);
+	    assert.ok(html.includes('data-info-grouping="tab,tmux-window,path"') && html.includes('data-info-sort="date:desc"') && html.includes('data-info-dimension="tmux-window"') && html.includes('<span class="info-tree-group-dimension">tmux sub-window:</span>') && html.includes('0:claude') && html.includes('0:codex'), 'YO!info renders a tree for Tab > tmux sub-window and the selected sort order');
+	    assert.equal((api.infoTreeHtmlForTest([appMainRecord], ['tab', 'tmux-window']).match(/info-tree-field-ai/g) || []).length, 0, 'YO!info hides tmux sub-window leaf rows when the tmux sub-window is already supplied by an ancestor group');
+	    assert.ok(html.includes('info-tree-item-last'), 'YO!info marks the final child at each tree level so CSS can draw an angle connector instead of a tee');
     const appPathGroup = api.infoGroupTree(records, ['path']).children.find(group => group.dimension === 'path' && group.key === '/repo/app');
     const appPathGroupKey = api.infoTreeGroupCollapseKeyForTest(appPathGroup);
     api.setInfoTreeGroupCollapsedForTest(appPathGroupKey, true);
@@ -3714,10 +3736,11 @@ async function runEditorPreviewSuite() {
     const infoTreeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     const paneTabCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
-    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
-    assert.ok(/\.info-tree-group\[data-info-dimension="branch"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info Git branch group labels preserve the mixed-case Git prefix');
-    assert.ok(/\.info-tree-group\[data-info-dimension="pr"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info GitHub PR group labels preserve the mixed-case GitHub prefix');
+	    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+	    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+	    assert.ok(/\.info-tree-group\[data-info-dimension="tmux-window"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info tmux sub-window group labels preserve lowercase text');
+	    assert.ok(/\.info-tree-group\[data-info-dimension="branch"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info Git branch group labels preserve the mixed-case Git prefix');
+	    assert.ok(/\.info-tree-group\[data-info-dimension="pr"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info GitHub PR group labels preserve the mixed-case GitHub prefix');
     const longPath = '/home/test/dynamo/dynamo2/packages/frontend/src/really/deep/path/that/must/not/be/chopped/off';
     const longBranch = 'keivenchang/DIS-1200__complete-visible-branch-identity-that-must-not-be-chopped-off';
     const longPr = '#1200 This is the complete PR description and it must wrap instead of being truncated';
@@ -3806,12 +3829,14 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.info-actions-bar\s*\{[\s\S]*position:\s*relative[\s\S]*z-index:\s*var\(--z-layer-marker\)[\s\S]*background:\s*var\(--pane-bar-bg/.test(infoTreeCss), 'YO!info action bar paints as the opaque layer above sticky tree summaries');
     assert.ok(/\.info-tree-actions-bar\s*\{[\s\S]*flex-wrap:\s*wrap[\s\S]*row-gap:\s*5px/.test(infoTreeCss), 'YO!info toolbar allows a two-line control layout');
     assert.ok(/\.info-tree-primary-controls\s*\{[\s\S]*flex:\s*1 0 100%/.test(infoTreeCss), 'YO!info grouping presets and search occupy the first toolbar line above the order-by chain');
+    assert.ok(/\.info-tree-search-control\s*\{[\s\S]*min-width:\s*0[\s\S]*max-width:\s*100%[\s\S]*flex:\s*1 1 180px/.test(infoTreeCss), 'YO!info search input shrinks with the pane instead of forcing a wide toolbar');
     assert.ok(/\.info-tree-order-label,[\s\S]*\.info-tree-order-separator\s*\{[\s\S]*color:\s*var\(--muted\)[\s\S]*white-space:\s*nowrap/.test(infoTreeCss), 'YO!info order-by label and separators share compact muted toolbar styling');
     assert.ok(/\.info-tree-search-control input\s*\{[\s\S]*height:\s*24px/.test(infoTreeCss), 'YO!info toolbar includes a compact search input');
     assert.ok(/\.info-tree-search-match\s*\{[\s\S]*color:\s*var\(--info-tree-search-match-text\)[\s\S]*background:\s*var\(--info-tree-search-match-bg\)/.test(infoTreeCss), 'YO!info search matches have a dedicated non-red/non-purple highlight style');
     assert.ok(/\.info-tree-sort-controls\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(infoTreeCss), 'YO!info Sort control is right-aligned on the selector toolbar line');
     assert.ok(/delegate\(panel, 'click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
     assert.ok(infoPanelSource.includes('data-info-search') && infoPanelSource.includes('setInfoSearch'), 'YO!info toolbar exposes a search box that filters relationship records');
+    assert.ok(infoPanelSource.includes('data-info-refresh title="${esc(t(\'meta.refresh\'))}"') && infoPanelSource.includes('setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t(\'meta.refresh\'), t(\'meta.refresh\'))'), 'YO!info metadata refresh button uses the compact Refresh label');
     assert.ok(infoPanelSource.includes('info-tree-order-label">Order by:</span>') && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render as Order by: select > select > select > select');
     assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
     assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');

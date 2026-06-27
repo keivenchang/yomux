@@ -18,12 +18,17 @@ function infoGroupingControlsHtml() {
   const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
   const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
   const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];
-  const dimensions = typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : [];
   const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'}];
-  const optionHtml = level => [
-    `<option value="">None</option>`,
-    ...dimensions.map(dimension => `<option value="${esc(dimension.key)}"${grouping[level] === dimension.key ? ' selected' : ''}>${esc(dimension.label)}</option>`),
-  ].join('');
+  const dimensionsForLevel = level => typeof infoGroupDimensionsForLevel === 'function'
+    ? infoGroupDimensionsForLevel(level, grouping)
+    : (typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : []);
+  const optionHtml = level => {
+    const dimensions = dimensionsForLevel(level);
+    return [
+      `<option value="">None</option>`,
+      ...dimensions.map(dimension => `<option value="${esc(dimension.key)}"${grouping[level] === dimension.key ? ' selected' : ''}>${esc(dimension.label)}</option>`),
+    ].join('');
+  };
   const sortValue = `${sort.key}:${sort.dir}`;
   const sortFieldHtml = sortFields.map(field => `<option value="${esc(field.value || `${field.key}:${field.dir || ''}`)}"${sortValue === (field.value || `${field.key}:${field.dir || ''}`) ? ' selected' : ''}>${esc(field.label)}</option>`).join('');
   const presetHtml = presets.map(preset => {
@@ -142,7 +147,7 @@ function createInfoPanel() {
       <div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
-          <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
+          <button type="button" class="info-refresh" data-info-refresh title="${esc(t('meta.refresh'))}" aria-label="${esc(t('meta.refresh'))}">${esc(t('meta.refresh'))}</button>
         </div>
       </div>
       <div class="info-pane panel-overlay-root">
@@ -295,9 +300,9 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
   const refresh = panel.querySelector('[data-info-refresh]');
   if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
-      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('meta.refresh'), t('meta.refresh'));
     } else {
-      const label = t('info.refreshRepo');
+      const label = t('meta.refresh');
       refresh.textContent = label;
       refresh.title = label;
       refresh.setAttribute('aria-label', label);

@@ -161,7 +161,7 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
 
 function syncTranscriptMetaLoadingUi() {
   document.getElementById(panelDomId(infoItemId))?.querySelectorAll('[data-info-refresh]').forEach(button => {
-    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('meta.refresh'), t('meta.refresh'));
   });
   const metaRefreshButton = refreshMeta;
   if (metaRefreshButton) {
@@ -572,6 +572,7 @@ const infoSortDefs = Object.freeze([
 ]);
 const infoDimensionDefs = Object.freeze([
   {key: 'tab', label: 'Tab'},
+  {key: 'tmux-window', label: 'tmux sub-window'},
   {key: 'ai', label: 'AI'},
   {key: 'path', label: 'Path'},
   {key: 'branch', label: 'Branch'},
@@ -593,6 +594,27 @@ function infoGroupDimensions() {
   return infoDimensionDefs.map(dimension => ({...dimension}));
 }
 
+function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
+  const dimension = String(key || '').trim();
+  const index = Number(level);
+  if (!dimension || !Number.isInteger(index) || index < 0 || index > 3) return false;
+  if (dimension === 'ai' && index === 0) return false;
+  if (dimension === 'tmux-window') {
+    const parent = Array.isArray(grouping) ? String(grouping[0] || '') : '';
+    return index === 1 && parent === 'tab';
+  }
+  return true;
+}
+
+function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
+  const index = Number(level);
+  const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(3, index)) : 0;
+  const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
+  return infoDimensionDefs
+    .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
+    .map(dimension => ({...dimension}));
+}
+
 function infoSortFields() {
   return infoSortDefs.map(def => ({...def}));
 }
@@ -604,15 +626,20 @@ function infoGroupingPresets() {
 function normalizeInfoGrouping(value, options = {}) {
   const valid = new Set(infoDimensionDefs.map(dimension => dimension.key));
   const input = Array.isArray(value) ? value : String(value || '').split(/[,\s|>]+/);
-  const result = [];
+  const candidates = [];
   for (const item of input) {
     const key = String(item || '').trim();
-    if (!key || !valid.has(key) || result.includes(key)) continue;
+    if (!key || !valid.has(key) || candidates.includes(key)) continue;
+    candidates.push(key);
+  }
+  const migrated = options.migrateLegacyPresets ? normalizeInfoLegacyPresetGrouping(candidates) : candidates;
+  const result = [];
+  for (const key of Array.isArray(migrated) ? migrated : []) {
+    if (!infoGroupDimensionAllowedAtLevel(key, result.length, result)) continue;
     result.push(key);
     if (result.length >= 4) break;
   }
-  const normalized = result.length ? result : infoDefaultGrouping;
-  return options.migrateLegacyPresets ? normalizeInfoLegacyPresetGrouping(normalized) : normalized.slice();
+  return (result.length ? result : infoDefaultGrouping).slice();
 }
 
 function normalizeInfoLegacyPresetGrouping(grouping) {
@@ -771,11 +798,42 @@ function setInfoGroupingLevel(level, value) {
   setInfoGrouping(next);
 }
 
+function infoRecordAiKind(record = {}) {
+  const direct = String(record?.aiAgentKey || record?.aiKind || '').trim();
+  if (direct && direct !== '__no_ai__' && direct !== 'no-ai') return direct;
+  const label = String(record?.aiAgentLabel || record?.aiLabel || '').trim();
+  if (!label || /^no\s+ai$/i.test(label)) return '';
+  if (label.includes(':')) return label.split(':').pop().trim();
+  return label;
+}
+
+function infoRecordAiAgentLabel(record = {}) {
+  return infoAgentKindLabel(infoRecordAiKind(record));
+}
+
+function infoRecordTmuxWindowIndex(record = {}) {
+  return String(record?.aiWindowIndex ?? record?.aiWindow ?? '').trim();
+}
+
+function infoRecordTmuxWindowLabel(record = {}) {
+  if (!infoRecordHasAi(record)) return 'No tmux sub-window';
+  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || 'tmux sub-window';
+}
+
+function infoRecordTmuxWindowKey(record = {}) {
+  const explicit = String(record?.tmuxWindowKey || '').trim();
+  if (explicit) return explicit;
+  if (!infoRecordHasAi(record)) return '__no_tmux_window__';
+  const index = infoRecordTmuxWindowIndex(record);
+  return `${record?.tabSession || record?.tabKey || 'no-tab'}:${index || infoRecordTmuxWindowLabel(record)}:${infoRecordTmuxWindowLabel(record)}`;
+}
+
 function infoDimensionValue(record, dimension) {
   const fallback = {key: 'none', label: 'None', title: ''};
   if (!record || !dimension) return fallback;
   if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
-  if (dimension === 'ai') return {key: record.aiKey, label: record.aiLabel, title: record.aiTitle, sortValue: infoRecordNumericSortValue(record, 'ai')};
+  if (dimension === 'tmux-window') return {key: infoRecordTmuxWindowKey(record), label: infoRecordTmuxWindowLabel(record), title: record.tmuxWindowTitle || record.aiTitle || infoRecordTmuxWindowLabel(record), sortValue: infoRecordNumericSortValue(record, 'tmux-window')};
+  if (dimension === 'ai') return {key: infoRecordAiKind(record) || '__no_ai__', label: infoRecordAiAgentLabel(record), title: record.aiAgentTitle || infoRecordAiAgentLabel(record)};
   if (dimension === 'path') return {key: record.pathKey, label: record.pathTitle || record.pathLabel, title: record.pathTitle};
   if (dimension === 'branch') return {key: record.branchKey, label: record.branchLabel, title: record.branchTitle};
   if (dimension === 'pr') return {key: record.prKey, label: record.prTitle || record.prLabel, title: record.prTitle, sortValue: infoRecordNumericSortValue(record, 'pr')};
@@ -817,6 +875,12 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const session = String(agent?.session || '');
       const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || 'No tab');
       const aiLabel = String(agent?.aiLabel || infoTabAgentAiLabel(agent));
+      const aiKind = String(agent?.kind || '');
+      const tmuxWindowIndex = String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? '');
+      const tmuxWindowKey = tmuxWindowIndex
+        ? `${session || 'no-tab'}:${tmuxWindowIndex}:${aiLabel}`
+        : '__no_tmux_window__';
+      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? 'No tmux sub-window' : aiLabel;
       const path = String(row?.path || '');
       const branch = String(row?.branch || '');
       const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
@@ -827,13 +891,16 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const prNumber = infoRowPrNumber(row);
       const prCompactLabel = Number.isFinite(prNumber) ? `#${prNumber}` : prKeyLabel;
       records.push({
-        id: [path, branch, session || 'no-tab', agent?.kind || 'no-ai', agent?.window || '', prCompactLabel || prKeyLabel, linearLabel].join('\n'),
+        id: [path, branch, session || 'no-tab', aiKind || 'no-ai', tmuxWindowIndex, prCompactLabel || prKeyLabel, linearLabel].join('\n'),
         tabKey: session || '__no_tab__',
         tabSession: session,
         tabLabel,
         tabTitle: String(agent?.title || tabLabel),
         aiKey: `${agent?.kind || 'no-ai'}:${agent?.window || ''}:${aiLabel}`,
-        aiKind: String(agent?.kind || ''),
+        aiKind,
+        aiAgentKey: aiKind || '__no_ai__',
+        aiAgentLabel: infoAgentKindLabel(aiKind),
+        aiAgentTitle: infoAgentKindLabel(aiKind),
         aiWindow: String(agent?.window || ''),
         aiWindowIndex: String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? ''),
         aiState: String(agent?.state || ''),
@@ -846,6 +913,9 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         aiLastActiveTs: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
         aiLabel,
         aiTitle: String(agent?.title || aiLabel),
+        tmuxWindowKey,
+        tmuxWindowLabel,
+        tmuxWindowTitle: String(agent?.title || tmuxWindowLabel),
         pathKey: infoNormalizedPath(path) || '__no_path__',
         pathLabel: String(row?.pathLabel || compactHomePath(path) || 'No path'),
         pathTitle: String(row?.pathTitle || path || 'No path'),
@@ -925,7 +995,7 @@ function infoRecordNumericSortValue(record = {}, dimension = '') {
   if (dimension === 'pr') return infoRecordPrNumber(record);
   if (dimension === 'linear') return infoRecordLinearNumber(record);
   if (dimension === 'tab') return infoFirstRecordNumber(record, [record.tabKey, record.tabLabel, record.tabTitle, record.tabSession]);
-  if (dimension === 'ai') return infoFirstRecordNumber(record, [record.aiWindowIndex, record.aiWindow, record.aiLabel, record.aiKey, record.aiTitle]);
+  if (dimension === 'tmux-window') return infoFirstRecordNumber(record, [infoRecordTmuxWindowIndex(record), infoRecordTmuxWindowLabel(record), record.aiLabel, record.aiKey, record.aiTitle]);
   return NaN;
 }
 
@@ -952,7 +1022,8 @@ function infoCompareRecordNumberThenLabel(left = {}, right = {}, dimension = '',
 
 function infoRecordLabel(record = {}, dimension = '') {
   if (dimension === 'tab') return record.tabLabel;
-  if (dimension === 'ai') return record.aiLabel;
+  if (dimension === 'tmux-window') return infoRecordTmuxWindowLabel(record);
+  if (dimension === 'ai') return infoRecordAiAgentLabel(record);
   if (dimension === 'linear') return record.linearLabel || record.linearTitle;
   if (dimension === 'pr') return record.prLabel || record.prTitle;
   if (dimension === 'path') return record.pathLabel;
@@ -1013,7 +1084,8 @@ function infoLinearSearchFields(record = {}) {
 function infoRecordSearchFields(record = {}) {
   return [
     ...(infoRecordHasTab(record) ? infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession) : []),
-    ...(infoRecordHasAi(record) ? infoSearchFields('ai', record.aiLabel) : []),
+    ...(infoRecordHasAi(record) ? infoSearchFields('tmux-window', infoRecordTmuxWindowLabel(record)) : []),
+    ...(infoRecordHasAi(record) ? infoSearchFields('ai', infoRecordAiAgentLabel(record), infoRecordAiKind(record)) : []),
     !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__'
       ? infoSearchField('path', record.pathTitle || record.pathLabel)
       : null,
@@ -1163,7 +1235,7 @@ function compareInfoGroups(left, right, sort = infoSort) {
   if (normalizedSort.key === 'date') {
     const selectedResult = compareInfoRecords(infoGroupRepresentativeRecord(left, sort), infoGroupRepresentativeRecord(right, sort), sort, {fallback: false});
     if (selectedResult) return selectedResult;
-  } else if (left?.dimension === right?.dimension && ['tab', 'ai', 'linear', 'pr'].includes(left?.dimension)) {
+  } else if (left?.dimension === right?.dimension && ['tab', 'tmux-window', 'linear', 'pr'].includes(left?.dimension)) {
     return infoCompareNumberThenLabel(left.sortValue, right.sortValue, left?.label, right?.label, direction)
       || (right?.count || 0) - (left?.count || 0);
   }
@@ -1182,7 +1254,7 @@ function infoTreeItemClasses(baseClass, options = {}) {
 
 function infoRecordMissingValue(value) {
   const text = String(value || '').trim();
-  return !text || /^no\s+(?:path|pr|linear|tab|ai|branch)$/i.test(text);
+  return !text || /^no\s+(?:path|pr|linear|tab|ai|branch|tmux\s+sub-window)$/i.test(text);
 }
 
 function infoRecordHasTab(record) {
@@ -1444,7 +1516,7 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
   if (!infoRecordHasAi(record) || typeof tmuxWindowButtonHtml !== 'function') return '';
   const label = String(record?.aiLabel || '').trim();
   if (!label) return '';
-  const labelHtml = infoRecordSearchValueHtml(record, 'ai', label);
+  const labelHtml = infoRecordSearchValueHtml(record, 'tmux-window', label);
   const agent = infoRecordAgentPayload(record);
   const active = record.aiCurrent === true || record.aiWindowActive === true;
   const title = String(options.title || record.aiTitle || label);
@@ -1496,7 +1568,7 @@ function infoRecordMainChipsHtml(record, options = {}) {
   if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
     fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
   }
-  if (!hiddenDimensions.has('ai') && infoRecordHasAi(record)) {
+  if (!hiddenDimensions.has('tmux-window') && infoRecordHasAi(record)) {
     fields.push(infoRecordFieldHtml('ai', infoRecordAiValueHtml(record), record.aiTitle));
   }
   if (!infoRecordMissingValue(record?.updated)) {
@@ -1518,6 +1590,7 @@ function infoTreeHiddenDimensions(ancestors, dimension) {
 function infoDimensionCountNoun(key, count) {
   const plural = count !== 1;
   if (key === 'tab') return plural ? 'tabs' : 'tab';
+  if (key === 'tmux-window') return plural ? 'tmux sub-windows' : 'tmux sub-window';
   if (key === 'ai') return 'AI';
   if (key === 'path') return plural ? 'paths' : 'path';
   if (key === 'branch') return plural ? 'branches' : 'branch';
@@ -1533,7 +1606,7 @@ function infoGroupLabelHtml(group = {}) {
     return `<button type="button" class="info-tree-group-label info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>`;
   }
   const representative = infoGroupRepresentativeRecord(group);
-  if (group.dimension === 'ai') {
+  if (group.dimension === 'tmux-window') {
     const html = infoRecordAiValueHtml(representative, {action: false});
     if (html) return `<span class="info-tree-group-label info-tree-group-label-ai">${html}</span>`;
   }
@@ -1566,6 +1639,7 @@ function infoGroupChildCountHtml(group = {}) {
 
 function infoGroupDimensionLabel(key) {
   if (key === 'tab') return 'Tab(tmux session):';
+  if (key === 'tmux-window') return 'tmux sub-window:';
   if (key === 'branch') return 'Git branch:';
   if (key === 'pr') return 'GitHub PR:';
   return `${infoDimensionLabel(key)}:`;
@@ -1810,9 +1884,15 @@ function infoTabAgentAiLabel(agent = null) {
   return agentLabel || 'AI';
 }
 
+function infoAgentKindLabel(value) {
+  const kind = String(value || '').trim();
+  return kind || 'No AI';
+}
+
 function infoTabAgentEntry(session, agent = null) {
   const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
   const aiLabel = infoTabAgentAiLabel(agent);
+  const aiKind = String(agent?.kind || '');
   const label = infoTabAgentLabel(session, agent);
   const title = agent
     ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
@@ -1823,7 +1903,8 @@ function infoTabAgentEntry(session, agent = null) {
     title,
     tabLabel,
     aiLabel,
-    kind: String(agent?.kind || ''),
+    kind: aiKind,
+    aiAgentLabel: infoAgentKindLabel(aiKind),
     window: String(agent?.window_index ?? agent?.window ?? ''),
     windowIndex: String(agent?.window_index ?? agent?.window ?? ''),
     state: String(agent?.state || ''),
