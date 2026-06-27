@@ -412,15 +412,17 @@ def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket
     monkeypatch.setattr(app_module, "BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY", 3)
     webapp = app_module.TmuxWebtermApp(["1"])
     raw_cache_key = ("payload", "1", "/tmp/repo", {"branch": "main"})
+    events = []
     try:
         for _index in range(5):
-            webapp.log_sampled_background_refresh_event(
+            event = webapp.log_sampled_background_refresh_event(
                 "background_refresh_started",
                 BACKGROUND_ROLE_SESSION_FILES,
                 "Session-files background refresh started",
                 webapp.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": "1"}, cache_key=raw_cache_key),
             )
-        events = [event for event in webapp.event_log.tail(limit=10) if event["type"] == "background_refresh_started"]
+            if event:
+                events.append(event)
     finally:
         webapp.control_server.stop()
 

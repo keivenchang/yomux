@@ -14,7 +14,7 @@ Before committing local changes, run the parallel check gate:
 python3 tools/check.py
 ```
 
-Use `python3 tools/check.py --list-lanes` to see focused lanes, `--lane <name>` for a smaller run, and `--serial` when debugging order or load-sensitive failures.
+Use `python3 tools/check.py --list-lanes` to see focused lanes, `--lane <name>` for a smaller run, and `--serial` when debugging order or load-sensitive failures. Full/default runs serialize through `/tmp/yolomux-expensive-tools.lock` and run at lower priority while live YOLOmux servers are active; use `--no-tool-guard` only when you intentionally want overlapping high-load checks.
 
 ## Requirements
 

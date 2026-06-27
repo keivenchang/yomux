@@ -2049,10 +2049,10 @@ body.theme-light .yoagent-global .markdown-body pre code {
   --info-tree-tab-color-hover: var(--pane-tab-active-border);
   --info-tree-ai-color: var(--icon-code);
   --info-tree-ai-color-hover: #bae6fd;
-  --info-tree-path-color: #fbbf24;
-  --info-tree-path-color-hover: #fde68a;
-  --info-tree-branch-color: var(--icon-archive);
-  --info-tree-branch-color-hover: #fed7aa;
+  --info-tree-path-color: var(--text);
+  --info-tree-path-color-hover: var(--text);
+  --info-tree-branch-color: var(--link-soft);
+  --info-tree-branch-color-hover: var(--link-soft-hover);
   --info-tree-pr-color: var(--info-tree-pr-neutral);
   --info-tree-pr-color-hover: var(--info-tree-pr-neutral-hover);
   --info-tree-linear-color: #5eead4;
@@ -2066,10 +2066,10 @@ body.theme-light .yoagent-global .markdown-body pre code {
 body.theme-light .info-tree {
   --info-tree-ai-color: var(--icon-code);
   --info-tree-ai-color-hover: var(--link-soft);
-  --info-tree-path-color: var(--icon-doc);
-  --info-tree-path-color-hover: #854d0e;
-  --info-tree-branch-color: var(--icon-archive);
-  --info-tree-branch-color-hover: #9a3412;
+  --info-tree-path-color: var(--text);
+  --info-tree-path-color-hover: var(--text);
+  --info-tree-branch-color: var(--link-soft);
+  --info-tree-branch-color-hover: var(--link-soft-hover);
   --info-tree-pr-color: var(--info-tree-pr-neutral);
   --info-tree-pr-color-hover: var(--info-tree-pr-neutral-hover);
   --info-tree-linear-color: var(--git-untracked-badge);
@@ -2383,8 +2383,8 @@ button.info-tree-tab-token.active:focus-visible {
   --info-tree-field-hover: var(--info-tree-tab-color-hover);
 }
 .info-tree-field-ai {
-  --info-tree-field-color: var(--info-tree-ai-color);
-  --info-tree-field-hover: var(--info-tree-ai-color-hover);
+  --info-tree-field-color: var(--pane-tab-active-bg);
+  --info-tree-field-hover: var(--pane-tab-active-border);
 }
 .info-tree-field-path {
   --info-tree-field-color: var(--info-tree-path-color);

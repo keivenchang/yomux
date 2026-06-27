@@ -3261,7 +3261,10 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
         f"""
         <div class="info-tree-record info-tree-item{' info-tree-item-last' if index == 23 else ''}">
           <div class="info-tree-record-main">
+            <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link info-tree-action-link-path">/repo/app/{index}</button></span></div>
+            <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value"><span class="info-tree-value-text">feature/context</span></span></div>
             <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link">tab-{index}</button></span></div>
+            <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link">0:codex</button></span></div>
             <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><a href="#">#1</a> PR description {index}</span></div>
             <div class="info-tree-field info-tree-field-updated"><span class="info-tree-field-label">updated:</span><span class="info-tree-field-value"><span class="info-tree-meta-updated">{index} days ago</span></span></div>
           </div>
@@ -3283,7 +3286,7 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
                 <div class="info-tree-group-children">
                   <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="branch" data-info-depth="1" open>
                     <summary id="branch-summary">
-                      <span class="info-tree-group-dimension">Git BRANCH:</span>
+                      <span class="info-tree-group-dimension">Git branch:</span>
                       <span class="info-tree-group-label-line"><span class="info-tree-group-label">feature/context</span></span>
                     </summary>
                     <div class="info-tree-group-children">
@@ -3312,6 +3315,29 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
         const rootSummary = document.getElementById('path-summary');
         const branchSummary = document.getElementById('branch-summary');
         const prSummary = document.getElementById('pr-summary');
+        const resolvedColor = value => {
+          const probe = document.createElement('span');
+          probe.style.color = value;
+          document.body.appendChild(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color;
+        };
+        const colorSnapshot = () => ({
+          text: resolvedColor('var(--text)'),
+          themeAccent: resolvedColor('var(--pane-tab-active-bg)'),
+          branchBlue: resolvedColor('var(--link-soft)'),
+          pathGroup: getComputedStyle(rootSummary.querySelector('.info-tree-group-label')).color,
+          pathLeaf: getComputedStyle(document.querySelector('.info-tree-field-path .info-tree-action-link')).color,
+          branchGroup: getComputedStyle(branchSummary.querySelector('.info-tree-group-label')).color,
+          branchLeaf: getComputedStyle(document.querySelector('.info-tree-field-branch .info-tree-value-text')).color,
+          aiLeafLabel: getComputedStyle(document.querySelector('.info-tree-field-ai .info-tree-field-label')).color,
+          aiLeafValue: getComputedStyle(document.querySelector('.info-tree-field-ai .info-tree-action-link')).color,
+        });
+        const darkColors = colorSnapshot();
+        document.body.classList.add('theme-light');
+        const lightColors = colorSnapshot();
+        document.body.classList.remove('theme-light');
         const initialBranchTop = branchSummary.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
         scroller.scrollTop = scroller.scrollHeight;
         scroller.scrollTop = initialBranchTop + 90;
@@ -3395,6 +3421,8 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
             branchConnectorWidth: branchConnector.width,
             branchConnectorHeight: branchConnector.height,
             branchRowConnectorContent: branchRowConnector.content,
+            darkColors,
+            lightColors,
           });
         }));
         """
@@ -3450,6 +3478,18 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     assert metrics["branchConnectorWidth"] == "11px", metrics
     assert metrics["branchConnectorHeight"] == "1px", metrics
     assert metrics["branchRowConnectorContent"] == "none", metrics
+    assert metrics["darkColors"]["pathGroup"] == metrics["darkColors"]["text"], metrics
+    assert metrics["darkColors"]["pathLeaf"] == metrics["darkColors"]["text"], metrics
+    assert metrics["lightColors"]["pathGroup"] == metrics["lightColors"]["text"], metrics
+    assert metrics["lightColors"]["pathLeaf"] == metrics["lightColors"]["text"], metrics
+    assert metrics["darkColors"]["branchGroup"] == metrics["darkColors"]["branchBlue"], metrics
+    assert metrics["darkColors"]["branchLeaf"] == metrics["darkColors"]["branchBlue"], metrics
+    assert metrics["lightColors"]["branchGroup"] == metrics["lightColors"]["branchBlue"], metrics
+    assert metrics["lightColors"]["branchLeaf"] == metrics["lightColors"]["branchBlue"], metrics
+    assert metrics["darkColors"]["aiLeafLabel"] == metrics["darkColors"]["themeAccent"], metrics
+    assert metrics["darkColors"]["aiLeafValue"] == metrics["darkColors"]["themeAccent"], metrics
+    assert metrics["lightColors"]["aiLeafLabel"] == metrics["lightColors"]["themeAccent"], metrics
+    assert metrics["lightColors"]["aiLeafValue"] == metrics["lightColors"]["themeAccent"], metrics
 
 
 def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):

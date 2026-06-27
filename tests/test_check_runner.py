@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+from contextlib import contextmanager
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -74,3 +76,68 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "browser and not e2e",
         "-q",
     ]
+
+
+def test_active_yolomux_server_records_uses_generation_heartbeats(monkeypatch, tmp_path):
+    check = load_check_module()
+    generations_dir = tmp_path / "background-owner" / "generations"
+    generations_dir.mkdir(parents=True)
+    (generations_dir / "live.json").write_text(json.dumps({"pid": 100, "last_heartbeat": 50.0, "port": 8002}), encoding="utf-8")
+    (generations_dir / "stale.json").write_text(json.dumps({"pid": 101, "last_heartbeat": 10.0, "port": 8001}), encoding="utf-8")
+    (generations_dir / "dead.json").write_text(json.dumps({"pid": 102, "last_heartbeat": 50.0, "port": 8003}), encoding="utf-8")
+    (generations_dir / "bad.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(check, "pid_is_alive", lambda pid: pid != 102)
+
+    records = check.active_yolomux_server_records(state_dir=tmp_path, now=55.0, stale_seconds=30.0)
+
+    assert records == [{"pid": 100, "last_heartbeat": 50.0, "port": 8002}]
+
+
+def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_active(monkeypatch, capsys):
+    check = load_check_module()
+    events = []
+
+    @contextmanager
+    def fake_expensive_tool_lock(enabled=True, lock_path=check.DEFAULT_TOOL_LOCK_PATH):
+        events.append(("lock", enabled, lock_path))
+        yield enabled
+
+    def fake_run_parallel(selected):
+        events.append(("run", [lane.name for lane in selected]))
+        return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
+
+    monkeypatch.setattr(check, "expensive_tool_lock", fake_expensive_tool_lock)
+    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [{"port": 8002}, {"port": 7777}])
+    monkeypatch.setattr(check, "lower_current_process_priority", lambda records: events.append(("nice", records)) or True)
+    monkeypatch.setattr(check, "run_parallel", fake_run_parallel)
+
+    assert check.main([]) == 0
+
+    assert events[0] == ("lock", True, check.DEFAULT_TOOL_LOCK_PATH)
+    assert events[1] == ("nice", [{"port": 8002}, {"port": 7777}])
+    assert events[2][0] == "run"
+    assert events[2][1] == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
+    output = capsys.readouterr().out
+    assert "Waiting for YOLOmux expensive-tool lock" in output
+    assert "lowered check priority by nice +5" in output
+
+
+def test_focused_cheap_lane_skips_live_server_priority_work(monkeypatch):
+    check = load_check_module()
+    events = []
+
+    @contextmanager
+    def fake_expensive_tool_lock(enabled=True, lock_path=check.DEFAULT_TOOL_LOCK_PATH):
+        events.append(("lock", enabled))
+        yield enabled
+
+    def fail_active_records():
+        raise AssertionError("cheap focused lanes should not probe live YOLOmux server state")
+
+    monkeypatch.setattr(check, "expensive_tool_lock", fake_expensive_tool_lock)
+    monkeypatch.setattr(check, "active_yolomux_server_records", fail_active_records)
+    monkeypatch.setattr(check, "run_parallel", lambda selected: [check.LaneResult(selected[0].name, selected[0].label, True, 0.0, "")])
+
+    assert check.main(["--lane", "whitespace"]) == 0
+
+    assert events == [("lock", False)]

@@ -13,20 +13,30 @@ Usage:
   python3 tools/check.py
   python3 tools/check.py --serial
   python3 tools/check.py --lane pytest-browser
+  python3 tools/check.py --no-tool-guard
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from contextlib import contextmanager
+import fcntl
+import json
+import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_TOOL_LOCK_PATH = Path(tempfile.gettempdir()) / "yolomux-expensive-tools.lock"
+TOOL_GUARD_STATE_STALE_SECONDS = 30.0
+TOOL_GUARD_NICE_DELTA = 5
+EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-browser", "pytest-e2e"})
 
 
 @dataclass(frozen=True)
@@ -174,6 +184,87 @@ def command_text(args: list[str]) -> str:
     return shlex.join(args)
 
 
+def state_dir_from_env() -> Path:
+    return Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
+
+
+def pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def active_yolomux_server_records(
+    *,
+    state_dir: Path | None = None,
+    now: float | None = None,
+    stale_seconds: float = TOOL_GUARD_STATE_STALE_SECONDS,
+) -> list[dict[str, object]]:
+    root = Path(state_dir) if state_dir is not None else state_dir_from_env()
+    generations_dir = root / "background-owner" / "generations"
+    timestamp = time.time() if now is None else float(now)
+    try:
+        paths = sorted(generations_dir.glob("*.json"))
+    except OSError:
+        return []
+    records: list[dict[str, object]] = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        try:
+            pid = int(record.get("pid") or 0)
+            heartbeat = float(record.get("last_heartbeat") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not pid_is_alive(pid):
+            continue
+        if heartbeat <= 0.0 or timestamp - heartbeat > stale_seconds:
+            continue
+        records.append(record)
+    return records
+
+
+def lower_current_process_priority(active_records: list[dict[str, object]], *, nice_delta: int = TOOL_GUARD_NICE_DELTA) -> bool:
+    if not active_records or nice_delta <= 0:
+        return False
+    try:
+        os.nice(nice_delta)
+    except OSError:
+        return False
+    return True
+
+
+def selected_needs_tool_guard(selected: list[Lane], explicit_lane_names: list[str] | None) -> bool:
+    selected_names = {lane.name for lane in selected}
+    if explicit_lane_names is None:
+        return True
+    return bool(selected_names & EXPENSIVE_TOOL_LANES)
+
+
+@contextmanager
+def expensive_tool_lock(enabled: bool = True, lock_path: Path = DEFAULT_TOOL_LOCK_PATH):
+    if not enabled:
+        yield False
+        return
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def run_lane(lane: Lane) -> LaneResult:
     started = time.monotonic()
     chunks: list[str] = []
@@ -232,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--serial", action="store_true", help="run lanes one at a time instead of in parallel")
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
+    parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock and live-server priority lowering")
     args = parser.parse_args(argv)
 
     if args.list_lanes:
@@ -245,11 +337,20 @@ def main(argv: list[str] | None = None) -> int:
         print("no lanes selected", file=sys.stderr)
         return 2
 
+    guard_enabled = selected_needs_tool_guard(selected, args.lane) and not args.no_tool_guard
+    if guard_enabled:
+        print(f"Waiting for YOLOmux expensive-tool lock: {DEFAULT_TOOL_LOCK_PATH}", flush=True)
     started = time.monotonic()
-    mode = "serial" if args.serial else "parallel"
-    print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
-    results = run_serial(selected) if args.serial else run_parallel(selected)
-    elapsed = time.monotonic() - started
+    with expensive_tool_lock(enabled=guard_enabled):
+        if guard_enabled:
+            active_records = active_yolomux_server_records()
+            if lower_current_process_priority(active_records):
+                ports = sorted({str(record.get("port") or "?") for record in active_records})
+                print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
+        mode = "serial" if args.serial else "parallel"
+        print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
+        results = run_serial(selected) if args.serial else run_parallel(selected)
+        elapsed = time.monotonic() - started
 
     failed = [result.label for result in results if not result.ok]
     print("\n" + ("=" * 40))
