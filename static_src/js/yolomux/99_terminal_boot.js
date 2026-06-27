@@ -1355,7 +1355,7 @@ function infoRecordFieldHtml(kind, html, title = '') {
   const labels = {
     path: 'path',
     branch: 'Git BRANCH',
-    pr: 'PR',
+    pr: 'GitHub PR',
     linear: 'Linear',
     tab: 'Tab(tmux session)',
     ai: 'tmux sub-window',
@@ -1572,6 +1572,7 @@ function infoGroupChildCountHtml(group = {}) {
 function infoGroupDimensionLabel(key) {
   if (key === 'tab') return 'Tab(tmux session):';
   if (key === 'branch') return 'Git BRANCH:';
+  if (key === 'pr') return 'GitHub PR:';
   return `${infoDimensionLabel(key)}:`;
 }
 

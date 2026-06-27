@@ -3262,7 +3262,7 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
         <div class="info-tree-record info-tree-item{' info-tree-item-last' if index == 23 else ''}">
           <div class="info-tree-record-main">
             <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link">tab-{index}</button></span></div>
-            <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">PR:</span><span class="info-tree-field-value"><a href="#">#1</a> PR description {index}</span></div>
+            <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><a href="#">#1</a> PR description {index}</span></div>
             <div class="info-tree-field info-tree-field-updated"><span class="info-tree-field-label">updated:</span><span class="info-tree-field-value"><span class="info-tree-meta-updated">{index} days ago</span></span></div>
           </div>
         </div>
@@ -3276,28 +3276,28 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
           <div id="info-tree-scroller" class="info-list info-tree-list">
             <div class="info-tree">
               <details class="info-tree-group info-tree-item" data-info-dimension="path" data-info-depth="0" open>
-              <summary id="path-summary">
-                <span class="info-tree-group-dimension">Path</span>
-                <span class="info-tree-group-label-line"><span class="info-tree-group-label">/repo/app</span><span class="info-tree-group-child-count">(2 branches)</span></span>
-              </summary>
-              <div class="info-tree-group-children">
-                <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="branch" data-info-depth="1" open>
-                  <summary id="branch-summary">
-                    <span class="info-tree-group-dimension">Branch</span>
-                    <span class="info-tree-group-label-line"><span class="info-tree-group-label">feature/context</span></span>
-                  </summary>
-                  <div class="info-tree-group-children">
-                    <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="pr" data-info-depth="2" open>
-                      <summary id="pr-summary">
-                        <span class="info-tree-group-dimension">PR</span>
-                        <span class="info-tree-group-label-line"><span class="info-tree-group-label">#42 sticky parent</span></span>
-                      </summary>
-                      <div class="info-tree-group-children">{records}</div>
-                    </details>
-                  </div>
-                </details>
-              </div>
-            </details>
+                <summary id="path-summary">
+                  <span class="info-tree-group-dimension">Path</span>
+                  <span class="info-tree-group-label-line"><span class="info-tree-group-label">/repo/app</span><span class="info-tree-group-child-count">(2 branches)</span></span>
+                </summary>
+                <div class="info-tree-group-children">
+                  <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="branch" data-info-depth="1" open>
+                    <summary id="branch-summary">
+                      <span class="info-tree-group-dimension">Git BRANCH:</span>
+                      <span class="info-tree-group-label-line"><span class="info-tree-group-label">feature/context</span></span>
+                    </summary>
+                    <div class="info-tree-group-children">
+                      <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="pr" data-info-depth="2" open>
+                        <summary id="pr-summary">
+                          <span class="info-tree-group-dimension">GitHub PR:</span>
+                          <span class="info-tree-group-label-line"><span class="info-tree-group-label">#42 sticky parent</span></span>
+                        </summary>
+                        <div class="info-tree-group-children">{records}</div>
+                      </details>
+                    </div>
+                  </details>
+                </div>
+              </details>
             </div>
           </div>
         </div>
@@ -3321,9 +3321,10 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
           const rootRect = rootSummary.getBoundingClientRect();
           const branchRect = branchSummary.getBoundingClientRect();
           const prRect = prSummary.getBoundingClientRect();
-          const topElement = document.elementFromPoint(scrollerRect.left + 110, scrollerRect.top + Math.min(12, rootRect.height / 2));
-          const branchElement = document.elementFromPoint(scrollerRect.left + 110, scrollerRect.top + rootRect.height + Math.min(12, branchRect.height / 2));
-          const prElement = document.elementFromPoint(scrollerRect.left + 110, scrollerRect.top + rootRect.height + branchRect.height + Math.min(12, prRect.height / 2));
+          const summaryValueX = scrollerRect.left + Math.min(scrollerRect.width - 24, 210);
+          const topElement = document.elementFromPoint(summaryValueX, scrollerRect.top + Math.min(12, rootRect.height / 2));
+          const branchElement = document.elementFromPoint(summaryValueX, scrollerRect.top + rootRect.height + Math.min(12, branchRect.height / 2));
+          const prElement = document.elementFromPoint(summaryValueX, scrollerRect.top + rootRect.height + branchRect.height + Math.min(12, prRect.height / 2));
           const rootStyle = getComputedStyle(rootSummary);
           const branchStyle = getComputedStyle(branchSummary);
           const prStyle = getComputedStyle(prSummary);
@@ -3461,7 +3462,7 @@ def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
             <div class="info-tree">
               <details class="info-tree-group info-tree-item" data-info-dimension="pr" data-info-depth="0" open>
                 <summary id="previous-pr">
-                  <span class="info-tree-group-dimension">PR</span>
+                  <span class="info-tree-group-dimension">GitHub PR:</span>
                   <span class="info-tree-group-label-line"><span class="info-tree-group-label">#81 previous group</span></span>
                 </summary>
                 <div class="info-tree-group-children">
@@ -3475,7 +3476,7 @@ def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
               </details>
               <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="pr" data-info-depth="0" open>
                 <summary id="next-pr">
-                  <span class="info-tree-group-dimension">PR</span>
+                  <span class="info-tree-group-dimension">GitHub PR:</span>
                   <span class="info-tree-group-label-line"><span class="info-tree-group-label">#80 next group</span></span>
                 </summary>
                 <div class="info-tree-group-children">
@@ -6077,9 +6078,9 @@ LIGHT_MODE_SURFACES = """
   <div class="info-list info-tree-list" id="info-content">
     <div class="info-tree">
       <details class="info-tree-group" open>
-        <summary id="info-tree-summary"><span class="info-tree-group-dimension">PR</span><span class="info-tree-group-label-line"><span class="info-tree-group-label">#1 full title</span><span class="info-tree-group-child-count" id="info-tree-child-count">(2 branches)</span></span></summary>
+        <summary id="info-tree-summary"><span class="info-tree-group-dimension">GitHub PR:</span><span class="info-tree-group-label-line"><span class="info-tree-group-label">#1 full title</span><span class="info-tree-group-child-count" id="info-tree-child-count">(2 branches)</span></span></summary>
         <div class="info-tree-group-children">
-          <div class="info-tree-record" id="info-tree-record"><div class="info-tree-record-main"><div class="info-tree-field info-tree-field-pr" id="info-tree-desc"><span class="info-tree-field-label" id="info-tree-label">PR:</span><span class="info-tree-field-value"><a href="#">#1</a> description</span></div><div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link" id="info-tree-session">tab</button></span></div></div></div>
+          <div class="info-tree-record" id="info-tree-record"><div class="info-tree-record-main"><div class="info-tree-field info-tree-field-pr" id="info-tree-desc"><span class="info-tree-field-label" id="info-tree-label">GitHub PR:</span><span class="info-tree-field-value"><a href="#">#1</a> description</span></div><div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link" id="info-tree-session">tab</button></span></div></div></div>
         </div>
       </details>
     </div>
