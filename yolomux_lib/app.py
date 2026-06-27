@@ -8529,15 +8529,23 @@ class TmuxWebtermApp:
         return rev
 
     def merge_shared_attention_acks(self) -> bool:
+        # Hold file_lock across the whole read->rev-check->apply. write_shared_attention_acks_union
+        # holds file_lock for its entire read-modify-write plus its in-memory cache + rev update, so
+        # keeping the lock here makes the two mutually exclusive. Releasing it before the apply (as the
+        # original did) let a concurrent local ack interleave: this poll would then regress
+        # client_watch_attention_ack_rev and overwrite attention_ack_keys with the stale snapshot it
+        # read earlier, dropping a just-acked key from the cache. The guard is monotonic (<=) so a stale
+        # or equal rev is never applied; that also makes the -1 startup rev load the file exactly once.
+        # changed compares the key SET, so a timestamp-only re-ack does not trigger a client refetch.
         with file_lock(common.ATTENTION_ACKS_PATH, dir_mode=0o700):
             file_keys, rev = self._read_shared_attention_acks_locked()
-        with self.client_watch_lock:
-            if rev == self.client_watch_attention_ack_rev:
-                return False
-            self.client_watch_attention_ack_rev = rev
-        with self.attention_ack_lock:
-            changed = self.attention_ack_keys != file_keys
-            self.attention_ack_keys = dict(file_keys)
+            with self.client_watch_lock:
+                if rev <= self.client_watch_attention_ack_rev:
+                    return False
+                self.client_watch_attention_ack_rev = rev
+            with self.attention_ack_lock:
+                changed = set(self.attention_ack_keys) != set(file_keys)
+                self.attention_ack_keys = dict(file_keys)
         return changed
 
     def poll_attention_acks_client_event_once(self) -> list[str]:
