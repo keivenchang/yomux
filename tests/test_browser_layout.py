@@ -2334,6 +2334,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
               expectedText: resolvedColor(document.body, 'var(--text)'),
               expectedWindowButtonText: resolvedColor(document.body, 'var(--pane-ctl-fg, var(--pc-control-fg))'),
               expectedActiveText: resolvedColor(document.body, 'var(--pane-tab-active-text)'),
+              expectedInactiveBorder: resolvedColor(document.body, 'var(--pane-inactive-tab-border)'),
               expectedMutedText: resolvedColor(document.body, 'var(--muted)'),
               windowIcons,
               nonSessionWithSessionTab,
@@ -2357,6 +2358,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["inactive"]["ariaCurrent"] == "", (label, metrics)
         assert metrics["active"]["tabBg"] == metrics["active"]["expectedActiveBg"], (label, metrics)
         assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedInactiveBg"], (label, metrics)
+        assert metrics["inactive"]["tabBorderTop"] == metrics["expectedInactiveBorder"], (label, metrics)
         assert metrics["active"]["tabBg"] != metrics["active"]["tabColor"], (label, metrics)
         assert metrics["inactive"]["tabBg"] != metrics["inactive"]["tabColor"], (label, metrics)
         if theme_class == "theme-light":

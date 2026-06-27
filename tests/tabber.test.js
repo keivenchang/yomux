@@ -1218,6 +1218,7 @@ async function runTabberSuite() {
     assert.equal(/max-inline-size:\s*min\(var\(--pane-tab-width\), 100%\)/.test(tabberSessionTabCss), false, 'A2/A4: Tabber session label has no shared pane-tab-width max cap');
     assert.ok(/color:\s*var\(--tabber-detail-color\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session text uses the dim Tabber detail color');
     assert.ok(/background:\s*var\(--pane-bar-bg, var\(--panel2\)\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session background matches dockview inactive tabs');
+    assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session labels keep a visible pane-tab outline');
     assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\]:not\(\.tabber-active-session\):not\(\.selected\):hover \.tabber-session-tab\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)/.test(css), 'A2: inactive Tabber session hover uses the shared inactive-tab hover token');
     assert.ok(/\.file-tree-row\.tabber-row\.tabber-active-session \.tabber-session-tab,[\s\S]*\.tabber-session-tab\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: active Tabber session labels use active pane-tab tokens');
     assert.ok(/\.file-tree-row\.tabber-row\.selected \.tabber-session-tab\s*\{[\s\S]*box-shadow:\s*0 0 0 1px var\(--active-control-focus-ring\)/.test(css), 'A2/A3: selected tree rows keep a visible focus ring on the tab-shaped label');
