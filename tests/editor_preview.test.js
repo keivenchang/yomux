@@ -852,7 +852,11 @@ async function runEditorPreviewSuite() {
     api.setWorkflowTransitionGlowSecondsForTest(60);
     const freshWorking = api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey, nowSeconds: 1000, scheduleRefresh: false});
     assert.equal(freshWorking.state, 'working', 'working transition state is recorded');
+    assert.equal(freshWorking.pulseActive, true, 'a newly visible working ball glows during the workflow transition glow duration');
     assert.equal(freshWorking.transitionPulseActive, true, 'a newly visible working ball pulses during the workflow transition glow duration');
+    const staleWorking = api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey, nowSeconds: 1065, scheduleRefresh: false});
+    assert.equal(staleWorking.pulseActive, false, 'after the glow duration the green working marker loses its transition glow');
+    assert.equal(staleWorking.transitionPulseActive, false, 'after the workflow transition glow duration the green working transition pulse stops');
     const freshStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1005, scheduleRefresh: false});
     assert.equal(freshStopped.state, 'cooldown', 'a window that just stopped working shows yellow');
     assert.equal(freshStopped.pulseActive, true, 'a fresh stopped marker glows during the configured glow window');

@@ -15557,7 +15557,13 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       agentWindowActivityStates.set(transitionKey, {state: STATE_KEY.working, visualTone: STATE_KEY.working, seenWorking: true, stoppedAt: 0, transitionStartedAt});
       scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
     }
-    return {state: STATE_KEY.working, icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`, transitionPulseActive: agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds)};
+    return {
+      state: STATE_KEY.working,
+      icon: '●',
+      label: `${agentLabel(kind)} ${t('state.working')}`,
+      pulseActive: agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
+      transitionPulseActive: agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
+    };
   }
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
   let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
