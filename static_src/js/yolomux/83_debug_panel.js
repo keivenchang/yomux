@@ -66,7 +66,7 @@ const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphSeries = Object.freeze([
   {key: 'api', label: 'API', unit: 'countPerSecond'},
   {key: 'sse', label: 'SSE', unit: 'countPerSecond'},
-  {key: 'latency', label: 'Latency', unit: 'ms'},
+  {key: 'latency', label: 'Client latency', unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond'},
   {key: 'askAgents', label: 'Attention', unit: 'count'},
   {key: 'runAgents', label: 'RUN', unit: 'count'},
@@ -77,10 +77,10 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'latency', label: 'Latency', series: ['latency'], unit: 'ms'},
-  {key: 'count', label: 'API/SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond'},
+  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms'},
+  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond'},
+  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
-  {key: 'bandwidth', label: 'Bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
   {key: 'activity', label: 'Agent status', series: ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
   {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, legendPlacement: 'footer', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);

@@ -2237,7 +2237,7 @@ async function runEditorPreviewSuite() {
     const html = api.debugPanelHtmlForTest();
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range slider stops');
-    assert.ok(html.includes('API/SSE/sec') && html.includes('Bandwidth/sec'), 'chart headers carry per-second units');
+    assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart headers carry per-second units');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>[0-9.]+(?:B|kB|MB)</.test(html), 'bandwidth chart Y axis uses compact byte labels');
@@ -2331,7 +2331,7 @@ async function runEditorPreviewSuite() {
     const html = api.debugPanelHtmlForTest();
 
     assert.ok(html.includes('data-js-debug-chart="count"') && html.includes('data-js-debug-chart="latency"') && html.includes('data-js-debug-chart="bandwidth"') && html.includes('data-js-debug-chart="cpu"'), 'YO!stats renders separate charts for unlike units');
-    assert.ok(html.includes('API/SSE/sec') && html.includes('Bandwidth/sec'), 'chart titles keep the per-second units');
+    assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart titles keep the per-second units');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>2</.test(html), 'count chart Y axis shows compact API/SSE rates');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>5s</.test(html), 'latency chart Y axis converts large millisecond values to terse seconds');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>1\.0kB</.test(html), 'bandwidth chart Y axis keeps byte labels terse');
@@ -2456,7 +2456,7 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.charts.includes('activity'), 'agent activity chart appears when agent rows exist');
     assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
-    assert.deepStrictEqual([...summary.charts], ['latency', 'count', 'cpu', 'bandwidth', 'activity', 'agentTokens'], 'YO!stats charts render in scan order: latency, API/SSE, CPU, bandwidth, agent status, agent tokens');
+    assert.deepStrictEqual([...summary.charts], ['latency', 'count', 'bandwidth', 'cpu', 'activity', 'agentTokens'], 'YO!stats charts render in scan order: latency, API/SSE, bandwidth, CPU, agent status, agent tokens');
 
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
