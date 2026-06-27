@@ -2403,7 +2403,7 @@ async function runEditorPreviewSuite() {
     });
     let baselineSummary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(baselineSummary.charts.includes('activity'), 'agent activity chart appears after the server baseline sample');
-    assert.equal(baselineSummary.charts.includes('agentTokens'), false, 'agent token chart waits for server token-rate records instead of plotting baselines');
+    assert.ok(baselineSummary.charts.includes('agentTokens'), 'agent token chart stays visible while waiting for server token-rate records');
     api.debugGraphApplyServerHistoryForTest({
       sequence: 82,
       records: [{
@@ -2484,10 +2484,10 @@ async function runEditorPreviewSuite() {
     });
     summary = noTokenApi.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.charts.includes('activity'), 'activity chart is independent from token data');
-    assert.equal(summary.charts.includes('agentTokens'), false, 'agent token chart stays hidden without token counters');
+    assert.ok(summary.charts.includes('agentTokens'), 'agent token chart stays visible without token counters');
     const noTokenHtml = noTokenApi.debugPanelHtmlForTest();
     assert.ok(noTokenHtml.includes('data-js-debug-chart="activity"'), 'activity chart renders without token counters');
-    assert.equal(noTokenHtml.includes('data-js-debug-chart="agentTokens"'), false, 'token chart does not render without numeric token counters');
+    assert.ok(noTokenHtml.includes('data-js-debug-chart="agentTokens"'), 'token chart renders without numeric token counters');
   });
 
   test('YO!stats aligns server activity and latency samples by timestamp', () => {

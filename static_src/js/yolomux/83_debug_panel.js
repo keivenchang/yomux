@@ -80,7 +80,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
   {key: 'bandwidth', label: 'Bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
   {key: 'activity', label: 'Agent status', series: ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, optional: true, dynamicAgentTokens: true, legendPlacement: 'footer'},
+  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'area', stacked: true, dynamicAgentTokens: true, legendPlacement: 'footer'},
 ]);
 
 function normalizedJsDebugSubTab(value) {
