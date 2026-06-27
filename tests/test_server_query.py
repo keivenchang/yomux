@@ -510,6 +510,7 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     app = SimpleNamespace(
         session_metadata_payload=lambda force=False: {"sessions": {}, "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
+        activity_payload=lambda hours=24.0, visible=True: ({"hours": hours, "visible": visible}, HTTPStatus.OK),
         stats_sample_payload=lambda since=0, client_id="", token_consumer=False: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer},
     )
 
@@ -532,6 +533,11 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"force": True, "locale": "ja"})]
+
+    handler, calls, writes = route_handler("/api/activity?hours=0.5&visible=0", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"hours": 0.5, "visible": False})]
 
     app = SimpleNamespace(background_owner_status_payload=lambda: ({"status": "owner"}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/background/status", app)

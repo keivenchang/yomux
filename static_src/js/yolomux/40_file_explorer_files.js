@@ -156,7 +156,7 @@ function currentFileExplorerListError(path) {
 }
 
 function fileExplorerFsCacheTtlMs() {
-  return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
+  return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 5000) || 0);
 }
 
 function fileExplorerFsBatchKey(type, path) {
@@ -172,6 +172,8 @@ function fileExplorerFsBatchSingleUrl(type, path) {
 
 function suppressBackgroundFilesystemFetch(options = {}) {
   if (options.force === true || options.user === true) return false;
+  if (document.visibilityState === 'hidden') return true;
+  if (!fileExplorerIsOpen()) return true;
   return clientPushConnectedForData() && !fileExplorerUserIsActive();
 }
 
@@ -3422,10 +3424,17 @@ function tabberAgentDateText(agent) {
   return sessionFileDisplayTimeText(ts);
 }
 
-async function fetchTabberActivity() {
+function tabberActivityVisibleConsumer() {
+  return fileExplorerMode === 'tabber' && document.visibilityState !== 'hidden';
+}
+
+async function fetchTabberActivity(options = {}) {
+  const visible = options.visible !== undefined ? Boolean(options.visible) : tabberActivityVisibleConsumer();
+  if (!visible && options.allowHidden !== true) return false;
   try {
     const params = new URLSearchParams();
     params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
+    params.set('visible', visible ? '1' : '0');
     const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
     if (payload && typeof payload === 'object' && payload.activity && typeof payload.activity === 'object') {
       tabberActivityPayload = payload;
@@ -3434,10 +3443,11 @@ async function fetchTabberActivity() {
     // keep the last snapshot; recency just goes stale until the next tick
   }
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  return true;
 }
 
 function warmTabberDataOnLaunch() {
-  if (tabberLaunchWarmupStarted || !transcriptMetaLoaded) return false;
+  if (tabberLaunchWarmupStarted || !transcriptMetaLoaded || !tabberActivityVisibleConsumer()) return false;
   tabberLaunchWarmupStarted = true;
   fetchTabberActivity();
   return true;

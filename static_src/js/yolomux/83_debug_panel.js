@@ -40,8 +40,8 @@ const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
 const jsDebugGraphRawBucketMs = 1000;
 const jsDebugGraphRollupBucketMs = 30 * 1000;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
-const jsDebugStatsPollMs = 1000;
-const jsDebugStatsHistoryFlushMs = 3000;
+const jsDebugStatsPollMs = 3000;
+const jsDebugStatsHistoryFlushMs = 10000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
@@ -1556,12 +1556,28 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   };
 }
 
+function jsDebugStatsPanelVisible() {
+  return debugModeEnabled === true
+    && document.visibilityState !== 'hidden'
+    && typeof itemIsActivePaneTab === 'function'
+    && itemIsActivePaneTab(debugPaneItemId);
+}
+
 function jsDebugStatsTokenConsumerEnabled() {
-  return debugModeEnabled === true && document.visibilityState !== 'hidden';
+  return jsDebugStatsPanelVisible();
+}
+
+function stopJsDebugStatsPolling() {
+  if (jsDebugStatsPollTimer && typeof clearInterval === 'function') clearInterval(jsDebugStatsPollTimer);
+  jsDebugStatsPollTimer = null;
 }
 
 async function pollJsDebugStatsSample() {
   if (!jsDebugCollectionEnabled) return;
+  if (!jsDebugStatsPanelVisible()) {
+    stopJsDebugStatsPolling();
+    return;
+  }
   if (jsDebugStatsPollInFlight || typeof apiFetchJsonQuiet !== 'function') return;
   jsDebugStatsPollInFlight = true;
   try {
@@ -1576,7 +1592,7 @@ async function pollJsDebugStatsSample() {
 }
 
 function scheduleJsDebugStatsHistoryFlush() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushTimer || typeof setTimeout !== 'function') return;
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible() || jsDebugStatsHistoryFlushTimer || typeof setTimeout !== 'function') return;
   jsDebugStatsHistoryFlushTimer = setTimeout(() => {
     jsDebugStatsHistoryFlushTimer = null;
     flushJsDebugStatsHistory();
@@ -1584,7 +1600,7 @@ function scheduleJsDebugStatsHistoryFlush() {
 }
 
 async function flushJsDebugStatsHistory() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushInFlight || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible() || jsDebugStatsHistoryFlushInFlight || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
   const records = [...jsDebugGraphPendingServerBuckets.values()]
     .map(record => ({...record}))
     .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.disconnected_ms || record.cpu_count || record.system_cpu_count)
@@ -1650,8 +1666,16 @@ function clearJsDebugServerHistory() {
 
 function startJsDebugStatsPolling() {
   if (!jsDebugCollectionEnabled || jsDebugStatsPollTimer) return;
+  if (!jsDebugStatsPanelVisible()) return;
   pollJsDebugStatsSample();
   if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollMs);
+}
+
+if (typeof document !== 'undefined' && document?.addEventListener) {
+  document.addEventListener('visibilitychange', () => {
+    if (jsDebugStatsPanelVisible()) startJsDebugStatsPolling();
+    else stopJsDebugStatsPolling();
+  });
 }
 
 function jsDebugTextForClipboard() {

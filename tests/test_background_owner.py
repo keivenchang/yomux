@@ -407,6 +407,35 @@ def test_background_owner_required_log_event_names_have_emitters():
         assert f'"{event_type}"' in source
 
 
+def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket, monkeypatch):
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module, "BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY", 3)
+    webapp = app_module.TmuxWebtermApp(["1"])
+    raw_cache_key = ("payload", "1", "/tmp/repo", {"branch": "main"})
+    try:
+        for _index in range(5):
+            webapp.log_sampled_background_refresh_event(
+                "background_refresh_started",
+                BACKGROUND_ROLE_SESSION_FILES,
+                "Session-files background refresh started",
+                webapp.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": "1"}, cache_key=raw_cache_key),
+            )
+        events = [event for event in webapp.event_log.tail(limit=10) if event["type"] == "background_refresh_started"]
+    finally:
+        webapp.control_server.stop()
+
+    assert len(events) == 2
+    first_details = events[0]["details"]
+    second_details = events[1]["details"]
+    assert first_details["sample_count"] == 1
+    assert second_details["sample_count"] == 3
+    assert second_details["suppressed_since_last"] == 1
+    assert first_details["cache_key_kind"] == "payload"
+    assert "cache_key_hash" in first_details
+    assert "cache_key" not in first_details
+    assert repr(raw_cache_key) not in json.dumps(events, sort_keys=True)
+
+
 def test_background_owner_status_reports_required_counters(tmp_path):
     owner = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", clock=lambda: 100.0)
     owner.record_refresh_request(BACKGROUND_ROLE_SESSION_FILES)

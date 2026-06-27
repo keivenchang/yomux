@@ -4383,6 +4383,7 @@ function installReconnectResyncHandlers() {
     if (document.visibilityState === 'visible') {
       scheduleReconnectResync('visible');
       resyncVisibleTerminalRemoteSizes('visible');
+      if (fileExplorerMode === 'tabber' && typeof fetchTabberActivity === 'function') fetchTabberActivity();
     }
   });
   window.addEventListener('online', () => {

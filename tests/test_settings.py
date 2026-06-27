@@ -113,6 +113,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["updates"]["notify_level"] == "patch"
     assert sanitize_settings({"updates": {"notify_level": "minor"}})["updates"]["notify_level"] == "minor"
+    assert settings["file_explorer"]["dir_cache_ms"] == 5000
     assert settings["performance"]["latency_refresh_ms"] == 1000
     assert settings["performance"]["event_log_refresh_ms"] == 60000
     assert settings["performance"]["agent_window_cooldown_seconds"] == 300

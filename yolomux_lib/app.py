@@ -234,6 +234,8 @@ SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS = 5 * 60
 TABBER_ACTIVITY_CACHE_VERSION = 1
 TABBER_ACTIVITY_CACHE_DIR = common.STATE_DIR / "activity-cache"
+TABBER_ACTIVITY_CONSUMER_TTL_SECONDS = 30.0
+TABBER_ACTIVITY_IDLE_REFRESH_SECONDS = 60.0
 SESSION_FILES_BATCH_MAX_WORKERS = 8
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
@@ -463,6 +465,7 @@ FILESYSTEM_WATCH_KEYFRAME_SECONDS = 60.0
 PERFORMANCE_RECORD_LIMIT = 4096
 PERFORMANCE_RECENT_LIMIT = 120
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
+BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
 BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
 BACKGROUND_CLIENT_EVENT_TYPES = frozenset({"background_owner_changed", "background_refresh_done"})
 BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
@@ -551,6 +554,9 @@ class SharedWatchRootIndex:
         self.limit = max(1, int(limit))
         self._clock = clock or (lambda: time.time())
         self._truncated_signature: tuple[Any, ...] | None = None
+        self.owner_dir = self.path.with_name(f"{self.path.name}.owners")
+        owner_digest = hashlib.sha256(self.owner_id.encode("utf-8", errors="replace")).hexdigest()[:24]
+        self.owner_path = self.owner_dir / f"{owner_digest}.json"
 
     def normalize_paths(self, roots: Any) -> list[str]:
         normalized: list[str] = []
@@ -567,6 +573,9 @@ class SharedWatchRootIndex:
 
     def _empty_payload(self) -> dict[str, Any]:
         return {"version": 1, "owners": {}}
+
+    def _empty_owner_payload(self) -> dict[str, Any]:
+        return {"version": 2, "owner_id": self.owner_id, "entries": {}, "updated_at": self._clock()}
 
     def _read_payload(self) -> dict[str, Any]:
         try:
@@ -595,6 +604,31 @@ class SharedWatchRootIndex:
             owner_payload["entries"] = entries
         owner_payload["updated_at"] = self._clock()
         return entries
+
+    def _read_owner_payload(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.owner_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            legacy_owner = self._read_payload().get("owners", {}).get(self.owner_id, {})
+            if isinstance(legacy_owner, dict) and isinstance(legacy_owner.get("entries"), dict):
+                return {
+                    "version": 2,
+                    "owner_id": self.owner_id,
+                    "entries": legacy_owner["entries"],
+                    "updated_at": self._clock(),
+                }
+            return self._empty_owner_payload()
+        if not isinstance(raw, dict):
+            return self._empty_owner_payload()
+        entries = raw.get("entries")
+        if not isinstance(entries, dict):
+            entries = {}
+        return {
+            "version": 2,
+            "owner_id": str(raw.get("owner_id") or self.owner_id),
+            "entries": entries,
+            "updated_at": self._clock(),
+        }
 
     def _live_owner_entries(self, entries: dict[str, Any], now: float) -> dict[str, Any]:
         live: dict[str, Any] = {}
@@ -627,45 +661,70 @@ class SharedWatchRootIndex:
     def _write_payload(self, payload: dict[str, Any]) -> None:
         atomic_write_text(self.path, json.dumps(payload, separators=(",", ":"), sort_keys=True), mode=0o600)
 
+    def _write_owner_payload(self, payload: dict[str, Any]) -> None:
+        owner_payload = {
+            "version": 2,
+            "owner_id": self.owner_id,
+            "entries": payload.get("entries") if isinstance(payload.get("entries"), dict) else {},
+            "updated_at": self._clock(),
+        }
+        atomic_write_text(self.owner_path, json.dumps(owner_payload, separators=(",", ":"), sort_keys=True), mode=0o600)
+
     def update_client_roots(self, roots: list[str]) -> None:
         now = self._clock()
         expires_at = now + self.ttl_seconds
-        with file_lock(self.path):
-            payload = self._read_payload()
+        with file_lock(self.owner_path):
+            payload = self._read_owner_payload()
             entries = {
                 key: entry
-                for key, entry in self._live_owner_entries(self._owner_entries(payload), now).items()
+                for key, entry in self._live_owner_entries(payload.get("entries", {}), now).items()
                 if isinstance(entry, dict) and entry.get("source") != "client"
             }
             for path in roots[: self.limit]:
                 entries[f"client:{path}"] = self._entry(path, "client", expires_at)
-            self._owner_entries(payload).clear()
-            self._owner_entries(payload).update(entries)
-            self._write_payload(payload)
+            payload["entries"] = entries
+            self._write_owner_payload(payload)
 
     def update_active_roots(self, roots_by_session: dict[str, str]) -> None:
         now = self._clock()
         expires_at = now + self.ttl_seconds
-        with file_lock(self.path):
-            payload = self._read_payload()
+        with file_lock(self.owner_path):
+            payload = self._read_owner_payload()
             entries = {
                 key: entry
-                for key, entry in self._live_owner_entries(self._owner_entries(payload), now).items()
+                for key, entry in self._live_owner_entries(payload.get("entries", {}), now).items()
                 if isinstance(entry, dict) and entry.get("source") != "active"
             }
             for session, path in sorted(roots_by_session.items()):
                 if not path.startswith("/"):
                     continue
                 entries[f"active:{session}:{path}"] = self._entry(path, "active", expires_at, session=session)
-            self._owner_entries(payload).clear()
-            self._owner_entries(payload).update(entries)
-            self._write_payload(payload)
+            payload["entries"] = entries
+            self._write_owner_payload(payload)
 
     def snapshot(self) -> list[str]:
         now = self._clock()
-        payload = self._read_payload()
-        owners = payload.get("owners")
-        if not isinstance(owners, dict):
+        owners: dict[str, Any] = {}
+        legacy_owners = self._read_payload().get("owners")
+        if isinstance(legacy_owners, dict):
+            owners.update(legacy_owners)
+        try:
+            owner_files = sorted(self.owner_dir.glob("*.json"))
+        except OSError:
+            owner_files = []
+        for owner_file in owner_files:
+            try:
+                raw = json.loads(owner_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            entries = raw.get("entries")
+            if not isinstance(entries, dict):
+                continue
+            owner_id = str(raw.get("owner_id") or owner_file.stem)
+            owners[owner_id] = {"entries": entries, "updated_at": raw.get("updated_at")}
+        if not owners:
             return []
         paths_by_owner: dict[str, set[str]] = {}
         for owner, owner_payload in owners.items():
@@ -1025,6 +1084,7 @@ class TmuxWebtermApp:
         self.tabber_activity_cache_refreshing = False
         self.tabber_activity_cache_warmer_thread: threading.Thread | None = None
         self.tabber_activity_cache_warmer_running = False
+        self.tabber_activity_consumer_until = 0.0
         self.auto_approve_cache_lock = threading.RLock()
         self.auto_approve_cache_condition = threading.Condition(self.auto_approve_cache_lock)
         self.auto_approve_cache: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]] | None = None
@@ -1062,6 +1122,9 @@ class TmuxWebtermApp:
         self.stats_agent_token_consumer_until = 0.0
         self.performance_record_lock = threading.RLock()
         self.performance_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_RECORD_LIMIT)
+        self.background_refresh_event_log_lock = threading.Lock()
+        self.background_refresh_event_log_counts: dict[tuple[str, str], int] = {}
+        self.background_refresh_event_log_last_emit_counts: dict[tuple[str, str], int] = {}
         self.client_events = ClientEventBroker()
         self.client_watch_lock = threading.RLock()
         self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
@@ -1775,7 +1838,12 @@ class TmuxWebtermApp:
         )
         if result.get("local_owner"):
             if not result.get("coalesced"):
-                self.log_event(None, "background_refresh_started", "Background refresh accepted by local owner", {"role": role, "payload": payload or {}})
+                self.log_sampled_background_refresh_event(
+                    "background_refresh_started",
+                    role,
+                    "Background refresh accepted by local owner",
+                    self.background_refresh_event_details(role, request_payload, extra={"source": "owner-request"}),
+                )
         elif self.background_refresh_should_fallback(result):
             self.record_background_fallback(role, result, payload)
         if result.get("coalesced"):
@@ -3307,6 +3375,22 @@ class TmuxWebtermApp:
     def tabber_activity_refresh_seconds(self) -> float:
         return self.performance_setting_ms_as_seconds("tabber_activity_refresh_ms", 1.0, 60.0)
 
+    def mark_tabber_activity_consumer(self, visible: bool = True) -> bool:
+        if not visible:
+            return False
+        until = time.monotonic() + max(TABBER_ACTIVITY_CONSUMER_TTL_SECONDS, self.tabber_activity_refresh_seconds() * 2.0)
+        with self.tabber_activity_cache_lock:
+            self.tabber_activity_consumer_until = max(self.tabber_activity_consumer_until, until)
+        return True
+
+    def tabber_activity_has_recent_consumer(self) -> bool:
+        now = time.monotonic()
+        with self.tabber_activity_cache_lock:
+            return self.tabber_activity_consumer_until > now
+
+    def tabber_activity_idle_refresh_seconds(self) -> float:
+        return max(TABBER_ACTIVITY_IDLE_REFRESH_SECONDS, self.tabber_activity_refresh_seconds() * 4.0)
+
     def client_event_watch_sleep_seconds(self, now: float) -> float:
         next_due = min(
             self.client_event_next_signature_poll_at,
@@ -4573,8 +4657,13 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None,
     ) -> None:
         started = time.perf_counter()
-        cache_key_kind = self.performance_cache_key_kind(cache_key)
-        self.log_event(None, "background_refresh_started", "Session-files background refresh started", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": session or "", "cache_key": repr(cache_key), "cache_key_kind": cache_key_kind})
+        refresh_details = self.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": session or ""}, cache_key=cache_key)
+        self.log_sampled_background_refresh_event(
+            "background_refresh_started",
+            BACKGROUND_ROLE_SESSION_FILES,
+            "Session-files background refresh started",
+            refresh_details,
+        )
         try:
             self.compute_session_files_cache_entry(
                 cache_key,
@@ -4589,8 +4678,15 @@ class TmuxWebtermApp:
                 ),
             )
             compute_ms = (time.perf_counter() - started) * 1000
-            self.log_event(None, "background_refresh_done", "Session-files background refresh finished", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": session or "", "cache_key": repr(cache_key), "cache_key_kind": cache_key_kind, "compute_ms": round(compute_ms, 3)})
-            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {"session": session or "", "cache_key": repr(cache_key), "cache_key_kind": cache_key_kind, "compute_ms": compute_ms})
+            done_details = dict(refresh_details)
+            done_details["compute_ms"] = round(compute_ms, 3)
+            self.log_sampled_background_refresh_event(
+                "background_refresh_done",
+                BACKGROUND_ROLE_SESSION_FILES,
+                "Session-files background refresh finished",
+                done_details,
+            )
+            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
         finally:
             with self.session_files_cache_lock:
                 self.session_files_refreshing_cache_keys.discard(cache_key)
@@ -4605,16 +4701,28 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None,
     ) -> None:
         started = time.perf_counter()
-        cache_key_kind = self.performance_cache_key_kind(cache_key)
-        self.log_event(None, "background_refresh_started", "Session-files background refresh started", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": info.session, "cache_key": repr(cache_key), "cache_key_kind": cache_key_kind})
+        refresh_details = self.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session}, cache_key=cache_key)
+        self.log_sampled_background_refresh_event(
+            "background_refresh_started",
+            BACKGROUND_ROLE_SESSION_FILES,
+            "Session-files background refresh started",
+            refresh_details,
+        )
         try:
             self.compute_session_files_cache_entry(
                 cache_key,
                 lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
             )
             compute_ms = (time.perf_counter() - started) * 1000
-            self.log_event(None, "background_refresh_done", "Session-files background refresh finished", {"role": BACKGROUND_ROLE_SESSION_FILES, "session": info.session, "cache_key": repr(cache_key), "cache_key_kind": cache_key_kind, "compute_ms": round(compute_ms, 3)})
-            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session, "cache_key": repr(cache_key), "cache_key_kind": cache_key_kind, "compute_ms": compute_ms})
+            done_details = dict(refresh_details)
+            done_details["compute_ms"] = round(compute_ms, 3)
+            self.log_sampled_background_refresh_event(
+                "background_refresh_done",
+                BACKGROUND_ROLE_SESSION_FILES,
+                "Session-files background refresh finished",
+                done_details,
+            )
+            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
         finally:
             with self.session_files_cache_lock:
                 self.session_files_refreshing_cache_keys.discard(cache_key)
@@ -5609,6 +5717,64 @@ class TmuxWebtermApp:
     def log_auto_event(self, session: str, event_type: str, message: str, details: dict[str, Any]) -> None:
         self.log_event(session, event_type, message, details)
 
+    def background_cache_key_summary(self, cache_key: Any) -> dict[str, Any]:
+        if cache_key in (None, ""):
+            return {}
+        try:
+            raw = json.dumps(cache_key, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            raw = repr(cache_key)
+        summary = {
+            "cache_key_hash": hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16],
+        }
+        cache_key_kind = self.performance_cache_key_kind(cache_key)
+        if cache_key_kind:
+            summary["cache_key_kind"] = cache_key_kind
+        return summary
+
+    def background_refresh_event_details(
+        self,
+        role: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        cache_key: Any = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {"role": role}
+        request_payload = payload if isinstance(payload, dict) else {}
+        for key in ("session", "reason", "trigger", "cache_key_kind"):
+            value = request_payload.get(key)
+            if value not in (None, ""):
+                details[key] = truncate_text(str(value), 160)
+        selected_cache_key = request_payload.get("cache_key") if cache_key in (None, "") else cache_key
+        details.update(self.background_cache_key_summary(selected_cache_key))
+        if extra:
+            for key, value in extra.items():
+                if value in (None, "") or key == "cache_key":
+                    continue
+                if isinstance(value, str):
+                    details[key] = truncate_text(value, 160)
+                elif isinstance(value, (int, float, bool)):
+                    details[key] = value
+        return details
+
+    def log_sampled_background_refresh_event(self, event_type: str, role: str, message: str, details: dict[str, Any]) -> dict[str, Any] | None:
+        key = (event_type, role)
+        with self.background_refresh_event_log_lock:
+            count = self.background_refresh_event_log_counts.get(key, 0) + 1
+            self.background_refresh_event_log_counts[key] = count
+            should_emit = count == 1 or count % BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY == 0
+            if not should_emit:
+                return None
+            previous_emit_count = self.background_refresh_event_log_last_emit_counts.get(key, 0)
+            self.background_refresh_event_log_last_emit_counts[key] = count
+        event_details = dict(details)
+        event_details["sample_count"] = count
+        suppressed = max(0, count - previous_emit_count - 1)
+        if suppressed:
+            event_details["suppressed_since_last"] = suppressed
+        return self.log_event(None, event_type, message, event_details)
+
     def performance_payload_bytes(self, payload: Any) -> int:
         try:
             return len(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
@@ -6162,10 +6328,23 @@ class TmuxWebtermApp:
     def run_tabber_activity_cache_refresh(self) -> None:
         try:
             started = time.perf_counter()
-            self.log_event(None, "background_refresh_started", "Tabber activity background refresh started", {"role": BACKGROUND_ROLE_TABBER_ACTIVITY})
+            refresh_details = self.background_refresh_event_details(BACKGROUND_ROLE_TABBER_ACTIVITY, {"cache_key_kind": "tabber-activity"}, cache_key={"kind": "tabber-activity"})
+            self.log_sampled_background_refresh_event(
+                "background_refresh_started",
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "Tabber activity background refresh started",
+                refresh_details,
+            )
             self.refresh_tabber_activity_cache()
             compute_ms = (time.perf_counter() - started) * 1000
-            self.log_event(None, "background_refresh_done", "Tabber activity background refresh finished", {"role": BACKGROUND_ROLE_TABBER_ACTIVITY, "compute_ms": round(compute_ms, 3)})
+            done_details = dict(refresh_details)
+            done_details["compute_ms"] = round(compute_ms, 3)
+            self.log_sampled_background_refresh_event(
+                "background_refresh_done",
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "Tabber activity background refresh finished",
+                done_details,
+            )
             self.publish_background_refresh_done(BACKGROUND_ROLE_TABBER_ACTIVITY, {"compute_ms": compute_ms})
         finally:
             with self.tabber_activity_cache_lock:
@@ -6202,18 +6381,30 @@ class TmuxWebtermApp:
                 if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
                     return
                 started = time.monotonic()
+                refreshed = False
                 try:
-                    self.refresh_tabber_activity_cache()
+                    if self.tabber_activity_has_recent_consumer():
+                        self.refresh_tabber_activity_cache()
+                        refreshed = True
+                    else:
+                        self.record_performance_sample(
+                            BACKGROUND_ROLE_TABBER_ACTIVITY,
+                            "warmer",
+                            trigger="idle",
+                            cache_key={"kind": "tabber-activity"},
+                            cache_status="skipped:no-consumer",
+                        )
                 except (OSError, RuntimeError, ValueError) as exc:
                     self.log_event(None, "client_event_watch_error", f"Tabber activity cache refresh failed: {exc}", {})
-                interval = self.tabber_activity_refresh_seconds()
+                interval = self.tabber_activity_refresh_seconds() if refreshed else self.tabber_activity_idle_refresh_seconds()
                 elapsed = max(0.0, time.monotonic() - started)
                 time.sleep(max(0.1, interval - elapsed))
         finally:
             with self.tabber_activity_cache_lock:
                 self.tabber_activity_cache_warmer_running = False
 
-    def activity_payload(self, hours: Any = 24.0) -> tuple[dict[str, Any], HTTPStatus]:
+    def activity_payload(self, hours: Any = 24.0, visible: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
+        visible_consumer = self.mark_tabber_activity_consumer(visible)
         refresh_seconds = self.tabber_activity_refresh_seconds()
         bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
         source_signature = self.tabber_activity_source_signature()
@@ -6240,7 +6431,10 @@ class TmuxWebtermApp:
                 "refresh_seconds": refresh_seconds,
             }
             if not fresh:
-                if self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                if not visible_consumer:
+                    payload["cache"]["refreshing"] = False
+                    payload["cache"]["idle_no_consumer"] = True
+                elif self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
                     payload["cache"]["refreshing"] = self.start_tabber_activity_cache_refresh()
                 else:
                     self.record_background_follower_stale_read(BACKGROUND_ROLE_TABBER_ACTIVITY)
@@ -6259,6 +6453,23 @@ class TmuxWebtermApp:
                         }
                     else:
                         payload["cache"]["refreshing_elsewhere"] = True
+            return payload, HTTPStatus.OK
+        if not visible_consumer:
+            payload = {
+                "activity": {},
+                "agents": [],
+                "agent_windows": {},
+                "errors": [],
+                "session_scope": "configured",
+                "session_file_hours": bounded_hours,
+                "cache": {
+                    "hit": False,
+                    "stale": True,
+                    "age_seconds": None,
+                    "refresh_seconds": refresh_seconds,
+                    "idle_no_consumer": True,
+                },
+            }
             return payload, HTTPStatus.OK
         if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             refresh_result = self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})

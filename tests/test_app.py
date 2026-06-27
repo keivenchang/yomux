@@ -2960,6 +2960,7 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
 
     try:
         webapp.tabber_activity_cache_warmer_running = True
+        webapp.mark_tabber_activity_consumer()
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
         monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger: events.append(trigger) or [])
         monkeypatch.setattr(webapp, "tabber_activity_refresh_seconds", lambda: 15.0)
@@ -2973,6 +2974,57 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
     assert refreshes == ["refresh"]
     assert events == []
     assert webapp.tabber_activity_cache_warmer_running is False
+
+
+def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["5"])
+    refreshes = []
+    sleeps = []
+
+    def stop_after_sleep(seconds):
+        sleeps.append(seconds)
+        raise RuntimeError(f"stop after sleeping {seconds}")
+
+    try:
+        webapp.tabber_activity_cache_warmer_running = True
+        monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
+        monkeypatch.setattr(webapp, "tabber_activity_refresh_seconds", lambda: 15.0)
+        monkeypatch.setattr(app_module.time, "sleep", stop_after_sleep)
+
+        with pytest.raises(RuntimeError, match="stop after sleeping"):
+            webapp.tabber_activity_cache_warmer_loop()
+    finally:
+        webapp.control_server.stop()
+
+    assert refreshes == []
+    assert len(sleeps) == 1
+    assert 59.9 <= sleeps[0] <= 60.0
+    recent = webapp.performance_metrics_payload()["recent"]
+    assert recent[-1]["role"] == app_module.BACKGROUND_ROLE_TABBER_ACTIVITY
+    assert recent[-1]["cache_status"] == "skipped:no-consumer"
+    assert webapp.tabber_activity_cache_warmer_running is False
+
+
+def test_activity_payload_hidden_consumer_does_not_refresh_stale_cache(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        payload = {"activity": {"5": {"last_user_input_ts": 100}}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": 24.0}
+        webapp.set_tabber_activity_cache(payload, write_disk=False, source_signature=webapp.tabber_activity_source_signature())
+        stored_at, cached_payload = webapp.tabber_activity_cache
+        webapp.tabber_activity_cache = (stored_at - webapp.tabber_activity_refresh_seconds() - 1, cached_payload)
+        monkeypatch.setattr(webapp, "read_tabber_activity_disk_cache", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: (_ for _ in ()).throw(AssertionError("hidden activity request must not queue refresh")))
+
+        hidden, status = webapp.activity_payload(visible=False)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert hidden["cache"]["stale"] is True
+    assert hidden["cache"]["refreshing"] is False
+    assert hidden["cache"]["idle_no_consumer"] is True
 
 
 def test_activity_summary_ready_auto_triggers_do_not_regenerate(monkeypatch):
@@ -3388,8 +3440,11 @@ def test_client_watch_roots_are_shared_across_app_instances(monkeypatch, tmp_pat
 
         assert app1.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
         assert app2.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
-        payload = json.loads((tmp_path / "watch-index.json").read_text(encoding="utf-8"))
-        assert sorted(payload["owners"]) == sorted([app1.watch_root_owner_id, app2.watch_root_owner_id])
+        assert not (tmp_path / "watch-index.json").exists()
+        owner_files = sorted((tmp_path / "watch-index.json.owners").glob("*.json"))
+        assert len(owner_files) == 2
+        owner_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in owner_files]
+        assert sorted(payload["owner_id"] for payload in owner_payloads) == sorted([app1.watch_root_owner_id, app2.watch_root_owner_id])
     finally:
         app1.control_server.stop()
         app2.control_server.stop()
@@ -3431,31 +3486,29 @@ def test_client_watch_roots_lock_free_read_during_write(monkeypatch, tmp_path):
         writer.update_client_watch_roots({"roots": ["/repo/old"]})
         observed: list[list[str]] = []
 
-        with app_module.file_lock(index_path):
+        owner_path = writer.watch_root_index.owner_path
+        with app_module.file_lock(owner_path):
             thread = threading.Thread(target=lambda: observed.append(reader.client_watch_roots_snapshot()))
             thread.start()
             thread.join(timeout=5)
             assert not thread.is_alive()
             assert observed == [["/repo/old"]]
             replacement = {
-                "version": 1,
-                "owners": {
-                    "other-server": {
-                        "entries": {
-                            "client:/repo/new": {
-                                "path": "/repo/new",
-                                "source": "client",
-                                "expires_at": 200.0,
-                                "updated_at": 100.0,
-                            }
-                        }
+                "version": 2,
+                "owner_id": writer.watch_root_owner_id,
+                "entries": {
+                    "client:/repo/new": {
+                        "path": "/repo/new",
+                        "source": "client",
+                        "expires_at": 200.0,
+                        "updated_at": 100.0,
                     }
                 },
             }
-            app_module.atomic_write_text(index_path, json.dumps(replacement, separators=(",", ":")), mode=0o600)
+            app_module.atomic_write_text(owner_path, json.dumps(replacement, separators=(",", ":")), mode=0o600)
 
         assert reader.client_watch_roots_snapshot() == ["/repo/new"]
-        index_path.write_text("{not-json", encoding="utf-8")
+        owner_path.write_text("{not-json", encoding="utf-8")
         assert reader.client_watch_roots_snapshot() == []
     finally:
         writer.control_server.stop()
@@ -3474,6 +3527,22 @@ def test_client_watch_roots_limit_keeps_multiple_owners_visible(tmp_path, caplog
     with caplog.at_level("WARNING"):
         assert owner_a.snapshot() == ["/repo/a1", "/repo/b1"]
     assert "shared watch-root index truncated from 4 live roots across 2 owners to 2" in caplog.text
+
+
+def test_client_watch_roots_updates_only_current_owner_file(tmp_path):
+    index_path = tmp_path / "watch-index.json"
+    clock = lambda: 100.0
+    owner_a = app_module.SharedWatchRootIndex(index_path, "owner-a", limit=10, clock=clock)
+    owner_b = app_module.SharedWatchRootIndex(index_path, "owner-b", limit=10, clock=clock)
+
+    owner_a.update_client_roots(["/repo/a"])
+    owner_b.update_client_roots(["/repo/b"])
+    before_b = owner_b.owner_path.read_text(encoding="utf-8")
+    owner_a.update_active_roots({"1": "/repo/a-active"})
+
+    assert not index_path.exists()
+    assert owner_b.owner_path.read_text(encoding="utf-8") == before_b
+    assert owner_a.snapshot() == ["/repo/a", "/repo/a-active", "/repo/b"]
 
 
 def test_filesystem_change_summary_counts_entry_changes():

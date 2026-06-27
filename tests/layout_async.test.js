@@ -1418,6 +1418,35 @@ async function runLayoutAsyncSuite() {
     {
       const api = loadYolomux();
       const calls = [];
+      api.setDocumentVisibilityForTest('hidden');
+      api.setFetchForTest((url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+        return Promise.resolve(jsonResponse({
+          responses: (body.requests || []).map(request => ({
+            id: request.id,
+            ok: true,
+            status: 200,
+            payload: {path: request.path, entries: [{name: 'visible.txt', kind: 'file'}]},
+          })),
+        }));
+      });
+      assert.equal(await api.fetchDirectoryForTest('/home/hidden'), null, 'hidden pages skip background Finder directory fetches');
+      assert.deepStrictEqual(canonical(calls), [], 'hidden background Finder fetches do not enqueue /api/fs/batch');
+
+      const userFetch = api.fetchDirectoryForTest('/home/hidden', {user: true});
+      await api.flushFileExplorerFsBatchForTest();
+      assert.equal((await userFetch)[0].name, 'visible.txt');
+      assert.deepStrictEqual(canonical(calls), [{
+        method: 'POST',
+        requests: [{id: 1, path: '/home/hidden', type: 'list'}],
+        url: '/api/fs/batch',
+      }], 'explicit user Finder fetches bypass hidden-background suppression');
+    }
+
+    {
+      const api = loadYolomux();
+      const calls = [];
       api.setFetchForTest((url, options = {}) => {
         const body = JSON.parse(options.body || '{}');
         calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});

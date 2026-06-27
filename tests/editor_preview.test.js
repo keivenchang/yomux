@@ -1965,6 +1965,8 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('boom'), 'debug panel renders JS error rows');
     const debugPaneSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    assert.ok(debugPaneSource.includes('const jsDebugStatsPollMs = 3000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 10000;'), 'YO!stats stats polling uses slower default sample and history flush intervals');
+    assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
     assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-area--runAgents') && debugPaneCss.includes('.js-debug-area--agentToken') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, area/line graph styling, and legends');
@@ -2584,6 +2586,7 @@ async function runEditorPreviewSuite() {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
     await flushAsyncWork();
+    assert.equal(api.jsDebugStatsPanelVisibleForTest(), true, 'YO!stats stats polling is enabled when the Debug pane is the active visible tab');
     api.clearJsDebugEventsForTest();
     api.setFetchForTest((url, options = {}) => {
       requests.push({url: String(url), method: String(options.method || 'GET'), body: options.body || ''});
@@ -2608,6 +2611,25 @@ async function runEditorPreviewSuite() {
     assert.equal(body.client_id, sampleUrl.searchParams.get('client_id'), 'YO!stats history posts the same per-tab client id');
     assert.ok(body.records.some(record => record.api_count === 1), 'YO!stats history posts browser API counters for this client');
     assert.equal(api.jsDebugEventsForTest().length, 1, 'regular debug event recording remains enabled');
+  });
+
+  await testAsync('YO!stats stats polling is gated on active Debug pane visibility', async () => {
+    const api = loadYolomux('?debug=1', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET'), body: options.body || ''});
+      return Promise.resolve(jsonResponse({ok: true, history: {sequence: 0, records: []}}));
+    });
+    assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 still enables event instrumentation');
+    assert.equal(api.jsDebugStatsPanelVisibleForTest(), false, 'stats polling stays off when the Debug tab is not active');
+
+    await api.pollJsDebugStatsSampleForTest();
+    api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 1});
+    await api.flushJsDebugStatsHistoryForTest();
+
+    assert.equal(requests.length, 0, 'inactive Debug instrumentation does not call stats-sample or stats-history');
+    assert.equal(api.jsDebugEventsForTest().length, 1, 'event capture remains available for later YO!stats inspection');
   });
 
   await testAsync('YO!stats renders disconnected client gaps as a bottom red baseline', async () => {

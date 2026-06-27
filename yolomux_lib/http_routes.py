@@ -492,12 +492,13 @@ def get_run_history(request: Any, parsed: Any, route: Route) -> None:
 def get_activity(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
+    visible = query_bool(qs, "visible", True)
     request.write_validated_float_result(
         qs,
         "hours",
         24.0,
         ACTIVITY_MAX_HOURS,
-        lambda hours: request.share_scoped_activity_result(request.server.app.activity_payload(hours=hours)),
+        lambda hours: request.share_scoped_activity_result(request.server.app.activity_payload(hours=hours, visible=visible)),
     )
 
 
