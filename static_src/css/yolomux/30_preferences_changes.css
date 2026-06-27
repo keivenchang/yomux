@@ -391,12 +391,6 @@ body.theme-light .js-debug-graph-view {
 .js-debug-graph--selecting .js-debug-selection-rect {
   opacity: 1;
 }
-.js-debug-disconnect-line {
-  stroke: var(--bad);
-  stroke-width: 5;
-  stroke-linecap: butt;
-  opacity: 0.95;
-}
 .js-debug-area {
   opacity: 0.18;
 }

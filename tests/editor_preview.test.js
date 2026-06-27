@@ -2690,7 +2690,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.jsDebugEventsForTest().length, 1, 'event capture remains available for later YO!stats inspection');
   });
 
-  await testAsync('YO!stats renders disconnected client gaps as a bottom red baseline', async () => {
+  await testAsync('YO!stats records disconnected client gaps without a bottom red baseline', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
     await flushAsyncWork();
@@ -2716,8 +2716,8 @@ async function runEditorPreviewSuite() {
     api.recordJsDebugDisconnectedSpanForTest(now - 4000, now - 1000);
     const html = api.debugPanelHtmlForTest();
 
-    assert.ok(html.includes('data-js-debug-disconnect-line='), 'YO!stats renders a disconnected-client line in the chart SVG');
-    assert.ok(html.includes('class="js-debug-disconnect-line"') && html.includes('Client disconnected'), 'disconnected-client line is the named red baseline overlay');
+    assert.equal(html.includes('data-js-debug-disconnect-line='), false, 'YO!stats does not render disconnected-client bars in the chart SVG');
+    assert.equal(html.includes('class="js-debug-disconnect-line"') || html.includes('Client disconnected'), false, 'disconnected-client spans are not a visible red baseline overlay');
     assert.ok(api.debugGraphBucketSummaryForTest(now).disconnectedBuckets > 0, 'disconnected spans are kept as graph bucket data');
 
     await api.flushJsDebugStatsHistoryForTest();
@@ -2728,7 +2728,7 @@ async function runEditorPreviewSuite() {
     assert.ok(body.records.some(record => Number(record.disconnected_ms || 0) > 0), 'disconnected span history includes disconnected_ms');
 
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
-    assert.ok(/\.js-debug-disconnect-line\s*\{[\s\S]*stroke:\s*var\(--bad\)[\s\S]*stroke-width:\s*5/.test(debugPaneCss), 'disconnected-client baseline is a thick red line');
+    assert.equal(debugPaneCss.includes('.js-debug-disconnect-line'), false, 'disconnected-client baseline CSS is removed');
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     assert.ok(terminalBootSource.includes('recordJsDebugClientEventsConnectionState(false)') && terminalBootSource.includes('recordJsDebugClientEventsConnectionState(true)'), 'client-events SSE transitions feed YO!stats disconnected spans');
   });

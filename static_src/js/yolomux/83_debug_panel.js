@@ -1255,45 +1255,6 @@ function debugGraphXForTime(timeMs, domain) {
   return Math.max(0, Math.min(width, ((Number(timeMs) - startMs) / spanMs) * width));
 }
 
-function debugGraphDisconnectedActiveStartMs() {
-  const inMemory = Number(jsDebugStatsDisconnectStartedAtMs);
-  if (Number.isFinite(inMemory) && inMemory > 0) return inMemory;
-  const stored = Number(jsDebugStatsStorageGet(jsDebugStatsDisconnectedStorageKey));
-  return Number.isFinite(stored) && stored > 0 ? stored : NaN;
-}
-
-function debugGraphDisconnectedSegments(buckets, domain) {
-  const startMs = Number(domain?.startMs);
-  const endMs = Number(domain?.endMs);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return [];
-  const segments = [];
-  for (const bucket of buckets || []) {
-    if (Number(bucket?.disconnectedMs || 0) <= 0) continue;
-    const bucketStart = Number(bucket.startMs);
-    const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
-    if (!Number.isFinite(bucketStart)) continue;
-    const segmentStart = Math.max(startMs, bucketStart);
-    const segmentEnd = Math.min(endMs, bucketStart + bucketDuration);
-    if (segmentEnd > segmentStart) segments.push({startMs: segmentStart, endMs: segmentEnd});
-  }
-  const activeStart = debugGraphDisconnectedActiveStartMs();
-  if (Number.isFinite(activeStart) && endMs > activeStart) {
-    segments.push({startMs: Math.max(startMs, activeStart), endMs});
-  }
-  return segments
-    .filter(segment => segment.endMs > segment.startMs)
-    .sort((a, b) => a.startMs - b.startMs)
-    .reduce((merged, segment) => {
-      const previous = merged.at(-1);
-      if (previous && segment.startMs <= previous.endMs) {
-        previous.endMs = Math.max(previous.endMs, segment.endMs);
-      } else {
-        merged.push({...segment});
-      }
-      return merged;
-    }, []);
-}
-
 function debugGraphSeriesPlotValues(series) {
   return Array.isArray(series.plotValues) ? series.plotValues : (series.values || []);
 }
@@ -1377,16 +1338,6 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
   const points = debugGraphPolylinePoints(series.movingAverageValues || [], series.movingAverageTimes || [], chartMax, domain);
   if (!points) return '';
   return `<polyline class="js-debug-line js-debug-line--${esc(debugGraphSeriesClassKey(series))} js-debug-line--moving-average" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)} ${sampleCount}-sample moving average</title></polyline>`;
-}
-
-function debugGraphDisconnectedOverlayHtml(buckets, domain) {
-  const y = 116;
-  return debugGraphDisconnectedSegments(buckets, domain).map((segment, index) => {
-    const x1 = debugGraphXForTime(segment.startMs, domain).toFixed(1);
-    const x2 = debugGraphXForTime(segment.endMs, domain).toFixed(1);
-    if (x1 === x2) return '';
-    return `<line class="js-debug-disconnect-line" data-js-debug-disconnect-line="${esc(index)}" data-js-debug-disconnect-start="${esc(Math.floor(segment.startMs))}" data-js-debug-disconnect-end="${esc(Math.floor(segment.endMs))}" x1="${esc(x1)}" y1="${esc(y)}" x2="${esc(x2)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"><title>Client disconnected</title></line>`;
-  }).join('');
 }
 
 function debugGraphInteractionOverlayHtml() {
@@ -1549,7 +1500,6 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${debugGraphDisconnectedOverlayHtml(buckets, domain)}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
