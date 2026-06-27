@@ -748,8 +748,11 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   for (const path of fileExplorerExpanded) {
     if (pathIsInsideDirectory(path, normalizedRoot) && path !== normalizedRoot) directories.add(normalizeDirectoryPath(path));
   }
-  for (const directory of directories) {
-    const entries = await fetchDirectory(directory);
+  const listings = await Promise.all(Array.from(directories).map(async directory => ({
+    directory,
+    entries: await fetchDirectory(directory),
+  })));
+  for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
   }
   return entriesByDir;

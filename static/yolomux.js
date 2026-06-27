@@ -15777,8 +15777,11 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   for (const path of fileExplorerExpanded) {
     if (pathIsInsideDirectory(path, normalizedRoot) && path !== normalizedRoot) directories.add(normalizeDirectoryPath(path));
   }
-  for (const directory of directories) {
-    const entries = await fetchDirectory(directory);
+  const listings = await Promise.all(Array.from(directories).map(async directory => ({
+    directory,
+    entries: await fetchDirectory(directory),
+  })));
+  for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
   }
   return entriesByDir;
@@ -51248,7 +51251,7 @@ function maybeHandleServerVersionChange(serverVersion, serverClientRevision = ''
   showServerUpdateBanner(versionReloadAllowed ? normalizedServerVersion : reloadKey);
 }
 
-async function applyTranscriptsPayload(payload, options = {}) {
+async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
   transcriptMetaLoaded = true;
@@ -51296,7 +51299,11 @@ async function applyTranscriptsPayload(payload, options = {}) {
   return true;
 }
 
-async function refreshTranscripts(options = {}) {
+function applyTranscriptsPayload(payload, options = {}) {
+  return applySessionMetadataPayload(payload, options);
+}
+
+async function refreshSessionMetadata(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
   transcriptMetaLoadError = '';
@@ -51307,8 +51314,8 @@ async function refreshTranscripts(options = {}) {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
-      const payload = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
-      await applyTranscriptsPayload(payload, {
+      const payload = await apiFetchJson(`/api/session-metadata${suffix ? `?${suffix}` : ''}`);
+      await applySessionMetadataPayload(payload, {
         refreshAuto: options.refreshAuto !== false,
         refreshContext: true,
         refreshActivity: options.refreshActivity !== false,
@@ -51330,6 +51337,10 @@ async function refreshTranscripts(options = {}) {
     }
   })();
   return transcriptMetaRefreshPromise;
+}
+
+async function refreshTranscripts(options = {}) {
+  return refreshSessionMetadata(options);
 }
 
 let paneInfoBarResizeObserver = null;

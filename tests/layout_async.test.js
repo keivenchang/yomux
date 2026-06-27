@@ -1089,7 +1089,7 @@ async function runLayoutAsyncSuite() {
         if (String(url).startsWith('/api/upload')) {
           return Promise.resolve(jsonResponse({files: [{path: `/home/test/${generatedName}`}]}));
         }
-        if (String(url).startsWith('/api/transcripts')) {
+        if (String(url).startsWith('/api/session-metadata')) {
           return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {agents: []}}}));
         }
         if (String(url).startsWith('/api/auto-approve')) {
@@ -1444,6 +1444,39 @@ async function runLayoutAsyncSuite() {
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
       assert.equal(firstEntries[0].name, 'a.txt');
       assert.equal(secondEntries[0].name, 'b.txt');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      const calls = [];
+      api.setFileExplorerRootForTest('/repo');
+      api.setFileExplorerExpandedForTest(['/repo/src', '/repo/src/js', '/repo/tests']);
+      api.setFetchForTest((url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+        return Promise.resolve(jsonResponse({
+          responses: (body.requests || []).map(request => ({
+            id: request.id,
+            ok: true,
+            status: 200,
+            payload: {path: request.path, entries: [{name: 'child', kind: 'file'}]},
+          })),
+        }));
+      });
+      const entriesPromise = api.fileExplorerEntriesByWatchedDirectoryForTest('/repo');
+      await api.flushFileExplorerFsBatchForTest();
+      const entriesByDir = await entriesPromise;
+      assert.deepStrictEqual(canonical(calls), [{
+        method: 'POST',
+        requests: [
+          {id: 1, path: '/repo', type: 'list'},
+          {id: 2, path: '/repo/src', type: 'list'},
+          {id: 3, path: '/repo/src/js', type: 'list'},
+          {id: 4, path: '/repo/tests', type: 'list'},
+        ],
+        url: '/api/fs/batch',
+      }], 'watched Finder/Differ directories prefetch in one fs batch instead of one POST per expanded directory');
+      assert.deepStrictEqual(canonical(Array.from(entriesByDir.keys()).sort()), ['/repo', '/repo/src', '/repo/src/js', '/repo/tests']);
     }
 
     {

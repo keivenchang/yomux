@@ -304,10 +304,16 @@ def get_preview_popout(request: Any, parsed: Any, route: Route) -> None:
     request.handle_preview_popout_placeholder(parsed)
 
 
-def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
+def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
-    request.write_json(request.share_scoped_transcripts_payload(request.server.app.transcripts_payload(force=query_bool(qs, "force"))))
+    payload_fn = getattr(request.server.app, "session_metadata_payload", None) or request.server.app.transcripts_payload
+    scoped_fn = getattr(request, "share_scoped_session_metadata_payload", None) or request.share_scoped_transcripts_payload
+    request.write_json(scoped_fn(payload_fn(force=query_bool(qs, "force"))))
+
+
+def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
+    get_session_metadata(request, parsed, route)
 
 
 def get_agent_auth(request: Any, parsed: Any, route: Route) -> None:
@@ -967,6 +973,7 @@ CORE_ROUTES = (
     Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
     Route("GET", "/", "readonly", get_home, group="core"),
     Route("GET", "/preview-popout", "readonly", get_preview_popout, group="core"),
+    Route("GET", "/api/session-metadata", "readonly", get_session_metadata, group="core"),
     Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core"),
     Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),

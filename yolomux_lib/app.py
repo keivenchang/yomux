@@ -6066,7 +6066,7 @@ class TmuxWebtermApp:
         self.log_event(session, "yolo_released", "YOLO released for another server", {"requester": requester})
         return {"ok": True, "session": session, "enabled": False}
 
-    def build_transcripts_payload(self, lightweight: bool = False) -> dict[str, Any]:
+    def build_session_metadata_payload(self, lightweight: bool = False) -> dict[str, Any]:
         refresh_errors = self.refresh_sessions(maintenance=not lightweight)
         sessions, errors = discover_sessions(self.sessions)
         with metadata_build_cache():
@@ -6097,13 +6097,16 @@ class TmuxWebtermApp:
             self.warm_metadata_cache_async(sessions)
         return payload
 
+    def build_transcripts_payload(self, lightweight: bool = False) -> dict[str, Any]:
+        return self.build_session_metadata_payload(lightweight=lightweight)
+
     def agent_auth_payload(self, force: bool = False) -> dict[str, Any]:
         return {
             "agentAuth": agent_auth_status(force=True) if force else agent_auth_status(),
             "availableAgents": available_agent_commands(),
         }
 
-    def transcripts_payload(self, force: bool = False) -> dict[str, Any]:
+    def session_metadata_payload(self, force: bool = False) -> dict[str, Any]:
         max_age = TRANSCRIPTS_PAYLOAD_CACHE_SECONDS
         cached = None if force else self.get_transcripts_payload_cache(max_age, allow_stale=True)
         if cached:
@@ -6118,7 +6121,7 @@ class TmuxWebtermApp:
                 payload["cache"]["refreshing"] = self.start_transcripts_payload_refresh()
             return payload
         if not force:
-            payload = self.build_transcripts_payload(lightweight=True)
+            payload = self.build_session_metadata_payload(lightweight=True)
             payload["cache"] = {
                 "hit": False,
                 "stale": True,
@@ -6128,7 +6131,7 @@ class TmuxWebtermApp:
                 "lightweight": True,
             }
             return payload
-        payload = self.build_transcripts_payload()
+        payload = self.build_session_metadata_payload()
         self.set_transcripts_payload_cache(payload)
         payload["cache"] = {
             "hit": False,
@@ -6138,6 +6141,9 @@ class TmuxWebtermApp:
             "refreshing": False,
         }
         return payload
+
+    def transcripts_payload(self, force: bool = False) -> dict[str, Any]:
+        return self.session_metadata_payload(force=force)
 
     def apply_metadata_badge_pulses(self, session_payloads: dict[str, dict[str, Any]]) -> None:
         now = time.time()

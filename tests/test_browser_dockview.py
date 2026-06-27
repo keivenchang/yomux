@@ -1576,7 +1576,7 @@ def test_dockview_new_xterm_survives_stale_transcripts_after_fresh_create_roster
           await createNextSession('term');
           for (let index = 0; index < 50; index += 1) {
             const fetches = window.__bootFetches || [];
-            if (fetches.some(fetch => fetch.path === '/api/transcripts')) break;
+            if (fetches.some(fetch => fetch.path === '/api/session-metadata')) break;
             await wait(10);
           }
           await wait(0);

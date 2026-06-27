@@ -215,7 +215,7 @@ async function runLayoutRestoreSuite() {
       if (parsed.pathname === '/api/ensure-session') {
         return Promise.resolve(jsonResponse({session: parsed.searchParams.get('session'), created: false, ok: true}));
       }
-      if (parsed.pathname === '/api/transcripts') {
+      if (parsed.pathname === '/api/session-metadata') {
         return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {panes: []}}}));
       }
       return Promise.resolve(jsonResponse({ok: true}));
@@ -246,7 +246,7 @@ async function runLayoutRestoreSuite() {
       if (parsed.pathname === '/api/ensure-session') {
         return Promise.resolve(jsonResponse({session: parsed.searchParams.get('session'), created: false, ok: true}));
       }
-      if (parsed.pathname === '/api/transcripts') {
+      if (parsed.pathname === '/api/session-metadata') {
         return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {panes: []}}}));
       }
       return Promise.resolve(jsonResponse({ok: true}));

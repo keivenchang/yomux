@@ -98,3 +98,4 @@ def test_html_and_json_responses_remain_no_store():
     assert html_headers["cache-control"] == "no-store"
     assert "content-encoding" not in json_headers
     assert "content-encoding" not in html_headers
+    assert json_handler.wfile.getvalue() == b'{"ok":true}'

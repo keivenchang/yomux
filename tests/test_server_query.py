@@ -504,7 +504,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
     app = SimpleNamespace(
-        transcripts_payload=lambda force=False: {"transcripts": [], "force": force},
+        session_metadata_payload=lambda force=False: {"sessions": {}, "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
         stats_sample_payload=lambda since=0, client_id="": {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id},
     )
@@ -514,10 +514,15 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a"})]
 
+    handler, calls, writes = route_handler("/api/session-metadata?force=1", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"sessions": {}, "force": True})]
+
     handler, calls, writes = route_handler("/api/transcripts?force=1", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"transcripts": [], "force": True})]
+    assert writes == [("json", HTTPStatus.OK, {"sessions": {}, "force": True})]
 
     handler, calls, writes = route_handler("/api/activity-summary?force=1&locale=ja", app)
     Handler.do_GET(handler)
@@ -748,6 +753,7 @@ def test_share_request_allowed_route_matrix(monkeypatch):
         "/api/fs/read?path=/repo/README.md",
         "/api/fs/raw?path=/repo/README.md",
         "/api/share-stream",
+        "/api/session-metadata",
         "/api/session-files",
         "/api/transcripts",
         "/ws/share-ui",

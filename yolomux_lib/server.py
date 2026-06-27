@@ -1333,7 +1333,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         }
         return scoped, status
 
-    def share_scoped_transcripts_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def share_scoped_session_metadata_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         allowed = set(self.share_sessions())
         if not allowed or not isinstance(payload, dict):
             return payload
@@ -1345,6 +1345,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if isinstance(order, list):
             scoped["session_order"] = [session for session in order if session in allowed]
         return scoped
+
+    def share_scoped_transcripts_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.share_scoped_session_metadata_payload(payload)
 
     def handle_share_create(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         session = str(payload.get("session") or "").strip()
@@ -1836,7 +1839,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+        data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))

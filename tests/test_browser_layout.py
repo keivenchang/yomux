@@ -2522,7 +2522,7 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert "GET /api/notify" in metrics["fetchPaths"]
     assert "GET /api/auto-approve" in metrics["fetchPaths"]
     assert metrics["fetchPaths"].count("POST /api/ensure-session") <= 1
-    assert "GET /api/transcripts" in metrics["fetchPaths"]
+    assert "GET /api/session-metadata" in metrics["fetchPaths"]
     assert "GET /api/ping" in metrics["fetchPaths"]
     assert any("/ws?session=1" in url for url in metrics["sockets"])
     assert {"File", "View", "tmux", "Tabs", "Help"}.issubset(

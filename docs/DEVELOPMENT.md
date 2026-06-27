@@ -240,7 +240,7 @@ All API routes require auth unless the process was intentionally started with th
 
 Linear fallback links use the slug-less `https://linear.app/issue` base by default. Set `YOLOMUX_LINEAR_ISSUE_BASE_URL=https://linear.app/<workspace>/issue` when you want local fallback links to point at a specific Linear workspace; Linear API results keep their server-provided URL.
 
-- `GET /api/transcripts` returns pane, process, transcript-path, `project`, and `window_metadata[]` metadata. Use `project.git` only for the session-level summary. Claude/Codex per-window path/branch/git/active UI must use the backend-owned `agent_windows` rows from `/api/activity` or `/api/auto-approve`, not frontend reconstruction from `window_metadata[]` or pane cwd.
+- `GET /api/session-metadata` returns pane, process, transcript-path, `project`, and `window_metadata[]` metadata. `/api/transcripts` is a compatibility alias for old clients and share links; it does not return transcript text. Use `project.git` only for the session-level summary. Claude/Codex per-window path/branch/git/active UI must use the backend-owned `agent_windows` rows from `/api/activity` or `/api/auto-approve`, not frontend reconstruction from `window_metadata[]` or pane cwd.
 - `GET /api/tmux?session=project1&lines=90` returns a tmux capture-pane snapshot.
 - `GET /api/transcript?session=project1&lines=120` returns the transcript tail for one session.
 - `GET /api/context?session=project1&messages=40` returns a compact, message-oriented transcript tail.

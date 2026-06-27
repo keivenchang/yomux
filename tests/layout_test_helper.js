@@ -736,6 +736,7 @@ globalThis.__layoutTestApi = {
   syncServerWatchRootsForTest: syncServerWatchRoots,
   fileExplorerPaneTabHtml,
   fetchDirectoryForTest: fetchDirectory,
+  fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
   refreshWatchedFilesystemForTest: refreshWatchedFilesystem,
   filesystemWatchTokenForTest() { return fileExplorerFilesystemWatchToken; },

@@ -1812,7 +1812,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           });
         }
         if (url.pathname === '/api/share') return jsonResponse(window.__fixtureSharePayload || {});
-        if (url.pathname === '/api/transcripts') {
+        if (url.pathname === '/api/session-metadata' || url.pathname === '/api/transcripts') {
           const transcriptSessions = window.__fixtureTranscriptSessions || {};
           const currentPath = window.__fixtureTranscriptCurrentPath || '/home/test/yolomux.dev';
           const gitRoot = window.__fixtureTranscriptGitRoot || '/home/test/yolomux.dev';

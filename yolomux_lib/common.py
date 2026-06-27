@@ -642,8 +642,8 @@ def split_csv(values: list[str]) -> list[str]:
 
 def tail_file_lines(path: Path, lines: int) -> str:
     # read a bounded window backward from EOF instead of scanning the whole file front-to-
-    # back. Transcripts are multi-hundred-MB JSONL and this is called on every metadata poll, /api/context,
-    # /api/transcripts, and the summary — a full re-scan each time was the hot path.
+    # back. Transcripts are multi-hundred-MB JSONL and this is called on every metadata poll,
+    # /api/context, /api/session-metadata, and the summary — a full re-scan each time was the hot path.
     want = min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES)
     chunk = 65536
     max_bytes = want * chunk  # generous per-line ceiling; never walk the entire huge file
