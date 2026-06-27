@@ -486,6 +486,62 @@ def test_stats_token_sampling_uses_slower_consumer_cadence(monkeypatch):
     assert token_records[-1]["total"] == pytest.approx(400.0 / (11.0 / 60.0))
 
 
+def test_stats_agent_token_count_falls_back_to_visible_status_counter():
+    webapp = app_module.TmuxWebtermApp(["1"])
+    try:
+        row = {"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 321}
+        assert webapp.stats_agent_token_count(row) == 321
+        assert row["_stats_agent_token_source"] == "status"
+    finally:
+        webapp.control_server.stop()
+
+
+def test_stats_agent_token_rates_use_status_counter_and_reset_baseline(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    rows = iter([
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 100}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 220}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 30}],
+    ])
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
+    try:
+        first = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
+        second = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
+        reset = webapp.stats_agent_activity_record(1120.0, include_token_rates=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert first["agent_token_rates"][0]["total"] == 0.0
+    assert second["agent_token_rates"][0]["total"] == 120.0
+    assert reset["agent_token_rates"][0]["total"] == 0.0
+    assert reset["agent_token_rates"][0]["source"] == "status"
+
+
+def test_stats_agent_token_rates_do_not_spike_when_counter_source_changes(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    rows = iter([
+        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "status_tokens": 80}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "status_tokens": 140}],
+    ])
+    transcript_tokens = iter([1000.0, 1000.0, 1000.0])
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
+    monkeypatch.setattr(webapp, "stats_agent_transcript_token_count", lambda _row: next(transcript_tokens))
+    try:
+        transcript = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
+        status_baseline = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
+        status_delta = webapp.stats_agent_activity_record(1120.0, include_token_rates=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert transcript["agent_token_rates"][0]["source"] == "transcript"
+    assert transcript["agent_token_rates"][0]["total"] == 0.0
+    assert status_baseline["agent_token_rates"][0]["source"] == "status"
+    assert status_baseline["agent_token_rates"][0]["total"] == 0.0
+    assert status_delta["agent_token_rates"][0]["source"] == "status"
+    assert status_delta["agent_token_rates"][0]["total"] == 60.0
+
+
 def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     rows = iter([

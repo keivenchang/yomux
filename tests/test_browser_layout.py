@@ -3306,7 +3306,7 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     page.write_text(page_html(f"""
       <div class="info-tree-panel" style="width: 680px; height: 260px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div id="info-tree-actions" class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
-        <div class="info-pane">
+        <div class="info-pane info-tree-pane-scrolled">
           <div id="info-tree-scroller" class="info-list info-tree-list">
             <div class="info-tree">
               <details class="info-tree-group info-tree-item" data-info-dimension="path" data-info-depth="0" open>
@@ -3523,12 +3523,64 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     assert metrics["lightColors"]["aiLeafValue"] == metrics["lightColors"]["themeAccent"], metrics
 
 
+def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
+    page = tmp_path / "info-tree-top-visible.html"
+    page.write_text(page_html("""
+      <div class="info-tree-panel" style="width: 760px; height: 190px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
+        <div class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
+        <div class="info-pane">
+          <div id="info-tree-scroller" class="info-list info-tree-list">
+            <div class="info-tree">
+              <details class="info-tree-group info-tree-item" data-info-dimension="path" data-info-depth="0" open>
+                <summary id="path-summary">
+                  <span class="info-tree-group-dimension">Path</span>
+                  <span class="info-tree-group-label-line"><span class="info-tree-group-label">/repo/top-visible</span></span>
+                </summary>
+                <div class="info-tree-group-children">
+                  <div class="info-tree-record info-tree-item info-tree-item-last">
+                    <div class="info-tree-record-main">
+                      <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value"><span class="info-tree-value-text">main</span></span></div>
+                    </div>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
+        </div>
+      </div>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const scroller = document.getElementById('info-tree-scroller');
+        const summary = document.getElementById('path-summary');
+        const pane = document.querySelector('.info-pane');
+        const scrollerRect = scroller.getBoundingClientRect();
+        const summaryRect = summary.getBoundingClientRect();
+        const maskStyle = getComputedStyle(pane, '::before');
+        const topElement = document.elementFromPoint(scrollerRect.left + 120, scrollerRect.top + Math.min(12, summaryRect.height / 2));
+        return {
+          scrollTop: scroller.scrollTop,
+          paneScrolled: pane.classList.contains('info-tree-pane-scrolled'),
+          maskContent: maskStyle.content,
+          summaryTopDelta: summaryRect.top - scrollerRect.top,
+          summaryText: topElement ? topElement.textContent : '',
+        };
+        """
+    )
+    assert metrics["scrollTop"] == 0, metrics
+    assert metrics["paneScrolled"] is False, metrics
+    assert metrics["maskContent"] == "none", metrics
+    assert 0 <= metrics["summaryTopDelta"] <= 6, metrics
+    assert "/repo/top-visible" in metrics["summaryText"], metrics
+
+
 def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
     page = tmp_path / "info-tree-top-mask.html"
     page.write_text(page_html("""
       <div class="info-tree-panel" style="width: 760px; height: 190px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
-        <div class="info-pane">
+        <div class="info-pane info-tree-pane-scrolled">
           <div id="info-tree-scroller" class="info-list info-tree-list">
             <div class="info-tree">
               <details class="info-tree-group info-tree-item" data-info-dimension="pr" data-info-depth="0" open>

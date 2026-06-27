@@ -29027,9 +29027,24 @@ function infoGroupingControlsHtml() {
         ${sortControls}`;
 }
 
+function syncInfoTreeScrolledState(root = document) {
+  const panels = root?.matches?.('.info-tree-panel') ? [root] : Array.from(root?.querySelectorAll?.('.info-tree-panel') || []);
+  for (const panel of panels) {
+    const pane = panel.querySelector('.info-pane');
+    const scroller = panel.querySelector('.info-tree-list');
+    if (!pane) continue;
+    pane.classList.toggle('info-tree-pane-scrolled', Boolean(scroller && scroller.scrollTop > 0));
+  }
+}
+
 function bindInfoPanel(panel) {
   if (!panel || panel.__yolomuxInfoPanelBound === true) return;
   panel.__yolomuxInfoPanelBound = true;
+  const treeScroller = panel.querySelector('.info-tree-list');
+  if (treeScroller) {
+    treeScroller.addEventListener('scroll', () => syncInfoTreeScrolledState(panel), {passive: true});
+    syncInfoTreeScrolledState(panel);
+  }
   delegate(panel, 'click', '[data-info-refresh]', event => {
     event.preventDefault();
     refreshTranscripts({force: true});
@@ -49367,31 +49382,35 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
 function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
+  const renderInfoContent = html => {
+    node.innerHTML = html;
+    if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
+  };
   syncTranscriptMetaLoadingUi();
   const serverRoleHtml = infoServerRoleHtml();
   const allRecords = infoRelationshipRecords();
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`;
+      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
       return;
     }
     if (transcriptMetaLoading) {
-      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
+      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
       return;
     }
     if (transcriptMetaLoadError) {
-      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
+      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
-      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
+      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
       return;
     }
-    node.innerHTML = `${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`;
+    renderInfoContent(`${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`);
     return;
   }
-  node.innerHTML = serverRoleHtml + infoTreeHtml(records, infoGrouping, infoSort);
+  renderInfoContent(serverRoleHtml + infoTreeHtml(records, infoGrouping, infoSort));
 }
 
 function infoPrCellHtml(row) {

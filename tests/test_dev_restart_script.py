@@ -49,3 +49,11 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
     assert "--port 8124" in command
     assert "--port 8125" in command
     assert command.count("--dang --self-signed --dev") == 3
+
+
+def test_boot_restart_waits_for_stable_listener_after_ready():
+    source = (ROOT / "boot.sh").read_text(encoding="utf-8")
+
+    assert "verify_port_stable()" in source
+    assert "became unstable after readiness" in source
+    assert "wait_for_port \"$port\"\n  verify_port_stable \"$port\"" in source

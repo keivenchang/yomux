@@ -7585,7 +7585,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   flex-direction: column;
   background: var(--info-pane-bg);
 }
-.info-tree-panel .info-pane::before {
+.info-tree-panel .info-pane.info-tree-pane-scrolled::before {
   content: "";
   position: absolute;
   z-index: 2;

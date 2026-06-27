@@ -1531,7 +1531,16 @@ class TmuxWebtermApp:
             }
         return kind
 
-    def stats_agent_token_count(self, row: dict[str, Any]) -> float | None:
+    def stats_agent_status_token_count(self, row: dict[str, Any]) -> float | None:
+        try:
+            status_tokens = float(row.get("status_tokens"))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(status_tokens) or status_tokens < 0:
+            return None
+        return status_tokens
+
+    def stats_agent_transcript_token_count(self, row: dict[str, Any]) -> float | None:
         transcript = str(row.get("transcript") or "").strip()
         kind = str(row.get("kind") or "").strip().lower()
         if not transcript:
@@ -1540,6 +1549,21 @@ class TmuxWebtermApp:
         if generated_tokens is None:
             return None
         return generated_tokens
+
+    def stats_agent_token_count(self, row: dict[str, Any]) -> float | None:
+        row.pop("_stats_agent_token_source", None)
+        status_tokens = self.stats_agent_status_token_count(row)
+        if status_tokens is not None and self.stats_agent_is_active(row):
+            row["_stats_agent_token_source"] = "status"
+            return status_tokens
+        transcript_tokens = self.stats_agent_transcript_token_count(row)
+        if transcript_tokens is not None:
+            row["_stats_agent_token_source"] = "transcript"
+            return transcript_tokens
+        if status_tokens is not None:
+            row["_stats_agent_token_source"] = "status"
+            return status_tokens
+        return None
 
     def stats_agent_token_key(self, row: dict[str, Any], fallback_index: int) -> str:
         session = str(row.get("session") or "").strip()
@@ -1592,14 +1616,16 @@ class TmuxWebtermApp:
                     token_count = self.stats_agent_token_count(row)
                     if token_count is None:
                         continue
+                    token_source = str(row.get("_stats_agent_token_source") or "sample").strip() or "sample"
                     label = self.stats_agent_token_label(row)
                     previous = self.stats_agent_token_state.get(key)
                     rate = 0.0
-                    if previous and token_count >= float(previous.get("tokens") or 0.0) and sample_time > float(previous.get("time") or 0.0):
+                    previous_source = str(previous.get("source") or "") if isinstance(previous, dict) else ""
+                    if previous and previous_source == token_source and token_count >= float(previous.get("tokens") or 0.0) and sample_time > float(previous.get("time") or 0.0):
                         elapsed_minutes = max((sample_time - float(previous.get("time") or 0.0)) / 60.0, 1.0 / 60.0)
                         rate = (token_count - float(previous.get("tokens") or 0.0)) / elapsed_minutes
-                    agent_token_rates.append({"key": key, "label": label, "total": max(0.0, rate), "samples": 1.0})
-                    self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label}
+                    agent_token_rates.append({"key": key, "label": label, "total": max(0.0, rate), "samples": 1.0, "source": token_source})
+                    self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source}
             for key in list(self.stats_agent_token_state):
                 if key not in seen_keys:
                     self.stats_agent_token_state.pop(key, None)

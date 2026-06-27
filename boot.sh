@@ -298,6 +298,22 @@ wait_for_port() {
   return 1
 }
 
+verify_port_stable() {
+  local port="$1"
+  local code
+  local pids
+  local attempt
+  for ((attempt = 0; attempt < 4; attempt++)); do
+    sleep 1
+    pids="$(port_listener_pids "$port" | tr '\n' ' ')"
+    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/api/ping" 2>/dev/null || true)"
+    if [[ -z "$pids" || ! "$code" =~ ^(200|401)$ ]]; then
+      printf 'port %s became unstable after readiness: listener=%s /api/ping -> %s\n' "$port" "${pids:-none}" "${code:-curl failed}" >&2
+      return 1
+    fi
+  done
+}
+
 launch_server() {
   local log_path="$1"
   local shell_command
@@ -325,6 +341,7 @@ restart_port() {
   )
   printf 'restarted port %s from %s; log: %s\n' "$port" "$repo_root" "$log_path"
   wait_for_port "$port"
+  verify_port_stable "$port"
 }
 
 if [[ "$print_command" -eq 1 ]]; then

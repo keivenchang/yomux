@@ -44,9 +44,24 @@ function infoGroupingControlsHtml() {
         ${sortControls}`;
 }
 
+function syncInfoTreeScrolledState(root = document) {
+  const panels = root?.matches?.('.info-tree-panel') ? [root] : Array.from(root?.querySelectorAll?.('.info-tree-panel') || []);
+  for (const panel of panels) {
+    const pane = panel.querySelector('.info-pane');
+    const scroller = panel.querySelector('.info-tree-list');
+    if (!pane) continue;
+    pane.classList.toggle('info-tree-pane-scrolled', Boolean(scroller && scroller.scrollTop > 0));
+  }
+}
+
 function bindInfoPanel(panel) {
   if (!panel || panel.__yolomuxInfoPanelBound === true) return;
   panel.__yolomuxInfoPanelBound = true;
+  const treeScroller = panel.querySelector('.info-tree-list');
+  if (treeScroller) {
+    treeScroller.addEventListener('scroll', () => syncInfoTreeScrolledState(panel), {passive: true});
+    syncInfoTreeScrolledState(panel);
+  }
   delegate(panel, 'click', '[data-info-refresh]', event => {
     event.preventDefault();
     refreshTranscripts({force: true});

@@ -1620,31 +1620,35 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
 function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
+  const renderInfoContent = html => {
+    node.innerHTML = html;
+    if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
+  };
   syncTranscriptMetaLoadingUi();
   const serverRoleHtml = infoServerRoleHtml();
   const allRecords = infoRelationshipRecords();
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`;
+      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
       return;
     }
     if (transcriptMetaLoading) {
-      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
+      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
       return;
     }
     if (transcriptMetaLoadError) {
-      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
+      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
-      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
+      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
       return;
     }
-    node.innerHTML = `${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`;
+    renderInfoContent(`${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`);
     return;
   }
-  node.innerHTML = serverRoleHtml + infoTreeHtml(records, infoGrouping, infoSort);
+  renderInfoContent(serverRoleHtml + infoTreeHtml(records, infoGrouping, infoSort));
 }
 
 function infoPrCellHtml(row) {
