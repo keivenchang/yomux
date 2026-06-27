@@ -1552,7 +1552,7 @@ def split_seam_fixture_html():
     )
 
 
-def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None):
+def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
@@ -1860,6 +1860,17 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           });
         }
         if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: window.__fixtureSessions});
+        if (url.pathname === '/api/background/status') return jsonResponse(window.__fixtureBackgroundStatusPayload || {
+          owner: true,
+          status: 'disabled',
+          generation: {},
+          current_owner: {},
+          roles: {
+            'search-index': {role: 'search-index', owner: true, status: 'disabled'},
+            'stats-sampler': {role: 'stats-sampler', owner: true, status: 'disabled'},
+          },
+          search_index: {role: 'search-index', owner: true, mode: 'indexing-server', current_server: {}, owner_server: {}, status: 'disabled'},
+        });
         if (url.pathname === '/api/session-files') {
           const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
           return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
@@ -1948,6 +1959,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
           window.__fixtureSharePayload = {json.dumps(share_status_payload, separators=(",", ":")) if share_status_payload is not None else "null"};
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
+          window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
         </script>
         <script>{file_explorer_intent_script}</script>
         <script>{stub_script}</script>

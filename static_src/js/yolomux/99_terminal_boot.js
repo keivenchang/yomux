@@ -204,53 +204,45 @@ function backgroundServerLabel(record, fallback = '') {
   ].filter(Boolean).join(' · ') || 'this server';
 }
 
-function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPayload, options = {}) {
   const data = payload && typeof payload === 'object' ? payload : {};
-  const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
   const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
-  const role = roles['search-index'] && typeof roles['search-index'] === 'object' ? roles['search-index'] : {};
-  const ownsIndex = searchIndex.owner === true || role.owner === true;
-  const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
-  const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
+  const role = roles[roleName] && typeof roles[roleName] === 'object' ? roles[roleName] : {};
+  const ownsRole = role.owner === true;
+  const current = data.generation && typeof data.generation === 'object' ? data.generation : {};
+  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
   return {
-    ownsIndex,
-    mode: ownsIndex ? 'indexing server' : 'read server',
-    state: ownsIndex ? 'owner' : 'reader',
+    ownsRole,
+    mode: ownsRole ? (options.ownerMode || 'owner') : (options.readerMode || 'follower'),
+    state: ownsRole ? 'owner' : 'reader',
     currentLabel: backgroundServerLabel(current),
-    ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
-    status: String(searchIndex.status || role.status || data.status || ''),
+    ownerLabel: owner ? backgroundServerLabel(owner) : '',
+    status: String(role.status || data.status || ''),
     error: String(data.last_error || ''),
   };
 }
 
-function infoServerRoleHtml() {
-  if (shareViewMode) return '';
-  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
-    return `<div class="info-server-role loading" data-index-role="loading" role="status">
-      <span class="info-server-role-label">server role</span>
-      <span class="info-server-role-mode">loading</span>
-      <span class="info-server-role-detail">${esc(backgroundServerLabel(null))}</span>
-    </div>`;
-  }
-  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
-    return `<div class="info-server-role error" data-index-role="error" title="${esc(backgroundOwnerStatusError)}">
-      <span class="info-server-role-label">server role</span>
-      <span class="info-server-role-mode">unavailable</span>
-      <span class="info-server-role-detail">${esc(backgroundOwnerStatusError)}</span>
-    </div>`;
-  }
-  if (!backgroundOwnerStatusPayload) return '';
-  const summary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
-  const detailParts = [`connected ${summary.currentLabel}`];
-  if (!summary.ownsIndex) detailParts.push(summary.ownerLabel ? `index owner ${summary.ownerLabel}` : 'index owner pending');
-  if (summary.error) detailParts.push(summary.error);
-  const title = [`Current connected server: ${summary.currentLabel}`, summary.ownerLabel ? `Index owner: ${summary.ownerLabel}` : '', summary.status ? `Status: ${summary.status}` : '', summary.error].filter(Boolean).join('\n');
-  return `<div class="info-server-role" data-index-role="${esc(summary.state)}" title="${esc(title)}">
-    <span class="info-server-role-dot" aria-hidden="true"></span>
-    <span class="info-server-role-label">server role</span>
-    <span class="info-server-role-mode">${esc(summary.mode)}</span>
-    <span class="info-server-role-detail">${esc(detailParts.join(' · '))}</span>
-  </div>`;
+function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
+  const summary = backgroundOwnerRoleSummary('search-index', payload, {ownerMode: 'indexing server', readerMode: 'read server'});
+  const ownsIndex = searchIndex.owner === true || summary.ownsRole === true;
+  const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
+  const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
+  return {
+    ...summary,
+    ownsIndex,
+    ownsRole: ownsIndex,
+    mode: ownsIndex ? 'indexing server' : 'read server',
+    state: ownsIndex ? 'owner' : 'reader',
+    currentLabel: backgroundServerLabel(current),
+    ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
+    status: String(searchIndex.status || summary.status || data.status || ''),
+  };
+}
+
+function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusPayload) {
+  return backgroundOwnerRoleSummary('stats-sampler', payload, {ownerMode: 'stats owner', readerMode: 'stats follower'});
 }
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
@@ -260,6 +252,7 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   backgroundOwnerStatusError = '';
   backgroundOwnerStatusLoading = false;
   if (options.render !== false) renderInfoPanel();
+  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
   return true;
 }
 
@@ -269,6 +262,7 @@ async function refreshBackgroundOwnerStatus(options = {}) {
   backgroundOwnerStatusLoading = !backgroundOwnerStatusPayload;
   backgroundOwnerStatusError = '';
   if (options.render !== false) renderInfoPanel();
+  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
   backgroundOwnerStatusRefreshPromise = (async () => {
     try {
       const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
@@ -277,6 +271,7 @@ async function refreshBackgroundOwnerStatus(options = {}) {
       backgroundOwnerStatusError = String(error?.payload?.error || error?.message || error);
       backgroundOwnerStatusLoading = false;
       if (options.render !== false) renderInfoPanel();
+      if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
       return false;
     } finally {
       backgroundOwnerStatusRefreshPromise = null;
@@ -1625,30 +1620,29 @@ function renderInfoPanel() {
     if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
   };
   syncTranscriptMetaLoadingUi();
-  const serverRoleHtml = infoServerRoleHtml();
   const allRecords = infoRelationshipRecords();
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
+      renderInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
       return;
     }
     if (transcriptMetaLoading) {
-      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
+      renderInfoContent(infoMetadataLoadingHtml());
       return;
     }
     if (transcriptMetaLoadError) {
-      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
+      renderInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
-      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
+      renderInfoContent(infoMetadataLoadingHtml());
       return;
     }
-    renderInfoContent(`${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`);
+    renderInfoContent(`<div class="info-empty">${esc(t('info.empty'))}</div>`);
     return;
   }
-  renderInfoContent(serverRoleHtml + infoTreeHtml(records, infoGrouping, infoSort));
+  renderInfoContent(infoTreeHtml(records, infoGrouping, infoSort));
 }
 
 function infoPrCellHtml(row) {

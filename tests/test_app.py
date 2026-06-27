@@ -224,7 +224,7 @@ def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypat
     assert sum(record["system_cpu_count"] for record in history["records"]) == 2
     assert sum(record["api_count"] for record in history["records"]) == 0
     with webapp.performance_record_lock:
-        assert any(record["role"] == "stats-sampler" for record in webapp.performance_records)
+        assert any(record["role"] == app_module.BACKGROUND_ROLE_STATS_SAMPLER for record in webapp.performance_records)
 
 
 def test_background_status_includes_performance_summary():

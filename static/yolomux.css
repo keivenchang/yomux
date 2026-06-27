@@ -1338,6 +1338,49 @@ body.app-vw-lte-1100 .topbar-search {
   max-width: none;
   padding: 0 6px;
 }
+.topbar-owner-status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--compact-control-height);
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-owner-status[hidden] {
+  display: none;
+}
+.topbar-owner-status:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.topbar-owner-status.has-reader {
+  border-color: color-mix(in srgb, var(--accent-gold) 56%, var(--line));
+}
+.topbar-owner-status.has-error {
+  border-color: var(--accent-gold);
+}
+.topbar-owner-status-key {
+  color: var(--text-muted-cool);
+  font-weight: 700;
+}
+.topbar-owner-status-part[data-owner-role="owner"] .topbar-owner-status-value {
+  color: var(--brand-green);
+  font-weight: 700;
+}
+.topbar-owner-status-part[data-owner-role="reader"] .topbar-owner-status-value,
+.topbar-owner-status-part[data-owner-role="loading"] .topbar-owner-status-value,
+.topbar-owner-status-part[data-owner-role="error"] .topbar-owner-status-value {
+  color: var(--accent-gold);
+  font-weight: 700;
+}
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
   flex: 0 0 auto;
@@ -8963,50 +9006,6 @@ body.theme-light .yoagent-global .markdown-body pre {
 body.theme-light .yoagent-chat .markdown-body pre code,
 body.theme-light .yoagent-global .markdown-body pre code {
   color: var(--lt-code-block-text);
-}
-.info-server-role {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-block-end: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  color: var(--pane-tab-text);
-  background: color-mix(in srgb, var(--panel2) 82%, var(--panel));
-  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
-}
-.info-server-role-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--muted);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--muted) 18%, transparent);
-}
-.info-server-role[data-index-role="owner"] .info-server-role-dot {
-  background: var(--good);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--good) 22%, transparent);
-}
-.info-server-role[data-index-role="reader"] .info-server-role-dot {
-  background: var(--accent-gold);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-gold) 24%, transparent);
-}
-.info-server-role-label {
-  color: var(--text-muted-cool);
-  font-weight: 700;
-  text-transform: uppercase;
-  font-size: var(--ui-font-size-xs);
-}
-.info-server-role-mode {
-  flex: 0 0 auto;
-  font-weight: 700;
-}
-.info-server-role-detail {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .info-tree {
   --info-tree-sticky-level-block: 27px;

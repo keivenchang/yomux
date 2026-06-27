@@ -1659,6 +1659,15 @@ function runningAgentCount() {
   return yoloWorkingSessions().length;
 }
 
+function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.get(session) || {}) {
+  if (payload?.prompt?.visible === true) return true;
+  const key = String(payload?.screen?.key || '');
+  if (key && key !== STATE_KEY.idle) return true;
+  if (autoApproveEnabledForSession(payload)) return true;
+  const info = transcriptMeta.sessions?.[session];
+  return typeof sessionAgentWindowStatusPayloads === 'function' && sessionAgentWindowStatusPayloads(session, info, payload).length > 0;
+}
+
 function sessionCountsAsRunning(session, stateKey = '') {
   if (sessionYoloIsWorking(session)) return true;
   return ['tests-running', 'yolo-approval'].includes(String(stateKey || ''));
@@ -1727,6 +1736,15 @@ function tmuxSignalPaneCommand(pane) {
 
 function tmuxSignalPaneIsAgent(pane) {
   return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+}
+
+function tmuxSignalWindowAgentPanes(windowRecord) {
+  const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  return panes.filter(tmuxSignalPaneIsAgent);
+}
+
+function tmuxSignalWindowHasAgentPane(windowRecord) {
+  return tmuxSignalWindowAgentPanes(windowRecord).length > 0;
 }
 
 function tmuxSignalPaneTarget(pane) {
@@ -1978,33 +1996,40 @@ function globalActivityCounts() {
   let running = 0;
   let ask = 0;
   let blocked = 0;
-  const signalSessions = new Set(signalWindows.map(tmuxSignalWindowSession).filter(Boolean));
+  const countedSignalSessions = new Set();
+  const countedSignalWindows = new Set();
   const runningSignalSessions = new Set();
   const bellSignalWindows = new Set();
   const actionRequiredSignalWindows = new Set();
   const signalAttentionSessions = new Set();
   for (const windowRecord of signalWindows) {
     const signalSession = tmuxSignalWindowSession(windowRecord);
+    const signalKey = tmuxSignalWindowKey(windowRecord);
     const signalPayload = signalSession ? (autoApproveStates.get(signalSession) || {}) : {};
     const signalPromptSignature = signalSession ? promptAttentionPayloadSignature(signalPayload) : '';
     const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature, signalPayload) : false;
-    if (windowRecord?.bell_flag === true && !signalPromptCleared) {
-      const signalKey = tmuxSignalWindowKey(windowRecord);
+    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+    const hasAgentPane = tmuxSignalWindowHasAgentPane(windowRecord);
+    const hasActionRequiredPane = panes.some(tmuxSignalPaneActionRequired);
+    if (windowRecord?.bell_flag === true && hasAgentPane && !signalPromptCleared) {
       if (signalKey) bellSignalWindows.add(signalKey);
       if (signalSession) signalAttentionSessions.add(signalSession);
     }
-    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
-    if (panes.some(tmuxSignalPaneActionRequired) && !signalPromptCleared) {
-      const signalKey = tmuxSignalWindowKey(windowRecord);
+    if (hasActionRequiredPane && !signalPromptCleared) {
       if (signalKey) actionRequiredSignalWindows.add(signalKey);
       if (signalSession) signalAttentionSessions.add(signalSession);
     }
+    if (signalKey && (hasAgentPane || hasActionRequiredPane)) countedSignalWindows.add(signalKey);
+    if (signalSession && (hasAgentPane || hasActionRequiredPane)) countedSignalSessions.add(signalSession);
+    if (!hasAgentPane) continue;
     if (!tmuxSignalWindowIsRecentlyActive(windowRecord)) continue;
     running += 1;
     if (signalSession) runningSignalSessions.add(signalSession);
   }
   ask += new Set([...bellSignalWindows, ...actionRequiredSignalWindows]).size;
-  const countedSessions = new Set([...sessions, ...autoApproveStates.keys()].map(value => String(value || '')).filter(Boolean));
+  const countedSessions = new Set([...autoApproveStates.keys()]
+    .map(value => String(value || ''))
+    .filter(session => session && autoApprovePayloadCountsInTopbar(session, autoApproveStates.get(session) || {})));
   for (const session of countedSessions) {
     if (!isTmuxSession(session)) continue;
     const payload = autoApproveStates.get(session) || {};
@@ -2020,8 +2045,8 @@ function globalActivityCounts() {
     else if (key === STATE_KEY.blocked) blocked += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
-  const total = signalWindows.length
-    ? signalWindows.length + [...countedSessions].filter(session => isTmuxSession(session) && !signalSessions.has(session)).length
+  const total = countedSignalWindows.size
+    ? countedSignalWindows.size + [...countedSessions].filter(session => isTmuxSession(session) && !countedSignalSessions.has(session)).length
     : fallbackTotal;
   const attention = ask + blocked;
   return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
@@ -2061,6 +2086,77 @@ function updateTopbarActivityStatus() {
   node.hidden = !html;
   node.classList.toggle('has-attention', counts.attention > 0);
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
+}
+
+function topbarOwnerStatusPartHtml(key, label, summary = {}) {
+  const owns = summary.ownsRole === true || summary.ownsIndex === true;
+  const state = owns ? 'owner' : 'reader';
+  const value = owns ? 'owner' : key === 'idx' ? 'reader' : 'follower';
+  return `<span class="topbar-owner-status-part ${esc(`topbar-owner-status-${key}`)}" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(label)}</span> <span class="topbar-owner-status-value">${esc(value)}</span></span>`;
+}
+
+function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}) {
+  const lines = [
+    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || 'this server'}`,
+    indexSummary.ownerLabel ? `Index owner: ${indexSummary.ownerLabel}` : '',
+    statsSummary.ownerLabel ? `YO!stats owner: ${statsSummary.ownerLabel}` : '',
+    indexSummary.status ? `Index status: ${indexSummary.status}` : '',
+    statsSummary.status ? `YO!stats status: ${statsSummary.status}` : '',
+    indexSummary.error || statsSummary.error || '',
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+function topbarOwnerStatusHtml() {
+  if (shareViewMode) return '';
+  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
+    return '<span class="topbar-owner-status-part" data-owner-role="loading"><span class="topbar-owner-status-key">IDX</span> <span class="topbar-owner-status-value">...</span></span><span class="topbar-activity-sep" aria-hidden="true">·</span><span class="topbar-owner-status-part" data-owner-role="loading"><span class="topbar-owner-status-key">STATS</span> <span class="topbar-owner-status-value">...</span></span>';
+  }
+  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
+    return '<span class="topbar-owner-status-part" data-owner-role="error"><span class="topbar-owner-status-key">IDX</span> <span class="topbar-owner-status-value">?</span></span><span class="topbar-activity-sep" aria-hidden="true">·</span><span class="topbar-owner-status-part" data-owner-role="error"><span class="topbar-owner-status-key">STATS</span> <span class="topbar-owner-status-value">?</span></span>';
+  }
+  if (!backgroundOwnerStatusPayload || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function') return '';
+  const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
+  const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
+  return [
+    topbarOwnerStatusPartHtml('idx', 'IDX', indexSummary),
+    '<span class="topbar-activity-sep" aria-hidden="true">·</span>',
+    topbarOwnerStatusPartHtml('stats', 'STATS', statsSummary),
+  ].join('');
+}
+
+function createTopbarOwnerStatus() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'topbarOwnerStatus';
+  button.className = 'topbar-owner-status';
+  button.title = 'Refresh connected server ownership status';
+  button.setAttribute('aria-label', 'Connected server ownership status');
+  button.onclick = () => {
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+    }
+  };
+  return button;
+}
+
+function updateTopbarOwnerStatus() {
+  const node = document.getElementById('topbarOwnerStatus');
+  if (!node) return;
+  const html = topbarOwnerStatusHtml();
+  node.innerHTML = html;
+  node.hidden = !html;
+  node.classList.toggle('has-reader', /\bdata-owner-role="reader"/.test(html));
+  node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
+  if (backgroundOwnerStatusPayload && typeof backgroundOwnerSearchIndexSummary === 'function' && typeof backgroundOwnerStatsSummary === 'function') {
+    const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
+    const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
+    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary) || 'Refresh connected server ownership status';
+  } else if (backgroundOwnerStatusError) {
+    node.title = backgroundOwnerStatusError;
+  } else {
+    node.title = 'Refresh connected server ownership status';
+  }
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';

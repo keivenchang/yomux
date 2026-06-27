@@ -561,7 +561,9 @@ globalThis.__layoutTestApi = {
   sessionFileLookbackOptionsForTest: sessionFileLookbackOptions,
   normalizeSessionFileLookbackHoursForTest: normalizeSessionFileLookbackHours,
   backgroundOwnerSearchIndexSummaryForTest: backgroundOwnerSearchIndexSummary,
-  infoServerRoleHtmlForTest: infoServerRoleHtml,
+  backgroundOwnerStatsSummaryForTest: backgroundOwnerStatsSummary,
+  topbarOwnerStatusHtmlForTest: topbarOwnerStatusHtml,
+  topbarOwnerStatusTitleForTest: topbarOwnerStatusTitle,
   setBackgroundOwnerStatusPayloadForTest(payload) {
     backgroundOwnerStatusPayload = payload;
     backgroundOwnerStatusLoaded = Boolean(payload);

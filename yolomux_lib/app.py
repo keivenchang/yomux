@@ -57,6 +57,7 @@ from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
 from .background_owner import BACKGROUND_ROLE_SEARCH_INDEX
 from .background_owner import BACKGROUND_ROLE_SESSION_FILES
+from .background_owner import BACKGROUND_ROLE_STATS_SAMPLER
 from .background_owner import BACKGROUND_ROLE_TABBER_ACTIVITY
 from .background_owner import BACKGROUND_ROLE_WATCH_ROOTS
 from .background_owner import BackgroundOwnerRegistry
@@ -1726,7 +1727,7 @@ class TmuxWebtermApp:
                 self.stats_history_merge_record_locked(record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
             self.stats_history_compact_locked(now)
         self.record_performance_sample(
-            "stats-sampler",
+            BACKGROUND_ROLE_STATS_SAMPLER,
             "global-sample",
             trigger=trigger,
             compute_ms=(time.perf_counter() - started) * 1000,
@@ -5838,7 +5839,7 @@ class TmuxWebtermApp:
         return str(cache_key or "")[:80]
 
     def performance_owner_role(self, role: str) -> str:
-        if role in {BACKGROUND_ROLE_SESSION_FILES, BACKGROUND_ROLE_TABBER_ACTIVITY, BACKGROUND_ROLE_SEARCH_INDEX, BACKGROUND_ROLE_WATCH_ROOTS}:
+        if role in {BACKGROUND_ROLE_SESSION_FILES, BACKGROUND_ROLE_STATS_SAMPLER, BACKGROUND_ROLE_TABBER_ACTIVITY, BACKGROUND_ROLE_SEARCH_INDEX, BACKGROUND_ROLE_WATCH_ROOTS}:
             return "owner" if self.background_can_run(role) else "follower"
         return ""
 

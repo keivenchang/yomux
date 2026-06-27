@@ -12,6 +12,7 @@ from yolomux_lib import file_index
 from yolomux_lib import filesystem
 from yolomux_lib.background_owner import BACKGROUND_ROLE_SESSION_FILES
 from yolomux_lib.background_owner import BACKGROUND_ROLE_SEARCH_INDEX
+from yolomux_lib.background_owner import BACKGROUND_ROLE_STATS_SAMPLER
 from yolomux_lib.background_owner import BACKGROUND_ROLE_TABBER_ACTIVITY
 from yolomux_lib.background_owner import BACKGROUND_ROLE_WATCH_ROOTS
 from yolomux_lib.background_owner import BackgroundOwnerRegistry
@@ -450,6 +451,7 @@ def test_background_owner_status_reports_required_counters(tmp_path):
 
     assert payload["roles"][BACKGROUND_ROLE_SESSION_FILES]["refresh_requests"] == 1
     assert payload["roles"][BACKGROUND_ROLE_SESSION_FILES]["fallback_count"] == 1
+    assert payload["roles"][BACKGROUND_ROLE_STATS_SAMPLER]["role"] == BACKGROUND_ROLE_STATS_SAMPLER
     assert payload["counters"]["owner_refresh_requests"] == 1
     assert payload["counters"]["avoided_recomputes"] == 1
     assert payload["counters"]["follower_stale_reads"] == 1

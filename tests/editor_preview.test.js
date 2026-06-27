@@ -5039,6 +5039,12 @@ async function runEditorPreviewSuite() {
   test('t@7149', () => {
     const api = loadYolomux();
     const ownerPayload = {
+      generation: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
+      current_owner: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
+      roles: {
+        'search-index': {owner: true, status: 'owner'},
+        'stats-sampler': {owner: true, status: 'owner'},
+      },
       search_index: {
         owner: true,
         status: 'owner',
@@ -5047,26 +5053,35 @@ async function runEditorPreviewSuite() {
       },
     };
     const readerPayload = {
+      generation: {hostname: 'devhost', port: 8003, project_root: '/home/keivenc/yolomux.dev8003', pid: 222},
+      current_owner: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
+      roles: {
+        'search-index': {owner: false, status: 'follower'},
+        'stats-sampler': {owner: false, status: 'follower'},
+      },
       search_index: {
         owner: false,
         status: 'follower',
-        current_server: {hostname: 'devhost', port: 8003, project_root: '/home/keivenc/yolomux.dev8002', pid: 222},
+        current_server: {hostname: 'devhost', port: 8003, project_root: '/home/keivenc/yolomux.dev8003', pid: 222},
         owner_server: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
       },
     };
-    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(ownerPayload).mode, 'indexing server', 'YO!info summary names the connected indexing owner');
-    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload).mode, 'read server', 'YO!info summary names a follower as a read server');
-    api.setBackgroundOwnerStatusPayloadForTest(ownerPayload);
-    const ownerHtml = api.infoServerRoleHtmlForTest();
-    assert.ok(ownerHtml.includes('data-index-role="owner"'), 'YO!info role row marks the connected indexing server');
-    assert.ok(ownerHtml.includes('indexing server'), 'YO!info role row renders indexing server text');
-    assert.ok(ownerHtml.includes('connected devhost:8002'), 'YO!info role row names the connected server');
-    api.setBackgroundOwnerStatusPayloadForTest(readerPayload);
-    const readerHtml = api.infoServerRoleHtmlForTest();
-    assert.ok(readerHtml.includes('data-index-role="reader"'), 'YO!info role row marks read servers');
-    assert.ok(readerHtml.includes('read server'), 'YO!info role row renders read server text');
-    assert.ok(readerHtml.includes('connected devhost:8003'), 'YO!info role row names the connected read server');
-    assert.ok(readerHtml.includes('index owner devhost:8002'), 'YO!info role row names the separate index owner');
+    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(ownerPayload).mode, 'indexing server', 'background-owner summary names the connected indexing owner');
+    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload).mode, 'read server', 'background-owner summary names a follower as a read server');
+    assert.equal(api.backgroundOwnerStatsSummaryForTest(ownerPayload).mode, 'stats owner', 'background-owner summary names the connected YO!stats owner');
+    assert.equal(api.backgroundOwnerStatsSummaryForTest(readerPayload).mode, 'stats follower', 'background-owner summary names a YO!stats follower');
+    api.setBackgroundOwnerStatusPayloadForTest({
+      ...readerPayload,
+      roles: {
+        'search-index': {owner: true, status: 'owner'},
+        'stats-sampler': {owner: false, status: 'follower'},
+      },
+      search_index: {...readerPayload.search_index, owner: true, current_server: readerPayload.generation, owner_server: readerPayload.generation},
+    });
+    const topbarOwnerHtml = api.topbarOwnerStatusHtmlForTest();
+    assert.ok(topbarOwnerHtml.includes('topbar-owner-status-idx') && topbarOwnerHtml.includes('IDX') && topbarOwnerHtml.includes('owner'), 'topbar owner chip shows index ownership');
+    assert.ok(topbarOwnerHtml.includes('topbar-owner-status-stats') && topbarOwnerHtml.includes('STATS') && topbarOwnerHtml.includes('follower'), 'topbar owner chip shows YO!stats follower status');
+    assert.ok(api.topbarOwnerStatusTitleForTest(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload), api.backgroundOwnerStatsSummaryForTest(readerPayload)).includes('YO!stats owner: devhost:8002'), 'topbar title names the YO!stats owner');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes("new EventSource('/api/client-events')"), 'client subscribes to the general server event stream');
     assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'SSE is installed alongside the remaining local ping/log timers');
@@ -5107,9 +5122,11 @@ async function runEditorPreviewSuite() {
     assert.equal(filePushHelper.includes('fetchDirectory'), false, 'files_changed uses the server file signature directly, not a parent-directory listing');
     assert.equal(filePushHelper.includes('refreshOpenFilesIfChanged'), false, 'files_changed does not route through the directory-backed polling helper');
     assert.equal(source.includes('function scheduleSessionFilesPushRefresh()'), false, 'session-files push no longer triggers a client refetch helper');
-    assert.ok(source.includes("apiFetchJson('/api/background/status'"), 'client fetches background-owner status for the YO!info server-role row');
-    assert.ok(source.includes('function infoServerRoleHtml()'), 'YO!info has a server-role row renderer');
-    assert.ok(source.includes('data-index-role="${esc(summary.state)}"'), 'server-role row exposes indexing-owner vs read-server state');
+    assert.ok(source.includes("apiFetchJson('/api/background/status'"), 'client fetches background-owner status for connected-server indicators');
+    assert.ok(source.includes('createTopbarOwnerStatus()') && source.includes('updateTopbarOwnerStatus()'), 'topbar renders the connected-server owner indicator');
+    assert.ok(source.includes("backgroundOwnerRoleSummary('stats-sampler'"), 'topbar owner indicator uses the shared stats-sampler role');
+    assert.equal(source.includes('function infoServerRoleHtml()'), false, 'YO!info does not render a server-role strip');
+    assert.equal(source.includes('info-server-role'), false, 'YO!info server-role markup is removed');
     const watchRootsHelper = source.slice(source.indexOf('function clientServerWatchRoots()'), source.indexOf('function clientServerWatchState()'));
     assert.equal(watchRootsHelper.includes('openFiles.keys()'), false, 'open editor file dirs are not folded into the slower directory watch roots');
     assert.ok(/function applyLayoutSlots[\s\S]*?syncServerWatchRoots\(\)/.test(source), 'layout/tab changes immediately resync the server watch state');
@@ -5747,8 +5764,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.topbar-language\s*\{/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'Phase 1: the language switcher has topbar styling');
     // #256: topbar theme switcher (auto/dark/light) mirrors the language switcher and sits right of it;
     // order ends Language, Theme, Activity (activity pinned far-right).
-    // #257: the topbar theme switcher was REMOVED (redundant). Order is Language, then Activity (far right).
-    assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\);\s*sessionButtons\.appendChild\(createTopbarActivityStatus\(\)\)/.test(src), '#257: topbar order is Language then Activity (no theme switcher between them)');
+    // #257: the topbar theme switcher was REMOVED (redundant). Order is Language, Ownership, then Activity (far right).
+    assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\);\s*sessionButtons\.appendChild\(createTopbarOwnerStatus\(\)\);\s*sessionButtons\.appendChild\(createTopbarActivityStatus\(\)\)/.test(src), '#257: topbar order is Language, Ownership, then Activity (no theme switcher between them)');
     assert.ok(/function topbarControlIsActive\(\)[\s\S]*document\.activeElement[\s\S]*sessionButtons\?\.contains\(active\)[\s\S]*active\.matches\?\.\('select, input, \.topbar-language, \.app-menu-button'\)/.test(src), '#62: topbar detects focused controls before passive rebuilds');
     assert.ok(/if \(!options\.force && topbarControlIsActive\(\)\) \{[\s\S]*pendingSessionButtonsRender = true[\s\S]*return;\s*\}/.test(src), '#62: passive topbar renders defer while a topbar control is focused');
     assert.ok(/button\.addEventListener\('blur', flushPendingSessionButtonsRender\)/.test(src), '#62: language button blur flushes a deferred topbar render');

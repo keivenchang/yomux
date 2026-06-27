@@ -867,7 +867,9 @@ function renderSessionButtons(options = {}) {
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarLanguageSwitcher());
+  sessionButtons.appendChild(createTopbarOwnerStatus());
   sessionButtons.appendChild(createTopbarActivityStatus());
+  updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
   if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));

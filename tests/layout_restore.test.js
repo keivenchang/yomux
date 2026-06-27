@@ -1291,7 +1291,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.info-list\s*\{[\s\S]*?background:\s*var\(--info-pane-bg\)/.test(infoCss), '#40: the light-mode YO!info body uses the shared pane surface token');
     assert.equal(infoCss.includes('border-bottom: 1px solid #263044'), false, 'YO!info rows do not hardcode the old dark separator');
     assert.equal(/\.info-row\s*\{/.test(infoCss), false, 'old YO!info table row CSS is removed');
-    assert.ok(/\.info-server-role\s*\{[\s\S]*?border-bottom:\s*1px solid var\(--line\)/.test(infoCss), 'YO!info server-role rows use the shared line token');
+    assert.equal(infoCss.includes('info-server-role'), false, 'YO!info server-role strip CSS is removed');
     assert.ok(/\.info-tree-record\s*\{[\s\S]*?border:\s*1px solid var\(--info-tree-record-border\)/.test(infoCss), 'YO!info tree records use the shared tree border token');
     assert.ok(/\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*?background:\s*var\(--info-tree-line\)/.test(infoCss), 'YO!info tree connectors use the shared tree line token');
     assert.equal(infoCss.includes('--info-column-resizer-hit-width'), false, 'old YO!info column resize tokens are removed');
@@ -1458,21 +1458,22 @@ async function runLayoutRestoreSuite() {
     signalApi.setDocumentTitleNowForTest(200000);
     signalApi.setTmuxSignalStateForTest({
       windows: [
-        {session: 'background-agent', window_index: '0', activity_ts: 199},
-        {session: 'old-output', window_index: '0', activity_ts: 10},
+        {session: 'background-agent', window_index: '0', activity_ts: 199, panes: [{session: 'background-agent', window_index: '0', current_command: 'codex', dead: false}]},
+        {session: 'old-agent', window_index: '0', activity_ts: 10, panes: [{session: 'old-agent', window_index: '0', current_command: 'claude', dead: false}]},
+        {session: 'old-output', window_index: '0', activity_ts: 10, panes: [{session: 'old-output', window_index: '0', current_command: 'bash', dead: false}]},
       ],
     });
     signalApi.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     signalApi.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'blocked'}});
     const signalCounts = signalApi.globalActivityCounts();
-    assert.equal(signalCounts.running, 2, 'server-wide tmux signals count a recent active window outside the current tab plus YO-active sessions');
+    assert.equal(signalCounts.running, 2, 'server-wide tmux signals count a recent active agent window outside the current tab plus YO-active sessions');
     assert.equal(signalCounts.blocked, 1, 'attention counts still come from YO screen state');
-    assert.equal(signalCounts.total, 4, 'signal windows and configured tmux sessions share one total without requiring every window in the tab URL');
+    assert.equal(signalCounts.total, 4, 'agent signal windows and configured YO sessions share one total without counting plain tmux windows');
     assert.equal(signalCounts.idle, 1, 'an old tmux sub-window outside the activity window remains idle');
     assert.equal(signalApi.browserFaviconBadgeCount(signalCounts), 2, 'favicon badge counts server-wide active windows');
     signalApi.setTmuxSignalStateForTest({
       windows: [
-        {key: 'background-agent:0', session: 'background-agent', window_index: '0', activity_ts: 10, bell_flag: true},
+        {key: 'background-agent:0', session: 'background-agent', window_index: '0', activity_ts: 10, bell_flag: true, panes: [{session: 'background-agent', window_index: '0', current_command: 'claude', dead: false}]},
       ],
     });
     const bellCounts = signalApi.globalActivityCounts();
@@ -1597,8 +1598,19 @@ async function runLayoutRestoreSuite() {
     }
     const idlePaneCounts = falsePositiveApi.globalActivityCounts();
     assert.equal(idlePaneCounts.running, 0, 'tmux selected panes are not active work');
-    assert.equal(idlePaneCounts.idle, 8, 'all eight selected-pane sessions remain idle');
+    assert.equal(idlePaneCounts.idle, 0, 'idle selected panes without detected agents are not counted as AI idle work');
     assert.equal(falsePositiveApi.browserFaviconBadgeCount(idlePaneCounts), 0, 'favicon does not show 8 for idle tmux sessions');
+    const plainSignalApi = loadYolomux('', ['1']);
+    plainSignalApi.setDocumentTitleNowForTest(200000);
+    plainSignalApi.setTmuxSignalStateForTest({windows: Array.from({length: 20}, (_unused, index) => ({
+      session: `plain-${index}`,
+      window_index: '0',
+      activity_ts: 10,
+      panes: [{session: `plain-${index}`, window_index: '0', current_command: 'bash', dead: false}],
+    }))});
+    const plainSignalCounts = plainSignalApi.globalActivityCounts();
+    assert.equal(plainSignalCounts.total, 0, 'plain tmux signal windows do not inflate the AI activity total');
+    assert.equal(plainSignalCounts.idle, 0, 'plain tmux signal windows do not show as idle AI agents');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10)') && source.includes("ctx.fillStyle = '#99d441'"), 'favicon fills the icon with the lime YO tile instead of a dark border');
     assert.ok(source.includes("ctx.font = '900 86px Arial, sans-serif'") && source.includes('ctx.scale(1.22, 1)') && source.includes("ctx.fillText('Y', 0, 0)"), 'favicon fills the tile with a large Y');
@@ -1611,6 +1623,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), 'topbar blocked inherits the shared status indicator pulse parent');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
+    assert.ok(/\.topbar-owner-status\s*\{/.test(css), 'the top-bar ownership indicator is styled');
+    assert.ok(/\.topbar-owner-status-part\[data-owner-role="owner"\]/.test(css), 'topbar ownership indicator highlights owner state');
     assert.ok(/\.topbar-activity-run\.active/.test(css), 'RUN only turns green when nonzero');
     assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
   });

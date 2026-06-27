@@ -576,6 +576,49 @@ body.app-vw-lte-1100 .topbar-search {
   max-width: none;
   padding: 0 6px;
 }
+.topbar-owner-status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--compact-control-height);
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-owner-status[hidden] {
+  display: none;
+}
+.topbar-owner-status:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.topbar-owner-status.has-reader {
+  border-color: color-mix(in srgb, var(--accent-gold) 56%, var(--line));
+}
+.topbar-owner-status.has-error {
+  border-color: var(--accent-gold);
+}
+.topbar-owner-status-key {
+  color: var(--text-muted-cool);
+  font-weight: 700;
+}
+.topbar-owner-status-part[data-owner-role="owner"] .topbar-owner-status-value {
+  color: var(--brand-green);
+  font-weight: 700;
+}
+.topbar-owner-status-part[data-owner-role="reader"] .topbar-owner-status-value,
+.topbar-owner-status-part[data-owner-role="loading"] .topbar-owner-status-value,
+.topbar-owner-status-part[data-owner-role="error"] .topbar-owner-status-value {
+  color: var(--accent-gold);
+  font-weight: 700;
+}
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
   flex: 0 0 auto;

@@ -6543,6 +6543,15 @@ function runningAgentCount() {
   return yoloWorkingSessions().length;
 }
 
+function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.get(session) || {}) {
+  if (payload?.prompt?.visible === true) return true;
+  const key = String(payload?.screen?.key || '');
+  if (key && key !== STATE_KEY.idle) return true;
+  if (autoApproveEnabledForSession(payload)) return true;
+  const info = transcriptMeta.sessions?.[session];
+  return typeof sessionAgentWindowStatusPayloads === 'function' && sessionAgentWindowStatusPayloads(session, info, payload).length > 0;
+}
+
 function sessionCountsAsRunning(session, stateKey = '') {
   if (sessionYoloIsWorking(session)) return true;
   return ['tests-running', 'yolo-approval'].includes(String(stateKey || ''));
@@ -6611,6 +6620,15 @@ function tmuxSignalPaneCommand(pane) {
 
 function tmuxSignalPaneIsAgent(pane) {
   return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+}
+
+function tmuxSignalWindowAgentPanes(windowRecord) {
+  const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  return panes.filter(tmuxSignalPaneIsAgent);
+}
+
+function tmuxSignalWindowHasAgentPane(windowRecord) {
+  return tmuxSignalWindowAgentPanes(windowRecord).length > 0;
 }
 
 function tmuxSignalPaneTarget(pane) {
@@ -6862,33 +6880,40 @@ function globalActivityCounts() {
   let running = 0;
   let ask = 0;
   let blocked = 0;
-  const signalSessions = new Set(signalWindows.map(tmuxSignalWindowSession).filter(Boolean));
+  const countedSignalSessions = new Set();
+  const countedSignalWindows = new Set();
   const runningSignalSessions = new Set();
   const bellSignalWindows = new Set();
   const actionRequiredSignalWindows = new Set();
   const signalAttentionSessions = new Set();
   for (const windowRecord of signalWindows) {
     const signalSession = tmuxSignalWindowSession(windowRecord);
+    const signalKey = tmuxSignalWindowKey(windowRecord);
     const signalPayload = signalSession ? (autoApproveStates.get(signalSession) || {}) : {};
     const signalPromptSignature = signalSession ? promptAttentionPayloadSignature(signalPayload) : '';
     const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature, signalPayload) : false;
-    if (windowRecord?.bell_flag === true && !signalPromptCleared) {
-      const signalKey = tmuxSignalWindowKey(windowRecord);
+    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+    const hasAgentPane = tmuxSignalWindowHasAgentPane(windowRecord);
+    const hasActionRequiredPane = panes.some(tmuxSignalPaneActionRequired);
+    if (windowRecord?.bell_flag === true && hasAgentPane && !signalPromptCleared) {
       if (signalKey) bellSignalWindows.add(signalKey);
       if (signalSession) signalAttentionSessions.add(signalSession);
     }
-    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
-    if (panes.some(tmuxSignalPaneActionRequired) && !signalPromptCleared) {
-      const signalKey = tmuxSignalWindowKey(windowRecord);
+    if (hasActionRequiredPane && !signalPromptCleared) {
       if (signalKey) actionRequiredSignalWindows.add(signalKey);
       if (signalSession) signalAttentionSessions.add(signalSession);
     }
+    if (signalKey && (hasAgentPane || hasActionRequiredPane)) countedSignalWindows.add(signalKey);
+    if (signalSession && (hasAgentPane || hasActionRequiredPane)) countedSignalSessions.add(signalSession);
+    if (!hasAgentPane) continue;
     if (!tmuxSignalWindowIsRecentlyActive(windowRecord)) continue;
     running += 1;
     if (signalSession) runningSignalSessions.add(signalSession);
   }
   ask += new Set([...bellSignalWindows, ...actionRequiredSignalWindows]).size;
-  const countedSessions = new Set([...sessions, ...autoApproveStates.keys()].map(value => String(value || '')).filter(Boolean));
+  const countedSessions = new Set([...autoApproveStates.keys()]
+    .map(value => String(value || ''))
+    .filter(session => session && autoApprovePayloadCountsInTopbar(session, autoApproveStates.get(session) || {})));
   for (const session of countedSessions) {
     if (!isTmuxSession(session)) continue;
     const payload = autoApproveStates.get(session) || {};
@@ -6904,8 +6929,8 @@ function globalActivityCounts() {
     else if (key === STATE_KEY.blocked) blocked += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
-  const total = signalWindows.length
-    ? signalWindows.length + [...countedSessions].filter(session => isTmuxSession(session) && !signalSessions.has(session)).length
+  const total = countedSignalWindows.size
+    ? countedSignalWindows.size + [...countedSessions].filter(session => isTmuxSession(session) && !countedSignalSessions.has(session)).length
     : fallbackTotal;
   const attention = ask + blocked;
   return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
@@ -6945,6 +6970,77 @@ function updateTopbarActivityStatus() {
   node.hidden = !html;
   node.classList.toggle('has-attention', counts.attention > 0);
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
+}
+
+function topbarOwnerStatusPartHtml(key, label, summary = {}) {
+  const owns = summary.ownsRole === true || summary.ownsIndex === true;
+  const state = owns ? 'owner' : 'reader';
+  const value = owns ? 'owner' : key === 'idx' ? 'reader' : 'follower';
+  return `<span class="topbar-owner-status-part ${esc(`topbar-owner-status-${key}`)}" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(label)}</span> <span class="topbar-owner-status-value">${esc(value)}</span></span>`;
+}
+
+function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}) {
+  const lines = [
+    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || 'this server'}`,
+    indexSummary.ownerLabel ? `Index owner: ${indexSummary.ownerLabel}` : '',
+    statsSummary.ownerLabel ? `YO!stats owner: ${statsSummary.ownerLabel}` : '',
+    indexSummary.status ? `Index status: ${indexSummary.status}` : '',
+    statsSummary.status ? `YO!stats status: ${statsSummary.status}` : '',
+    indexSummary.error || statsSummary.error || '',
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+function topbarOwnerStatusHtml() {
+  if (shareViewMode) return '';
+  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
+    return '<span class="topbar-owner-status-part" data-owner-role="loading"><span class="topbar-owner-status-key">IDX</span> <span class="topbar-owner-status-value">...</span></span><span class="topbar-activity-sep" aria-hidden="true">·</span><span class="topbar-owner-status-part" data-owner-role="loading"><span class="topbar-owner-status-key">STATS</span> <span class="topbar-owner-status-value">...</span></span>';
+  }
+  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
+    return '<span class="topbar-owner-status-part" data-owner-role="error"><span class="topbar-owner-status-key">IDX</span> <span class="topbar-owner-status-value">?</span></span><span class="topbar-activity-sep" aria-hidden="true">·</span><span class="topbar-owner-status-part" data-owner-role="error"><span class="topbar-owner-status-key">STATS</span> <span class="topbar-owner-status-value">?</span></span>';
+  }
+  if (!backgroundOwnerStatusPayload || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function') return '';
+  const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
+  const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
+  return [
+    topbarOwnerStatusPartHtml('idx', 'IDX', indexSummary),
+    '<span class="topbar-activity-sep" aria-hidden="true">·</span>',
+    topbarOwnerStatusPartHtml('stats', 'STATS', statsSummary),
+  ].join('');
+}
+
+function createTopbarOwnerStatus() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'topbarOwnerStatus';
+  button.className = 'topbar-owner-status';
+  button.title = 'Refresh connected server ownership status';
+  button.setAttribute('aria-label', 'Connected server ownership status');
+  button.onclick = () => {
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+    }
+  };
+  return button;
+}
+
+function updateTopbarOwnerStatus() {
+  const node = document.getElementById('topbarOwnerStatus');
+  if (!node) return;
+  const html = topbarOwnerStatusHtml();
+  node.innerHTML = html;
+  node.hidden = !html;
+  node.classList.toggle('has-reader', /\bdata-owner-role="reader"/.test(html));
+  node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
+  if (backgroundOwnerStatusPayload && typeof backgroundOwnerSearchIndexSummary === 'function' && typeof backgroundOwnerStatsSummary === 'function') {
+    const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
+    const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
+    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary) || 'Refresh connected server ownership status';
+  } else if (backgroundOwnerStatusError) {
+    node.title = backgroundOwnerStatusError;
+  } else {
+    node.title = 'Refresh connected server ownership status';
+  }
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
@@ -9962,7 +10058,9 @@ function renderSessionButtons(options = {}) {
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarLanguageSwitcher());
+  sessionButtons.appendChild(createTopbarOwnerStatus());
   sessionButtons.appendChild(createTopbarActivityStatus());
+  updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
   if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
@@ -47992,53 +48090,45 @@ function backgroundServerLabel(record, fallback = '') {
   ].filter(Boolean).join(' · ') || 'this server';
 }
 
-function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPayload, options = {}) {
   const data = payload && typeof payload === 'object' ? payload : {};
-  const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
   const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
-  const role = roles['search-index'] && typeof roles['search-index'] === 'object' ? roles['search-index'] : {};
-  const ownsIndex = searchIndex.owner === true || role.owner === true;
-  const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
-  const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
+  const role = roles[roleName] && typeof roles[roleName] === 'object' ? roles[roleName] : {};
+  const ownsRole = role.owner === true;
+  const current = data.generation && typeof data.generation === 'object' ? data.generation : {};
+  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
   return {
-    ownsIndex,
-    mode: ownsIndex ? 'indexing server' : 'read server',
-    state: ownsIndex ? 'owner' : 'reader',
+    ownsRole,
+    mode: ownsRole ? (options.ownerMode || 'owner') : (options.readerMode || 'follower'),
+    state: ownsRole ? 'owner' : 'reader',
     currentLabel: backgroundServerLabel(current),
-    ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
-    status: String(searchIndex.status || role.status || data.status || ''),
+    ownerLabel: owner ? backgroundServerLabel(owner) : '',
+    status: String(role.status || data.status || ''),
     error: String(data.last_error || ''),
   };
 }
 
-function infoServerRoleHtml() {
-  if (shareViewMode) return '';
-  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
-    return `<div class="info-server-role loading" data-index-role="loading" role="status">
-      <span class="info-server-role-label">server role</span>
-      <span class="info-server-role-mode">loading</span>
-      <span class="info-server-role-detail">${esc(backgroundServerLabel(null))}</span>
-    </div>`;
-  }
-  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
-    return `<div class="info-server-role error" data-index-role="error" title="${esc(backgroundOwnerStatusError)}">
-      <span class="info-server-role-label">server role</span>
-      <span class="info-server-role-mode">unavailable</span>
-      <span class="info-server-role-detail">${esc(backgroundOwnerStatusError)}</span>
-    </div>`;
-  }
-  if (!backgroundOwnerStatusPayload) return '';
-  const summary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
-  const detailParts = [`connected ${summary.currentLabel}`];
-  if (!summary.ownsIndex) detailParts.push(summary.ownerLabel ? `index owner ${summary.ownerLabel}` : 'index owner pending');
-  if (summary.error) detailParts.push(summary.error);
-  const title = [`Current connected server: ${summary.currentLabel}`, summary.ownerLabel ? `Index owner: ${summary.ownerLabel}` : '', summary.status ? `Status: ${summary.status}` : '', summary.error].filter(Boolean).join('\n');
-  return `<div class="info-server-role" data-index-role="${esc(summary.state)}" title="${esc(title)}">
-    <span class="info-server-role-dot" aria-hidden="true"></span>
-    <span class="info-server-role-label">server role</span>
-    <span class="info-server-role-mode">${esc(summary.mode)}</span>
-    <span class="info-server-role-detail">${esc(detailParts.join(' · '))}</span>
-  </div>`;
+function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
+  const summary = backgroundOwnerRoleSummary('search-index', payload, {ownerMode: 'indexing server', readerMode: 'read server'});
+  const ownsIndex = searchIndex.owner === true || summary.ownsRole === true;
+  const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
+  const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
+  return {
+    ...summary,
+    ownsIndex,
+    ownsRole: ownsIndex,
+    mode: ownsIndex ? 'indexing server' : 'read server',
+    state: ownsIndex ? 'owner' : 'reader',
+    currentLabel: backgroundServerLabel(current),
+    ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
+    status: String(searchIndex.status || summary.status || data.status || ''),
+  };
+}
+
+function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusPayload) {
+  return backgroundOwnerRoleSummary('stats-sampler', payload, {ownerMode: 'stats owner', readerMode: 'stats follower'});
 }
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
@@ -48048,6 +48138,7 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   backgroundOwnerStatusError = '';
   backgroundOwnerStatusLoading = false;
   if (options.render !== false) renderInfoPanel();
+  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
   return true;
 }
 
@@ -48057,6 +48148,7 @@ async function refreshBackgroundOwnerStatus(options = {}) {
   backgroundOwnerStatusLoading = !backgroundOwnerStatusPayload;
   backgroundOwnerStatusError = '';
   if (options.render !== false) renderInfoPanel();
+  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
   backgroundOwnerStatusRefreshPromise = (async () => {
     try {
       const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
@@ -48065,6 +48157,7 @@ async function refreshBackgroundOwnerStatus(options = {}) {
       backgroundOwnerStatusError = String(error?.payload?.error || error?.message || error);
       backgroundOwnerStatusLoading = false;
       if (options.render !== false) renderInfoPanel();
+      if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
       return false;
     } finally {
       backgroundOwnerStatusRefreshPromise = null;
@@ -49413,30 +49506,29 @@ function renderInfoPanel() {
     if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
   };
   syncTranscriptMetaLoadingUi();
-  const serverRoleHtml = infoServerRoleHtml();
   const allRecords = infoRelationshipRecords();
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
+      renderInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
       return;
     }
     if (transcriptMetaLoading) {
-      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
+      renderInfoContent(infoMetadataLoadingHtml());
       return;
     }
     if (transcriptMetaLoadError) {
-      renderInfoContent(`${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
+      renderInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
-      renderInfoContent(serverRoleHtml + infoMetadataLoadingHtml());
+      renderInfoContent(infoMetadataLoadingHtml());
       return;
     }
-    renderInfoContent(`${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`);
+    renderInfoContent(`<div class="info-empty">${esc(t('info.empty'))}</div>`);
     return;
   }
-  renderInfoContent(serverRoleHtml + infoTreeHtml(records, infoGrouping, infoSort));
+  renderInfoContent(infoTreeHtml(records, infoGrouping, infoSort));
 }
 
 function infoPrCellHtml(row) {

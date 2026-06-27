@@ -1373,6 +1373,71 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
         cleanup_isolated_browser_runtime_paths(paths)
 
 
+def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
+    background_status = {
+        "owner": False,
+        "status": "follower",
+        "generation": {"hostname": "devhost", "port": 8001, "project_root": "/home/test/yolomux.dev8001", "pid": 111},
+        "current_owner": {"hostname": "devhost", "port": 8002, "project_root": "/home/test/yolomux.dev8002", "pid": 222},
+        "roles": {
+            "search-index": {"role": "search-index", "owner": True, "status": "owner"},
+            "stats-sampler": {"role": "stats-sampler", "owner": False, "status": "follower"},
+        },
+        "search_index": {
+            "role": "search-index",
+            "owner": True,
+            "mode": "indexing-server",
+            "current_server": {"hostname": "devhost", "port": 8001, "project_root": "/home/test/yolomux.dev8001", "pid": 111},
+            "owner_server": {"hostname": "devhost", "port": 8001, "project_root": "/home/test/yolomux.dev8001", "pid": 111},
+            "status": "owner",
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {"1": {"target": "1", "enabled": True, "screen": {"key": "idle"}, "agent_windows": [{"kind": "codex", "state": "idle", "window_index": 0, "window_label": "0:codex"}]}},
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"], auto_approve_payload=auto_approve_payload, background_status_payload=background_status)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const owner = document.getElementById('topbarOwnerStatus');
+            return owner && owner.textContent.includes('IDX') && owner.textContent.includes('STATS');
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const language = document.querySelector('.topbar-language');
+        const owner = document.getElementById('topbarOwnerStatus');
+        const activity = document.getElementById('topbarActivity');
+        const position = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+        const rect = node => {
+          const box = node.getBoundingClientRect();
+          return {left: box.left, right: box.right, width: box.width};
+        };
+        return {
+          text: owner.textContent.replace(/\\s+/g, ' ').trim(),
+          title: owner.title,
+          idxRole: owner.querySelector('.topbar-owner-status-idx')?.dataset.ownerRole || '',
+          statsRole: owner.querySelector('.topbar-owner-status-stats')?.dataset.ownerRole || '',
+          languageBeforeOwner: position(language, owner),
+          ownerBeforeActivity: position(owner, activity),
+          ownerRect: rect(owner),
+          activityRect: rect(activity),
+        };
+        """
+    )
+    assert "IDX owner" in metrics["text"], metrics
+    assert "STATS follower" in metrics["text"], metrics
+    assert metrics["idxRole"] == "owner"
+    assert metrics["statsRole"] == "reader"
+    assert metrics["languageBeforeOwner"] is True
+    assert metrics["ownerBeforeActivity"] is True
+    assert metrics["ownerRect"]["right"] <= metrics["activityRect"]["left"] + 1
+    assert "YO!stats owner: devhost:8002" in metrics["title"]
+
+
 @pytest.mark.e2e
 def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):
     if os.environ.get("YOLOMUX_REAL_AGENT_SMOKE") != "1":

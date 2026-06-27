@@ -32,11 +32,13 @@ BACKGROUND_REFRESH_COALESCE_SECONDS = 5.0
 BACKGROUND_ROLE_TABBER_ACTIVITY = "tabber-activity"
 BACKGROUND_ROLE_SESSION_FILES = "session-files"
 BACKGROUND_ROLE_SEARCH_INDEX = "search-index"
+BACKGROUND_ROLE_STATS_SAMPLER = "stats-sampler"
 BACKGROUND_ROLE_WATCH_ROOTS = "watch-roots"
 BACKGROUND_ROLES = (
     BACKGROUND_ROLE_TABBER_ACTIVITY,
     BACKGROUND_ROLE_SESSION_FILES,
     BACKGROUND_ROLE_SEARCH_INDEX,
+    BACKGROUND_ROLE_STATS_SAMPLER,
     BACKGROUND_ROLE_WATCH_ROOTS,
 )
 
@@ -579,7 +581,7 @@ class DisabledBackgroundOwner:
         return {
             "owner": True,
             "status": "disabled",
-            "roles": {},
+            "roles": {role: BackgroundRoleState(role=role, owner=True, status="disabled").__dict__ for role in BACKGROUND_ROLES},
             "refresh_queue": self.refresh_queue_payload(),
             "search_index": {
                 "role": BACKGROUND_ROLE_SEARCH_INDEX,
