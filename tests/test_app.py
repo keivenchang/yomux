@@ -413,13 +413,21 @@ def test_stats_sample_payload_records_shared_agent_activity_and_token_rates(monk
     assert sum(record["ask_agent_total"] + record["run_agent_total"] + record["transition_agent_total"] + record["idle_agent_total"] for record in records) == 6
     assert sum(record["agent_activity_samples"] for record in records) == 2
     token_records = [item for record in records for item in record["agent_token_rates"]]
-    by_key = {record["key"]: record for record in token_records}
-    assert by_key["1|0|claude"]["label"] == "1:0:claude"
-    assert by_key["1|0|claude"]["total"] == 1500.0
-    assert by_key["2|0|codex"]["label"] == "2:0:codex"
-    assert by_key["2|0|codex"]["total"] == 2400.0
-    assert by_key["2|0|codex"]["samples"] == 1.0
-    assert sum(record["agent_token_samples"] for record in records) == 2
+    tokens_by_key: dict[str, float] = {}
+    labels_by_key: dict[str, str] = {}
+    sources_by_key: dict[str, set[str]] = {}
+    for record in token_records:
+        key = record["key"]
+        labels_by_key[key] = record["label"]
+        tokens_by_key[key] = tokens_by_key.get(key, 0.0) + float(record.get("tokens") or 0.0)
+        sources_by_key.setdefault(key, set()).add(record.get("source") or "")
+    assert labels_by_key["1|0|claude"] == "1:0:claude"
+    assert tokens_by_key["1|0|claude"] == pytest.approx(1500.0)
+    assert sources_by_key["1|0|claude"] == {"transcript"}
+    assert labels_by_key["2|0|codex"] == "2:0:codex"
+    assert tokens_by_key["2|0|codex"] == pytest.approx(2400.0)
+    assert sources_by_key["2|0|codex"] == {"transcript"}
+    assert sum(record["agent_token_samples"] for record in records) == 4
 
 
 def test_stats_sampler_skips_token_scans_without_consumer(monkeypatch):
@@ -482,64 +490,72 @@ def test_stats_token_sampling_uses_slower_consumer_cadence(monkeypatch):
     with webapp.stats_history_lock:
         history = webapp.stats_history_payload_locked(0, client_id="client-a")
     token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
-    assert len(token_records) == 2
-    assert token_records[-1]["total"] == pytest.approx(400.0 / (11.0 / 60.0))
+    assert len(token_records) == 1
+    assert token_records[-1]["tokens"] == pytest.approx(400.0)
+    assert token_records[-1]["source"] == "transcript"
 
 
-def test_stats_agent_token_count_falls_back_to_visible_status_counter():
+def test_stats_agent_token_count_uses_transcript_only(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
+    transcript_tokens = iter([654.0])
+    monkeypatch.setattr(webapp, "stats_agent_transcript_token_count", lambda _row: next(transcript_tokens))
     try:
-        row = {"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 321}
-        assert webapp.stats_agent_token_count(row) == 321
-        assert row["_stats_agent_token_source"] == "status"
+        status_only = {"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 321}
+        monkeypatch.setattr(webapp, "stats_agent_transcript_token_count", lambda _row: None)
+        assert webapp.stats_agent_token_count(status_only) is None
+        assert "_stats_agent_token_source" not in status_only
+        transcript_row = {"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 321, "transcript": "/tmp/claude.jsonl"}
+        monkeypatch.setattr(webapp, "stats_agent_transcript_token_count", lambda _row: 654.0)
+        assert webapp.stats_agent_token_count(transcript_row) == 654.0
+        assert transcript_row["_stats_agent_token_source"] == "transcript"
     finally:
         webapp.control_server.stop()
 
 
-def test_stats_agent_token_rates_use_status_counter_and_reset_baseline(monkeypatch):
+def test_stats_agent_token_rates_use_transcript_counter_and_reset_baseline(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     rows = iter([
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 100}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 220}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "status_tokens": 30}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}],
     ])
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    try:
-        first = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
-        second = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
-        reset = webapp.stats_agent_activity_record(1120.0, include_token_rates=True)
-    finally:
-        webapp.control_server.stop()
-
-    assert first["agent_token_rates"][0]["total"] == 0.0
-    assert second["agent_token_rates"][0]["total"] == 120.0
-    assert reset["agent_token_rates"][0]["total"] == 0.0
-    assert reset["agent_token_rates"][0]["source"] == "status"
-
-
-def test_stats_agent_token_rates_do_not_spike_when_counter_source_changes(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    rows = iter([
-        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "status_tokens": 80}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "status_tokens": 140}],
-    ])
-    transcript_tokens = iter([1000.0, 1000.0, 1000.0])
+    transcript_tokens = iter([100.0, 220.0, 30.0])
     monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
     monkeypatch.setattr(webapp, "stats_agent_transcript_token_count", lambda _row: next(transcript_tokens))
     try:
-        transcript = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
-        status_baseline = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
-        status_delta = webapp.stats_agent_activity_record(1120.0, include_token_rates=True)
+        first = webapp.stats_agent_activity_record(1020.0, include_token_rates=True)
+        second = webapp.stats_agent_activity_record(1080.0, include_token_rates=True)
+        reset = webapp.stats_agent_activity_record(1140.0, include_token_rates=True)
     finally:
         webapp.control_server.stop()
 
-    assert transcript["agent_token_rates"][0]["source"] == "transcript"
-    assert transcript["agent_token_rates"][0]["total"] == 0.0
-    assert status_baseline["agent_token_rates"][0]["source"] == "status"
-    assert status_baseline["agent_token_rates"][0]["total"] == 0.0
-    assert status_delta["agent_token_rates"][0]["source"] == "status"
-    assert status_delta["agent_token_rates"][0]["total"] == 60.0
+    assert "_agent_token_records" not in first
+    assert second["_agent_token_records"][0]["time"] == 1020.0
+    assert second["_agent_token_records"][0]["agent_token_rates"][0]["tokens"] == pytest.approx(120.0)
+    assert second["_agent_token_records"][0]["agent_token_rates"][0]["source"] == "transcript"
+    assert "_agent_token_records" not in reset
+
+
+def test_stats_agent_token_rates_ignore_visible_counter_changes(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    rows = iter([
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "status_tokens": 80}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "status_tokens": 8000}],
+        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "status_tokens": 14000}],
+    ])
+    transcript_tokens = iter([1000.0, 1000.0, 1060.0])
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
+    monkeypatch.setattr(webapp, "stats_agent_transcript_token_count", lambda _row: next(transcript_tokens))
+    try:
+        first = webapp.stats_agent_activity_record(1020.0, include_token_rates=True)
+        unchanged = webapp.stats_agent_activity_record(1080.0, include_token_rates=True)
+        transcript_delta = webapp.stats_agent_activity_record(1140.0, include_token_rates=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert "_agent_token_records" not in first
+    assert "_agent_token_records" not in unchanged
+    assert transcript_delta["_agent_token_records"][0]["agent_token_rates"][0]["tokens"] == pytest.approx(60.0)
 
 
 def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch):

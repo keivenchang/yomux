@@ -400,6 +400,14 @@ body.theme-light .js-debug-graph-view {
 .js-debug-area {
   opacity: 0.18;
 }
+.js-debug-bar {
+  fill: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 0.68;
+  shape-rendering: crispEdges;
+}
+.js-debug-bar--agentToken {
+  fill: var(--js-debug-series-color, var(--accent-sky-strong));
+}
 .js-debug-line--api {
   stroke: var(--js-debug-api-series);
 }
@@ -448,10 +456,6 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-area--tokensPerAgent {
   fill: var(--accent-sky-strong);
-}
-.js-debug-area--agentToken {
-  fill: var(--js-debug-series-color, var(--accent-sky-strong));
-  opacity: 0.7;
 }
 .js-debug-line--cpu {
   stroke: var(--active-accent-bright);

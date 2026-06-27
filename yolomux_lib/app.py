@@ -265,6 +265,7 @@ STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
+STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
 STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 6.0
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_CLIENT_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -447,11 +448,23 @@ def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
         label = str(item.get("label") or key).strip() or key
         total = stats_history_positive_number(item.get("total", item.get("rate", item.get("value"))))
         samples = stats_history_positive_number(item.get("samples"))
+        tokens = stats_history_positive_number(item.get("tokens", item.get("token_total")))
+        seconds = stats_history_positive_number(item.get("seconds", item.get("duration_seconds")))
+        source_label = str(item.get("source") or "").strip()
+        if tokens and not total:
+            total = tokens
         if total and not samples:
             samples = 1.0
-        if not total and not samples:
+        if not total and not samples and not tokens:
             continue
-        records.append({"key": key, "label": label, "total": total, "samples": samples})
+        record = {"key": key, "label": label, "total": total, "samples": samples}
+        if tokens:
+            record["tokens"] = tokens
+        if seconds:
+            record["seconds"] = seconds
+        if source_label:
+            record["source"] = source_label
+        records.append(record)
     return records
 
 
@@ -1279,11 +1292,15 @@ class TmuxWebtermApp:
             key = item["key"]
             existing = token_rates.get(key)
             if not isinstance(existing, dict):
-                existing = {"label": item["label"], "total": 0.0, "samples": 0.0}
+                existing = {"label": item["label"], "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0}
                 token_rates[key] = existing
             existing["label"] = item["label"] or existing.get("label") or key
             existing["total"] = float(existing.get("total") or 0.0) + float(item.get("total") or 0.0)
             existing["samples"] = float(existing.get("samples") or 0.0) + float(item.get("samples") or 0.0)
+            existing["tokens"] = float(existing.get("tokens") or 0.0) + float(item.get("tokens") or 0.0)
+            existing["seconds"] = float(existing.get("seconds") or 0.0) + float(item.get("seconds") or 0.0)
+            if item.get("source"):
+                existing["source"] = str(item.get("source") or "")
             changed = True
         return changed
 
@@ -1410,6 +1427,9 @@ class TmuxWebtermApp:
                         "label": str(item.get("label") or key),
                         "total": float(item.get("total") or 0.0),
                         "samples": float(item.get("samples") or 0.0),
+                        "tokens": float(item.get("tokens") or 0.0),
+                        "seconds": float(item.get("seconds") or 0.0),
+                        "source": str(item.get("source") or ""),
                     }
                     for key, item in sorted((bucket.get("agent_token_rates") or {}).items())
                     if isinstance(item, dict)
@@ -1548,15 +1568,6 @@ class TmuxWebtermApp:
             }
         return kind
 
-    def stats_agent_status_token_count(self, row: dict[str, Any]) -> float | None:
-        try:
-            status_tokens = float(row.get("status_tokens"))
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(status_tokens) or status_tokens < 0:
-            return None
-        return status_tokens
-
     def stats_agent_transcript_token_count(self, row: dict[str, Any]) -> float | None:
         transcript = str(row.get("transcript") or "").strip()
         kind = str(row.get("kind") or "").strip().lower()
@@ -1569,17 +1580,10 @@ class TmuxWebtermApp:
 
     def stats_agent_token_count(self, row: dict[str, Any]) -> float | None:
         row.pop("_stats_agent_token_source", None)
-        status_tokens = self.stats_agent_status_token_count(row)
-        if status_tokens is not None and self.stats_agent_is_active(row):
-            row["_stats_agent_token_source"] = "status"
-            return status_tokens
         transcript_tokens = self.stats_agent_transcript_token_count(row)
         if transcript_tokens is not None:
             row["_stats_agent_token_source"] = "transcript"
             return transcript_tokens
-        if status_tokens is not None:
-            row["_stats_agent_token_source"] = "status"
-            return status_tokens
         return None
 
     def stats_agent_token_key(self, row: dict[str, Any], fallback_index: int) -> str:
@@ -1598,6 +1602,40 @@ class TmuxWebtermApp:
         kind = str(row.get("kind") or "agent").strip() or "agent"
         return ":".join(part for part in (session, window_label or kind) if part) or kind
 
+    def stats_agent_token_delta_records(self, key: str, label: str, start_time: float, end_time: float, token_delta: float) -> list[dict[str, Any]]:
+        if not key or not math.isfinite(start_time) or not math.isfinite(end_time) or end_time <= start_time:
+            return []
+        if not math.isfinite(token_delta) or token_delta <= 0:
+            return []
+        elapsed = end_time - start_time
+        bucket_seconds = STATS_AGENT_TOKEN_BUCKET_SECONDS
+        records: list[dict[str, Any]] = []
+        cursor = start_time
+        while cursor < end_time:
+            bucket_start = math.floor(cursor / bucket_seconds) * bucket_seconds
+            bucket_end = min(end_time, bucket_start + bucket_seconds)
+            overlap = max(0.0, bucket_end - cursor)
+            if overlap <= 0:
+                cursor = min(end_time, cursor + bucket_seconds)
+                continue
+            tokens = token_delta * (overlap / elapsed)
+            records.append({
+                "time": bucket_start,
+                "tokens_per_agent_total": tokens,
+                "agent_token_samples": 1.0,
+                "agent_token_rates": [{
+                    "key": key,
+                    "label": label,
+                    "total": tokens,
+                    "samples": 1.0,
+                    "tokens": tokens,
+                    "seconds": bucket_seconds,
+                    "source": "transcript",
+                }],
+            })
+            cursor = bucket_end
+        return records
+
     def stats_agent_activity_record(self, sample_time: float, include_token_rates: bool = True) -> dict[str, Any] | None:
         rows = self.stats_agent_window_rows()
         if not rows:
@@ -1612,7 +1650,7 @@ class TmuxWebtermApp:
         transition_agents = 0
         idle_agents = 0
         inactive_agents = 0
-        agent_token_rates: list[dict[str, Any]] = []
+        agent_token_records: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
         transition_seconds = self.stats_agent_transition_seconds()
         with self.stats_agent_token_lock:
@@ -1636,12 +1674,11 @@ class TmuxWebtermApp:
                     token_source = str(row.get("_stats_agent_token_source") or "sample").strip() or "sample"
                     label = self.stats_agent_token_label(row)
                     previous = self.stats_agent_token_state.get(key)
-                    rate = 0.0
                     previous_source = str(previous.get("source") or "") if isinstance(previous, dict) else ""
-                    if previous and previous_source == token_source and token_count >= float(previous.get("tokens") or 0.0) and sample_time > float(previous.get("time") or 0.0):
-                        elapsed_minutes = max((sample_time - float(previous.get("time") or 0.0)) / 60.0, 1.0 / 60.0)
-                        rate = (token_count - float(previous.get("tokens") or 0.0)) / elapsed_minutes
-                    agent_token_rates.append({"key": key, "label": label, "total": max(0.0, rate), "samples": 1.0, "source": token_source})
+                    previous_tokens = float(previous.get("tokens") or 0.0) if isinstance(previous, dict) else 0.0
+                    previous_time = float(previous.get("time") or 0.0) if isinstance(previous, dict) else 0.0
+                    if previous and previous_source == token_source and token_count >= previous_tokens and sample_time > previous_time:
+                        agent_token_records.extend(self.stats_agent_token_delta_records(key, label, previous_time, sample_time, token_count - previous_tokens))
                     self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source}
             for key in list(self.stats_agent_token_state):
                 if key not in seen_keys:
@@ -1660,11 +1697,8 @@ class TmuxWebtermApp:
             "inactive_agent_total": inactive_agents,
             "agent_activity_samples": 1,
         }
-        if agent_token_rates:
-            token_rate_total = sum(float(item["total"]) for item in agent_token_rates)
-            record["tokens_per_agent_total"] = token_rate_total / len(agent_token_rates)
-            record["agent_token_samples"] = 1
-            record["agent_token_rates"] = agent_token_rates
+        if agent_token_records:
+            record["_agent_token_records"] = agent_token_records
         return record
 
     def current_stats_sample(self) -> tuple[dict[str, Any], bool]:
@@ -1712,6 +1746,7 @@ class TmuxWebtermApp:
         sample, record_cpu_sample = self.current_stats_sample()
         include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample else False
         agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample else None
+        agent_token_records = list(agent_record.pop("_agent_token_records", [])) if isinstance(agent_record, dict) else []
         now = float(sample.get("time") or time.time())
         with self.stats_history_lock:
             if record_cpu_sample:
@@ -1725,6 +1760,9 @@ class TmuxWebtermApp:
                 if agent_record:
                     record.update(agent_record)
                 self.stats_history_merge_record_locked(record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
+                for token_record in agent_token_records:
+                    if isinstance(token_record, dict):
+                        self.stats_history_merge_record_locked(token_record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
             self.stats_history_compact_locked(now)
         self.record_performance_sample(
             BACKGROUND_ROLE_STATS_SAMPLER,
@@ -1734,7 +1772,7 @@ class TmuxWebtermApp:
             payload=sample,
             cache_status="sampled" if record_cpu_sample else "cached",
             record_time=sample["time"],
-            details={"agent_tokens": bool(agent_record and agent_record.get("agent_token_samples")), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates)},
+            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates)},
         )
         return sample
 
