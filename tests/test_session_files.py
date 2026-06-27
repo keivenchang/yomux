@@ -146,6 +146,105 @@ def test_transcript_scans_collect_generated_usage_with_changes(tmp_path):
     assert session_files.transcript_generated_tokens(codex_path, "codex", str(tmp_path)) == 20
 
 
+def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypatch):
+    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+
+    def line(path_name, generated_tokens):
+        return json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"git add {path_name}", "workdir": str(tmp_path)}),
+                "info": {"last_token_usage": {"output_tokens": generated_tokens}},
+            },
+        }) + "\n"
+
+    first_line = line("a.py", 5)
+    second_line = line("b.py", 7)
+    transcript.write_text(first_line, encoding="utf-8")
+    first_key = session_files.codex_transcript_scan_cache_key(transcript, str(tmp_path), True)
+
+    first = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+    assert first["changes"] == {str(tmp_path / "a.py"): {"M"}}
+    assert first["usage"]["generated_tokens"] == 5
+
+    transcript.write_text(first_line + second_line, encoding="utf-8")
+    second_key = session_files.codex_transcript_scan_cache_key(transcript, str(tmp_path), True)
+    real_loads = session_files.json.loads
+    parsed_lines = []
+
+    def counting_loads(value):
+        parsed_lines.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", counting_loads)
+    second = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+    parsed_top_level_lines = [value for value in parsed_lines if isinstance(value, str) and value.endswith("\n")]
+
+    assert first_key == second_key
+    assert parsed_top_level_lines == [second_line]
+    assert second["changes"] == {str(tmp_path / "a.py"): {"M"}, str(tmp_path / "b.py"): {"M"}}
+    assert second["usage"]["generated_tokens"] == 12
+
+
+def test_codex_transcript_scan_restarts_after_truncation(tmp_path):
+    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+
+    def line(path_name, generated_tokens):
+        return json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"git add {path_name}", "workdir": str(tmp_path)}),
+                "info": {"last_token_usage": {"output_tokens": generated_tokens}},
+            },
+        }) + "\n"
+
+    original_line = line("very-long-original-name.py", 5)
+    replacement_line = line("b.py", 3)
+    assert len(replacement_line) < len(original_line)
+    transcript.write_text(original_line, encoding="utf-8")
+    assert session_files.scan_codex_transcript_details(transcript, str(tmp_path))["changes"] == {str(tmp_path / "very-long-original-name.py"): {"M"}}
+
+    transcript.write_text(replacement_line, encoding="utf-8")
+    refreshed = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+
+    assert refreshed["changes"] == {str(tmp_path / "b.py"): {"M"}}
+    assert refreshed["usage"]["generated_tokens"] == 3
+
+
+def test_codex_transcript_scan_restarts_when_existing_bytes_change(tmp_path):
+    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+
+    def line(path_name, generated_tokens):
+        return json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"git add {path_name}", "workdir": str(tmp_path)}),
+                "info": {"total_token_usage": {"output_tokens": generated_tokens}},
+            },
+        }) + "\n"
+
+    original_line = line("a.py", 5)
+    replacement_line = line("b.py", 3000)
+    assert len(replacement_line) >= len(original_line)
+    transcript.write_text(original_line, encoding="utf-8")
+    assert session_files.scan_codex_transcript_details(transcript, str(tmp_path))["changes"] == {str(tmp_path / "a.py"): {"M"}}
+
+    transcript.write_text(replacement_line, encoding="utf-8")
+    refreshed = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+
+    assert refreshed["changes"] == {str(tmp_path / "b.py"): {"M"}}
+    assert refreshed["usage"]["generated_tokens"] == 3000
+
+
 def test_session_touched_dirs_collects_edited_dirs(tmp_path):
     # session_touched_dirs returns the unique containing dirs of files the agents EDITED (not read),
     # so repo detection can find the real repo even when the live cwd is a non-repo.

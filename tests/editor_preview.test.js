@@ -2604,6 +2604,7 @@ async function runEditorPreviewSuite() {
     assert.equal(historyRequest.method, 'POST', 'YO!stats history uses POST');
     assert.equal(sampleUrl.searchParams.get('since'), '0', 'YO!stats sample keeps incremental since state');
     assert.ok(sampleUrl.searchParams.get('client_id'), 'YO!stats sample includes the per-tab client id');
+    assert.equal(sampleUrl.searchParams.get('token_consumer'), '1', 'visible YO!stats polling opts into slower server token scans');
     assert.equal(body.client_id, sampleUrl.searchParams.get('client_id'), 'YO!stats history posts the same per-tab client id');
     assert.ok(body.records.some(record => record.api_count === 1), 'YO!stats history posts browser API counters for this client');
     assert.equal(api.jsDebugEventsForTest().length, 1, 'regular debug event recording remains enabled');

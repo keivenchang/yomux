@@ -1556,13 +1556,18 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   };
 }
 
+function jsDebugStatsTokenConsumerEnabled() {
+  return debugModeEnabled === true && document.visibilityState !== 'hidden';
+}
+
 async function pollJsDebugStatsSample() {
   if (!jsDebugCollectionEnabled) return;
   if (jsDebugStatsPollInFlight || typeof apiFetchJsonQuiet !== 'function') return;
   jsDebugStatsPollInFlight = true;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
-    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}`, {cache: 'no-store'});
+    const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
+    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {

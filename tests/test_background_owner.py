@@ -433,8 +433,8 @@ def test_background_owner_coalesces_duplicate_local_refresh_requests(tmp_path):
     owner.owner = True
     owner.status = "owner"
 
-    first = owner.request_owner_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same"})
-    second = owner.request_owner_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same"})
+    first = owner.request_owner_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same", "reason": "stale-read", "requester": {"pid": 1}})
+    second = owner.request_owner_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same", "reason": "watch-state", "requester": {"pid": 2}})
     now[0] += background_owner_module.BACKGROUND_REFRESH_COALESCE_SECONDS + 0.1
     third = owner.request_owner_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same"})
 
@@ -465,8 +465,8 @@ def test_background_owner_coalesces_duplicate_follower_control_refreshes(monkeyp
         lambda owner, request, timeout: control_requests.append((owner, request, timeout)) or {"ok": True, "accepted": True},
     )
 
-    first = follower.request_owner_refresh(BACKGROUND_ROLE_WATCH_ROOTS, {"roots": ["/repo"], "reason": "poll"})
-    second = follower.request_owner_refresh(BACKGROUND_ROLE_WATCH_ROOTS, {"roots": ["/repo"], "reason": "poll"})
+    first = follower.request_owner_refresh(BACKGROUND_ROLE_WATCH_ROOTS, {"cache_key": "watch:/repo", "roots": ["/repo"], "reason": "poll"})
+    second = follower.request_owner_refresh(BACKGROUND_ROLE_WATCH_ROOTS, {"cache_key": "watch:/repo", "roots": ["/repo"], "reason": "watch-state"})
 
     assert first["accepted"] is True
     assert not first.get("coalesced")

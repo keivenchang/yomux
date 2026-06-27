@@ -227,7 +227,11 @@ METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 30.0
 SESSION_FILES_CACHE_VERSION = 1
+SESSION_FILES_CACHE_KEY_VERSION = 2
 SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
+SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
+SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS = 5 * 60
 TABBER_ACTIVITY_CACHE_VERSION = 1
 TABBER_ACTIVITY_CACHE_DIR = common.STATE_DIR / "activity-cache"
 SESSION_FILES_BATCH_MAX_WORKERS = 8
@@ -255,6 +259,8 @@ STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 30
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
+STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
+STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 6.0
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_CLIENT_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 STATS_HISTORY_BROWSER_FIELDS = (
@@ -712,6 +718,21 @@ def file_stat_signature(path: Path) -> tuple[str, int, int]:
     return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
 
 
+def transcript_cache_identity(transcript: str | None) -> tuple[str, int, int]:
+    if not transcript:
+        return ("", 0, 0)
+    path = Path(transcript).expanduser()
+    try:
+        resolved = str(path.resolve(strict=False))
+    except OSError:
+        resolved = str(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return (resolved, 0, 0)
+    return (resolved, int(stat.st_dev), int(stat.st_ino))
+
+
 def filesystem_watch_signature(path: str | Path) -> tuple[Any, ...]:
     target = Path(path).expanduser()
     try:
@@ -838,20 +859,13 @@ def filesystem_change_summary(previous: tuple[Any, ...] | None, current: tuple[A
 
 
 def agent_cache_signature(agent: AgentInfo) -> tuple[Any, ...]:
-    if agent.transcript:
-        try:
-            transcript_signature = file_stat_signature(Path(agent.transcript))
-        except OSError:
-            transcript_signature = (str(agent.transcript), 0, 0)
-    else:
-        transcript_signature = ("", 0, 0)
     return (
         agent.kind or "",
         agent.cwd or "",
         agent.status or "",
         agent.session_id or "",
         agent.model or "",
-        transcript_signature,
+        transcript_cache_identity(agent.transcript),
     )
 
 
@@ -1001,6 +1015,10 @@ class TmuxWebtermApp:
         self.session_files_cache_lock = threading.RLock()
         self.session_files_cache: dict[tuple[Any, ...], tuple[float, tuple[SessionFilesPayload, HTTPStatus]]] = {}
         self.session_files_refreshing_cache_keys: set[tuple[Any, ...]] = set()
+        self.session_files_disk_prune_lock = threading.Lock()
+        self.session_files_disk_prune_next_at = 0.0
+        self.session_files_disk_prune_running = False
+        self.session_files_disk_prune_last_result: dict[str, Any] = {}
         self.tabber_activity_cache_lock = threading.RLock()
         self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = None
         self.tabber_activity_cache_source_signature = ""
@@ -1040,6 +1058,8 @@ class TmuxWebtermApp:
         self.stats_agent_token_lock = threading.Lock()
         self.stats_agent_token_state: dict[str, dict[str, Any]] = {}
         self.stats_agent_activity_state: dict[str, dict[str, Any]] = {}
+        self.stats_agent_token_next_sample_at = 0.0
+        self.stats_agent_token_consumer_until = 0.0
         self.performance_record_lock = threading.RLock()
         self.performance_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_RECORD_LIMIT)
         self.client_events = ClientEventBroker()
@@ -1398,6 +1418,20 @@ class TmuxWebtermApp:
     def stats_agent_transition_seconds(self) -> float:
         return self.performance_setting_seconds("agent_window_cooldown_seconds", 0.0, 300.0)
 
+    def stats_agent_token_sample_seconds(self) -> float:
+        return STATS_AGENT_TOKEN_SAMPLE_SECONDS
+
+    def stats_agent_token_sampling_due(self, sample_time: float, token_consumer: bool = False) -> bool:
+        with self.stats_agent_token_lock:
+            if token_consumer:
+                self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, sample_time + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS)
+            if sample_time > self.stats_agent_token_consumer_until:
+                return False
+            if sample_time < self.stats_agent_token_next_sample_at:
+                return False
+            self.stats_agent_token_next_sample_at = sample_time + self.stats_agent_token_sample_seconds()
+            return True
+
     def stats_agent_activity_kind_locked(self, row: dict[str, Any], key: str, sample_time: float, transition_seconds: float) -> str:
         state = str(row.get("state") or "").strip().lower()
         previous = self.stats_agent_activity_state.get(key) if key else None
@@ -1456,12 +1490,14 @@ class TmuxWebtermApp:
         kind = str(row.get("kind") or "agent").strip() or "agent"
         return ":".join(part for part in (session, window_label or kind) if part) or kind
 
-    def stats_agent_activity_record(self, sample_time: float) -> dict[str, Any] | None:
+    def stats_agent_activity_record(self, sample_time: float, include_token_rates: bool = True) -> dict[str, Any] | None:
         rows = self.stats_agent_window_rows()
         if not rows:
             with self.stats_agent_token_lock:
                 self.stats_agent_token_state.clear()
                 self.stats_agent_activity_state.clear()
+                self.stats_agent_token_next_sample_at = 0.0
+                self.stats_agent_token_consumer_until = 0.0
             return None
         ask_agents = 0
         run_agents = 0
@@ -1485,17 +1521,18 @@ class TmuxWebtermApp:
                 else:
                     idle_agents += 1
                     inactive_agents += 1
-                token_count = self.stats_agent_token_count(row)
-                if token_count is None:
-                    continue
-                label = self.stats_agent_token_label(row)
-                previous = self.stats_agent_token_state.get(key)
-                rate = 0.0
-                if previous and token_count >= float(previous.get("tokens") or 0.0) and sample_time > float(previous.get("time") or 0.0):
-                    elapsed_minutes = max((sample_time - float(previous.get("time") or 0.0)) / 60.0, 1.0 / 60.0)
-                    rate = (token_count - float(previous.get("tokens") or 0.0)) / elapsed_minutes
-                agent_token_rates.append({"key": key, "label": label, "total": max(0.0, rate), "samples": 1.0})
-                self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label}
+                if include_token_rates:
+                    token_count = self.stats_agent_token_count(row)
+                    if token_count is None:
+                        continue
+                    label = self.stats_agent_token_label(row)
+                    previous = self.stats_agent_token_state.get(key)
+                    rate = 0.0
+                    if previous and token_count >= float(previous.get("tokens") or 0.0) and sample_time > float(previous.get("time") or 0.0):
+                        elapsed_minutes = max((sample_time - float(previous.get("time") or 0.0)) / 60.0, 1.0 / 60.0)
+                        rate = (token_count - float(previous.get("tokens") or 0.0)) / elapsed_minutes
+                    agent_token_rates.append({"key": key, "label": label, "total": max(0.0, rate), "samples": 1.0})
+                    self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label}
             for key in list(self.stats_agent_token_state):
                 if key not in seen_keys:
                     self.stats_agent_token_state.pop(key, None)
@@ -1560,10 +1597,11 @@ class TmuxWebtermApp:
                 record_cpu_sample = True
         return sample, record_cpu_sample
 
-    def record_stats_global_sample(self, trigger: str = "sampler") -> dict[str, Any]:
+    def record_stats_global_sample(self, trigger: str = "sampler", token_consumer: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
         sample, record_cpu_sample = self.current_stats_sample()
-        agent_record = self.stats_agent_activity_record(sample["time"]) if record_cpu_sample else None
+        include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample else False
+        agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample else None
         now = float(sample.get("time") or time.time())
         with self.stats_history_lock:
             if record_cpu_sample:
@@ -1586,7 +1624,7 @@ class TmuxWebtermApp:
             payload=sample,
             cache_status="sampled" if record_cpu_sample else "cached",
             record_time=sample["time"],
-            details={"agent_tokens": bool(agent_record and agent_record.get("agent_token_samples"))},
+            details={"agent_tokens": bool(agent_record and agent_record.get("agent_token_samples")), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates)},
         )
         return sample
 
@@ -1625,8 +1663,8 @@ class TmuxWebtermApp:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
 
-    def stats_sample_payload(self, since: int = 0, client_id: str = "") -> dict[str, Any]:
-        sample = self.record_stats_global_sample(trigger="api")
+    def stats_sample_payload(self, since: int = 0, client_id: str = "", token_consumer: bool = False) -> dict[str, Any]:
+        sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer)
         with self.stats_history_lock:
             self.stats_history_compact_locked(float(sample.get("time") or time.time()))
             history = self.stats_history_payload_locked(max(0, since), client_id=client_id)
@@ -4144,6 +4182,7 @@ class TmuxWebtermApp:
     ) -> tuple[Any, ...]:
         return (
             kind,
+            SESSION_FILES_CACHE_KEY_VERSION,
             session or "",
             session_files.bounded_session_files_hours(hours),
             str(from_ref or ""),
@@ -4159,6 +4198,118 @@ class TmuxWebtermApp:
 
     def session_files_disk_manifest_path(self, signature: str) -> Path:
         return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
+
+    def session_files_disk_cache_entries(self) -> list[dict[str, Any]]:
+        try:
+            paths = sorted(SESSION_FILES_CACHE_DIR.glob("*.json"))
+        except OSError:
+            return []
+        entries: list[dict[str, Any]] = []
+        for path in paths:
+            if path.name.endswith(".manifest.json"):
+                continue
+            signature = path.stem
+            manifest_path = self.session_files_disk_manifest_path(signature)
+            try:
+                payload_stat = path.stat()
+            except OSError:
+                continue
+            size = int(payload_stat.st_size)
+            mtime = float(payload_stat.st_mtime)
+            try:
+                manifest_stat = manifest_path.stat()
+                size += int(manifest_stat.st_size)
+                mtime = max(mtime, float(manifest_stat.st_mtime))
+            except OSError:
+                pass
+            entries.append({"path": path, "manifest_path": manifest_path, "signature": signature, "size": size, "mtime": mtime})
+        return entries
+
+    def remove_session_files_disk_cache_entry(self, entry: dict[str, Any]) -> tuple[int, int]:
+        removed_files = 0
+        removed_bytes = max(0, int(self.float_value(entry.get("size"), 0.0)))
+        for path in (entry.get("path"), entry.get("manifest_path")):
+            if not isinstance(path, Path):
+                continue
+            try:
+                path.unlink()
+                removed_files += 1
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.debug("failed to remove session-files cache entry %s: %s", path, exc)
+        return removed_files, removed_bytes
+
+    def prune_session_files_disk_cache(
+        self,
+        *,
+        max_age_seconds: float | None = None,
+        max_bytes: int | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        max_age = SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS if max_age_seconds is None else max(0.0, float(max_age_seconds))
+        byte_cap = SESSION_FILES_DISK_CACHE_MAX_BYTES if max_bytes is None else max(0, int(max_bytes))
+        current_time = time.time() if now is None else float(now)
+        entries = self.session_files_disk_cache_entries()
+        kept: list[dict[str, Any]] = []
+        to_remove: list[dict[str, Any]] = []
+        for entry in entries:
+            age_seconds = max(0.0, current_time - float(entry.get("mtime") or 0.0))
+            if max_age and age_seconds > max_age:
+                to_remove.append(entry)
+            else:
+                kept.append(entry)
+        total_bytes = sum(max(0, int(self.float_value(entry.get("size"), 0.0))) for entry in kept)
+        if byte_cap >= 0 and total_bytes > byte_cap:
+            for entry in sorted(kept, key=lambda item: (float(item.get("mtime") or 0.0), str(item.get("path") or ""))):
+                if total_bytes <= byte_cap:
+                    break
+                to_remove.append(entry)
+                total_bytes -= max(0, int(self.float_value(entry.get("size"), 0.0)))
+        removed_files = 0
+        removed_bytes = 0
+        seen_paths: set[Path] = set()
+        for entry in to_remove:
+            path = entry.get("path")
+            if isinstance(path, Path):
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+            files, bytes_removed = self.remove_session_files_disk_cache_entry(entry)
+            removed_files += files
+            removed_bytes += bytes_removed
+        return {
+            "entries": len(entries),
+            "removed_entries": len(seen_paths),
+            "removed_files": removed_files,
+            "removed_bytes": removed_bytes,
+            "kept_bytes": max(0, total_bytes),
+            "max_age_seconds": max_age,
+            "max_bytes": byte_cap,
+        }
+
+    def run_session_files_disk_cache_prune(self) -> None:
+        try:
+            result = self.prune_session_files_disk_cache()
+        except (OSError, RuntimeError, ValueError) as exc:
+            result = {"error": str(exc)}
+            logger.warning("session-files disk cache prune failed: %s", exc)
+        with self.session_files_disk_prune_lock:
+            self.session_files_disk_prune_last_result = result
+            self.session_files_disk_prune_running = False
+        if result.get("removed_entries"):
+            self.log_event(None, "session_files_cache_pruned", "Session-files disk cache pruned", result)
+
+    def request_session_files_disk_cache_prune(self, reason: str = "") -> bool:
+        now = time.monotonic()
+        with self.session_files_disk_prune_lock:
+            if self.session_files_disk_prune_running or now < self.session_files_disk_prune_next_at:
+                return False
+            self.session_files_disk_prune_running = True
+            self.session_files_disk_prune_next_at = now + SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
+        worker = threading.Thread(target=self.run_session_files_disk_cache_prune, name="session-files-cache-prune", daemon=True)
+        worker.start()
+        return True
 
     def session_files_payload_signature(self, payload: SessionFilesPayload | dict[str, Any]) -> str:
         payload_text = self.client_event_payload_signature(payload)
@@ -4267,6 +4418,7 @@ class TmuxWebtermApp:
             "last_error": "",
         }
         atomic_write_text(self.session_files_disk_manifest_path(signature), json.dumps(manifest, sort_keys=True, separators=(",", ":")), mode=0o600)
+        self.request_session_files_disk_cache_prune("write")
 
     def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
         path, signature = self.session_files_disk_cache_path(key)
@@ -6390,14 +6542,16 @@ class TmuxWebtermApp:
             requester = request.get("requester")
             return self.background_release_owner(requester if isinstance(requester, dict) else {})
         if action == "background_status":
-            return {"ok": True, "status": self.background_owner.status_payload()}
+            payload, _status = self.background_owner_status_payload()
+            return {"ok": True, "status": payload}
         if action == "background_ping":
             return {"ok": True, "status": self.background_owner.status_payload()}
         if action == "background_client_event":
             return self.handle_background_client_event(request)
         if action == "background_refresh":
             role = str(request.get("role") or "")
-            self.request_background_refresh(role, request if isinstance(request, dict) else {})
+            payload = request.get("payload") if isinstance(request, dict) else {}
+            self.request_background_refresh(role, payload if isinstance(payload, dict) else {})
             return {"ok": True, "accepted": True, "role": role}
         return {"ok": False, "error": f"unknown action: {action}"}
 

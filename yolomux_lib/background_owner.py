@@ -384,11 +384,27 @@ class BackgroundOwnerRegistry:
             self.counters["owner_refresh_requests"] = self.counters.get("owner_refresh_requests", 0) + 1
 
     def refresh_request_key(self, role: str, payload: dict[str, Any] | None = None) -> str:
+        key_payload = self.refresh_request_key_payload(payload)
         try:
-            payload_key = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
+            payload_key = json.dumps(key_payload, sort_keys=True, separators=(",", ":"), default=str)
         except (TypeError, ValueError):
-            payload_key = repr(payload or {})
+            payload_key = repr(key_payload)
         return f"{role}\0{payload_key}"
+
+    def refresh_request_key_payload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        cache_key = payload.get("cache_key")
+        if cache_key not in (None, ""):
+            return {"cache_key": str(cache_key)}
+        nested = payload.get("payload")
+        if isinstance(nested, dict):
+            nested_cache_key = nested.get("cache_key")
+            if nested_cache_key not in (None, ""):
+                return {"cache_key": str(nested_cache_key)}
+            payload = nested
+        volatile_keys = {"action", "reason", "requester", "role", "trigger"}
+        return {str(key): value for key, value in payload.items() if str(key) not in volatile_keys}
 
     def coalesce_refresh_request(self, role: str, payload: dict[str, Any] | None = None) -> bool:
         now = self.monotonic()
