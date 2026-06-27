@@ -945,13 +945,16 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
 
 
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
+    prompt_key = '["prompt","1","waiting"]'
     attention_key = '["agent-window","1","2","","claude","needs-input","waiting"]'
+    cooldown_key = '["agent-window","1","3","","codex","cooldown","1234"]'
     transcript_sessions = {
         "1": {
             "panes": [
-                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
-                {"target": "%2", "window": 1, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": True, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
                 {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+                {"target": "%4", "window": 3, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
             ],
         },
     }
@@ -961,9 +964,12 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
             "1": {
                 "target": "1",
                 "enabled": True,
+                "prompt": {"visible": True, "question_text": "waiting", "text": "waiting", "attention_key": prompt_key},
+                "screen": {"key": "needs-input", "text": "waiting", "question_text": "waiting"},
+                "prompt_attention_key": prompt_key,
                 "agent_windows": [
-                    {"kind": "claude", "state": "working", "window_index": 1, "window_label": "1:claude"},
                     {"kind": "claude", "state": "needs-input", "window_index": 2, "window_label": "2:claude", "screen_text": "waiting", "attention_key": attention_key},
+                    {"kind": "codex", "state": "idle", "window_index": 3, "window_label": "3:codex", "working_stopped_ts": 1234, "cooldown_attention_key": cooldown_key},
                 ],
             },
         },
@@ -982,7 +988,11 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
         lambda driver: driver.execute_script(
             """
             const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
-            return !!dot && document.querySelector('.panel-detail-row [data-window-index="1"]')?.classList.contains('active');
+            const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+            return !!dot
+              && !!tab?.querySelector('.session-state-badge.session-state-needs-input')
+              && !!tab?.querySelector('.agent-window-status-dot--attention-cooldown')
+              && document.querySelector('.panel-detail-row [data-window-index="0"]')?.classList.contains('active');
             """
         )
     )
@@ -1021,14 +1031,30 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
             """
         )
     )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+            const dot = tab?.querySelector('.session-agent-activity-marker .agent-window-status-dot');
+            return !!tab
+              && !tab.querySelector('.session-state-badge.session-state-needs-input')
+              && !!dot
+              && dot.classList.contains('status-indicator--cooldown')
+              && !dot.classList.contains('status-indicator--attention')
+              && !dot.classList.contains('agent-window-status-dot--attention-cooldown');
+            """
+        )
+    )
     assert time.monotonic() - click_started >= 0.8
-    ack_body = browser.execute_script(
+    ack_bodies = browser.execute_script(
         """
-        const fetch = window.__bootFetches.find(entry => entry.path === '/api/attention-ack');
-        return fetch?.body || null;
+        return window.__bootFetches
+          .filter(entry => entry.path === '/api/attention-ack')
+          .map(entry => entry.body);
         """
     )
-    assert ack_body == {"keys": [attention_key]}
+    acked_keys = {key for body in ack_bodies for key in body.get("keys", [])}
+    assert acked_keys == {prompt_key, attention_key}
 
 
 def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp_path):

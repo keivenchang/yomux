@@ -62,9 +62,11 @@ function aboutCommitShaText() {
 
 function topbarVersionTitle() {
   const sha = aboutCommitShaText();
+  const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
   if (sha) lines.push(`SHA: ${sha}`);
   if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
+  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(`Commits: ${commitCount}`);
   return lines.join('\n') || 'SHA unknown';
 }
 

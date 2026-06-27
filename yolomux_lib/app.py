@@ -1485,6 +1485,16 @@ class TmuxWebtermApp:
     def stats_agent_transition_seconds(self) -> float:
         return self.performance_setting_seconds("agent_window_cooldown_seconds", 0.0, 300.0)
 
+    def stats_agent_cooldown_visible(self, row: dict[str, Any], sample_time: float, transition_seconds: float) -> bool:
+        if row.get("cooldown_acknowledged") is True:
+            return False
+        stopped_ts = self.float_value(row.get("working_stopped_ts"), 0.0)
+        if stopped_ts <= 0:
+            return False
+        if transition_seconds <= 0:
+            return True
+        return sample_time - stopped_ts < transition_seconds
+
     def stats_agent_token_sample_seconds(self) -> float:
         return STATS_AGENT_TOKEN_SAMPLE_SECONDS
 
@@ -1506,11 +1516,17 @@ class TmuxWebtermApp:
         previous_transition_started = self.float_value(previous.get("transition_started") if isinstance(previous, dict) else 0.0, 0.0)
         transition_started = 0.0
         kind = "idle"
-        if state in STATS_AGENT_ASK_STATES:
+        if state in STATS_AGENT_ASK_STATES and row.get("attention_acknowledged") is not True:
             kind = "ask"
         elif state in STATS_AGENT_RUN_STATES:
             kind = "run"
-        elif state in STATS_AGENT_TRANSITION_STATES:
+        elif state in STATS_AGENT_TRANSITION_STATES and row.get("cooldown_acknowledged") is not True:
+            kind = "transition"
+            transition_started = self.float_value(row.get("working_stopped_ts"), 0.0) or previous_transition_started or sample_time
+        elif self.stats_agent_cooldown_visible(row, sample_time, transition_seconds):
+            kind = "transition"
+            transition_started = self.float_value(row.get("working_stopped_ts"), 0.0)
+        elif transition_seconds <= 0 and row.get("cooldown_acknowledged") is not True and previous_kind in {"run", "transition"}:
             kind = "transition"
             transition_started = previous_transition_started or sample_time
         elif transition_seconds > 0:

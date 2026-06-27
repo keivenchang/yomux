@@ -1877,7 +1877,9 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
-    if (typeof acknowledgeAgentWindowActivity === 'function') {
+    if (typeof acknowledgeTerminalAttentionFromUserAction === 'function') {
+      acknowledgeTerminalAttentionFromUserAction(button.dataset.windowSession, button.dataset.windowIndex);
+    } else if (typeof acknowledgeAgentWindowActivity === 'function') {
       acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
     }
     tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);

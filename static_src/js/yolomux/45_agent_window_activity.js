@@ -448,8 +448,17 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   if (!sessionKey || !isTmuxSession(sessionKey)) return null;
   const info = transcriptMeta.sessions?.[sessionKey] || null;
   const explicitIndex = windowIndex === null || windowIndex === undefined ? null : tmuxWindowIndexKey(windowIndex);
+  let summaryIndex = null;
+  if (explicitIndex === null && options.preferSummary === true && typeof sessionStatusAgentWindowSummaryForTab === 'function') {
+    const summary = sessionStatusAgentWindowSummaryForTab(sessionKey, info, autoApproveStates.get(sessionKey));
+    if (['attention', 'cooldown'].includes(summary?.item?.state)) {
+      summaryIndex = tmuxWindowIndexKey(summary?.agent?.window_index ?? summary?.agent?.window);
+    }
+  }
   const activeIndex = explicitIndex !== null
     ? explicitIndex
+    : summaryIndex !== null
+      ? summaryIndex
     : typeof tmuxWindowCurrentActiveIndex === 'function'
       ? tmuxWindowCurrentActiveIndex(sessionKey, info)
       : typeof tmuxWindowInfoActiveIndex === 'function'

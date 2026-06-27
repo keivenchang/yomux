@@ -110,6 +110,7 @@ SERVER_STARTED_AT = time.time()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
 _YOLOMUX_COMMIT_SHA: str | None = None
+_YOLOMUX_COMMIT_COUNT: int | None = None
 _AGENT_PATH_WARNING_KEYS: set[str] = set()
 
 
@@ -340,6 +341,24 @@ def yolomux_commit_sha() -> str:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         _YOLOMUX_COMMIT_SHA = ""
     return _YOLOMUX_COMMIT_SHA
+
+
+def yolomux_commit_count() -> int:
+    global _YOLOMUX_COMMIT_COUNT
+    if _YOLOMUX_COMMIT_COUNT is not None:
+        return _YOLOMUX_COMMIT_COUNT
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-list", "--count", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+        _YOLOMUX_COMMIT_COUNT = max(0, int(result.stdout.strip()))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+        _YOLOMUX_COMMIT_COUNT = 0
+    return _YOLOMUX_COMMIT_COUNT
 
 
 POPULAR_IDE_XTERM_APP_NAMES = [

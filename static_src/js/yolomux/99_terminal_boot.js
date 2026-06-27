@@ -3561,6 +3561,7 @@ function applyAutoApprovePayload(payload) {
     autoApproveStates.set(session, state);
   }
   if (sessionsChanged) renderPanels(previousActive);
+  else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
   updateDocumentTitle();
   renderAutoApproveButtons();
   updateSessionButtonStates();

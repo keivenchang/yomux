@@ -2999,6 +2999,26 @@ function seedVisualActivePaneItem(preferredItems = []) {
   return item || null;
 }
 
+function attentionAcknowledgeDelayMsFromOptions(options = {}) {
+  return Number.isFinite(Number(options.acknowledgeAgentWindowDelayMs))
+    ? Math.max(0, Number(options.acknowledgeAgentWindowDelayMs))
+    : (typeof agentWindowActivityAcknowledgeDelayMs === 'number' ? agentWindowActivityAcknowledgeDelayMs : 0);
+}
+
+function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null, options = {}) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || !isTmuxSession(sessionKey)) return false;
+  const acknowledgeDelayMs = attentionAcknowledgeDelayMsFromOptions(options);
+  let acknowledged = false;
+  if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
+    acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
+  }
+  if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
+    acknowledged = acknowledgeAgentWindowActivity(sessionKey, windowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
+  }
+  return acknowledged;
+}
+
 function setFocusedTerminal(session, options = {}) {
   const previousItem = focusedPanelItem;
   if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
@@ -3013,15 +3033,7 @@ function setFocusedTerminal(session, options = {}) {
   updatePanelInactiveOverlays();
   sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
-    const acknowledgeDelayMs = Number.isFinite(Number(options.acknowledgeAgentWindowDelayMs))
-      ? Math.max(0, Number(options.acknowledgeAgentWindowDelayMs))
-      : (typeof agentWindowActivityAcknowledgeDelayMs === 'number' ? agentWindowActivityAcknowledgeDelayMs : 0);
-    if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
-      clearPromptAttentionForSession(session, {delayMs: acknowledgeDelayMs});
-    }
-    if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
-      acknowledgeAgentWindowActivity(session, null, {delayMs: acknowledgeDelayMs});
-    }
+    acknowledgeTerminalAttentionFromUserAction(session, null, options);
     rememberFileExplorerExplicitSyncSession(session);
     scheduleFileExplorerActiveTabSync(session, {explicit: true});
     recordFocusNavTransition(previousItem, session);
@@ -3054,6 +3066,7 @@ function setFocusedPanelItem(item, options = {}) {
   updatePanelInactiveOverlays();
   sharePublish('focus', {item});
   if (options.userInitiated === true) {
+    if (isTmuxSession(item)) acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
     if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
     if (isFileEditorItem(item)) {
       activeFile = fileItemPath(item);
@@ -9144,9 +9157,11 @@ function aboutCommitShaText() {
 
 function topbarVersionTitle() {
   const sha = aboutCommitShaText();
+  const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
   if (sha) lines.push(`SHA: ${sha}`);
   if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
+  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(`Commits: ${commitCount}`);
   return lines.join('\n') || 'SHA unknown';
 }
 
@@ -15141,8 +15156,17 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   if (!sessionKey || !isTmuxSession(sessionKey)) return null;
   const info = transcriptMeta.sessions?.[sessionKey] || null;
   const explicitIndex = windowIndex === null || windowIndex === undefined ? null : tmuxWindowIndexKey(windowIndex);
+  let summaryIndex = null;
+  if (explicitIndex === null && options.preferSummary === true && typeof sessionStatusAgentWindowSummaryForTab === 'function') {
+    const summary = sessionStatusAgentWindowSummaryForTab(sessionKey, info, autoApproveStates.get(sessionKey));
+    if (['attention', 'cooldown'].includes(summary?.item?.state)) {
+      summaryIndex = tmuxWindowIndexKey(summary?.agent?.window_index ?? summary?.agent?.window);
+    }
+  }
   const activeIndex = explicitIndex !== null
     ? explicitIndex
+    : summaryIndex !== null
+      ? summaryIndex
     : typeof tmuxWindowCurrentActiveIndex === 'function'
       ? tmuxWindowCurrentActiveIndex(sessionKey, info)
       : typeof tmuxWindowInfoActiveIndex === 'function'
@@ -28629,7 +28653,9 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
-    if (typeof acknowledgeAgentWindowActivity === 'function') {
+    if (typeof acknowledgeTerminalAttentionFromUserAction === 'function') {
+      acknowledgeTerminalAttentionFromUserAction(button.dataset.windowSession, button.dataset.windowIndex);
+    } else if (typeof acknowledgeAgentWindowActivity === 'function') {
       acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
     }
     tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);
@@ -51323,6 +51349,7 @@ function applyAutoApprovePayload(payload) {
     autoApproveStates.set(session, state);
   }
   if (sessionsChanged) renderPanels(previousActive);
+  else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
   updateDocumentTitle();
   renderAutoApproveButtons();
   updateSessionButtonStates();

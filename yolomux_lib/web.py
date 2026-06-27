@@ -15,6 +15,7 @@ from .common import YOLOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
 from .common import yolomux_client_revision
+from .common import yolomux_commit_count
 from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .settings import save_settings
@@ -129,7 +130,9 @@ def static_asset_url(asset: str) -> str:
 
 
 def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
-    version_title = html.escape(f"SHA: {yolomux_commit_sha()}\nLast commit: {yolomux_commit_time_pt()}", quote=True)
+    commit_count = yolomux_commit_count()
+    commit_count_line = f"\nCommits: {commit_count}" if commit_count > 0 else ""
+    version_title = html.escape(f"SHA: {yolomux_commit_sha()}\nLast commit: {yolomux_commit_time_pt()}{commit_count_line}", quote=True)
     # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
     # the JS renderBrandWordmark(), so localize the YO/LO glyphs here too — otherwise a Chinese locale
     # showed "YO/LOmux" instead of 優樂mux / 优乐mux. Pass a locale on those pages; the main app leaves it
@@ -181,6 +184,7 @@ def html_page(
         "clientRevision": yolomux_client_revision(),
         "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
+        "versionCommitCount": yolomux_commit_count(),
         "settingsPayload": settings_data,
         # i18n: resolved active locale for first paint ("system" -> en server-side; the client
         # may refine via navigator.language). The active locale's catalog (+ the en fallback) is INLINED
