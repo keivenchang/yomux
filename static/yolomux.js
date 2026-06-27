@@ -6841,6 +6841,7 @@ function updateTopbarActivityStatus() {
   node.innerHTML = html;
   node.hidden = !html;
   node.classList.toggle('has-attention', counts.attention > 0);
+  if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
 function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
@@ -14853,7 +14854,9 @@ let agentWindowActivityMutationObserver = null;
 function mutationTouchesAgentWindowActivity(mutation) {
   for (const node of mutation?.addedNodes || []) {
     if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.classList?.contains?.('status-indicator') && (node.classList.contains('heartbeat-pulse') || node.classList.contains('attention-pulse'))) return true;
     if (node?.querySelector?.('.agent-window-activity')) return true;
+    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse')) return true;
   }
   return false;
 }
@@ -14868,11 +14871,12 @@ function ensureAgentWindowActivityMutationObserver() {
 
 function syncAgentWindowActivityAnimationDelays(root = document) {
   const scope = root?.querySelectorAll ? root : document;
-  const nodes = Array.from(scope?.querySelectorAll?.('.agent-window-activity') || []);
+  const nodes = Array.from(scope?.querySelectorAll?.('.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse') || []);
   if (!nodes.length) return;
   const delay = attentionAnimationDelay();
   for (const node of nodes) {
-    if (!node?.style || !node.querySelector?.('.agent-window-status-dot')) continue;
+    if (!node?.style) continue;
+    if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
     node.style.setProperty('--attention-animation-delay', delay);
   }
 }
@@ -48737,7 +48741,7 @@ function infoRecordFieldHtml(kind, html, title = '') {
   if (!html) return '';
   const labels = {
     path: 'path',
-    branch: 'branch',
+    branch: 'Git BRANCH',
     pr: 'PR',
     linear: 'Linear',
     tab: 'Tab(tmux session)',
@@ -48953,7 +48957,9 @@ function infoGroupChildCountHtml(group = {}) {
 }
 
 function infoGroupDimensionLabel(key) {
-  return key === 'tab' ? 'Tab(tmux session):' : `${infoDimensionLabel(key)}:`;
+  if (key === 'tab') return 'Tab(tmux session):';
+  if (key === 'branch') return 'Git BRANCH:';
+  return `${infoDimensionLabel(key)}:`;
 }
 
 function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ancestorGroupIdentities = [], activeGroupKeys = null) {

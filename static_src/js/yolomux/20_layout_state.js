@@ -1980,6 +1980,7 @@ function updateTopbarActivityStatus() {
   node.innerHTML = html;
   node.hidden = !html;
   node.classList.toggle('has-attention', counts.attention > 0);
+  if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
 function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {

@@ -286,7 +286,9 @@ let agentWindowActivityMutationObserver = null;
 function mutationTouchesAgentWindowActivity(mutation) {
   for (const node of mutation?.addedNodes || []) {
     if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.classList?.contains?.('status-indicator') && (node.classList.contains('heartbeat-pulse') || node.classList.contains('attention-pulse'))) return true;
     if (node?.querySelector?.('.agent-window-activity')) return true;
+    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse')) return true;
   }
   return false;
 }
@@ -301,11 +303,12 @@ function ensureAgentWindowActivityMutationObserver() {
 
 function syncAgentWindowActivityAnimationDelays(root = document) {
   const scope = root?.querySelectorAll ? root : document;
-  const nodes = Array.from(scope?.querySelectorAll?.('.agent-window-activity') || []);
+  const nodes = Array.from(scope?.querySelectorAll?.('.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse') || []);
   if (!nodes.length) return;
   const delay = attentionAnimationDelay();
   for (const node of nodes) {
-    if (!node?.style || !node.querySelector?.('.agent-window-status-dot')) continue;
+    if (!node?.style) continue;
+    if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
     node.style.setProperty('--attention-animation-delay', delay);
   }
 }

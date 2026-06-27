@@ -2173,6 +2173,9 @@ body.theme-light .info-tree {
 .info-tree-group[data-info-dimension="tab"] > summary .info-tree-group-dimension {
   text-transform: none;
 }
+.info-tree-group[data-info-dimension="branch"] > summary .info-tree-group-dimension {
+  text-transform: none;
+}
 .info-tree-group-label-line {
   min-width: 0;
   overflow: hidden;

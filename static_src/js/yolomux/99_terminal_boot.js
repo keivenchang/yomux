@@ -1354,7 +1354,7 @@ function infoRecordFieldHtml(kind, html, title = '') {
   if (!html) return '';
   const labels = {
     path: 'path',
-    branch: 'branch',
+    branch: 'Git BRANCH',
     pr: 'PR',
     linear: 'Linear',
     tab: 'Tab(tmux session)',
@@ -1570,7 +1570,9 @@ function infoGroupChildCountHtml(group = {}) {
 }
 
 function infoGroupDimensionLabel(key) {
-  return key === 'tab' ? 'Tab(tmux session):' : `${infoDimensionLabel(key)}:`;
+  if (key === 'tab') return 'Tab(tmux session):';
+  if (key === 'branch') return 'Git BRANCH:';
+  return `${infoDimensionLabel(key)}:`;
 }
 
 function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ancestorGroupIdentities = [], activeGroupKeys = null) {

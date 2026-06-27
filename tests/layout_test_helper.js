@@ -264,6 +264,9 @@ class TestElement {
     if (selector === '.file-tree-row[data-path]') return this.classList.contains('file-tree-row') && Boolean(this.dataset.path);
     const fileTreePathMatch = selector.match(/^\.file-tree-row\[data-path="([^"]+)"\]$/);
     if (fileTreePathMatch) return this.classList.contains('file-tree-row') && this.dataset.path === fileTreePathMatch[1];
+    if (/^\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/.test(selector)) {
+      return selector.slice(1).split('.').every(className => this.classList.contains(className));
+    }
     if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
     return false;
   }
@@ -962,6 +965,7 @@ globalThis.__layoutTestApi = {
   transcriptInfoForTest(session) { return transcriptMeta.sessions?.[session]; },
   applyTranscriptsPayloadForTest: applyTranscriptsPayload,
   applyTmuxSignalsPayloadForTest: applyTmuxSignalsPayload,
+  syncAgentWindowActivityAnimationDelaysForTest: syncAgentWindowActivityAnimationDelays,
   scheduleTmuxWindowReadbackForTest: scheduleTmuxWindowReadback,
   setTmuxWindowActiveIndexOverrideForTest: setTmuxWindowActiveIndexOverride,
   setTmuxWindowActiveIndexPendingForTest: setTmuxWindowActiveIndexPending,
