@@ -267,6 +267,8 @@ STATS_HISTORY_SAMPLER_SECONDS = 1.0
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
 STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 6.0
+STATS_SHARED_FRESH_SECONDS = 3.0
+TMUX_AI_STATUS_VERSION = 1
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_CLIENT_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 STATS_HISTORY_BROWSER_FIELDS = (
@@ -1131,6 +1133,8 @@ class TmuxWebtermApp:
         self.stats_history_raw_buckets: dict[tuple[int, int], dict[str, Any]] = {}
         self.stats_history_rollup_buckets: dict[tuple[int, int], dict[str, Any]] = {}
         self.stats_history_sequence = 0
+        self.stats_history_shared_rev = -1
+        self.stats_history_shared_loaded = False
         self.attention_ack_lock = threading.RLock()
         self.attention_ack_keys: dict[str, float] = {}
         self.stats_agent_token_lock = threading.Lock()
@@ -1448,6 +1452,324 @@ class TmuxWebtermApp:
             "rollup_bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS,
             "client_id": stats_history_client_id(client_id),
         }
+
+    def tmux_ai_status_empty(self) -> dict[str, Any]:
+        return {
+            "version": TMUX_AI_STATUS_VERSION,
+            "rev": 0,
+            "updated_at": 0.0,
+            "attention_acks": {"rev": 0, "updated_at": 0.0, "keys": {}},
+            "stats_history": {
+                "rev": 0,
+                "updated_at": 0.0,
+                "sequence": 0,
+                "sample": {},
+                "raw_buckets": [],
+                "rollup_buckets": [],
+                "agent_token_state": {},
+                "agent_activity_state": {},
+                "agent_token_next_sample_at": 0.0,
+                "agent_token_consumer_until": 0.0,
+                "writer": {},
+            },
+        }
+
+    def _read_shared_tmux_ai_status_locked(self) -> dict[str, Any]:
+        status = self.tmux_ai_status_empty()
+        try:
+            data = json.loads(common.TMUX_AI_STATUS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        try:
+            legacy = json.loads(common.LEGACY_ATTENTION_ACKS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            legacy = {}
+        if not isinstance(legacy, dict):
+            legacy = {}
+        if not data and legacy:
+            data = {
+                "version": TMUX_AI_STATUS_VERSION,
+                "rev": legacy.get("rev", 0),
+                "attention_acks": {
+                    "rev": legacy.get("rev", 0),
+                    "updated_at": legacy.get("updated_at", 0.0),
+                    "keys": legacy.get("keys", {}),
+                },
+            }
+        try:
+            status["rev"] = max(0, int(data.get("rev", 0)))
+        except (TypeError, ValueError):
+            status["rev"] = 0
+        try:
+            status["updated_at"] = max(0.0, float(data.get("updated_at", 0.0)))
+        except (TypeError, ValueError):
+            status["updated_at"] = 0.0
+        attention = data.get("attention_acks") if isinstance(data.get("attention_acks"), dict) else {}
+        if not attention and isinstance(data.get("keys"), dict):
+            attention = {"rev": data.get("rev", 0), "updated_at": data.get("updated_at", 0.0), "keys": data.get("keys", {})}
+        legacy_keys = legacy.get("keys") if isinstance(legacy.get("keys"), dict) else {}
+        if legacy_keys:
+            attention = dict(attention) if isinstance(attention, dict) else {}
+            merged_keys = dict(attention.get("keys")) if isinstance(attention.get("keys"), dict) else {}
+            for key, ts in legacy_keys.items():
+                try:
+                    legacy_ts = float(ts)
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    existing_ts = float(merged_keys.get(str(key)) or 0.0)
+                except (TypeError, ValueError):
+                    existing_ts = 0.0
+                merged_keys[str(key)] = max(existing_ts, legacy_ts)
+            attention["keys"] = merged_keys
+            try:
+                attention["rev"] = max(int(attention.get("rev") or 0), int(legacy.get("rev") or 0))
+            except (TypeError, ValueError):
+                attention["rev"] = 0
+            attention["legacy_rev"] = legacy.get("rev", 0)
+        status["attention_acks"] = attention if isinstance(attention, dict) else {}
+        stats_history = data.get("stats_history") if isinstance(data.get("stats_history"), dict) else {}
+        status["stats_history"] = stats_history if isinstance(stats_history, dict) else {}
+        return status
+
+    def _write_shared_tmux_ai_status_locked(self, status: dict[str, Any]) -> int:
+        now = time.time()
+        try:
+            rev = max(0, int(status.get("rev", 0))) + 1
+        except (TypeError, ValueError):
+            rev = 1
+        payload = dict(status)
+        payload["version"] = TMUX_AI_STATUS_VERSION
+        payload["rev"] = rev
+        payload["updated_at"] = now
+        atomic_write_text(
+            common.TMUX_AI_STATUS_PATH,
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            mode=0o600,
+        )
+        return rev
+
+    def stats_history_uses_shared_status(self) -> bool:
+        return not isinstance(self.background_owner, DisabledBackgroundOwner)
+
+    def stats_history_bucket_has_server_data(self, bucket: dict[str, Any]) -> bool:
+        if int(bucket.get("server_sequence") or 0) > 0:
+            return True
+        if any(float(bucket.get(key) or 0.0) for key in STATS_HISTORY_SERVER_FIELDS):
+            return True
+        return bool(bucket.get("agent_token_rates"))
+
+    def stats_history_agent_token_rates_snapshot(self, rates: Any) -> dict[str, dict[str, Any]]:
+        snapshot: dict[str, dict[str, Any]] = {}
+        for item in stats_history_agent_token_rate_records(rates):
+            snapshot[item["key"]] = {
+                "label": item["label"],
+                "total": float(item.get("total") or 0.0),
+                "samples": float(item.get("samples") or 0.0),
+                "tokens": float(item.get("tokens") or 0.0),
+                "seconds": float(item.get("seconds") or 0.0),
+                "source": str(item.get("source") or ""),
+            }
+        return snapshot
+
+    def stats_history_shared_bucket_snapshot(self, bucket: dict[str, Any]) -> dict[str, Any]:
+        snapshot = {
+            "start": int(bucket.get("start") or 0),
+            "duration": int(bucket.get("duration") or 0),
+            "sequence": int(bucket.get("server_sequence") or bucket.get("sequence") or 0),
+            "server_sequence": int(bucket.get("server_sequence") or bucket.get("sequence") or 0),
+            "agent_token_rates": self.stats_history_agent_token_rates_snapshot(bucket.get("agent_token_rates")),
+        }
+        for key in STATS_HISTORY_SERVER_FIELDS:
+            snapshot[key] = float(bucket.get(key) or 0.0)
+        return snapshot
+
+    def stats_history_shared_agent_state_snapshot(self, value: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        snapshot: dict[str, dict[str, Any]] = {}
+        for raw_key, raw_item in value.items():
+            key = str(raw_key or "").strip()
+            if not key or not isinstance(raw_item, dict):
+                continue
+            item: dict[str, Any] = {}
+            for field in ("tokens", "time", "transition_started"):
+                try:
+                    item[field] = float(raw_item.get(field) or 0.0)
+                except (TypeError, ValueError):
+                    item[field] = 0.0
+            for field in ("label", "source", "state", "kind"):
+                text = str(raw_item.get(field) or "").strip()
+                if text:
+                    item[field] = text
+            snapshot[key] = item
+        return snapshot
+
+    def stats_history_shared_snapshot(self, sample: dict[str, Any]) -> dict[str, Any]:
+        now = float(sample.get("time") or time.time())
+        with self.stats_history_lock:
+            self.stats_history_compact_locked(now)
+            raw_buckets = [
+                self.stats_history_shared_bucket_snapshot(bucket)
+                for bucket in self.stats_history_raw_buckets.values()
+                if self.stats_history_bucket_has_server_data(bucket)
+            ]
+            rollup_buckets = [
+                self.stats_history_shared_bucket_snapshot(bucket)
+                for bucket in self.stats_history_rollup_buckets.values()
+                if self.stats_history_bucket_has_server_data(bucket)
+            ]
+            sequence = self.stats_history_sequence
+        with self.stats_agent_token_lock:
+            token_state = self.stats_history_shared_agent_state_snapshot(self.stats_agent_token_state)
+            activity_state = self.stats_history_shared_agent_state_snapshot(self.stats_agent_activity_state)
+            token_next_sample_at = self.stats_agent_token_next_sample_at
+            token_consumer_until = self.stats_agent_token_consumer_until
+        return {
+            "updated_at": now,
+            "sequence": sequence,
+            "sample": dict(sample),
+            "raw_buckets": sorted(raw_buckets, key=lambda item: (item["start"], item["duration"])),
+            "rollup_buckets": sorted(rollup_buckets, key=lambda item: (item["start"], item["duration"])),
+            "agent_token_state": token_state,
+            "agent_activity_state": activity_state,
+            "agent_token_next_sample_at": token_next_sample_at,
+            "agent_token_consumer_until": token_consumer_until,
+            "writer": self.background_owner.owner_payload(),
+        }
+
+    def write_shared_stats_history(self, sample: dict[str, Any]) -> int:
+        if not self.stats_history_uses_shared_status():
+            return self.stats_history_shared_rev
+        snapshot = self.stats_history_shared_snapshot(sample)
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            existing = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
+            try:
+                stats_rev = max(0, int(existing.get("rev", 0))) + 1
+            except (TypeError, ValueError):
+                stats_rev = 1
+            snapshot["rev"] = stats_rev
+            status["stats_history"] = snapshot
+            self._write_shared_tmux_ai_status_locked(status)
+        self.stats_history_shared_rev = stats_rev
+        self.stats_history_shared_loaded = True
+        return stats_rev
+
+    def write_shared_stats_token_consumer_until(self, consumer_until: float) -> None:
+        if not self.stats_history_uses_shared_status() or consumer_until <= 0:
+            return
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            stats_history = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
+            stats_history = dict(stats_history)
+            try:
+                previous = float(stats_history.get("agent_token_consumer_until") or 0.0)
+            except (TypeError, ValueError):
+                previous = 0.0
+            if consumer_until <= previous:
+                return
+            try:
+                stats_rev = max(0, int(stats_history.get("rev", 0))) + 1
+            except (TypeError, ValueError):
+                stats_rev = 1
+            stats_history["rev"] = stats_rev
+            stats_history["agent_token_consumer_until"] = consumer_until
+            stats_history["consumer_updated_at"] = time.time()
+            status["stats_history"] = stats_history
+            self._write_shared_tmux_ai_status_locked(status)
+
+    def stats_history_refresh_bucket_sequence_locked(self, bucket: dict[str, Any]) -> None:
+        sequence = int(bucket.get("server_sequence") or 0)
+        clients = bucket.get("clients")
+        if isinstance(clients, dict):
+            for client_bucket in clients.values():
+                if isinstance(client_bucket, dict):
+                    sequence = max(sequence, int(client_bucket.get("sequence") or 0))
+        bucket["sequence"] = sequence
+
+    def stats_history_clear_server_fields_locked(self) -> None:
+        for bucket in [*self.stats_history_raw_buckets.values(), *self.stats_history_rollup_buckets.values()]:
+            for key in STATS_HISTORY_SERVER_FIELDS:
+                bucket[key] = 0.0
+            bucket["agent_token_rates"] = {}
+            bucket["server_sequence"] = 0
+            self.stats_history_refresh_bucket_sequence_locked(bucket)
+
+    def stats_history_apply_shared_bucket_locked(self, source: dict[str, Any]) -> None:
+        try:
+            start = int(source.get("start") or 0)
+            duration = int(source.get("duration") or 0)
+        except (TypeError, ValueError):
+            return
+        if start <= 0 or duration <= 0:
+            return
+        buckets = self.stats_history_rollup_buckets if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS else self.stats_history_raw_buckets
+        key = (start, duration)
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = stats_history_empty_bucket(start, duration)
+            buckets[key] = bucket
+        for field in STATS_HISTORY_SERVER_FIELDS:
+            bucket[field] = float(source.get(field) or 0.0)
+        bucket["agent_token_rates"] = self.stats_history_agent_token_rates_snapshot(source.get("agent_token_rates"))
+        server_sequence = int(source.get("server_sequence") or source.get("sequence") or 0)
+        bucket["server_sequence"] = server_sequence
+        self.stats_history_refresh_bucket_sequence_locked(bucket)
+
+    def stats_history_apply_shared_agent_state(self, stats_history: dict[str, Any]) -> None:
+        with self.stats_agent_token_lock:
+            token_state = stats_history.get("agent_token_state")
+            if isinstance(token_state, dict):
+                self.stats_agent_token_state = self.stats_history_shared_agent_state_snapshot(token_state)
+            activity_state = stats_history.get("agent_activity_state")
+            if isinstance(activity_state, dict):
+                self.stats_agent_activity_state = self.stats_history_shared_agent_state_snapshot(activity_state)
+            try:
+                self.stats_agent_token_next_sample_at = max(self.stats_agent_token_next_sample_at, float(stats_history.get("agent_token_next_sample_at") or 0.0))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, float(stats_history.get("agent_token_consumer_until") or 0.0))
+            except (TypeError, ValueError):
+                pass
+
+    def merge_shared_stats_history(self, max_age_seconds: float | None = None) -> dict[str, Any]:
+        if not self.stats_history_uses_shared_status():
+            return {"ok": False, "fresh": False, "sample": {}, "updated_at": 0.0, "rev": self.stats_history_shared_rev}
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+        stats_history = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
+        if not stats_history:
+            return {"ok": False, "fresh": False, "sample": {}, "updated_at": 0.0, "rev": self.stats_history_shared_rev}
+        try:
+            rev = max(0, int(stats_history.get("rev", 0)))
+        except (TypeError, ValueError):
+            rev = 0
+        try:
+            updated_at = max(0.0, float(stats_history.get("updated_at") or 0.0))
+        except (TypeError, ValueError):
+            updated_at = 0.0
+        now = time.time()
+        fresh = bool(updated_at and (max_age_seconds is None or now - updated_at <= max_age_seconds))
+        if rev != self.stats_history_shared_rev:
+            raw_buckets = stats_history.get("raw_buckets") if isinstance(stats_history.get("raw_buckets"), list) else []
+            rollup_buckets = stats_history.get("rollup_buckets") if isinstance(stats_history.get("rollup_buckets"), list) else []
+            with self.stats_history_lock:
+                self.stats_history_clear_server_fields_locked()
+                for bucket in [*rollup_buckets, *raw_buckets]:
+                    if isinstance(bucket, dict):
+                        self.stats_history_apply_shared_bucket_locked(bucket)
+                try:
+                    self.stats_history_sequence = max(self.stats_history_sequence, int(stats_history.get("sequence") or 0))
+                except (TypeError, ValueError):
+                    pass
+                self.stats_history_compact_locked(now)
+            self.stats_history_apply_shared_agent_state(stats_history)
+            self.stats_history_shared_rev = rev
+            self.stats_history_shared_loaded = True
+        sample = stats_history.get("sample") if isinstance(stats_history.get("sample"), dict) else {}
+        return {"ok": True, "fresh": fresh, "sample": dict(sample), "updated_at": updated_at, "rev": rev}
 
     def record_stats_history_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         if not isinstance(payload, dict):
@@ -1780,6 +2102,23 @@ class TmuxWebtermApp:
 
     def record_stats_global_sample(self, trigger: str = "sampler", token_consumer: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
+        shared_enabled = self.stats_history_uses_shared_status()
+        if shared_enabled and not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
+            shared = self.merge_shared_stats_history(max_age_seconds=None)
+            sample = shared.get("sample") if isinstance(shared.get("sample"), dict) else {}
+            self.record_performance_sample(
+                BACKGROUND_ROLE_STATS_SAMPLER,
+                "global-sample",
+                trigger=trigger,
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=sample,
+                cache_status="follower",
+                record_time=shared.get("updated_at") if shared.get("updated_at") else None,
+                details={"shared": bool(shared.get("ok")), "fresh": bool(shared.get("fresh")), "token_consumer": bool(token_consumer)},
+            )
+            return dict(sample)
+        if shared_enabled:
+            self.merge_shared_stats_history(max_age_seconds=None)
         sample, record_cpu_sample = self.current_stats_sample()
         include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample else False
         agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample else None
@@ -1801,6 +2140,8 @@ class TmuxWebtermApp:
                     if isinstance(token_record, dict):
                         self.stats_history_merge_record_locked(token_record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
             self.stats_history_compact_locked(now)
+        if shared_enabled and record_cpu_sample:
+            self.write_shared_stats_history(sample)
         self.record_performance_sample(
             BACKGROUND_ROLE_STATS_SAMPLER,
             "global-sample",
@@ -1818,7 +2159,10 @@ class TmuxWebtermApp:
             while not self.stats_history_sampler_stop_event.is_set():
                 started = time.monotonic()
                 try:
-                    self.record_stats_global_sample(trigger="sampler")
+                    if self.stats_history_uses_shared_status() and not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
+                        self.merge_shared_stats_history(max_age_seconds=None)
+                    else:
+                        self.record_stats_global_sample(trigger="sampler")
                 except (OSError, RuntimeError, ValueError) as exc:
                     self.log_event(None, "stats_history_error", f"Stats history sample failed: {exc}", {})
                 elapsed = max(0.0, time.monotonic() - started)
@@ -1849,6 +2193,34 @@ class TmuxWebtermApp:
             thread.join(timeout=2.0)
 
     def stats_sample_payload(self, since: int = 0, client_id: str = "", token_consumer: bool = False) -> dict[str, Any]:
+        shared_enabled = self.stats_history_uses_shared_status()
+        if shared_enabled and token_consumer:
+            consumer_until = time.time() + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS
+            with self.stats_agent_token_lock:
+                self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, consumer_until)
+            self.write_shared_stats_token_consumer_until(consumer_until)
+        if shared_enabled and not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
+            shared = self.merge_shared_stats_history(max_age_seconds=STATS_SHARED_FRESH_SECONDS)
+            sample = shared.get("sample") if isinstance(shared.get("sample"), dict) else {}
+            if not shared.get("fresh"):
+                self.record_background_follower_stale_read(BACKGROUND_ROLE_STATS_SAMPLER)
+            if not sample:
+                sample, _record_cpu_sample = self.current_stats_sample()
+            with self.stats_history_lock:
+                self.stats_history_compact_locked(float(sample.get("time") or time.time()))
+                history = self.stats_history_payload_locked(max(0, since), client_id=client_id)
+            return {
+                "ok": True,
+                **sample,
+                "history": history,
+                "shared_stats": {
+                    "enabled": True,
+                    "fresh": bool(shared.get("fresh")),
+                    "updated_at": float(shared.get("updated_at") or 0.0),
+                    "rev": int(shared.get("rev") or 0),
+                    "role": "follower",
+                },
+            }
         sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer)
         with self.stats_history_lock:
             self.stats_history_compact_locked(float(sample.get("time") or time.time()))
@@ -1857,6 +2229,13 @@ class TmuxWebtermApp:
             "ok": True,
             **sample,
             "history": history,
+            "shared_stats": {
+                "enabled": shared_enabled,
+                "fresh": True,
+                "updated_at": float(sample.get("time") or time.time()),
+                "rev": self.stats_history_shared_rev,
+                "role": "owner" if shared_enabled else "local",
+            },
         }
 
     def start_background_owner(self, port: int | None = None) -> bool:
@@ -1869,6 +2248,7 @@ class TmuxWebtermApp:
         )
         file_index.set_background_owner_checker(self.background_can_run)
         acquired = self.background_owner.start()
+        self.merge_shared_stats_history(max_age_seconds=None)
         if not acquired and self.background_owner.status == "blocked_by_unreachable_owner":
             self.log_event(None, "background_owner_blocked", "Background owner takeover blocked", self.background_owner.status_payload())
         return acquired
@@ -1881,6 +2261,7 @@ class TmuxWebtermApp:
             self.log_event(None, "background_owner_acquired", "Background owner acquired by this server", status.get("generation", {}))
         self.warm_start_session_files_payload_cache()
         self.warm_start_tabber_activity_cache()
+        self.merge_shared_stats_history(max_age_seconds=None)
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
 
     def background_can_run(self, role: str) -> bool:
@@ -8480,11 +8861,9 @@ class TmuxWebtermApp:
             self.auto_approve_cache_condition.notify_all()
 
     def _read_shared_attention_acks_locked(self) -> tuple[dict[str, float], int]:
-        try:
-            data = json.loads(common.ATTENTION_ACKS_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            data = {}
-        raw_keys = data.get("keys") if isinstance(data, dict) else {}
+        data = self._read_shared_tmux_ai_status_locked()
+        attention = data.get("attention_acks") if isinstance(data.get("attention_acks"), dict) else {}
+        raw_keys = attention.get("keys") if isinstance(attention.get("keys"), dict) else {}
         keys: dict[str, float] = {}
         if isinstance(raw_keys, dict):
             for raw_key, raw_ts in raw_keys.items():
@@ -8496,7 +8875,7 @@ class TmuxWebtermApp:
                 if key and ts > 0:
                     keys[key] = ts
         try:
-            rev = int(data.get("rev", 0)) if isinstance(data, dict) else 0
+            rev = int(attention.get("rev", 0)) if isinstance(attention, dict) else 0
         except (TypeError, ValueError):
             rev = 0
         return keys, max(0, rev)
@@ -8510,18 +8889,23 @@ class TmuxWebtermApp:
 
     def write_shared_attention_acks_union(self, local_keys: dict[str, float]) -> int:
         now = time.time()
-        with file_lock(common.ATTENTION_ACKS_PATH, dir_mode=0o700):
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            attention = status.get("attention_acks") if isinstance(status.get("attention_acks"), dict) else {}
             merged, rev = self._read_shared_attention_acks_locked()
             for key, ts in local_keys.items():
                 if key and ts > 0:
                     merged[key] = max(ts, merged.get(key, 0.0))
             self._prune_attention_ack_dict(merged, now)
             rev += 1
-            atomic_write_text(
-                common.ATTENTION_ACKS_PATH,
-                json.dumps({"version": 1, "rev": rev, "keys": merged}, sort_keys=True, separators=(",", ":")) + "\n",
-                mode=0o600,
-            )
+            status["attention_acks"] = {
+                "rev": rev,
+                "updated_at": now,
+                "keys": merged,
+                "writer": self.background_owner.owner_payload(),
+                **({"legacy_rev": attention.get("legacy_rev")} if isinstance(attention, dict) and attention.get("legacy_rev") else {}),
+            }
+            self._write_shared_tmux_ai_status_locked(status)
         with self.attention_ack_lock:
             self.attention_ack_keys = dict(merged)
         with self.client_watch_lock:
@@ -8531,13 +8915,12 @@ class TmuxWebtermApp:
     def merge_shared_attention_acks(self) -> bool:
         # Hold file_lock across the whole read->rev-check->apply. write_shared_attention_acks_union
         # holds file_lock for its entire read-modify-write plus its in-memory cache + rev update, so
-        # keeping the lock here makes the two mutually exclusive. Releasing it before the apply (as the
-        # original did) let a concurrent local ack interleave: this poll would then regress
-        # client_watch_attention_ack_rev and overwrite attention_ack_keys with the stale snapshot it
-        # read earlier, dropping a just-acked key from the cache. The guard is monotonic (<=) so a stale
-        # or equal rev is never applied; that also makes the -1 startup rev load the file exactly once.
-        # changed compares the key SET, so a timestamp-only re-ack does not trigger a client refetch.
-        with file_lock(common.ATTENTION_ACKS_PATH, dir_mode=0o700):
+        # keeping the lock here makes the two mutually exclusive. Releasing it before the apply let a
+        # concurrent local ack interleave: this poll would then regress client_watch_attention_ack_rev
+        # and overwrite attention_ack_keys with the stale snapshot it read earlier, dropping a just-acked
+        # key from the cache. The guard is monotonic (<=) so a stale or equal rev is never applied, and
+        # changed compares the key set so a timestamp-only re-ack does not trigger a client refetch.
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
             file_keys, rev = self._read_shared_attention_acks_locked()
             with self.client_watch_lock:
                 if rev <= self.client_watch_attention_ack_rev:

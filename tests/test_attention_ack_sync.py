@@ -31,7 +31,8 @@ def make_app(monkeypatch):
 
 
 def patch_shared_path(monkeypatch, tmp_path):
-    monkeypatch.setattr(common, "ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
 
 
 def test_attention_ack_visible_to_second_instance(monkeypatch, tmp_path, make_app):
@@ -44,8 +45,8 @@ def test_attention_ack_visible_to_second_instance(monkeypatch, tmp_path, make_ap
 
     assert status == HTTPStatus.OK
     assert result["ok"] is True
-    data = json.loads((tmp_path / "attention-acks.json").read_text(encoding="utf-8"))
-    assert key in data["keys"]
+    data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    assert key in data["attention_acks"]["keys"]
     assert second.merge_shared_attention_acks() is True
     assert second.attention_acknowledged(key) is True
 
@@ -61,9 +62,9 @@ def test_attention_ack_union_does_not_clobber_peer_keys(monkeypatch, tmp_path, m
     first.write_shared_attention_acks_union({first_key: now})
     second.write_shared_attention_acks_union({second_key: now})
 
-    data = json.loads((tmp_path / "attention-acks.json").read_text(encoding="utf-8"))
-    assert first_key in data["keys"]
-    assert second_key in data["keys"]
+    data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    assert first_key in data["attention_acks"]["keys"]
+    assert second_key in data["attention_acks"]["keys"]
     first.merge_shared_attention_acks()
     second.merge_shared_attention_acks()
     assert first.attention_acknowledged(first_key) is True
@@ -130,6 +131,85 @@ def test_attention_ack_shared_file_prunes_stale_keys(monkeypatch, tmp_path, make
 
     app.write_shared_attention_acks_union({fresh_key: now})
 
-    data = json.loads((tmp_path / "attention-acks.json").read_text(encoding="utf-8"))
-    assert stale_key not in data["keys"]
-    assert fresh_key in data["keys"]
+    data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    assert stale_key not in data["attention_acks"]["keys"]
+    assert fresh_key in data["attention_acks"]["keys"]
+
+
+def test_attention_ack_migrates_legacy_file_to_tmux_ai_status(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    now = time.time()
+    legacy_key = app.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", "legacy")
+    fresh_key = app.attention_ack_key("agent-window", "1", "0", "%2", "codex", "approval", "fresh")
+    (tmp_path / "attention-acks.json").write_text(
+        json.dumps({"version": 1, "rev": 7, "keys": {legacy_key: now}}),
+        encoding="utf-8",
+    )
+
+    app.write_shared_attention_acks_union({fresh_key: now})
+
+    data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    assert legacy_key in data["attention_acks"]["keys"]
+    assert fresh_key in data["attention_acks"]["keys"]
+    assert data["attention_acks"]["rev"] == 8
+
+
+def test_attention_ack_reads_legacy_keys_after_new_status_exists(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    now = time.time()
+    legacy_key = app.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", "legacy-after-new")
+    (tmp_path / "tmux-AI-status.json").write_text(
+        json.dumps({"version": 1, "rev": 3, "attention_acks": {"rev": 3, "keys": {}}, "stats_history": {"rev": 9, "raw_buckets": []}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "attention-acks.json").write_text(
+        json.dumps({"version": 1, "rev": 10, "keys": {legacy_key: now}}),
+        encoding="utf-8",
+    )
+
+    assert app.merge_shared_attention_acks() is True
+
+    assert app.attention_acknowledged(legacy_key) is True
+
+
+def test_attention_ack_merge_never_applies_stale_revision(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    now = time.time()
+    stale_key = app.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", "stale")
+    local_key = app.attention_ack_key("agent-window", "1", "0", "%2", "codex", "approval", "local")
+    (tmp_path / "tmux-AI-status.json").write_text(
+        json.dumps({"version": 1, "rev": 1, "attention_acks": {"rev": 1, "keys": {stale_key: now}}}),
+        encoding="utf-8",
+    )
+    with app.client_watch_lock:
+        app.client_watch_attention_ack_rev = 2
+    with app.attention_ack_lock:
+        app.attention_ack_keys = {local_key: now}
+
+    assert app.merge_shared_attention_acks() is False
+
+    assert app.attention_acknowledged(local_key) is True
+    assert app.attention_acknowledged(stale_key) is False
+
+
+def test_attention_ack_timestamp_only_reack_does_not_report_changed(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    now = time.time()
+    key = app.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", "same-key")
+    (tmp_path / "tmux-AI-status.json").write_text(
+        json.dumps({"version": 1, "rev": 2, "attention_acks": {"rev": 2, "keys": {key: now + 10}}}),
+        encoding="utf-8",
+    )
+    with app.client_watch_lock:
+        app.client_watch_attention_ack_rev = 1
+    with app.attention_ack_lock:
+        app.attention_ack_keys = {key: now}
+
+    assert app.merge_shared_attention_acks() is False
+
+    with app.attention_ack_lock:
+        assert app.attention_ack_keys[key] == now + 10

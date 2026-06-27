@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from yolomux_lib import app as app_module
+from yolomux_lib import common
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
@@ -27,6 +28,22 @@ from yolomux_lib.yoagent import transports as transport_module
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
 PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus" / "captures"
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
+
+
+class StatsRoleOwner:
+    def __init__(self, *, owner: bool, port: int):
+        self.owner = owner
+        self.port = port
+        self.follower_stale_reads = []
+
+    def can_run(self, role):
+        return self.owner and role == app_module.BACKGROUND_ROLE_STATS_SAMPLER
+
+    def owner_payload(self):
+        return {"port": self.port}
+
+    def record_follower_stale_read(self, role):
+        self.follower_stale_reads.append(role)
 
 
 def test_session_http_guards_use_shared_decorator():
@@ -225,6 +242,118 @@ def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypat
     assert sum(record["api_count"] for record in history["records"]) == 0
     with webapp.performance_record_lock:
         assert any(record["role"] == app_module.BACKGROUND_ROLE_STATS_SAMPLER for record in webapp.performance_records)
+
+
+def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+    owner = app_module.TmuxWebtermApp(["1"])
+    follower = app_module.TmuxWebtermApp(["1"])
+    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
+    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
+    sample_time = time.time()
+    sample = {
+        "time": sample_time,
+        "pid": 8003,
+        "started_at": sample_time - 20.0,
+        "uptime_seconds": 20.0,
+        "cpu_percent": 12.5,
+        "system_cpu_percent": 33.0,
+        "rss_bytes": 456789,
+    }
+    monkeypatch.setattr(owner, "current_stats_sample", lambda: (dict(sample), True))
+    monkeypatch.setattr(owner, "stats_agent_activity_record", lambda _sample_time, include_token_rates=True: {
+        "ask_agent_total": 1,
+        "run_agent_total": 2,
+        "transition_agent_total": 3,
+        "idle_agent_total": 4,
+        "active_agent_total": 6,
+        "inactive_agent_total": 4,
+        "agent_activity_samples": 1,
+    })
+    monkeypatch.setattr(follower, "current_stats_sample", lambda: (_ for _ in ()).throw(AssertionError("fresh shared stats should avoid follower sampling")))
+    try:
+        owner.record_stats_global_sample(trigger="sampler")
+        payload = follower.stats_sample_payload(client_id="client-a")
+    finally:
+        owner.control_server.stop()
+        follower.control_server.stop()
+
+    assert payload["pid"] == 8003
+    assert payload["system_cpu_percent"] == 33.0
+    assert payload["shared_stats"]["role"] == "follower"
+    assert payload["shared_stats"]["fresh"] is True
+    records = payload["history"]["records"]
+    assert sum(record["cpu_count"] for record in records) == 1
+    assert sum(record["system_cpu_count"] for record in records) == 1
+    assert sum(record["ask_agent_total"] for record in records) == 1
+    assert sum(record["run_agent_total"] for record in records) == 2
+    assert sum(record["transition_agent_total"] for record in records) == 3
+    assert sum(record["idle_agent_total"] for record in records) == 4
+    data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    assert data["stats_history"]["writer"]["port"] == 8003
+    assert data["stats_history"]["raw_buckets"]
+
+
+def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+    owner = app_module.TmuxWebtermApp(["1"])
+    follower = app_module.TmuxWebtermApp(["1"])
+    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
+    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
+    sample_time = time.time() + 1.0
+    previous_time = sample_time - 60.0
+    monkeypatch.setattr(follower, "current_stats_sample", lambda: ({
+        "time": sample_time - 1.0,
+        "pid": 8002,
+        "started_at": sample_time - 10.0,
+        "uptime_seconds": 9.0,
+        "cpu_percent": 1.0,
+        "system_cpu_percent": 2.0,
+        "rss_bytes": 123,
+    }, True))
+    monkeypatch.setattr(owner, "current_stats_sample", lambda: ({
+        "time": sample_time,
+        "pid": 8003,
+        "started_at": sample_time - 20.0,
+        "uptime_seconds": 20.0,
+        "cpu_percent": 3.0,
+        "system_cpu_percent": 4.0,
+        "rss_bytes": 456,
+    }, True))
+    monkeypatch.setattr(owner, "stats_agent_window_rows", lambda: [{
+        "session": "1",
+        "kind": "codex",
+        "state": "working",
+        "window_index": 0,
+        "window_label": "0:codex",
+        "transcript": "/tmp/codex.jsonl",
+    }])
+    def token_count(row):
+        row["_stats_agent_token_source"] = "transcript"
+        return 250.0
+
+    monkeypatch.setattr(owner, "stats_agent_token_count", token_count)
+    try:
+        follower.stats_sample_payload(token_consumer=True)
+        owner.merge_shared_stats_history(max_age_seconds=None)
+        with owner.stats_agent_token_lock:
+            assert owner.stats_agent_token_consumer_until >= sample_time
+            owner.stats_agent_token_state = {
+                "1|0|codex": {"tokens": 100.0, "time": previous_time, "label": "1:0:codex", "source": "transcript"}
+            }
+            owner.stats_agent_token_next_sample_at = 0.0
+        owner.record_stats_global_sample(trigger="sampler", token_consumer=False)
+        with owner.stats_history_lock:
+            history = owner.stats_history_payload_locked(0, client_id="client-a")
+    finally:
+        owner.control_server.stop()
+        follower.control_server.stop()
+
+    token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
+    assert sum(item["tokens"] for item in token_records) == pytest.approx(150.0)
+    assert sum(record["agent_token_samples"] for record in history["records"]) >= 1
 
 
 def test_background_status_includes_performance_summary():
