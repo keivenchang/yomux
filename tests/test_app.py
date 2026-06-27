@@ -1558,6 +1558,7 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
         webapp.client_event_next_background_file_poll_at = 100.75
         webapp.client_event_next_signature_poll_at = 100.25
         webapp.client_event_next_auto_poll_at = 101.0
+        webapp.client_event_next_attention_ack_poll_at = 100.6
         webapp.client_event_next_watched_pr_poll_at = 200.0
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
         webapp.client_event_next_signature_poll_at = 0.0
@@ -1752,12 +1753,14 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
     monkeypatch.setattr(webapp, "server_auto_approve_event_poll_seconds", lambda: 10.0)
+    monkeypatch.setattr(webapp, "server_attention_ack_event_poll_seconds", lambda: 12.0)
     monkeypatch.setattr(webapp, "server_tmux_signal_event_poll_seconds", lambda: 15.0)
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
     try:
         webapp.start_client_event_watcher()
         assert started == ["client-event-watch"]
         assert webapp.client_event_next_auto_poll_at == pytest.approx(110.0)
+        assert webapp.client_event_next_attention_ack_poll_at == pytest.approx(112.0)
         assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(115.0)
     finally:
         webapp.stop_client_event_watcher()

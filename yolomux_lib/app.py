@@ -483,7 +483,7 @@ PERFORMANCE_RECENT_LIMIT = 120
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
 BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
 BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
-BACKGROUND_CLIENT_EVENT_TYPES = frozenset({"background_owner_changed", "background_refresh_done"})
+BACKGROUND_CLIENT_EVENT_TYPES = frozenset({"attention_acks_changed", "background_owner_changed", "background_refresh_done"})
 BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
 BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS = 0.2
 CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
@@ -1160,6 +1160,7 @@ class TmuxWebtermApp:
         self.client_watch_file_signature: tuple[Any, ...] | None = None
         self.client_watch_background_file_signature: tuple[Any, ...] | None = None
         self.client_watch_auto_approve_signature: str = ""
+        self.client_watch_attention_ack_rev: int = -1
         self.client_watch_tmux_signal_signature: str = ""
         self.client_watch_watched_prs_signature: str = ""
         self.client_watch_context_item_payload_signatures: dict[str, str] = {}
@@ -1179,6 +1180,7 @@ class TmuxWebtermApp:
         self.client_event_next_file_poll_at = 0.0
         self.client_event_next_background_file_poll_at = 0.0
         self.client_event_next_auto_poll_at = 0.0
+        self.client_event_next_attention_ack_poll_at = 0.0
         self.client_event_next_tmux_signal_poll_at = 0.0
         self.client_event_next_watched_pr_poll_at = 0.0
         self.client_event_next_yoagent_job_poll_at = 0.0
@@ -3050,6 +3052,17 @@ class TmuxWebtermApp:
         event_type = str(request.get("event_type") or "")
         if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
             return {"ok": False, "error": f"unsupported background client event: {event_type}"}
+        if event_type == "attention_acks_changed":
+            if not self.merge_shared_attention_acks():
+                return {"ok": True, "accepted": True, "noop": True}
+            self.invalidate_auto_approve_cache()
+            self.publish_client_event(
+                "auto_approve_changed",
+                {"refresh": True, "trigger": "attention_ack_sync"},
+                trigger="background-fanout",
+                cache="ready",
+            )
+            return {"ok": True, "accepted": True, "event": {"type": event_type}}
         raw_payload = request.get("payload")
         payload = raw_payload if isinstance(raw_payload, dict) else {}
         event = self.publish_client_event(event_type, payload, trigger="background-fanout", cache="ready")
@@ -3116,6 +3129,9 @@ class TmuxWebtermApp:
 
     def server_auto_approve_event_poll_seconds(self) -> float:
         return self.jittered_interactive_event_poll_seconds(SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS)
+
+    def server_attention_ack_event_poll_seconds(self) -> float:
+        return self.server_auto_approve_event_poll_seconds()
 
     def server_tmux_signal_event_poll_seconds(self) -> float:
         return self.jittered_interactive_event_poll_seconds(SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS)
@@ -3517,6 +3533,7 @@ class TmuxWebtermApp:
             self.client_event_next_file_poll_at,
             self.client_event_next_background_file_poll_at,
             self.client_event_next_auto_poll_at,
+            self.client_event_next_attention_ack_poll_at,
             self.client_event_next_tmux_signal_poll_at,
             self.client_event_next_watched_pr_poll_at,
             self.client_event_next_yoagent_job_poll_at,
@@ -4289,6 +4306,7 @@ class TmuxWebtermApp:
                 return
             self.client_watch_stop_event.clear()
             self.client_event_next_auto_poll_at = max(self.client_event_next_auto_poll_at, now + self.server_auto_approve_event_poll_seconds())
+            self.client_event_next_attention_ack_poll_at = max(self.client_event_next_attention_ack_poll_at, now + self.server_attention_ack_event_poll_seconds())
             self.client_event_next_tmux_signal_poll_at = max(self.client_event_next_tmux_signal_poll_at, now + self.server_tmux_signal_event_poll_seconds())
             self.client_watch_running = True
         self.start_tmux_signal_event_watcher()
@@ -4350,6 +4368,9 @@ class TmuxWebtermApp:
                     if now >= self.client_event_next_auto_poll_at:
                         self.poll_auto_approve_client_event_once()
                         self.client_event_next_auto_poll_at = now + self.server_auto_approve_event_poll_seconds()
+                    if now >= self.client_event_next_attention_ack_poll_at:
+                        self.poll_attention_acks_client_event_once()
+                        self.client_event_next_attention_ack_poll_at = now + self.server_attention_ack_event_poll_seconds()
                     if now >= self.client_event_next_tmux_signal_poll_at:
                         self.poll_tmux_signals_client_event_once()
                         self.client_event_next_tmux_signal_poll_at = now + self.server_tmux_signal_event_poll_seconds()
@@ -8458,6 +8479,79 @@ class TmuxWebtermApp:
             self.auto_approve_cache_refreshing = False
             self.auto_approve_cache_condition.notify_all()
 
+    def _read_shared_attention_acks_locked(self) -> tuple[dict[str, float], int]:
+        try:
+            data = json.loads(common.ATTENTION_ACKS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            data = {}
+        raw_keys = data.get("keys") if isinstance(data, dict) else {}
+        keys: dict[str, float] = {}
+        if isinstance(raw_keys, dict):
+            for raw_key, raw_ts in raw_keys.items():
+                key = str(raw_key or "").strip()
+                try:
+                    ts = float(raw_ts)
+                except (TypeError, ValueError):
+                    continue
+                if key and ts > 0:
+                    keys[key] = ts
+        try:
+            rev = int(data.get("rev", 0)) if isinstance(data, dict) else 0
+        except (TypeError, ValueError):
+            rev = 0
+        return keys, max(0, rev)
+
+    def _prune_attention_ack_dict(self, keys: dict[str, float], now: float) -> None:
+        for key, ts in list(keys.items()):
+            if now - ts > ATTENTION_ACK_TTL_SECONDS:
+                keys.pop(key, None)
+        while len(keys) > ATTENTION_ACK_MAX_KEYS:
+            keys.pop(min(keys, key=lambda item: keys[item]), None)
+
+    def write_shared_attention_acks_union(self, local_keys: dict[str, float]) -> int:
+        now = time.time()
+        with file_lock(common.ATTENTION_ACKS_PATH, dir_mode=0o700):
+            merged, rev = self._read_shared_attention_acks_locked()
+            for key, ts in local_keys.items():
+                if key and ts > 0:
+                    merged[key] = max(ts, merged.get(key, 0.0))
+            self._prune_attention_ack_dict(merged, now)
+            rev += 1
+            atomic_write_text(
+                common.ATTENTION_ACKS_PATH,
+                json.dumps({"version": 1, "rev": rev, "keys": merged}, sort_keys=True, separators=(",", ":")) + "\n",
+                mode=0o600,
+            )
+        with self.attention_ack_lock:
+            self.attention_ack_keys = dict(merged)
+        with self.client_watch_lock:
+            self.client_watch_attention_ack_rev = rev
+        return rev
+
+    def merge_shared_attention_acks(self) -> bool:
+        with file_lock(common.ATTENTION_ACKS_PATH, dir_mode=0o700):
+            file_keys, rev = self._read_shared_attention_acks_locked()
+        with self.client_watch_lock:
+            if rev == self.client_watch_attention_ack_rev:
+                return False
+            self.client_watch_attention_ack_rev = rev
+        with self.attention_ack_lock:
+            changed = self.attention_ack_keys != file_keys
+            self.attention_ack_keys = dict(file_keys)
+        return changed
+
+    def poll_attention_acks_client_event_once(self) -> list[str]:
+        if not self.merge_shared_attention_acks():
+            return []
+        self.invalidate_auto_approve_cache()
+        self.publish_client_event(
+            "auto_approve_changed",
+            {"refresh": True, "trigger": "attention_ack_sync"},
+            trigger="timer",
+            cache="ready",
+        )
+        return ["auto_approve_changed"]
+
     def acknowledge_attention(self, payload: dict[str, Any] | None) -> tuple[dict[str, Any], HTTPStatus]:
         source = payload if isinstance(payload, dict) else {}
         raw_keys = source.get("keys") if isinstance(source.get("keys"), list) else [source.get("key")]
@@ -8474,6 +8568,12 @@ class TmuxWebtermApp:
             for key in keys:
                 self.attention_ack_keys[key] = now
             self.prune_attention_ack_keys_locked(now)
+        self.write_shared_attention_acks_union({key: now for key in keys})
+        self.notify_background_client_event_followers(
+            "attention_acks_changed",
+            {},
+            self.shared_background_client_event_record("attention_acks_changed", {}),
+        )
         self.invalidate_auto_approve_cache()
         auto_payload, status = self.auto_approve_status()
         if status == HTTPStatus.OK and isinstance(auto_payload, dict):

@@ -13,6 +13,7 @@ from typing import Any
 # the `*_changed` events are signal-only nudges to refetch.
 CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "activity_summary_ready",
+    "attention_acks_changed",
     "auto_approve_changed",
     "background_owner_changed",
     "background_refresh_done",
