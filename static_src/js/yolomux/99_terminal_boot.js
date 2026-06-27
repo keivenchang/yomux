@@ -3228,6 +3228,7 @@ function activateTab(session, name, options = {}) {
   }
   if (name === 'summary') startSummaryStream(session);
   if (name === 'events') refreshEventLog(session);
+  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function tmuxWindow(session, key, label) {
@@ -3988,6 +3989,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     if (agent?.transcript) {
       updateTranscriptPathRow(session, agent.transcript);
       if (options.refreshContext === false) continue;
+      if (typeof transcriptPreviewPaneIsActive === 'function' && !transcriptPreviewPaneIsActive(session)) continue;
       preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\n${t('transcript.loadingRecentContext')}`;
       refreshTranscriptPreview(session, preview, {preserveScroll: false});
     } else if (agent?.error) {

@@ -1213,7 +1213,7 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
     assert sent_frame == {"type": "input", "data": "a"}
 
 
-def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_glowing_ball(browser, tmp_path):
+def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_ball(browser, tmp_path):
     transcript_sessions = {
         "1": {
             "panes": [
@@ -1282,6 +1282,7 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_glowing_
           workingDotExists: !!workingDot,
           workingDotIsWorkingTone: workingDot?.classList.contains('status-indicator--working') || false,
           workingDotAnimationName: workingDotStyle ? workingDotStyle.animationName : null,
+          statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
           idleDotCount: idleButton?.querySelectorAll('.agent-window-status-dot').length || 0,
         };
         """
@@ -1298,18 +1299,18 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_glowing_
     assert metrics["idleHasDot"] is False, metrics
     assert metrics["idleHasState"] is False, metrics
     assert metrics["idleDotCount"] == 0, metrics
-    # Working = static AI symbol + a SEPARATE green ball that glows (side by side, not alternating).
-    # The symbol does not animate; a green working-tone status dot sits beside it and glows/flashes
-    # through the shared attention pulse tracks without changing geometry.
+    # Working = static AI symbol + a SEPARATE green ball (side by side, not alternating).
+    # With the default static status-pulse setting, the symbol and green dot stay visible without
+    # running glow/flash animations.
     assert metrics["workingAnimationName"] == "none", metrics
     assert float(metrics["workingOpacity"]) == 1, metrics
     assert metrics["workingDotExists"] is True, metrics
     assert metrics["workingDotIsWorkingTone"] is True, metrics
-    assert "attention-ring-fade" in metrics["workingDotAnimationName"], metrics
-    assert "working-ball-hard-flash" in metrics["workingDotAnimationName"], metrics
+    assert metrics["statusPulseDisabled"] is True, metrics
+    assert metrics["workingDotAnimationName"] == "none", metrics
 
 
-def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_path):
+def test_dockview_window_bar_active_agent_glyph_is_static_by_default(browser, tmp_path):
     transcript_sessions = {
         "1": {
             "panes": [
@@ -1340,9 +1341,7 @@ def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_
         auto_approve_payload=auto_approve_payload,
     )
     wait_for_dockview(browser, min_tabs=1)
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return !!document.querySelector('.tmux-window-button.active .agent-window-agent-icon--active')")
-    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return !!document.querySelector('.tmux-window-button.active .agent-window-agent-icon--active')"))
     metrics = browser.execute_script(
         """
         const button = Array.from(document.querySelectorAll('.tmux-window-button')).find(item => item.textContent.includes('1:codex'));
@@ -1351,8 +1350,10 @@ def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_
         const style = getComputedStyle(icon);
         return {
           buttonActive: button?.classList.contains('active') || false,
+          staticPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
           iconHasSvg: !!icon?.querySelector('svg'),
           iconAnimationName: style.animationName,
+          iconWillChange: style.willChange,
           iconGlowRgb: style.getPropertyValue('--agent-working-glow-rgb').trim(),
           dotCount: button?.querySelectorAll('.agent-window-status-dot').length || 0,
           dotText: dot?.textContent || '',
@@ -1360,18 +1361,19 @@ def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_
         """
     )
     assert metrics["buttonActive"] is True, metrics
+    assert metrics["staticPulseDisabled"] is True, metrics
     assert metrics["iconHasSvg"] is True, metrics
-    assert metrics["iconAnimationName"] == "agent-symbol-glow-cadence", metrics
+    assert metrics["iconAnimationName"] == "none", metrics
+    assert metrics["iconWillChange"] == "auto", metrics
     assert metrics["iconGlowRgb"] == "102 126 248", metrics
     assert metrics["dotCount"] == 0, metrics
     assert metrics["dotText"] == "", metrics
 
 
-def test_dockview_working_glyph_shows_static_symbol_and_glowing_green_ball(browser, tmp_path):
-    # Working = a STATIC agent symbol followed by a SEPARATE green ball that glows (side by side, not
-    # alternating, not a symbol pulse). Assert the symbol does not animate, the wrapper lays them out
-    # inline (flex, not the attention/cooldown grid stack), and a green working-tone status dot glows
-    # via attention-ring-fade (infinite, running).
+def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_default(browser, tmp_path):
+    # Working = a STATIC agent symbol followed by a SEPARATE green ball (side by side, not alternating,
+    # not a symbol pulse). Assert the symbol does not animate, the wrapper lays them out inline, and the
+    # default status-pulse setting keeps the green working-tone dot static.
     transcript_sessions = {
         "1": {
             "panes": [
@@ -1417,6 +1419,7 @@ def test_dockview_working_glyph_shows_static_symbol_and_glowing_green_ball(brows
           wrapDisplay: wrap ? getComputedStyle(wrap).display : null,
           symAnimationName: ss.animationName,
           symOpacity: ss.opacity,
+          statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
           dotPresent: !!dot,
           dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
           dotAnimationName: ds ? ds.animationName : null,
@@ -1425,19 +1428,16 @@ def test_dockview_working_glyph_shows_static_symbol_and_glowing_green_ball(brows
         };
         """
     )
-    # Symbol is static.
+    # Symbol is static; the working state uses the separate ball for status.
     assert data["symAnimationName"] == "none", data
     assert float(data["symOpacity"]) == 1, data
     # Laid out side by side (base inline-flex), not the attention/cooldown grid stack.
     assert data["wrapDisplay"] == "flex", data
-    # A separate green ball is present and glows.
+    # A separate green ball is present and static.
     assert data["dotPresent"] is True, data
     assert data["dotWorkingTone"] is True, data
-    if not data["reducedMotion"]:
-        assert "attention-ring-fade" in data["dotAnimationName"], data
-        assert "working-ball-hard-flash" in data["dotAnimationName"], data
-        assert data["dotIterationCount"] == "infinite", data
-        assert data["dotPlayState"] == "running", data
+    assert data["statusPulseDisabled"] is True, data
+    assert data["dotAnimationName"] == "none", data
 
 
 def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp_path):

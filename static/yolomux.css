@@ -2186,6 +2186,12 @@ body.theme-light .latency-meter {
   border: 1px solid transparent;
   animation-name: attention-ring-fade;
 }
+.agent-window-status-dot--transition-glow.status-indicator--attention,
+.agent-window-status-dot--transition-glow.status-indicator--cooldown {
+  border: 1px solid rgb(var(--attention-ring-rgb, 255 51 71) / 0.42);
+  box-shadow: 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.24), 0 0 8px rgb(var(--attention-ring-rgb, 255 51 71) / 0.28);
+  filter: saturate(1.06) brightness(1.08);
+}
 .status-indicator--settled {
   color: var(--agent-inactive-marker-bg);
 }
@@ -2428,6 +2434,21 @@ body.theme-light .latency-meter {
     filter: saturate(var(--attention-pulse-saturate-peak, 1.52)) brightness(var(--attention-pulse-brightness-peak, 1.44));
     box-shadow: 0 0 0 2px rgb(var(--agent-working-glow-rgb) / 0.48), 0 0 12px rgb(var(--agent-working-glow-rgb) / 0.7);
   }
+}
+html.status-pulse-disabled .heartbeat-pulse,
+html.status-pulse-disabled .attention-pulse,
+html.status-pulse-disabled .agent-window-agent-icon--active,
+html.status-pulse-disabled .ci-indicator.pr-status-failing {
+  animation: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+  transform: none !important;
+  transition: none !important;
+}
+html.status-pulse-disabled .status-indicator--dot,
+html.status-pulse-disabled .agent-window-status-dot,
+html.status-pulse-disabled .agent-window-agent-icon--active {
+  will-change: auto;
 }
 .session-yolo-marker {
   flex: 0 0 auto;

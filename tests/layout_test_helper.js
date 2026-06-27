@@ -22,7 +22,7 @@ const DEFAULT_TEST_SETTINGS = Object.freeze({
     latency_refresh_ms: 3000,
     event_log_refresh_ms: 5000,
     tabber_activity_refresh_ms: 15000,
-    agent_window_cooldown_seconds: 0,
+    agent_window_cooldown_seconds: 60,
     popover_show_delay_ms: 1000,
     popover_hide_delay_ms: 300,
     menu_hover_open_delay_ms: 800,
@@ -361,6 +361,28 @@ class TestFormData {
   }
 }
 
+class TestEventSource {
+  constructor(url) {
+    this.url = String(url || '');
+    this.readyState = 1;
+    this.listeners = new Map();
+  }
+
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(listener);
+  }
+
+  removeEventListener(type, listener) {
+    const listeners = this.listeners.get(type) || [];
+    this.listeners.set(type, listeners.filter(item => item !== listener));
+  }
+
+  close() {
+    this.readyState = 2;
+  }
+}
+
 function assertNoStandalonePrBadge(html, label) {
   assert.equal(html.includes('>PR<'), false, `${label} avoids redundant PR text`);
   assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(html), false, `${label} never renders a standalone PR text pill`);
@@ -431,6 +453,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   };
   const context = {
     console,
+    EventSource: TestEventSource,
     File: TestFile,
     FormData: TestFormData,
     URLSearchParams,
@@ -510,6 +533,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       },
       clearTimeout() {},
       confirm: () => true,
+      EventSource: TestEventSource,
       innerHeight: 800,
       innerWidth: 1200,
       location,
@@ -859,6 +883,7 @@ globalThis.__layoutTestApi = {
   fileExplorerItemId,
   prefsItemId,
   menuTabCommand,
+  activateTerminalDetailTabForTest: activateTab,
   activatePaneTab,
   paneTabTraversalPositionsForTest: paneTabTraversalPositions,
   adjacentPaneTabPosition,

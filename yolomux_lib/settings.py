@@ -185,14 +185,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "active_color": "green",
         "separator_color": "theme",
         "max_tabs_per_pane": 10,
-        "red_reminder_ms": 1550,
+        "red_reminder_ms": 0,
         "metadata_badge_pulse_seconds": 20,
     },
     "performance": {
         "latency_refresh_ms": 3000,
         "event_log_refresh_ms": 5000,
         "tabber_activity_refresh_ms": 15000,
-        "agent_window_cooldown_seconds": 0,
+        "agent_window_cooldown_seconds": 60,
         "server_event_poll_ms": 850,
         "server_background_file_event_poll_ms": 5000,
         "server_directory_event_poll_ms": 3000,
@@ -342,6 +342,8 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
     ("performance", "auto_approve_interval_seconds"): 0.5,
     ("share", "max_viewers"): 5,
+    ("appearance", "red_reminder_ms"): 1550,
+    ("performance", "agent_window_cooldown_seconds"): 0,
 }
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
@@ -516,7 +518,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("performance", "latency_refresh_ms"): "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
     ("performance", "event_log_refresh_ms"): "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
     ("performance", "tabber_activity_refresh_ms"): "Server-side refresh interval for cached Tabber activity; clients read the latest cached snapshot. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
-    ("performance", "agent_window_cooldown_seconds"): "Seconds, 0-300. Yellow means the agent is done; look at its output. This controls how long a Claude/Codex tmux sub-window keeps the yellow finished ball. 0 keeps it yellow until the user clicks the matching tab or tmux window.",
+    ("performance", "agent_window_cooldown_seconds"): "Seconds, 0-300. Red/yellow Claude/Codex tmux sub-window status balls stay visible until acknowledgement; this controls how long a new red/yellow transition keeps glowing. 0 keeps the status visible but static.",
     ("performance", "server_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for open editor file signatures in visible panes before pushing files_changed events to browsers.",
     ("performance", "server_background_file_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for background editor file signatures before pushing files_changed events to browsers.",
     ("performance", "server_directory_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for Finder/Differ directory signatures before pushing fs_changed events to browsers.",

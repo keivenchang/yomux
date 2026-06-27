@@ -1549,9 +1549,7 @@ class TmuxWebtermApp:
         stopped_ts = self.float_value(row.get("working_stopped_ts"), 0.0)
         if stopped_ts <= 0:
             return False
-        if transition_seconds <= 0:
-            return True
-        return sample_time - stopped_ts < transition_seconds
+        return True
 
     def stats_agent_token_sample_seconds(self) -> float:
         return STATS_AGENT_TOKEN_SAMPLE_SECONDS

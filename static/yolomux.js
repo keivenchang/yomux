@@ -7050,6 +7050,10 @@ function attentionAnimationDurationMs(durationMs = redReminderMs) {
   return duration;
 }
 
+function statusPulseAnimationEnabled(durationMs = redReminderMs) {
+  return Number(durationMs) > 0;
+}
+
 function attentionAnimationPhaseMs(now = Date.now(), durationMs = redReminderMs) {
   const duration = attentionAnimationDurationMs(durationMs);
   return ((Number(now) || 0) % duration + duration) % duration;
@@ -7080,9 +7084,10 @@ function setAttentionAnimationClockDelay(now = Date.now(), durationMs = redRemin
 
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
-  node.classList?.toggle?.('attention-pulse', active === true);
-  node.classList?.toggle?.('heartbeat-pulse', active === true);
-  if (active) {
+  const enabled = active === true && statusPulseAnimationEnabled();
+  node.classList?.toggle?.('attention-pulse', enabled);
+  node.classList?.toggle?.('heartbeat-pulse', enabled);
+  if (enabled) {
     attentionAnimationClockDelay();
     node.style.removeProperty(attentionAnimationDelayProperty);
   } else {
@@ -7103,50 +7108,64 @@ function statusIndicatorClasses(...classes) {
   return ['status-indicator', ...statusIndicatorClassItems(...classes)].join(' ');
 }
 
-function statusIndicatorToneClasses(tone) {
+function statusIndicatorToneClasses(tone, options = {}) {
+  const pulseEnabled = options.pulse !== false && statusPulseAnimationEnabled();
   if (tone === 'positive') return ['status-indicator--positive'];
-  if (tone === STATE_KEY.working) return ['status-indicator--working', 'heartbeat-pulse'];
-  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'];
-  if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
+  if (tone === STATE_KEY.working) return ['status-indicator--working', pulseEnabled ? 'heartbeat-pulse' : ''];
+  if (tone === 'cooldown') return ['status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'attention') return ['status-indicator--attention', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
   return [];
 }
 
-function statusIndicatorToneStyle(tone) {
-  return [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+function statusIndicatorToneStyle(tone, options = {}) {
+  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+}
+
+function statusIndicatorExtractOptions(classes) {
+  const last = classes.length ? classes[classes.length - 1] : null;
+  if (!last || typeof last !== 'object' || Array.isArray(last)) return {};
+  if (!Object.prototype.hasOwnProperty.call(last, 'pulse') && !Object.prototype.hasOwnProperty.call(last, 'modifierPosition')) return {};
+  classes.pop();
+  return last;
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
   const items = statusIndicatorClassItems(classes);
-  const toneClasses = statusIndicatorToneClasses(tone);
+  const toneClasses = statusIndicatorToneClasses(tone, options);
   if (options.modifierPosition === 'after-all') return statusIndicatorClasses(items, toneClasses, modifier);
   if (!items.length) return statusIndicatorClasses(modifier, toneClasses);
   return statusIndicatorClasses(items[0], modifier, items.slice(1), toneClasses);
 }
 
 function statusIndicatorTextClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--text', tone, classes);
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--text', tone, classes, options);
 }
 
 function statusIndicatorLabelClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--label', tone, classes);
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--label', tone, classes, options);
 }
 
 function statusIndicatorDotClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes);
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes, options);
 }
 
 function statusIndicatorInlineClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {modifierPosition: 'after-all'});
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {...options, modifierPosition: 'after-all'});
 }
 
 function statusIndicatorLabelHtml(text, tone, ...classes) {
   const value = String(text || '').trim();
   if (!value) return '';
-  const style = statusIndicatorToneStyle(tone);
-  return `<span class="${esc(statusIndicatorLabelClasses(tone, classes))}"${style}>${esc(value)}</span>`;
+  const options = statusIndicatorExtractOptions(classes);
+  const style = statusIndicatorToneStyle(tone, options);
+  return `<span class="${esc(statusIndicatorLabelClasses(tone, ...classes, options))}"${style}>${esc(value)}</span>`;
 }
 
 function stateBadgeHtml(key, short, title, options = {}) {
@@ -9573,7 +9592,7 @@ function tmuxYoloMenuItems() {
       max: 10000,
       step: 50,
       suffix: 'ms',
-      fallback: 1550,
+      fallback: 0,
       detail: t('pref.appearance.red_reminder_ms.help'),
     }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
@@ -15099,6 +15118,26 @@ const agentWindowActivityPulseAnimationNames = new Set([
   'agent-symbol-glow-cadence',
 ]);
 
+function agentWindowStatusGlowDurationSeconds() {
+  return Math.max(0, Number(agentWindowCooldownSeconds) || 0);
+}
+
+function agentWindowStatusGlowActive(startedAt, nowSeconds = Date.now() / 1000) {
+  const durationSeconds = agentWindowStatusGlowDurationSeconds();
+  const started = Number(startedAt) || 0;
+  if (!Number.isFinite(started) || started <= 0 || durationSeconds <= 0) return false;
+  return Math.max(0, Number(nowSeconds) - started) < durationSeconds;
+}
+
+function scheduleAgentWindowStatusGlowRefresh(key, startedAt, options = {}) {
+  const durationSeconds = agentWindowStatusGlowDurationSeconds();
+  const start = Number(startedAt) || 0;
+  if (options.scheduleRefresh === false || !key || start <= 0 || durationSeconds <= 0) return;
+  const untilMs = (start + durationSeconds) * 1000;
+  if (untilMs <= Date.now()) return;
+  scheduleAgentWindowStoppedRefresh(key, untilMs);
+}
+
 function mutationTouchesAgentWindowActivity(mutation) {
   for (const node of mutation?.addedNodes || []) {
     if (node?.classList?.contains?.('agent-window-activity')) return true;
@@ -15130,6 +15169,7 @@ function syncAgentWindowPulseAnimationCurrentTime(node, nowMs = Date.now()) {
 }
 
 function syncAgentWindowActivityAnimationDelays(root = document) {
+  if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) return;
   const scope = root?.querySelectorAll ? root : document;
   const nodes = Array.from(scope?.querySelectorAll?.(agentWindowActivityPulseSelector) || []);
   if (!nodes.length) return;
@@ -15147,6 +15187,7 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
 }
 
 function scheduleAgentWindowActivityAnimationSync(root = document) {
+  if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) return;
   ensureAgentWindowActivityMutationObserver();
   syncAgentWindowActivityAnimationDelays(root);
   if (agentWindowActivityAnimationSyncFrame && typeof cancelAnimationFrame === 'function') {
@@ -15308,7 +15349,6 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return null;
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
-  const cooldownSeconds = Math.max(0, Number(agentWindowCooldownSeconds) || 0);
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
   const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
   const stateKey = agentWindowStateKey(state);
@@ -15316,11 +15356,22 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (agentWindowIsAttentionState(stateKey)) {
     const ackKey = agentWindowActivityAcknowledgementKey(kind, stateKey, options, options.attention_signature || options.screen_text || stateKey);
     if (agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false})) return null;
+    const previousAttentionStartedAt = Number(previous.attentionStartedAt || 0);
+    const attentionStartedAt = previous.state === stateKey && previous.attentionKey === ackKey && previousAttentionStartedAt > 0
+      ? previousAttentionStartedAt
+      : nowSeconds;
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: stateKey, seenWorking: previous.seenWorking === true, stoppedAt: Number(previous.stoppedAt) || 0});
+      agentWindowActivityStates.set(transitionKey, {
+        state: stateKey,
+        seenWorking: previous.seenWorking === true,
+        stoppedAt: Number(previous.stoppedAt) || 0,
+        attentionKey: ackKey,
+        attentionStartedAt,
+      });
+      scheduleAgentWindowStatusGlowRefresh(transitionKey, attentionStartedAt, options);
     }
-    return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`};
+    return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`, pulseActive: agentWindowStatusGlowActive(attentionStartedAt, nowSeconds)};
   }
   if (agentWindowIsWorkingState(stateKey)) {
     if (transitionKey) {
@@ -15337,14 +15388,10 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
   if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || STATE_KEY.idle), seenWorking, stoppedAt});
   if (seenWorking && stoppedAt > 0) {
-    const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
     const cooldownAckKey = agentWindowActivityAcknowledgementKey(kind, 'cooldown', options, stoppedAt);
     if (agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false})) return null;
-    if (cooldownSeconds === 0 || stoppedAgeSeconds < cooldownSeconds) {
-      if (cooldownSeconds > 0 && options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + cooldownSeconds) * 1000);
-      return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`};
-    }
-    return null;
+    scheduleAgentWindowStatusGlowRefresh(transitionKey, stoppedAt, options);
+    return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`, pulseActive: agentWindowStatusGlowActive(stoppedAt, nowSeconds)};
   }
   if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
   return null;
@@ -15393,15 +15440,19 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const statusTones = agentWindowStatusToneOrder(options.statusTones || [tone]);
   const segmented = statusTones.length > 1;
   const segmentKey = statusTones.map(agentWindowStatusToneClass).join('-');
+  const pulse = item.pulseActive !== false;
+  const transitionGlow = pulse && ['attention', 'cooldown'].includes(tone);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
     'agent-window-status-dot',
     `agent-window-activity-icon--${item.state}`,
+    transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     segmented ? 'agent-window-status-dot--segmented' : '',
     segmented ? `agent-window-status-dot--${segmentKey}` : '',
     segmented ? `agent-window-status-dot--segments-${statusTones.length}` : '',
     segmented ? statusTones.map(itemTone => `agent-window-status-dot--tone-${agentWindowStatusToneClass(itemTone)}`) : '',
+    {pulse},
   );
   return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
 }
@@ -15423,7 +15474,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones});
   if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
+  const style = [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone, {pulse: item?.pulseActive !== false}) : '';
   const wrapperClasses = [
     'agent-window-activity',
     `agent-window-activity--${stateKey}`,
@@ -17536,14 +17587,25 @@ function clientServerWatchRoots() {
     .sort();
 }
 
+function transcriptPreviewPaneIsActive(session) {
+  if (!isTmuxSession(session)) return false;
+  const pane = document.getElementById(`transcript-pane-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
+  return Boolean(pane?.classList?.contains(CLS.active) && preview?.isConnected);
+}
+
+function transcriptContextWatchRequests() {
+  return activeSessions
+    .filter(transcriptPreviewPaneIsActive)
+    .map(session => ({session, messages: transcriptPreviewMessages}));
+}
+
 function clientServerWatchState() {
   const state = {
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
-    context_items: activeSessions
-      .filter(isTmuxSession)
-      .map(session => ({session, messages: transcriptPreviewMessages})),
+    context_items: transcriptContextWatchRequests(),
   };
   if (typeof activitySummaryIsVisible === 'function') {
     state.activity_summary = {
@@ -19973,7 +20035,13 @@ function applySeparatorColor(value) {
   }
 }
 
+function applyStatusPulseModeClass() {
+  const enabled = typeof statusPulseAnimationEnabled === 'function' ? statusPulseAnimationEnabled() : Number(redReminderMs) > 0;
+  document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
+}
+
 function applyCssSettings() {
+  applyStatusPulseModeClass();
   const root = document.documentElement?.style;
   if (!root) return;
   const uiFontSize = numberSetting('appearance.ui_font_size', 13);
@@ -51162,6 +51230,7 @@ function activateTab(session, name, options = {}) {
   }
   if (name === 'summary') startSummaryStream(session);
   if (name === 'events') refreshEventLog(session);
+  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function tmuxWindow(session, key, label) {
@@ -51922,6 +51991,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     if (agent?.transcript) {
       updateTranscriptPathRow(session, agent.transcript);
       if (options.refreshContext === false) continue;
+      if (typeof transcriptPreviewPaneIsActive === 'function' && !transcriptPreviewPaneIsActive(session)) continue;
       preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\n${t('transcript.loadingRecentContext')}`;
       refreshTranscriptPreview(session, preview, {preserveScroll: false});
     } else if (agent?.error) {

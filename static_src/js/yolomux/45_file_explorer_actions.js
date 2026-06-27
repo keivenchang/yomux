@@ -2093,14 +2093,25 @@ function clientServerWatchRoots() {
     .sort();
 }
 
+function transcriptPreviewPaneIsActive(session) {
+  if (!isTmuxSession(session)) return false;
+  const pane = document.getElementById(`transcript-pane-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
+  return Boolean(pane?.classList?.contains(CLS.active) && preview?.isConnected);
+}
+
+function transcriptContextWatchRequests() {
+  return activeSessions
+    .filter(transcriptPreviewPaneIsActive)
+    .map(session => ({session, messages: transcriptPreviewMessages}));
+}
+
 function clientServerWatchState() {
   const state = {
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
-    context_items: activeSessions
-      .filter(isTmuxSession)
-      .map(session => ({session, messages: transcriptPreviewMessages})),
+    context_items: transcriptContextWatchRequests(),
   };
   if (typeof activitySummaryIsVisible === 'function') {
     state.activity_summary = {

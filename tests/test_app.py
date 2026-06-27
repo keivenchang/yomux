@@ -591,7 +591,7 @@ def test_stats_agent_activity_record_counts_sticky_cooldown_as_transition(monkey
         "stats_agent_window_rows",
         lambda: [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": 900.0}],
     )
-    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 0.0)
+    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 60.0)
     try:
         record = webapp.stats_agent_activity_record(1000.0)
     finally:

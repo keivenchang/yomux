@@ -685,7 +685,13 @@ function applySeparatorColor(value) {
   }
 }
 
+function applyStatusPulseModeClass() {
+  const enabled = typeof statusPulseAnimationEnabled === 'function' ? statusPulseAnimationEnabled() : Number(redReminderMs) > 0;
+  document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
+}
+
 function applyCssSettings() {
+  applyStatusPulseModeClass();
   const root = document.documentElement?.style;
   if (!root) return;
   const uiFontSize = numberSetting('appearance.ui_font_size', 13);

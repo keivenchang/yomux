@@ -1299,6 +1299,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             const beforeSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
             const badge = tab?.querySelector('[data-prompt-attention-clear]');
             const before = {
+              statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
               badgeText: badge?.textContent || '',
               badgePresent: !!badge,
               tabAttention: tab?.classList.contains('needs-attention') || false,
@@ -1321,6 +1322,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             """,
             session,
         )
+        assert metrics["before"]["statusPulseDisabled"] is True
         assert metrics["before"]["badgeText"] == ""
         assert metrics["before"]["badgePresent"] is False
         assert metrics["before"]["tabAttention"] is True
@@ -1328,7 +1330,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
         assert "1 attention" in metrics["before"]["topbarText"]
         assert metrics["before"]["topbarAskHasSharedParent"] is True
         assert metrics["before"]["topbarAskHasAttentionModifier"] is True
-        assert metrics["before"]["topbarAskHasPulse"] is True
+        assert metrics["before"]["topbarAskHasPulse"] is False
         assert metrics["immediate"]["badgeText"] == ""
         assert metrics["immediate"]["tabAttention"] is True
         assert metrics["immediate"]["panelNeedsApproval"] is True

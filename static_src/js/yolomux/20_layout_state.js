@@ -2166,6 +2166,10 @@ function attentionAnimationDurationMs(durationMs = redReminderMs) {
   return duration;
 }
 
+function statusPulseAnimationEnabled(durationMs = redReminderMs) {
+  return Number(durationMs) > 0;
+}
+
 function attentionAnimationPhaseMs(now = Date.now(), durationMs = redReminderMs) {
   const duration = attentionAnimationDurationMs(durationMs);
   return ((Number(now) || 0) % duration + duration) % duration;
@@ -2196,9 +2200,10 @@ function setAttentionAnimationClockDelay(now = Date.now(), durationMs = redRemin
 
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
-  node.classList?.toggle?.('attention-pulse', active === true);
-  node.classList?.toggle?.('heartbeat-pulse', active === true);
-  if (active) {
+  const enabled = active === true && statusPulseAnimationEnabled();
+  node.classList?.toggle?.('attention-pulse', enabled);
+  node.classList?.toggle?.('heartbeat-pulse', enabled);
+  if (enabled) {
     attentionAnimationClockDelay();
     node.style.removeProperty(attentionAnimationDelayProperty);
   } else {
@@ -2219,50 +2224,64 @@ function statusIndicatorClasses(...classes) {
   return ['status-indicator', ...statusIndicatorClassItems(...classes)].join(' ');
 }
 
-function statusIndicatorToneClasses(tone) {
+function statusIndicatorToneClasses(tone, options = {}) {
+  const pulseEnabled = options.pulse !== false && statusPulseAnimationEnabled();
   if (tone === 'positive') return ['status-indicator--positive'];
-  if (tone === STATE_KEY.working) return ['status-indicator--working', 'heartbeat-pulse'];
-  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'];
-  if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
+  if (tone === STATE_KEY.working) return ['status-indicator--working', pulseEnabled ? 'heartbeat-pulse' : ''];
+  if (tone === 'cooldown') return ['status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'attention') return ['status-indicator--attention', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
   return [];
 }
 
-function statusIndicatorToneStyle(tone) {
-  return [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+function statusIndicatorToneStyle(tone, options = {}) {
+  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+}
+
+function statusIndicatorExtractOptions(classes) {
+  const last = classes.length ? classes[classes.length - 1] : null;
+  if (!last || typeof last !== 'object' || Array.isArray(last)) return {};
+  if (!Object.prototype.hasOwnProperty.call(last, 'pulse') && !Object.prototype.hasOwnProperty.call(last, 'modifierPosition')) return {};
+  classes.pop();
+  return last;
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
   const items = statusIndicatorClassItems(classes);
-  const toneClasses = statusIndicatorToneClasses(tone);
+  const toneClasses = statusIndicatorToneClasses(tone, options);
   if (options.modifierPosition === 'after-all') return statusIndicatorClasses(items, toneClasses, modifier);
   if (!items.length) return statusIndicatorClasses(modifier, toneClasses);
   return statusIndicatorClasses(items[0], modifier, items.slice(1), toneClasses);
 }
 
 function statusIndicatorTextClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--text', tone, classes);
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--text', tone, classes, options);
 }
 
 function statusIndicatorLabelClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--label', tone, classes);
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--label', tone, classes, options);
 }
 
 function statusIndicatorDotClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes);
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes, options);
 }
 
 function statusIndicatorInlineClasses(tone, ...classes) {
-  return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {modifierPosition: 'after-all'});
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {...options, modifierPosition: 'after-all'});
 }
 
 function statusIndicatorLabelHtml(text, tone, ...classes) {
   const value = String(text || '').trim();
   if (!value) return '';
-  const style = statusIndicatorToneStyle(tone);
-  return `<span class="${esc(statusIndicatorLabelClasses(tone, classes))}"${style}>${esc(value)}</span>`;
+  const options = statusIndicatorExtractOptions(classes);
+  const style = statusIndicatorToneStyle(tone, options);
+  return `<span class="${esc(statusIndicatorLabelClasses(tone, ...classes, options))}"${style}>${esc(value)}</span>`;
 }
 
 function stateBadgeHtml(key, short, title, options = {}) {

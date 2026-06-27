@@ -381,7 +381,7 @@ function tmuxYoloMenuItems() {
       max: 10000,
       step: 50,
       suffix: 'ms',
-      fallback: 1550,
+      fallback: 0,
       detail: t('pref.appearance.red_reminder_ms.help'),
     }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {

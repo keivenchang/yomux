@@ -27,6 +27,24 @@ def test_pane_spacing_default_is_3px():
     assert default_settings()["appearance"]["pane_spacing"] == 3
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
+    assert default_settings()["appearance"]["red_reminder_ms"] == 0
+    assert default_settings()["performance"]["agent_window_cooldown_seconds"] == 60
+
+
+def test_stale_status_pulse_and_yellow_visibility_defaults_migrate():
+    defaults = default_settings()
+
+    pulse_migrated = sanitize_settings({"appearance": {"red_reminder_ms": 1550}})
+    assert pulse_migrated["appearance"]["red_reminder_ms"] == defaults["appearance"]["red_reminder_ms"]
+
+    pulse_custom = sanitize_settings({"appearance": {"red_reminder_ms": 1600}})
+    assert pulse_custom["appearance"]["red_reminder_ms"] == 1600
+
+    migrated = sanitize_settings({"performance": {"agent_window_cooldown_seconds": 0}})
+    assert migrated["performance"]["agent_window_cooldown_seconds"] == defaults["performance"]["agent_window_cooldown_seconds"]
+
+    custom = sanitize_settings({"performance": {"agent_window_cooldown_seconds": 45}})
+    assert custom["performance"]["agent_window_cooldown_seconds"] == 45
 
 
 def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp_path):
@@ -275,7 +293,7 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
 
     assert catalog["appearance.tab_width"]["limits"] == {"min": 120, "max": 420}
     assert catalog["appearance.tab_width"]["units"] == "pixels"
-    assert catalog["performance.agent_window_cooldown_seconds"]["default"] == 0
+    assert catalog["performance.agent_window_cooldown_seconds"]["default"] == 60
     assert catalog["performance.agent_window_cooldown_seconds"]["limits"] == {"min": 0, "max": 300}
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
     assert catalog["uploads.subdir"]["empty_allowed"] is True
