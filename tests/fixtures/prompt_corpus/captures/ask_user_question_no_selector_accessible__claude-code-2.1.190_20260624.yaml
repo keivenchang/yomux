@@ -19,7 +19,7 @@ expected_promoted:
   approval_type: ''
   approval_visible: false
   attention_kind: question
-  attention_label: ASK
+  attention_label: Question
   composer_key: empty
   reason_code: needs-input
   screen_key: needs-input

@@ -98,10 +98,10 @@ def test_snapshot_includes_shared_agent_state(monkeypatch):
     )
     state = {
         "screen": {"key": "needs-input", "text": "Which backend?"},
-        "display": {"screen_key": "needs-input", "attention_kind": "question", "attention_label": "ASK"},
+        "display": {"screen_key": "needs-input", "attention_kind": "question", "attention_label": "Question"},
         "approval": {"approval_visible": False},
         "attention_kind": "question",
-        "attention_label": "ASK",
+        "attention_label": "Question",
         "agent_kind": "claude",
         "reason_code": "needs-input",
     }
@@ -124,6 +124,6 @@ def test_snapshot_includes_shared_agent_state(monkeypatch):
 
     assert slot["text"] == "raw text"
     assert slot["screen"]["key"] == "needs-input"
-    assert slot["display"]["attention_label"] == "ASK"
+    assert slot["display"]["attention_label"] == "Question"
     assert slot["attention_kind"] == "question"
     assert slot["reason_code"] == "needs-input"

@@ -6243,9 +6243,9 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: 'ASK', priority: 0, attention: true},
+  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: '', priority: 0, attention: true},
   'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  [STATE_KEY.needsInput]: {label: 'Needs input', short: 'ASK', priority: 1, attention: true},
+  [STATE_KEY.needsInput]: {label: 'Needs input', short: '', priority: 1, attention: true},
   [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
@@ -6874,7 +6874,7 @@ function updateDocumentTitle() {
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
-// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/ASK/blocked.
+// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/attention/blocked.
 function globalActivityCounts() {
   const signalWindows = tmuxSignalWindows();
   let running = 0;
@@ -6944,7 +6944,7 @@ function globalActivityStatusLineHtml() {
   const askTone = counts.ask ? 'attention' : '';
   const blockedTone = counts.blocked ? 'attention' : '';
   parts.push(`<span class="${esc(statusIndicatorInlineClasses(runTone, 'topbar-activity-run', counts.running ? 'active' : ''))}">${counts.running} RUN</span>`);
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses(askTone, 'topbar-activity-ask', counts.ask ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(askTone)}>${counts.ask} ASK</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(askTone, 'topbar-activity-ask', counts.ask ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(askTone)}>${counts.ask} attention</span>`);
   parts.push(`<span class="${esc(statusIndicatorInlineClasses(blockedTone, 'topbar-activity-blocked', counts.blocked ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(blockedTone)}>${counts.blocked} blocked</span>`);
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
@@ -7166,6 +7166,7 @@ function sessionStateHtml(state) {
   // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
+  if ([STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state?.key)) return '';
   if (!state || (!state.showBadge && [STATE_KEY.working, 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
     clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
@@ -14563,7 +14564,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
-  row.classList.toggle('tabber-status-long', data.type === 'window' && /^(working for|ASK)/.test(String(data.dateText || '')));
+  row.classList.toggle('tabber-status-long', data.type === 'window' && (/^working for/.test(String(data.dateText || '')) || Boolean(data.dateHtml)));
   row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
@@ -15229,6 +15230,7 @@ function refreshAgentWindowActivityDisplays() {
   if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
     renderPanels(activePaneItems(), {reason: 'agent-window-activity'});
   }
+  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof refreshTabberPanels === 'function' && typeof fileExplorerMode !== 'undefined' && fileExplorerMode === 'tabber') refreshTabberPanels();
@@ -15410,6 +15412,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const item = options.item || agentWindowActivityIcon(kind, state, idleSeconds, options);
   const stateKey = item?.state || 'idle-recent';
   const label = options.label || item?.label || agentLabel(kind);
+  const statusOnly = options.statusOnly === true || options.hideAgentIcon === true;
   const agentClasses = [
     'agent-window-activity-icon',
     'agent-window-agent-icon',
@@ -15418,15 +15421,23 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
   const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones});
+  if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
-  return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
+  const wrapperClasses = [
+    'agent-window-activity',
+    `agent-window-activity--${stateKey}`,
+    statusOnly ? 'agent-window-activity--status-only' : '',
+  ].filter(Boolean).join(' ');
+  const agentHtml = statusOnly ? '' : agentIcon(kind, {label, className: agentClasses});
+  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentHtml}${markerHtml}</span>`;
 }
 
-function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
+function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '', extraOptions = {}) {
   const options = agentWindowActivityOptionsForStatus(agent, session);
   return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
     ...options,
+    ...extraOptions,
     item: agentWindowActivityIconForStatusItem(agent, agentKey, session, options),
   });
 }
@@ -20763,6 +20774,7 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       item: statusSummary.item,
       label: statusSummary.label,
       statusTones: statusSummary.statusTones,
+      statusOnly: true,
     });
     if (iconHtml) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
@@ -21088,7 +21100,7 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
   }
-  if (agentWindowIsAttentionState(state)) return `ASK ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
+  if (agentWindowIsAttentionState(state)) return sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true});
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
 }
@@ -32114,7 +32126,7 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'sse', label: 'SSE', unit: 'countPerSecond'},
   {key: 'latency', label: 'Latency', unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond'},
-  {key: 'askAgents', label: 'ASK', unit: 'count'},
+  {key: 'askAgents', label: 'Attention', unit: 'count'},
   {key: 'runAgents', label: 'RUN', unit: 'count'},
   {key: 'transitionAgents', label: 'Transition', unit: 'count'},
   {key: 'idleAgents', label: 'Idle', unit: 'count'},
@@ -34966,6 +34978,22 @@ function sessionFilesPayloadIsRootlessEmpty(payload) {
   return true;
 }
 
+function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
+  if (!payload || payload.loaded !== true) return false;
+  const visibleFiles = Array.isArray(files) ? files : (Array.isArray(payload.files) ? payload.files : []);
+  if (visibleFiles.length) return true;
+  if (sessionFilesRepoRoots(payload).length > 0) return true;
+  if ((Array.isArray(payload.errors) ? payload.errors : []).length) return true;
+  if ((Array.isArray(payload.warnings) ? payload.warnings : []).length) return true;
+  return !sessionFilesPayloadIsRefreshingElsewhere(payload) && sessionFilesPayloadIsRootlessEmpty(payload);
+}
+
+function sessionFilesPanelIsLoading(payload, files = null) {
+  if (fileExplorerSessionFilesLoading) return true;
+  if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
+  return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
+}
+
 function sessionFilesPayloadShouldPreserveCurrent(nextPayload) {
   const session = String(nextPayload?.session || '');
   const current = sessionFilesPayloadForDestination('finder');
@@ -35160,7 +35188,9 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
-  const shouldRender = signature !== sessionFilesSignatureForDestination(destination);
+  const wasLoading = sessionFilesLoadingForDestination(destination);
+  const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
+  if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
@@ -35503,7 +35533,6 @@ function changesLoadingHtml(session = '') {
   const label = session ? sessionLabel(session) : '';
   const loadingText = label ? `${stripTrailingEllipsisText(base)} ${label}` : base;
   return `<span class="changes-loading" aria-live="polite" aria-busy="true">
-    <span class="session-yolo-marker active working changes-loading-yolo" aria-hidden="true">${esc(t('brand.marker'))}</span>
     <span>${textWithMovingEllipsisHtml(loadingText, 'changes-loading-dots')}</span>
   </span>`;
 }
@@ -35802,8 +35831,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <div class="changes-groups"></div>`;
   }
   const payload = fileExplorerSessionFilesPayload;
-  const loading = fileExplorerSessionFilesLoading || sessionFilesPayloadIsRefreshingElsewhere(payload);
   const files = fileExplorerDifferFiles(payload);
+  const loading = sessionFilesPanelIsLoading(payload, files);
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
@@ -35898,8 +35927,9 @@ function changesGroupsSnapshotHtml(files, options = {}) {
 
 function fileExplorerChangesPanelHtml() {
   const staticHtml = fileExplorerChangesPanelStaticHtml();
-  const loading = fileExplorerSessionFilesLoading || sessionFilesPayloadIsRefreshingElsewhere(fileExplorerSessionFilesPayload);
-  const groupsHtml = changesGroupsSnapshotHtml(fileExplorerDifferFiles(), {
+  const files = fileExplorerDifferFiles();
+  const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, files);
+  const groupsHtml = changesGroupsSnapshotHtml(files, {
     payload: fileExplorerSessionFilesPayload,
     compact: fileExplorerMode !== 'diff',
     includeEmptyRepoSections: fileExplorerMode === 'diff' && !loading,
@@ -49405,15 +49435,13 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session);
+  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
 function infoAgentAttentionHtml(record) {
   if (!infoRecordHasAi(record) || typeof agentWindowIsAttentionState !== 'function' || !agentWindowIsAttentionState(record.aiState)) return '';
-  return typeof statusIndicatorLabelHtml === 'function'
-    ? statusIndicatorLabelHtml('ASK', 'attention', 'info-tree-ai-status-label')
-    : '<span class="info-tree-ai-status-label">ASK</span>';
+  return '';
 }
 
 function infoRecordAiWindowButtonHtml(record, options = {}) {
@@ -50655,6 +50683,24 @@ function noteTerminalExplicitInput(session) {
   setFocusedTerminal(session, {userInitiated: true});
 }
 
+function terminalDataWithoutPassiveReports(data) {
+  return String(data || '')
+    .replace(/\x1b\[[IO]/g, '')
+    .replace(/\x1b\[<\d+(?:;\d+){2}[mM]/g, '')
+    .replace(/\x1b\[M[\s\S]{3}/g, '');
+}
+
+function terminalDataShouldAcknowledgeAttention(data) {
+  return terminalDataWithoutPassiveReports(data).length > 0;
+}
+
+function acknowledgeTerminalAttentionFromTransportInput(session, data, options = {}) {
+  if (options.acknowledgeAttention === false) return false;
+  if (!terminalDataShouldAcknowledgeAttention(data)) return false;
+  if (typeof acknowledgeTerminalAttentionFromUserAction !== 'function') return false;
+  return acknowledgeTerminalAttentionFromUserAction(session, null, options.attentionOptions || {});
+}
+
 const terminalTmuxPrefixPendingBySession = new Map();
 const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;
 const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;
@@ -50925,11 +50971,12 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   return mirrored;
 }
 
-function handleTerminalData(session, data) {
+function handleTerminalData(session, data, options = {}) {
   if (readOnlyMode && !shareWriteMode) return false;
   const filtered = stripTerminalQueryResponses(data);
   if (!filtered) return false;
   if (shareReplayShellActive && shareWriteMode) {
+    acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
     shareSendTerminalInputIntent(session, filtered);
     return true;
   }
@@ -50937,6 +50984,7 @@ function handleTerminalData(session, data) {
   const socket = current?.socket;
   if (socket?.readyState !== WebSocket.OPEN) return false;
   observeTerminalTmuxPrefixWindowSwitches(session, filtered);
+  acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   socket.send(JSON.stringify({type: 'input', data: filtered}));
   return true;
 }

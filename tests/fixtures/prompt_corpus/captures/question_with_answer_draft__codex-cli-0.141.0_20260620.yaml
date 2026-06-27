@@ -12,7 +12,7 @@ actual:
     selected_option: 0
     source: ''
   attention_kind: question
-  attention_label: ASK
+  attention_label: Question
   composer:
     accepting: false
     detected_text: Pane capture
@@ -27,7 +27,7 @@ actual:
     y: 37
   display:
     attention_kind: question
-    attention_label: ASK
+    attention_label: Question
     evidence_lines:
     - 1. Pane capture 2. Transcript capture
     - Which YOLOmux verifier mode should we use?
@@ -105,7 +105,7 @@ cursor:
   pane_in_mode: false
   x: 2
   y: 34
-description: 'Positive: Codex question remains ASK even when an answer draft is in the composer'
+description: 'Positive: Codex question remains needs-input even when an answer draft is in the composer'
 evidence_fields:
   display_evidence_lines:
   - 1. Pane capture 2. Transcript capture
@@ -134,7 +134,7 @@ expected_promoted:
   approval_type: ''
   approval_visible: false
   attention_kind: question
-  attention_label: ASK
+  attention_label: Question
   composer_key: draft
   reason_code: needs-input
   screen_key: needs-input

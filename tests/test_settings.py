@@ -3,6 +3,7 @@ from pathlib import Path
 import threading
 
 
+from yolomux_lib import settings as settings_module
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.common import UPLOAD_MAX_BYTES
 from yolomux_lib.settings import LEGACY_YOAGENT_DEFAULTS
@@ -12,6 +13,7 @@ from yolomux_lib.settings import save_settings
 from yolomux_lib.settings import sanitize_settings
 from yolomux_lib.settings import settings_catalog
 from yolomux_lib.settings import settings_payload
+from yolomux_lib.settings import write_settings_file
 from yolomux_lib.yoagent.actions import parse_yoagent_action_intent
 from yolomux_lib.yoagent.preferences import parse_settings_write
 
@@ -25,6 +27,32 @@ def test_pane_spacing_default_is_3px():
     assert default_settings()["appearance"]["pane_spacing"] == 3
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
+
+
+def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp_path):
+    path = tmp_path / "settings.yaml"
+    write_settings_file({"appearance": {"theme": "light"}}, path)
+    calls = []
+    real_safe_load = settings_module.yaml.safe_load
+
+    def counting_safe_load(text):
+        calls.append(text)
+        return real_safe_load(text)
+
+    monkeypatch.setattr(settings_module.yaml, "safe_load", counting_safe_load)
+
+    first = settings_payload(path)
+    second = settings_payload(path)
+
+    assert len(calls) == 1
+    assert first["settings"]["appearance"]["theme"] == "light"
+    assert second["settings"]["appearance"]["theme"] == "light"
+
+    write_settings_file({"appearance": {"theme": "dark"}}, path)
+    third = settings_payload(path)
+
+    assert len(calls) == 2
+    assert third["settings"]["appearance"]["theme"] == "dark"
 
 
 def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text():

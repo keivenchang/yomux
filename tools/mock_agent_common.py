@@ -2878,7 +2878,7 @@ def mock_fixture_outcome_label(case: dict[str, object]) -> str:
     if expected.get("approval_visible") is True or screen_key == "approval":
         return "YOLO?"
     if expected.get("ask") is True or screen_key == "needs-input":
-        return "ASK"
+        return "Question"
     if screen_key == "working" or reason_code == "busy":
         return "RUN"
     if screen_key == "input-draft" or composer_key == "draft":

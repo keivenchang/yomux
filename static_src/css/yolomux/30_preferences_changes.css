@@ -784,11 +784,6 @@ body.theme-light .js-debug-graph-view {
   gap: 6px;
   color: var(--muted);
 }
-.changes-loading-yolo {
-  min-width: 17px;
-  height: 17px;
-  font-size: var(--ui-font-size-2xs);
-}
 .changes-summary-totals {
   flex: 0 0 auto;
   display: inline-flex;

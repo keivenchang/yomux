@@ -1501,15 +1501,13 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session);
+  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
 function infoAgentAttentionHtml(record) {
   if (!infoRecordHasAi(record) || typeof agentWindowIsAttentionState !== 'function' || !agentWindowIsAttentionState(record.aiState)) return '';
-  return typeof statusIndicatorLabelHtml === 'function'
-    ? statusIndicatorLabelHtml('ASK', 'attention', 'info-tree-ai-status-label')
-    : '<span class="info-tree-ai-status-label">ASK</span>';
+  return '';
 }
 
 function infoRecordAiWindowButtonHtml(record, options = {}) {
@@ -2751,6 +2749,24 @@ function noteTerminalExplicitInput(session) {
   setFocusedTerminal(session, {userInitiated: true});
 }
 
+function terminalDataWithoutPassiveReports(data) {
+  return String(data || '')
+    .replace(/\x1b\[[IO]/g, '')
+    .replace(/\x1b\[<\d+(?:;\d+){2}[mM]/g, '')
+    .replace(/\x1b\[M[\s\S]{3}/g, '');
+}
+
+function terminalDataShouldAcknowledgeAttention(data) {
+  return terminalDataWithoutPassiveReports(data).length > 0;
+}
+
+function acknowledgeTerminalAttentionFromTransportInput(session, data, options = {}) {
+  if (options.acknowledgeAttention === false) return false;
+  if (!terminalDataShouldAcknowledgeAttention(data)) return false;
+  if (typeof acknowledgeTerminalAttentionFromUserAction !== 'function') return false;
+  return acknowledgeTerminalAttentionFromUserAction(session, null, options.attentionOptions || {});
+}
+
 const terminalTmuxPrefixPendingBySession = new Map();
 const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;
 const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;
@@ -3021,11 +3037,12 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   return mirrored;
 }
 
-function handleTerminalData(session, data) {
+function handleTerminalData(session, data, options = {}) {
   if (readOnlyMode && !shareWriteMode) return false;
   const filtered = stripTerminalQueryResponses(data);
   if (!filtered) return false;
   if (shareReplayShellActive && shareWriteMode) {
+    acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
     shareSendTerminalInputIntent(session, filtered);
     return true;
   }
@@ -3033,6 +3050,7 @@ function handleTerminalData(session, data) {
   const socket = current?.socket;
   if (socket?.readyState !== WebSocket.OPEN) return false;
   observeTerminalTmuxPrefixWindowSwitches(session, filtered);
+  acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   socket.send(JSON.stringify({type: 'input', data: filtered}));
   return true;
 }

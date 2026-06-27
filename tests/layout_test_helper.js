@@ -1156,6 +1156,8 @@ globalThis.__layoutTestApi = {
   globalActivityCounts,
   globalActivityStatusLineHtml,
   clearPromptAttentionForSessionForTest(session, options = {}) { return clearPromptAttentionForSession(session, {...options, localOnly: options.localOnly !== false}); },
+  attentionAcknowledgementKeyIsRecordedForTest: attentionAcknowledgementKeyIsRecorded,
+  terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
   updateSessionButtonStatesForTest: updateSessionButtonStates,
   browserFaviconBadgeCount,
   browserFaviconBadgeLabel,

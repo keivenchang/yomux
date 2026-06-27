@@ -1607,6 +1607,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
       window.__bootSockets = [];
       window.__bootSocketInstances = [];
       window.__eventSources = [];
+      window.__bootTerminalInstances = [];
       window.__terminalOpened = 0;
       window.__terminalResizeCalls = [];
       window.__settingsMtime = 0;
@@ -1628,6 +1629,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           this.rows = options.rows || 24;
           this.options = options;
           this.buffer = {active: {length: 0, getLine() { return null; }}};
+          window.__bootTerminalInstances.push(this);
         }
         open(container) {
           this.element = document.createElement('div');

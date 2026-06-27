@@ -478,7 +478,7 @@ def _attention_for_state(prompt_state: dict[str, Any], screen_state: dict[str, A
     if prompt_state.get("visible") or screen_state.get("key") == "approval":
         return "approval", "YOLO?"
     if screen_state.get("key") == "needs-input":
-        return "question", "ASK"
+        return "question", "Question"
     if screen_state.get("key") == "working":
         return "working", "RUN"
     return "", ""

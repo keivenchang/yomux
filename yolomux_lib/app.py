@@ -1475,6 +1475,9 @@ class TmuxWebtermApp:
             return {"ok": True, "history": self.stats_history_payload_locked(max(0, since), client_id=client_id)}, HTTPStatus.OK
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
+        cached_payload = self.fresh_auto_approve_payload_for_stats()
+        if cached_payload is not None:
+            return self.stats_agent_window_rows_from_auto_approve_payload(cached_payload)
         self.refresh_sessions(maintenance=False)
         if not self.sessions:
             return []
@@ -1494,6 +1497,40 @@ class TmuxWebtermApp:
                 activity_snapshot=activity_snapshot,
                 include_path_metadata=False,
             ):
+                item = dict(row)
+                item["session"] = session
+                rows.append(item)
+        return rows
+
+    def fresh_auto_approve_payload_for_stats(self) -> AutoApproveStatusPayload | None:
+        with self.auto_approve_cache_condition:
+            cached = self.auto_approve_cache
+            if cached is None:
+                return None
+            stored_at, (payload, status) = cached
+            if status != HTTPStatus.OK:
+                return None
+            if time.monotonic() - stored_at > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
+                return None
+            if not isinstance(payload, dict):
+                return None
+            return copy.deepcopy(payload)
+
+    @staticmethod
+    def stats_agent_window_rows_from_auto_approve_payload(payload: AutoApproveStatusPayload) -> list[dict[str, Any]]:
+        sessions_payload = payload.get("sessions")
+        if not isinstance(sessions_payload, dict):
+            return []
+        session_order = payload.get("session_order")
+        ordered_sessions = [str(session) for session in session_order] if isinstance(session_order, list) else list(sessions_payload)
+        rows: list[dict[str, Any]] = []
+        for session in ordered_sessions:
+            state = sessions_payload.get(session)
+            if not isinstance(state, dict):
+                continue
+            for row in state.get("agent_windows") if isinstance(state.get("agent_windows"), list) else []:
+                if not isinstance(row, dict):
+                    continue
                 item = dict(row)
                 item["session"] = session
                 rows.append(item)

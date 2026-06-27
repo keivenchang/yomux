@@ -23,6 +23,7 @@ from .common import UPLOAD_MAX_BYTES
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
+_SETTINGS_PAYLOAD_CACHE: dict[Path, tuple[int, int, dict[str, Any]]] = {}
 UI_COLOR_CHOICES: tuple[str, ...] = ("green", "blue", "orange", "yellow", "purple", "white")
 DEFAULT_CURSOR_COLOR = "yellow"
 SEPARATOR_COLOR_CHOICES: tuple[str, ...] = ("theme", *UI_COLOR_CHOICES)
@@ -510,7 +511,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "pane_ring_opacity"): "Percent, 5-100. Opacity of the green/red pane ring drawn over the content edge.",
     ("appearance", "inactive_pane_opacity"): "Percent, 0-100. Strength of inactive pane gray-out.",
     ("appearance", "max_tabs_per_pane"): "Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).",
-    ("appearance", "red_reminder_ms"): "Milliseconds, 0 disables the red/yellow/green status progress pulse cycle for ASK and agent status balls.",
+    ("appearance", "red_reminder_ms"): "Milliseconds, 0 disables the red/yellow/green status progress pulse cycle for agent status balls.",
     ("appearance", "metadata_badge_pulse_seconds"): "Seconds, 0-120. Duration for PR/branch metadata badge pulses.",
     ("performance", "latency_refresh_ms"): "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
     ("performance", "event_log_refresh_ms"): "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
@@ -946,6 +947,7 @@ def _write_settings_file_unlocked(settings: dict[str, Any], path: Path = SETTING
 def write_settings_file(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
     with locked_settings_file(path):
         _write_settings_file_unlocked(settings, path)
+        _settings_payload_cache_clear_unlocked(path)
 
 
 def _read_settings_file_unlocked(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
@@ -976,6 +978,36 @@ def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
         "mtime_ns": stat.st_mtime_ns if stat else 0,
         "error": error,
     }
+
+
+def _settings_payload_file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat() if path.exists() else None
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size) if stat is not None else None
+
+
+def _settings_payload_cache_clear_unlocked(path: Path = SETTINGS_PATH) -> None:
+    _SETTINGS_PAYLOAD_CACHE.pop(path, None)
+
+
+def _settings_payload_cache_store_unlocked(path: Path, payload: dict[str, Any]) -> None:
+    signature = _settings_payload_file_signature(path)
+    if signature is None:
+        _settings_payload_cache_clear_unlocked(path)
+        return
+    _SETTINGS_PAYLOAD_CACHE[path] = (signature[0], signature[1], copy.deepcopy(payload))
+
+
+def _settings_payload_cached_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
+    signature = _settings_payload_file_signature(path)
+    cached = _SETTINGS_PAYLOAD_CACHE.get(path)
+    if signature is not None and cached is not None and cached[:2] == signature:
+        return copy.deepcopy(cached[2])
+    payload = _settings_payload_unlocked(path)
+    _settings_payload_cache_store_unlocked(path, payload)
+    return copy.deepcopy(payload)
 
 
 def settings_payload_choices() -> dict[str, list[str]]:
@@ -1103,7 +1135,7 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
 
 def settings_payload(path: Path = SETTINGS_PATH) -> dict[str, Any]:
     with locked_settings_file(path):
-        return _settings_payload_unlocked(path)
+        return _settings_payload_cached_unlocked(path)
 
 
 def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
@@ -1113,6 +1145,8 @@ def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
         next_settings = merge_settings(current, patch, coerced)
         _write_settings_file_unlocked(next_settings, path)
         payload = _settings_payload_unlocked(path)
+        _settings_payload_cache_store_unlocked(path, payload)
+        payload = copy.deepcopy(payload)
         # report which patched keys were clamped/reverted so the API/UI can surface it
         # instead of silently changing the value (e.g. ui_font_size:999 -> 20).
         payload["coerced"] = coerced

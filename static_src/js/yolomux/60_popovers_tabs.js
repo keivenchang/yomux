@@ -500,6 +500,7 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       item: statusSummary.item,
       label: statusSummary.label,
       statusTones: statusSummary.statusTones,
+      statusOnly: true,
     });
     if (iconHtml) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
@@ -825,7 +826,7 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
   }
-  if (agentWindowIsAttentionState(state)) return `ASK ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
+  if (agentWindowIsAttentionState(state)) return sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true});
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
 }

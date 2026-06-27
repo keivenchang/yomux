@@ -68,7 +68,7 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'sse', label: 'SSE', unit: 'countPerSecond'},
   {key: 'latency', label: 'Latency', unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond'},
-  {key: 'askAgents', label: 'ASK', unit: 'count'},
+  {key: 'askAgents', label: 'Attention', unit: 'count'},
   {key: 'runAgents', label: 'RUN', unit: 'count'},
   {key: 'transitionAgents', label: 'Transition', unit: 'count'},
   {key: 'idleAgents', label: 'Idle', unit: 'count'},

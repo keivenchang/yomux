@@ -423,6 +423,7 @@ function refreshAgentWindowActivityDisplays() {
   if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
     renderPanels(activePaneItems(), {reason: 'agent-window-activity'});
   }
+  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof refreshTabberPanels === 'function' && typeof fileExplorerMode !== 'undefined' && fileExplorerMode === 'tabber') refreshTabberPanels();
@@ -604,6 +605,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const item = options.item || agentWindowActivityIcon(kind, state, idleSeconds, options);
   const stateKey = item?.state || 'idle-recent';
   const label = options.label || item?.label || agentLabel(kind);
+  const statusOnly = options.statusOnly === true || options.hideAgentIcon === true;
   const agentClasses = [
     'agent-window-activity-icon',
     'agent-window-agent-icon',
@@ -612,15 +614,23 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
   const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones});
+  if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone) ? statusIndicatorToneStyle(tone) : '';
-  return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
+  const wrapperClasses = [
+    'agent-window-activity',
+    `agent-window-activity--${stateKey}`,
+    statusOnly ? 'agent-window-activity--status-only' : '',
+  ].filter(Boolean).join(' ');
+  const agentHtml = statusOnly ? '' : agentIcon(kind, {label, className: agentClasses});
+  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentHtml}${markerHtml}</span>`;
 }
 
-function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
+function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '', extraOptions = {}) {
   const options = agentWindowActivityOptionsForStatus(agent, session);
   return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
     ...options,
+    ...extraOptions,
     item: agentWindowActivityIconForStatusItem(agent, agentKey, session, options),
   });
 }

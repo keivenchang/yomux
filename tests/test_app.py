@@ -791,6 +791,36 @@ def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):
     assert refreshes == ["refresh"]
 
 
+def test_stats_agent_window_rows_reuses_fresh_auto_approve_cache(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    cached_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"},
+                ],
+            },
+        },
+        "errors": [],
+        "rules": {},
+    }
+    with webapp.auto_approve_cache_condition:
+        webapp.auto_approve_cache = (time.monotonic(), (cached_payload, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stats should use the fresh auto-approve cache")))
+    try:
+        rows = webapp.stats_agent_window_rows()
+    finally:
+        webapp.control_server.stop()
+
+    assert rows == [
+        {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "session": "1"},
+    ]
+    assert "session" not in cached_payload["sessions"]["1"]["agent_windows"][0]
+
+
 def test_auto_approve_session_status_skips_roster_cache(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     build_calls = []

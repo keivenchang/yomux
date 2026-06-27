@@ -2120,7 +2120,6 @@ body.theme-light .latency-meter {
   text-align: center;
   border-radius: 999px;
   opacity: 1;
-  will-change: opacity, filter, box-shadow;
 }
 .status-indicator--dot.heartbeat-pulse {
   --attention-pulse-saturate-rest: 1.04;
@@ -2158,7 +2157,7 @@ body.theme-light .latency-meter {
 /* Re-declare the pulse cadence at higher specificity (.status-indicator beats the bare
    .heartbeat-pulse) so the prefers-reduced-motion rule `.heartbeat-pulse { animation: none }` cannot
    zero the status balls' timing. Without this the balls freeze under reduced motion while the
-   high-specificity ASK pillbox keeps pulsing (the balls' animation-name survives but their
+   higher-specificity status labels keep pulsing (the balls' animation-name survives but their
    duration/iteration get reset to 0). Same cadence as the parent; only the specificity differs. */
 .status-indicator.heartbeat-pulse {
   animation-duration: var(--pulse-duration);
@@ -2504,12 +2503,11 @@ body.theme-light .session-yolo-marker.inactive {
   border-color: var(--agent-inactive-marker-border);
 }
 /* The session YO marker no longer rotates to signal "working" — the glowing green ball beside the
-   agent symbol does that now. Loading/thinking spinners (which reuse the YO glyph) still spin below;
-   they indicate transient loading, not session-working. */
+   agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
+   model work, not session-working. */
 .session-yolo-marker.working {
   transform-origin: center;
 }
-.session-yolo-marker.changes-loading-yolo,
 .session-yolo-marker.yoagent-waiting-spinner,
 .session-yolo-marker.yoagent-chat-spinner {
   transform-origin: center;
@@ -3850,11 +3848,6 @@ body.theme-light .js-debug-graph-view {
   align-items: center;
   gap: 6px;
   color: var(--muted);
-}
-.changes-loading-yolo {
-  min-width: 17px;
-  height: 17px;
-  font-size: var(--ui-font-size-2xs);
 }
 .changes-summary-totals {
   flex: 0 0 auto;

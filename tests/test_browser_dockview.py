@@ -990,7 +990,7 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
             const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
             const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
             return !!dot
-              && !!tab?.querySelector('.session-state-badge.session-state-needs-input')
+              && !tab?.querySelector('.session-state-badge.session-state-needs-input')
               && !!tab?.querySelector('.agent-window-status-dot--attention-cooldown')
               && document.querySelector('.panel-detail-row [data-window-index="0"]')?.classList.contains('active');
             """
@@ -1128,6 +1128,89 @@ def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp
         """
     )
     assert ack_body == {"keys": [attention_key]}
+
+
+def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, tmp_path):
+    attention_key = '["agent-window","1","2","","claude","needs-input","waiting"]'
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 2, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "claude", "state": "needs-input", "window_index": 2, "window_label": "2:claude", "current": True, "window_active": True, "screen_text": "waiting", "attention_key": attention_key},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const terminal = (window.__bootTerminalInstances || [])[0];
+            const socket = (window.__bootSocketInstances || [])[0];
+            return terminal?._onData
+              && socket?.readyState === WebSocket.OPEN
+              && document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+            """
+        )
+    )
+    started = time.monotonic()
+    immediate = browser.execute_script(
+        """
+        const terminal = window.__bootTerminalInstances[0];
+        const beforeFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
+        terminal._onData('a');
+        const afterFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
+        return {
+          stillRed: !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention'),
+          ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
+          newSocketFrames: afterFrames - beforeFrames,
+        };
+        """
+    )
+    assert immediate == {"stillRed": True, "ackPosts": 0, "newSocketFrames": 1}
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention')
+              && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
+            """
+        )
+    )
+    assert time.monotonic() - started >= 0.8
+    ack_body = browser.execute_script(
+        """
+        const fetch = window.__bootFetches.find(entry => entry.path === '/api/attention-ack');
+        return fetch?.body || null;
+        """
+    )
+    sent_frame = browser.execute_script(
+        """
+        const frames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
+        return frames.map(frame => JSON.parse(frame)).find(frame => frame.type === 'input') || null;
+        """
+    )
+    assert ack_body == {"keys": [attention_key]}
+    assert sent_frame == {"type": "input", "data": "a"}
 
 
 def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_glowing_ball(browser, tmp_path):
@@ -1475,26 +1558,22 @@ def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(bro
         """
         const tab = document.querySelector('.dockview-pane-tab, .pane-tab');
         const marker = tab && tab.querySelector('.session-agent-activity-marker');
-        const sym = tab && tab.querySelector('.session-agent-activity-marker .agent-window-agent-icon--working');
+        const icon = tab && tab.querySelector('.session-agent-activity-marker .agent-window-agent-icon');
         const dot = tab && tab.querySelector('.session-agent-activity-marker .agent-window-status-dot');
         return {
           tabFound: !!tab,
           hasMarker: !!marker,
-          hasWorkingSymbol: !!sym,
-          symbolStatic: sym ? getComputedStyle(sym).animationName === 'none' : null,
-          symbolIsClaude: sym ? sym.classList.contains('claude') : null,
+          hasAgentIcon: !!icon,
           dotPresent: !!dot,
           dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
         };
         """
     )
-    # The working indicator (static symbol + green ball) renders even when working comes only from
-    # the screen-state proxy.
+    # The working tab indicator renders as a green ball even when working comes only from the
+    # screen-state proxy; pane tabs omit the Claude/Codex symbol to reduce clutter.
     assert data["tabFound"] is True, data
     assert data["hasMarker"] is True, data
-    assert data["hasWorkingSymbol"] is True, data
-    assert data["symbolStatic"] is True, data
-    assert data["symbolIsClaude"] is True, data
+    assert data["hasAgentIcon"] is False, data
     assert data["dotPresent"] is True, data
     assert data["dotWorkingTone"] is True, data
 
@@ -1559,6 +1638,8 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
               return {
                 found: !!root,
                 wrapState: wrap ? Array.from(wrap.classList).find(name => name.startsWith('agent-window-activity--')) : '',
+                statusOnly: wrap ? wrap.classList.contains('agent-window-activity--status-only') : false,
+                hasIcon: !!icon,
                 iconState: icon ? Array.from(icon.classList).find(name => name.startsWith('agent-window-agent-icon--')) : '',
                 attention: dot ? dot.classList.contains('status-indicator--attention') : false,
                 cooldown: dot ? dot.classList.contains('status-indicator--cooldown') : false,
@@ -1599,7 +1680,8 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
     assert red_case["tab"]["toneWorking"] is False, red_case
     assert red_case["tab"]["segmentClass"] == "agent-window-status-dot--attention-cooldown", red_case
     assert "conic-gradient" in red_case["tab"]["backgroundImage"], red_case
-    assert red_case["tab"]["iconState"] == red_case["claude"]["iconState"], red_case
+    assert red_case["tab"]["statusOnly"] is True, red_case
+    assert red_case["tab"]["hasIcon"] is False, red_case
     assert abs(red_case["tab"]["animationCurrentTime"] - red_case["claude"]["animationCurrentTime"]) <= 75, red_case
     assert abs(red_case["tab"]["animationCurrentTime"] - red_case["codex"]["animationCurrentTime"]) <= 75, red_case
 
@@ -1616,7 +1698,8 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
     assert yellow_case["tab"]["toneWorking"] is True, yellow_case
     assert yellow_case["tab"]["segmentClass"] == "agent-window-status-dot--cooldown-working", yellow_case
     assert "conic-gradient" in yellow_case["tab"]["backgroundImage"], yellow_case
-    assert yellow_case["tab"]["iconState"] == yellow_case["codex"]["iconState"], yellow_case
+    assert yellow_case["tab"]["statusOnly"] is True, yellow_case
+    assert yellow_case["tab"]["hasIcon"] is False, yellow_case
     assert yellow_case["tab"]["animationName"] == yellow_case["codex"]["animationName"], yellow_case
     assert yellow_case["tab"]["animationDuration"] == yellow_case["codex"]["animationDuration"], yellow_case
     assert yellow_case["tab"]["animationTiming"] == yellow_case["codex"]["animationTiming"], yellow_case

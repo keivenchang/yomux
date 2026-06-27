@@ -118,7 +118,8 @@ async function runShareThemeSuite() {
     api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
     api.setSessionFilesLoadingForTest(true);
     const loadingDifferHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/changes-loading[\s\S]*session-yolo-marker active working changes-loading-yolo[\s\S]*loading 2[\s\S]*moving-ellipsis changes-loading-dots/.test(loadingDifferHtml), 'Differ loading state uses the spinning YO marker, session label, and shared moving dots');
+    assert.ok(/changes-loading[\s\S]*loading 2[\s\S]*moving-ellipsis changes-loading-dots/.test(loadingDifferHtml), 'Differ loading state uses the session label and shared moving dots');
+    assert.equal(loadingDifferHtml.includes('changes-loading-yolo'), false, 'Differ loading state does not render a circular YO spinner');
     assert.equal(loadingDifferHtml.includes('not loaded'), false, 'Differ loading state does not flash "not loaded" while a session switch fetch is in flight');
     api.setSessionFilesPayloadForTest({
       session: '3',
@@ -131,8 +132,21 @@ async function runShareThemeSuite() {
     });
     api.setSessionFilesLoadingForTest(false);
     const refreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/changes-loading[\s\S]*loading 3[\s\S]*moving-ellipsis changes-loading-dots/.test(refreshingElsewhereHtml), 'Differ follower refresh placeholders render as loading instead of a completed empty result');
-    assert.equal(refreshingElsewhereHtml.includes('class="changes-empty"'), false, 'Differ follower refresh placeholders do not render a misleading empty repo section');
+    assert.equal(refreshingElsewhereHtml.includes('changes-loading'), false, 'Differ renders a clean repo placeholder instead of pinning the header to loading while a follower refreshes');
+    assert.ok(refreshingElsewhereHtml.includes('frontend-crates3'), 'Differ clean repo placeholders keep the visible repo section while a follower refreshes');
+    assert.ok(refreshingElsewhereHtml.includes('No Differ results for this session.'), 'Differ clean repo placeholders show the completed empty result');
+    api.setSessionFilesPayloadForTest({
+      session: '4',
+      loaded: true,
+      refreshing_elsewhere: true,
+      errors: [],
+      refs_by_repo: {},
+      repos: [],
+      files: [],
+    });
+    const rootlessRefreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
+    assert.ok(/changes-loading[\s\S]*loading 4[\s\S]*moving-ellipsis changes-loading-dots/.test(rootlessRefreshingElsewhereHtml), 'Differ rootless follower placeholders still render as loading instead of a misleading empty result');
+    assert.equal(rootlessRefreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rootless follower placeholders do not render a completed empty state');
     const sessionSwitchSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const sessionSwitchBody = sessionSwitchSource.slice(sessionSwitchSource.indexOf('function switchFileExplorerChangesSession('), sessionSwitchSource.indexOf('function noteFileExplorerChangesSessionInteraction('));
     assert.ok(/setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);\s*renderFileExplorerChangesPanels\(\);\s*fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\);/.test(sessionSwitchBody), 'auto-switching Differ sessions shows loading only when no loaded cached payload is available while Finder Sync updates immediately');
@@ -194,7 +208,8 @@ async function runShareThemeSuite() {
     api.setSessionFilesLoadingForTest(true);
     api.setFileExplorerModeForTest('files');
     const loadingEmbeddedDifferHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/changes-comparison-head compact[\s\S]*changes-loading[\s\S]*session-yolo-marker active working changes-loading-yolo/.test(loadingEmbeddedDifferHtml), 'embedded Finder Differ loading header uses the same moving YO indicator');
+    assert.ok(/changes-comparison-head compact[\s\S]*changes-loading[\s\S]*loading 2[\s\S]*moving-ellipsis changes-loading-dots/.test(loadingEmbeddedDifferHtml), 'embedded Finder Differ loading header uses the same moving-dot indicator');
+    assert.equal(loadingEmbeddedDifferHtml.includes('changes-loading-yolo'), false, 'embedded Finder Differ loading header does not render a circular YO spinner');
     assert.equal(loadingEmbeddedDifferHtml.includes('not loaded'), false, 'embedded Finder Differ loading header does not flash "not loaded"');
     api.setFileExplorerModeForTest('diff');
     api.setSessionFilesLoadingForTest(false);
@@ -611,9 +626,21 @@ async function runShareThemeSuite() {
         readyState: 1,
         send(message) { socketMessages.push(JSON.parse(message)); },
       });
+      const attentionKey = '["agent-window","1","0","","claude","needs-input","waiting"]';
+      mouseReportApi.setTranscriptInfoForTest('1', {panes: [{window: 0, active: true, window_active: true, process_label: 'claude'}]});
+      mouseReportApi.setAutoApproveStateForTest('1', {agent_windows: [
+        {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude', current: true, window_active: true, screen_text: 'waiting', attention_key: attentionKey},
+      ]});
+      assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest('\x1b[<35;12;7M'), false, 'xterm mouse-report bytes are not treated as user text for attention acknowledgement');
       assert.equal(mouseReportApi.handleTerminalDataForTest('1', '\x1b[<35;12;7M'), true, 'xterm mouse-report bytes are still forwarded to the terminal backend');
       assert.equal(socketMessages[0]?.data, '\x1b[<35;12;7M', 'xterm mouse-report bytes stay a transport concern');
+      assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), false, 'xterm mouse-report bytes do not acknowledge red/yellow agent attention');
       assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'xterm hover/mouse-report bytes from pane 1 do not auto-select Differ session 1');
+      assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest('a'), true, 'printable terminal bytes are treated as user input for attention acknowledgement');
+      assert.equal(mouseReportApi.handleTerminalDataForTest('1', 'a', {attentionOptions: {localOnly: true, acknowledgeAgentWindowDelayMs: 0}}), true, 'typed xterm bytes still forward while acknowledging attention');
+      assert.equal(socketMessages[1]?.data, 'a', 'typed xterm bytes are still sent to the terminal backend');
+      assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), true, 'typed xterm bytes acknowledge the active red/yellow agent status');
+      assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
     }
     // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
     // each repo owns its own compact comparison line instead.
@@ -1367,13 +1394,15 @@ async function runShareThemeSuite() {
     assert.ok(terminalContainerBindingBody.includes("container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal keydown commits the Finder Modified-files target');
     assert.ok(terminalContainerBindingBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
-    assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared transport-only handler');
+    assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
     assert.ok(/function applyTerminalUnicode11Addon\(term\)[\s\S]*new Unicode11AddonCtor\(\)[\s\S]*term\.loadAddon\(addon\)[\s\S]*term\.unicode\.activeVersion = '11'/.test(appSource), 'xterm terminals register Unicode 11 widths for emoji cell accounting');
     assert.ok(/const term = new TerminalCtor\([\s\S]*?\}\);\s*applyTerminalUnicode11Addon\(term\);\s*term\.open\(container\);/.test(terminalInputBody), 'xterm Unicode widths are selected before the first terminal paint');
     assert.equal(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder because hover focus can emit focus/mouse reports');
     assert.equal(/term\.onData\(data => \{[^]*?noteTerminalExplicitInput\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder indirectly through explicit-input helpers because hover mouse reports can emit terminal bytes');
-    assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling stays transport-only; DOM keydown/paste/beforeinput own explicit-input commits');
+    assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling still avoids the explicit-input helper that commits Finder targets');
+    assert.ok(/function terminalDataShouldAcknowledgeAttention\(data\)[\s\S]*terminalDataWithoutPassiveReports\(data\)\.length > 0/.test(appSource), 'terminal byte handling filters passive xterm reports before acknowledging attention');
+    assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*acknowledgeTerminalAttentionFromTransportInput\(session, filtered, options\)/.test(appSource), 'terminal byte handling acknowledges red/yellow attention from real typed xterm input');
     assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
     assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
     assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
@@ -1452,6 +1481,8 @@ async function runShareThemeSuite() {
     assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores follower refresh placeholders after a rooted payload is already visible');
+    assert.ok(/function sessionFilesPanelIsLoading\(payload, files = null\)[\s\S]*sessionFilesPayloadHasVisibleDifferResult\(payload, files\)/.test(appSource), 'Differ loading state is suppressed when a follower-refresh payload already has a visible loaded result');
+    assert.ok(/function applySessionFilesPayloadFromPush\(payload = \{\}, request = \{\}\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear a stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted Differ payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
     assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
@@ -2904,7 +2935,7 @@ async function runShareThemeSuite() {
       assert.ok(/const shareWriteMode = shareViewMode && shareBootstrap\?\.mode === 'rw'/.test(shareSource), 'share-view write mode is explicit and token-driven');
       assert.ok(/disableStdin:\s*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view terminals are created with stdin enabled');
       assert.ok(/function insertIntoTerminal\(session, text\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view can send terminal insertions while ro share-view stays blocked');
-      assert.ok(/function handleTerminalData\(session, data\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource) && shareSource.includes('term.onData(data => handleTerminalData(session, data));'), 'rw share-view can type into the focused terminal only through terminal input frames');
+      assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource) && shareSource.includes('term.onData(data => handleTerminalData(session, data));'), 'rw share-view can type into the focused terminal only through terminal input frames');
       assert.ok(shareSource.includes('function renderShareStatusPill') && shareSource.includes('share.pill'), 'host topbar renders the YO!share status pill');
       assert.ok(shareSource.includes('share.pillMultiple'), 'host topbar aggregates multiple active YO!share URLs into one status pill');
       assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'share-view pages keep one viewer id across all terminal websockets in the page');

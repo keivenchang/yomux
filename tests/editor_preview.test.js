@@ -167,17 +167,18 @@ async function runEditorPreviewSuite() {
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
     const dotBlock = sessionsCss.match(/\.status-indicator--dot\s*\{[^}]*\}/)?.[0] || '';
-    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === STATE_KEY\.working[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === STATE_KEY\.idle[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK/activity-dot status tones are centralized in one shared parent helper');
-    assert.ok(/function updateTopbarActivityStatus\(\)[\s\S]*node\.innerHTML = html[\s\S]*scheduleAgentWindowActivityAnimationSync\(node\)/.test(layoutSource), 'topbar ASK rerenders explicitly resync the shared attention animation phase');
-    assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar ASK badges inherit shared inline status behavior');
-    assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK badges inherit shared text status behavior');
-    assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'ASK status labels inherit shared status-indicator tone behavior without badge text-transform');
+    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === STATE_KEY\.working[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === STATE_KEY\.idle[\s\S]*status-indicator--idle/.test(layoutSource), 'attention/activity-dot status tones are centralized in one shared parent helper');
+    assert.ok(/function updateTopbarActivityStatus\(\)[\s\S]*node\.innerHTML = html[\s\S]*scheduleAgentWindowActivityAnimationSync\(node\)/.test(layoutSource), 'topbar attention rerenders explicitly resync the shared attention animation phase');
+    assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar attention count inherits shared inline status behavior');
+    assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'text status badges inherit shared text status behavior');
+    assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'attention status labels inherit shared status-indicator tone behavior without badge text-transform');
     assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(activitySource), 'tmux sub-window status dots inherit shared dot behavior through the shared activity-tone helper');
     assert.ok(/sessionPopoverAgentWindowRowHtml\(agent[\s\S]*agentWindowActivityIconHtmlForStatus\(agent, agent\.kind/.test(popoverSource), 'session popover agent rows reuse the shared activity glyph/status renderer');
-    assert.ok(/mutationTouchesAgentWindowActivity\(mutation\)[\s\S]*status-indicator[\s\S]*heartbeat-pulse[\s\S]*querySelector\?\.\('\.status-indicator\.heartbeat-pulse, \.status-indicator\.attention-pulse'/.test(activitySource), 'the shared animation sync observer watches ASK status indicators as well as agent activity wrappers');
-    assert.ok(/function syncAgentWindowPulseAnimationCurrentTime\(node, nowMs = Date\.now\(\)\)[\s\S]*animation\.currentTime = Number\(nowMs\) \|\| 0/.test(activitySource), 'ASK labels and red/yellow/green balls are phase-synced from one sampled timeline value');
-    assert.ok(/function syncAgentWindowActivityAnimationDelays\(root = document\)[\s\S]*agentWindowActivityPulseSelector[\s\S]*attentionAnimationClockDelay\(nowMs\)[\s\S]*localDelay && localDelay !== delay[\s\S]*node\.style\.removeProperty\('--attention-animation-delay'\)[\s\S]*syncAgentWindowPulseAnimationCurrentTime\(node, nowMs\)/.test(activitySource), 'ASK labels and red/yellow/green balls share one root delay while stale local delays are cleared instead of rewritten');
-    assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK/activity-dot markers share the status-indicator parent');
+    assert.ok(/function refreshAgentWindowActivityDisplays\(\)[\s\S]*renderPanels\(activePaneItems\(\), \{reason: 'agent-window-activity'\}\);[\s\S]*renderPaneTabStrips\(\)/.test(activitySource), 'sub-window activity refreshes redraw parent pane tab strips immediately');
+    assert.ok(/mutationTouchesAgentWindowActivity\(mutation\)[\s\S]*status-indicator[\s\S]*heartbeat-pulse[\s\S]*querySelector\?\.\('\.status-indicator\.heartbeat-pulse, \.status-indicator\.attention-pulse'/.test(activitySource), 'the shared animation sync observer watches attention status indicators as well as agent activity wrappers');
+    assert.ok(/function syncAgentWindowPulseAnimationCurrentTime\(node, nowMs = Date\.now\(\)\)[\s\S]*animation\.currentTime = Number\(nowMs\) \|\| 0/.test(activitySource), 'red/yellow/green attention balls are phase-synced from one sampled timeline value');
+    assert.ok(/function syncAgentWindowActivityAnimationDelays\(root = document\)[\s\S]*agentWindowActivityPulseSelector[\s\S]*attentionAnimationClockDelay\(nowMs\)[\s\S]*localDelay && localDelay !== delay[\s\S]*node\.style\.removeProperty\('--attention-animation-delay'\)[\s\S]*syncAgentWindowPulseAnimationCurrentTime\(node, nowMs\)/.test(activitySource), 'red/yellow/green attention balls share one root delay while stale local delays are cleared instead of rewritten');
+    assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'attention/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
     assert.ok(/width:\s*1em/.test(dotBlock) && /min-width:\s*1em/.test(dotBlock) && /color:\s*var\(--muted\)/.test(dotBlock) && /font-size:\s*0\.9em/.test(dotBlock), 'status ball markers keep the compact glyph-dot style from the shared parent modifier');
     assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-delay:\s*var\(--attention-animation-delay, 0s\)[^}]*animation-timing-function:\s*var\(--pulse-easing\)[^}]*animation-iteration-count:\s*infinite[^}]*animation-direction:\s*normal/.test(sessionsCss), 'heartbeat indicators share one pulse cadence parent');
@@ -207,8 +208,8 @@ async function runEditorPreviewSuite() {
     assert.equal((sessionsCss.match(/--agent-status-ball-size:/g) || []).length, 1, 'agent status-ball size has one owner');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(sessionsCss), false, 'status balls do not size themselves from the surface-specific agent icon token');
     assert.equal(/agent-symbol-status-alternate|agent-status-dot-alternate|--agent-alternate-animation-delay|--agent-alternate-pulse-duration/.test(sessionsCss + activitySource + layoutSource), false, 'agent status indicators no longer alternate symbol and ball');
-    assert.equal(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid/.test(sessionsCss), false, 'ASK/cooldown agent glyphs and dots are not grid-stacked overlays');
-    assert.ok(/\.status-indicator--dot\.status-indicator--attention\.heartbeat-pulse,[\s\S]*\.status-indicator--dot\.status-indicator--cooldown\.heartbeat-pulse\s*\{[\s\S]*animation-name:\s*attention-ring-fade/.test(sessionsCss), 'ASK/cooldown status balls glow with the shared attention-ring-fade pulse');
+    assert.equal(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid/.test(sessionsCss), false, 'attention/cooldown agent glyphs and dots are not grid-stacked overlays');
+    assert.ok(/\.status-indicator--dot\.status-indicator--attention\.heartbeat-pulse,[\s\S]*\.status-indicator--dot\.status-indicator--cooldown\.heartbeat-pulse\s*\{[\s\S]*animation-name:\s*attention-ring-fade/.test(sessionsCss), 'attention/cooldown status balls glow with the shared attention-ring-fade pulse');
     assert.ok(layoutSource.includes("status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse"), 'cooldown tone inherits the shared pulse class for the yellow ball');
     assert.ok(/\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb:\s*245 197 66/.test(sessionsCss), 'cooldown markers use the yellow glow channel');
     assert.equal(/\.status-indicator--dot\.status-indicator--working\.heartbeat-pulse,[\s\S]*?animation-name:\s*command-palette-thinking/.test(sessionsCss), false, 'status dots do not use the old command-palette-thinking pulse');
@@ -217,8 +218,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.agent-window-agent-icon--active\.agent-icon\.claude\s*\{[^}]*--agent-working-glow-rgb:\s*207 117 84/.test(sessionsCss), 'the --active Claude glyph glows with the Claude icon color (working uses the green ball, not a per-agent glow)');
     assert.ok(/\.status-indicator--cooldown\s*\{[^}]*color:\s*var\(--accent-gold\)/.test(sessionsCss), 'cooldown dot is yellow');
     assert.ok(/\.status-indicator--active\s*\{[^}]*color:\s*var\(--file-tree-recency-max-contrast, var\(--text\)\)/.test(sessionsCss), 'active labels use the same max-contrast token as plain hot recency');
-    assert.ok(/\.status-indicator--attention\s*\{[^}]*--attention-ring-rgb:\s*255 51 71/.test(sessionsCss), 'ASK dot glow is red');
-    assert.ok(/\.status-indicator--dot\.status-indicator--attention\s*\{[^}]*color:\s*var\(--bad\)/.test(sessionsCss), 'ASK dot glyphs use saturated red instead of pale danger text');
+    assert.ok(/\.status-indicator--attention\s*\{[^}]*--attention-ring-rgb:\s*255 51 71/.test(sessionsCss), 'attention dot glow is red');
+    assert.ok(/\.status-indicator--dot\.status-indicator--attention\s*\{[^}]*color:\s*var\(--bad\)/.test(sessionsCss), 'attention dot glyphs use saturated red instead of pale danger text');
     assert.equal(/status-indicator--idle[\s\S]{0,160}animation/.test(sessionsCss), false, 'idle circle markers stay static');
     assert.ok(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.heartbeat-pulse[\s\S]*animation:\s*none/.test(sessionsCss), 'generic heartbeat motion is still suppressed by the reduced-motion rule before status indicators re-declare their pulse cadence');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-name:\s*attention-ring-fade/.test(sessionsCss), 'recency and attention share the attention-ring-fade animation parent');
@@ -241,27 +242,27 @@ async function runEditorPreviewSuite() {
     };
     syncDot.getAnimations = () => [syncDotAnimation];
     syncAgent.appendChild(syncDot);
-    const syncAsk = api.testElementForId('sync-ask-badge');
-    syncAsk.className = 'status-indicator session-state-badge status-indicator--text status-indicator--attention heartbeat-pulse attention-pulse';
-    syncAsk.style.setProperty('--attention-animation-delay', '-0.999s');
-    let syncAskCurrentTime = -2;
-    const syncAskAnimation = {
+    const syncAttentionLabel = api.testElementForId('sync-attention-label');
+    syncAttentionLabel.className = 'status-indicator status-indicator--label status-indicator--attention heartbeat-pulse attention-pulse';
+    syncAttentionLabel.style.setProperty('--attention-animation-delay', '-0.999s');
+    let syncAttentionLabelCurrentTime = -2;
+    const syncAttentionLabelAnimation = {
       animationName: 'attention-ring-fade',
       effect: {getTiming: () => ({duration: 1550})},
-      set currentTime(value) { syncAskCurrentTime = value; },
-      get currentTime() { return syncAskCurrentTime; },
+      set currentTime(value) { syncAttentionLabelCurrentTime = value; },
+      get currentTime() { return syncAttentionLabelCurrentTime; },
     };
-    syncAsk.getAnimations = () => [syncAskAnimation];
+    syncAttentionLabel.getAnimations = () => [syncAttentionLabelAnimation];
     syncRoot.appendChild(syncAgent);
-    syncRoot.appendChild(syncAsk);
+    syncRoot.appendChild(syncAttentionLabel);
     api.syncAgentWindowActivityAnimationDelaysForTest(syncRoot);
     const syncedDelay = api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay');
-    assert.notEqual(syncedDelay, '', 'ASK and status balls inherit one root animation delay');
+    assert.notEqual(syncedDelay, '', 'attention indicators inherit one root animation delay');
     assert.equal(syncAgent.style.getPropertyValue('--attention-animation-delay'), '', 'agent activity wrapper stale local animation delay is cleared');
     assert.equal(syncDot.style.getPropertyValue('--attention-animation-delay'), '', 'red agent status dot stale local animation delay is cleared');
-    assert.equal(syncAsk.style.getPropertyValue('--attention-animation-delay'), '', 'ASK stale local animation delay is cleared');
-    assert.equal(syncDotCurrentTime, syncAskCurrentTime, 'red agent status dot and ASK animation currentTime are forced to the same sampled phase');
-    assert.ok(syncAskCurrentTime > 0, 'sampled attention animation timeline is a positive shared clock value');
+    assert.equal(syncAttentionLabel.style.getPropertyValue('--attention-animation-delay'), '', 'attention label stale local animation delay is cleared');
+    assert.equal(syncDotCurrentTime, syncAttentionLabelCurrentTime, 'red agent status dot and attention label animation currentTime are forced to the same sampled phase');
+    assert.ok(syncAttentionLabelCurrentTime > 0, 'sampled attention animation timeline is a positive shared clock value');
     const firstSyncedDelay = api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay');
     api.syncAgentWindowActivityAnimationDelaysForTest(syncRoot);
     assert.equal(api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay'), firstSyncedDelay, 'a second sync keeps the same root animation delay instead of restarting the CSS animation');
@@ -274,7 +275,7 @@ async function runEditorPreviewSuite() {
     assert.equal(/file-tree-recency-pulse/.test(treeCss + activitySource), false, 'the old standalone file-tree recency pulse is gone');
     assert.equal(/10s ease-out/.test(treeCss), false, 'recency no longer uses the old one-shot ten-second pulse');
     assert.ok((tokensCss.match(/--file-tree-recency-hot:\s*var\(--file-tree-recency-max-contrast\);/g) || []).length >= 2, 'plain hot recency uses the shared max-contrast token in dark and light themes');
-    assert.equal(/--file-tree-recency-hot:\s*var\(--bad\)/.test(tokensCss), false, 'plain hot recency is not red; red is ASK-only');
+    assert.equal(/--file-tree-recency-hot:\s*var\(--bad\)/.test(tokensCss), false, 'plain hot recency is not red; red is attention-only');
     assert.ok(/\.file-tree-row:not\(\.selected\):not\(\.current-file\)\.file-tree-recency-just-updated > \.file-tree-date,[\s\S]*?\.file-tree-recency-hot > \.file-tree-date,[\s\S]*?\.file-tree-recency-fresh > \.file-tree-date\s*\{[\s\S]*font-weight:\s*800/.test(treeCss), 'newest recency rows stay bold through the shared date-cell rule');
 
     api.setFileTreeRecencyNowForTest(nowMs);
@@ -601,7 +602,7 @@ async function runEditorPreviewSuite() {
       screen: {key: 'approval', text: 'Do you want to proceed?'},
     });
     const state = api.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
-    assert.equal(state.key, 'needs-approval', 'roster screen approval state lights ASK even when prompt.visible is absent');
+    assert.equal(state.key, 'needs-approval', 'roster screen approval state lights attention even when prompt.visible is absent');
     assert.equal(state.reason, 'Do you want to proceed?');
   });
 
@@ -704,7 +705,7 @@ async function runEditorPreviewSuite() {
       }],
     });
     const actionRequired = api.sessionState('1', {agents: [], panes: []});
-    assert.equal(actionRequired.key, 'needs-input', 'Codex action-required pane title marks the session as ASK');
+    assert.equal(actionRequired.key, 'needs-input', 'Codex action-required pane title marks the session as needing input');
     assert.equal(actionRequired.reason, 'tmux agent action required');
     api.setTmuxSignalStateForTest({
       windows: [{
@@ -870,7 +871,7 @@ async function runEditorPreviewSuite() {
     const activeAskWindowBarHtml = api.tmuxWindowBarHtml('1', {panes: [
       {window: '0', window_name: 'claude', window_active: true, active: true, command: 'claude', pid: 4444},
     ]});
-    assert.ok(/class="tab tmux-window-button active"[\s\S]*data-window-index="0"[\s\S]*0:claude[\s\S]*agent-window-activity-icon--attention[\s\S]*status-indicator--attention/.test(activeAskWindowBarHtml), 'active 0:claude ASK window button renders the red shared attention dot, not an idle/current white dot');
+    assert.ok(/class="tab tmux-window-button active"[\s\S]*data-window-index="0"[\s\S]*0:claude[\s\S]*agent-window-activity-icon--attention[\s\S]*status-indicator--attention/.test(activeAskWindowBarHtml), 'active 0:claude attention window button renders the red shared attention dot, not an idle/current white dot');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'codex', state: 'working', window_index: 3, last_active_ts: nowSeconds, window_label: '3:codex'},
       {kind: 'codex', state: 'idle', window_index: 2, last_active_ts: nowSeconds - 120, idle_since: nowSeconds - 120, window_label: '2:codex'},
@@ -961,7 +962,7 @@ async function runEditorPreviewSuite() {
     assert.equal(/\.tmux-window-button\.active\s*\{[^}]*#[0-9a-fA-F]{3,6}/.test(yoloCss), false, 'DOIT.57 T2: the active window button uses theme-aware tokens, not hardcoded hex');
     assert.ok(/\.tmux-window-button \.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*14px[\s\S]*height:\s*14px/.test(yoloCss), 'tmux sub-window agent glyphs stay compact beside the canonical label');
     assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\s*\{[\s\S]*text-shadow:\s*0 0 0 var\(--active-control-text\), 0 0 4px var\(--active-control-text\)/.test(yoloCss), 'active tmux sub-window status dots reuse active-control text for contrast');
-    assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*color:\s*var\(--bad\)[\s\S]*text-shadow:\s*0 0 0 var\(--bad\), 0 0 6px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\.85\)/.test(yoloCss), 'active ASK window dots keep the saturated red attention color instead of the active-control white halo');
+    assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*color:\s*var\(--bad\)[\s\S]*text-shadow:\s*0 0 0 var\(--bad\), 0 0 6px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\.85\)/.test(yoloCss), 'active attention window dots keep the saturated red attention color instead of the active-control white halo');
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(yoloCss), 'active tmux sub-window activity dots inherit the shared brightness pulse in the built CSS');
     assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux sub-window buttons have no per-agent tint CSS');
     assert.ok(source.includes("agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown initializes from the persisted setting');
@@ -1087,12 +1088,12 @@ async function runEditorPreviewSuite() {
     assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '0')?.classList.contains('active'), false, 'Ctrl-b numeric selection clears the previous active button synchronously');
     assert.notEqual(relativeMetaNode.innerHTML, 'stale again', 'Ctrl-b then a number updates known target-window path/repo metadata immediately');
     assert.ok(relativeMetaNode.innerHTML.includes('/tmp/shell'), 'Ctrl-b numeric target uses the known target-window pane path immediately');
-    const tmuxPrefixObserver = source.slice(source.indexOf('function observeTerminalTmuxPrefixWindowSwitches(session, data)'), source.indexOf('function handleTerminalData(session, data)'));
+    const tmuxPrefixObserver = source.slice(source.indexOf('function observeTerminalTmuxPrefixWindowSwitches(session, data)'), source.indexOf('function handleTerminalData(session, data, options = {})'));
     assert.ok(tmuxPrefixObserver.includes("char === '\\x02'") && tmuxPrefixObserver.includes('terminalTmuxPrefixWindowShortcut(char)'), 'terminal transport observes tmux prefix window shortcuts without owning the bytes');
     assert.equal(source.includes('function previewTmuxWindowInfo'), false, 'tmux sub-window switching has no relative-index predictor');
     assert.equal(source.includes('function previewTmuxWindowLabel'), false, 'tmux sub-window switching has no optimistic local label repaint');
     assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*const sequence = directIndex !== null[\s\S]*setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*setTmuxWindowActiveIndexPending\(session\)[\s\S]*expectedIndex: directIndex, sequence[\s\S]*previousIndex, sequence/.test(source), 'terminal prefix observer highlights explicit targets and carries a sequence through readback');
-    assert.ok(/function handleTerminalData\(session, data\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)/.test(source), 'tmux prefix observation happens before sending the unchanged terminal bytes');
+    assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)/.test(source), 'tmux prefix observation happens before sending the unchanged terminal bytes');
     assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*applyTmuxWindowActiveIndexToTranscriptInfo\(String\(session\), indexKey, \{render: true\}\)/.test(source), 'known direct tmux targets overlay transcript metadata immediately so stale polls do not flash the old window');
     assert.ok(/async function applySessionMetadataPayload\(payload, options = \{\}\)[\s\S]*transcriptMeta = transcriptPayloadWithTmuxWindowOverrides\(payload\)/.test(source), 'incoming session metadata payloads preserve pending direct-window overrides');
@@ -1691,6 +1692,7 @@ async function runEditorPreviewSuite() {
     };
     const html = api.tmuxPaneTabHtml('4', info, null, true);
     const tabBadgeSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const tabActivityMarkerHtml = value => value.match(/<span class="session-agent-activity-marker[^"]*">[\s\S]*?<\/span><\/span>/)?.[0] || '';
     assert.ok(tabBadgeSource.includes('function pullRequestNumberIndicatorHtml'), 'tab renders the PR number chip helper');
     assert.ok(/<span class="ci-indicator tab-symbol pr-number-chip pr-status-merged"[^>]*>#9961<\/span>/.test(html), 'merged default-branch tab renders the #number as a purple chip');
     assert.ok(html.includes('>YO<'), 'tab includes YO marker');
@@ -1751,17 +1753,21 @@ async function runEditorPreviewSuite() {
       {kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude', current: true, window_active: true},
     ]});
     const workingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
+    const workingMarkerHtml = tabActivityMarkerHtml(workingHtml);
     assert.ok(/session-yolo-marker[^"]*active/.test(workingHtml), 'working Claude session tabs keep the YO button visible');
-    assert.equal(/session-yolo-marker[^"]*working/.test(workingHtml), false, 'attributed working Claude tabs leave motion to the agent glyph');
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(workingHtml), 'working Claude session tabs also show the glowing Claude glyph');
-    assert.ok(workingHtml.indexOf('session-yolo-marker') < workingHtml.indexOf('session-agent-activity-marker'), 'YO button stays before the working agent glyph');
+    assert.equal(/session-yolo-marker[^"]*working/.test(workingHtml), false, 'attributed working Claude tabs leave motion to the status ball');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(workingMarkerHtml), 'working Claude session tabs show the shared green status ball');
+    assert.equal(workingMarkerHtml.includes('agent-icon claude'), false, 'working Claude session tabs omit the Claude icon');
+    assert.ok(workingHtml.indexOf('session-yolo-marker') < workingHtml.indexOf('session-agent-activity-marker'), 'YO button stays before the working status ball');
 
     api.setAutoApproveStateForTest('4', {enabled: false, screen: {key: 'working'}, agent_windows: [
       {kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude', current: true, window_active: true},
     ]});
     const autoOffWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
+    const autoOffWorkingMarkerHtml = tabActivityMarkerHtml(autoOffWorkingHtml);
     assert.ok(/session-yolo-marker[^"]*inactive/.test(autoOffWorkingHtml), 'auto-off working Claude tabs still show the YO button state');
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-agent-icon--working/.test(autoOffWorkingHtml), 'working Claude session tabs keep the glowing Claude glyph even when auto-approve is off');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(autoOffWorkingMarkerHtml), 'working Claude session tabs keep the green status ball even when auto-approve is off');
+    assert.equal(autoOffWorkingMarkerHtml.includes('agent-icon claude'), false, 'auto-off working Claude session tabs still omit the Claude icon');
     const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
     // The working YO marker no longer spins — the glowing green ball beside the agent symbol is the
     // working indicator now. Loading/thinking spinners use the shared status pulse duration instead.
@@ -1814,25 +1820,25 @@ async function runEditorPreviewSuite() {
       {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
       {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
     ]});
-    assert.equal(api.sessionState('4', {agents: [{kind: 'claude'}, {kind: 'codex'}], panes: []}).key, 'needs-input', 'a background agent window needing input propagates ASK to the session tab');
+    assert.equal(api.sessionState('4', {agents: [{kind: 'claude'}, {kind: 'codex'}], panes: []}).key, 'needs-input', 'a background agent window needing input propagates attention to the session tab');
     api.setAutoApproveStateForTest('4', {agent_windows: [
       {kind: 'codex', state: 'interrupted', window_index: 1, window_label: '1:codex', screen_text: 'What should Codex do instead?'},
     ]});
-    assert.equal(api.sessionState('4', {agents: [{kind: 'codex'}], panes: []}).key, 'needs-input', 'an interrupted background agent window propagates ASK to the session tab');
+    assert.equal(api.sessionState('4', {agents: [{kind: 'codex'}], panes: []}).key, 'needs-input', 'an interrupted background agent window propagates attention to the session tab');
     api.setAutoApproveStateForTest('4', {agent_windows: [
       {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
       {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
     ]});
     const agentPopover = api.sessionPopoverHtml('4', {panes: []}, 'claude', false);
     assert.ok(/session-agent-kind[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*agent-window-status-dot[^"]*status-indicator--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows a static Claude symbol plus green ball before the tmux sub-window label');
-    assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot[^"]*status-indicator--attention[^"]*attention-pulse[\s\S]*1:codex/.test(agentPopover), 'ASK popover row shows a static Codex symbol plus red attention ball before the label');
-    assert.ok(/agent-window-activity agent-window-activity--attention[^"]*"[^>]*style="--attention-animation-delay:[^"]*"[\s\S]*agent-window-status-dot/.test(agentPopover), 'ASK agent glyph and status ball inherit one shared animation phase from their wrapper');
-    assert.equal(/agent-window-status-dot[^>]*style="--attention-animation-delay:/.test(agentPopover), false, 'ASK status dot does not carry its own independent animation phase');
-    assert.ok(/class="[^"]*session-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(agentPopover), 'ASK popover status text inherits the shared red attention pulse and phase');
-    assert.ok(agentPopover.includes('ASK &lt;15 sec ago'), 'ASK popover status text shows recency instead of approval/needs-input subtype words');
-    assert.equal(agentPopover.includes('ASK needs input') || agentPopover.includes('ASK approval'), false, 'ASK popover status text drops subtype words');
+    assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot[^"]*status-indicator--attention[^"]*attention-pulse[\s\S]*1:codex/.test(agentPopover), 'attention popover row shows a static Codex symbol plus red attention ball before the label');
+    assert.ok(/agent-window-activity agent-window-activity--attention[^"]*"[^>]*style="--attention-animation-delay:[^"]*"[\s\S]*agent-window-status-dot/.test(agentPopover), 'attention agent glyph and status ball inherit one shared animation phase from their wrapper');
+    assert.equal(/agent-window-status-dot[^>]*style="--attention-animation-delay:/.test(agentPopover), false, 'attention status dot does not carry its own independent animation phase');
+    assert.ok(/class="[^"]*session-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(agentPopover), 'attention popover status text inherits the shared red attention pulse and phase');
+    assert.ok(agentPopover.includes('&lt;15 sec ago'), 'attention popover status text shows recency instead of approval/needs-input subtype words');
+    assert.equal(agentPopover.includes('needs input') || agentPopover.includes('approval'), false, 'attention popover status text drops subtype words');
     assert.ok(agentPopover.includes('tmux sub-window 0:claude'), 'working agent row labels the tmux sub-window explicitly');
-    assert.ok(agentPopover.includes('tmux sub-window 1:codex'), 'ASK agent row labels the tmux sub-window explicitly');
+    assert.ok(agentPopover.includes('tmux sub-window 1:codex'), 'attention agent row labels the tmux sub-window explicitly');
     assert.equal(agentPopover.includes('tmux sub-window tmux sub-window'), false, 'agent row does not double-label tmux sub-window');
     api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: '4:1::codex', scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
@@ -1840,16 +1846,18 @@ async function runEditorPreviewSuite() {
       {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', working_stopped_ts: Math.floor(Date.now() / 1000) - 5},
     ]});
     const redTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[^"]*agent-window-agent-icon--attention[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)(?=[^"]*agent-window-status-dot--segmented)(?=[^"]*agent-window-status-dot--attention-cooldown)(?=[^"]*agent-window-status-dot--tone-attention)(?=[^"]*agent-window-status-dot--tone-cooldown)/.test(redTabHtml), 'red+yellow tab status uses the red attention symbol with one segmented red/yellow ball');
-    assert.equal(/session-agent-activity-marker[\s\S]*agent-icon codex[^"]*agent-window-agent-icon--cooldown/.test(redTabHtml), false, 'red+yellow tab status does not render a second lower-priority agent symbol');
+    const redMarkerHtml = tabActivityMarkerHtml(redTabHtml);
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)(?=[^"]*agent-window-status-dot--segmented)(?=[^"]*agent-window-status-dot--attention-cooldown)(?=[^"]*agent-window-status-dot--tone-attention)(?=[^"]*agent-window-status-dot--tone-cooldown)/.test(redMarkerHtml), 'red+yellow tab status renders one segmented red/yellow ball without an agent icon');
+    assert.equal(redMarkerHtml.includes('agent-icon'), false, 'red+yellow tab status does not render any agent symbol');
     api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: '4:1::codex', scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
       {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', working_stopped_ts: Math.floor(Date.now() / 1000) - 5},
     ]});
     const yellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon codex[^"]*agent-window-agent-icon--cooldown[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--cooldown)(?=[^"]*agent-window-status-dot--segmented)(?=[^"]*agent-window-status-dot--cooldown-working)(?=[^"]*agent-window-status-dot--tone-cooldown)(?=[^"]*agent-window-status-dot--tone-working)/.test(yellowTabHtml), 'yellow+green tab status uses the yellow cooldown symbol with one segmented yellow/green ball');
-    assert.equal(/session-agent-activity-marker[\s\S]*agent-icon claude[^"]*agent-window-agent-icon--working/.test(yellowTabHtml), false, 'yellow+green tab status does not render a second lower-priority agent symbol');
+    const yellowMarkerHtml = tabActivityMarkerHtml(yellowTabHtml);
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--cooldown)(?=[^"]*agent-window-status-dot--segmented)(?=[^"]*agent-window-status-dot--cooldown-working)(?=[^"]*agent-window-status-dot--tone-cooldown)(?=[^"]*agent-window-status-dot--tone-working)/.test(yellowMarkerHtml), 'yellow+green tab status renders one segmented yellow/green ball without an agent icon');
+    assert.equal(yellowMarkerHtml.includes('agent-icon'), false, 'yellow+green tab status does not render any agent symbol');
     api.agentWindowActivityIconForTest('claude', 'working', 0, {transitionKey: '4:2::claude', nowSeconds: 5000, scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
@@ -1863,7 +1871,9 @@ async function runEditorPreviewSuite() {
       {kind: 'claude', state: 'working', window_index: 2, window_label: '2:claude'},
     ]});
     const triTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[^"]*agent-window-agent-icon--attention[\s\S]*agent-window-status-dot(?=[^"]*agent-window-status-dot--attention-cooldown-working)(?=[^"]*agent-window-status-dot--tone-attention)(?=[^"]*agent-window-status-dot--tone-cooldown)(?=[^"]*agent-window-status-dot--tone-working)/.test(triTabHtml), 'red+yellow+green tab status renders one tri-color ball with the red attention symbol');
+    const triMarkerHtml = tabActivityMarkerHtml(triTabHtml);
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*agent-window-status-dot--attention-cooldown-working)(?=[^"]*agent-window-status-dot--tone-attention)(?=[^"]*agent-window-status-dot--tone-cooldown)(?=[^"]*agent-window-status-dot--tone-working)/.test(triMarkerHtml), 'red+yellow+green tab status renders one tri-color ball without an agent icon');
+    assert.equal(triMarkerHtml.includes('agent-icon'), false, 'red+yellow+green tab status does not render any agent symbol');
     const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
     for (const file of localeFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
@@ -2439,7 +2449,7 @@ async function runEditorPreviewSuite() {
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
     assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-body') < agentTokenChartHtml.indexOf('js-debug-chart-legend-footer'), 'agent token legend renders after the plot body, not over the chart');
     assert.equal(agentTokenChartHtml.slice(0, agentTokenChartHtml.indexOf('js-debug-chart-body')).includes('data-js-debug-legend="agentToken:'), false, 'agent token header does not contain the busy per-agent legend');
-    assert.ok(/data-js-debug-axis-max="activity"[^>]*>3</.test(html), 'agent status Y axis uses the exact stacked ASK+RUN+Transition total');
+    assert.ok(/data-js-debug-axis-max="activity"[^>]*>3</.test(html), 'agent status Y axis uses the exact stacked attention+RUN+Transition total');
     for (const value of [3, 2, 1, 0]) {
       assert.ok(html.includes(`data-js-debug-axis-tick="activity" data-js-debug-axis-value="${value}"`), `activity chart Y axis shows whole-number tick ${value}`);
       assert.ok(html.includes(`data-js-debug-grid-line="activity" data-js-debug-grid-value="${value}"`), `activity chart draws a horizontal grid line for whole-number tick ${value}`);
@@ -2462,7 +2472,7 @@ async function runEditorPreviewSuite() {
     assert.equal(/data-js-debug-legend="agentToken:[^"]+"[\s\S]{0,240}<strong>/.test(html), false, 'per-agent token legend omits current token/min values');
     assert.ok(/data-js-debug-area-series="transitionAgents"[\s\S]{0,180}data-js-debug-area-stacked="transitionAgents"[\s\S]{0,180}data-js-debug-area-total="2"/.test(html), 'transition area is only yellow transition, not idle agents');
     assert.ok(/data-js-debug-area-series="idleAgents"[\s\S]{0,180}data-js-debug-area-stacked="idleAgents"[\s\S]{0,180}data-js-debug-area-total="3"/.test(html), 'idle area stacks above active status so the top remains the total agent count');
-    assert.ok(/data-js-debug-legend="askAgents"[\s\S]*<span>ASK<\/span>/.test(html), 'prompted agents render an ASK legend label');
+    assert.ok(/data-js-debug-legend="askAgents"[\s\S]*<span>Attention<\/span>/.test(html), 'prompted agents render an attention legend label');
     assert.ok(/data-js-debug-legend="runAgents"[\s\S]*<span>RUN<\/span>/.test(html), 'working agents render a RUN legend label');
     assert.ok(/data-js-debug-legend="transitionAgents"[\s\S]*<span>Transition<\/span>/.test(html), 'yellow stopped agents render a Transition legend label');
     assert.ok(/data-js-debug-legend="idleAgents"[\s\S]*<span>Idle<\/span>/.test(html), 'idle agents render a grey idle legend label');
@@ -3624,7 +3634,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path[\s\S]*info-tree-status-badge pr-status-merged[\s\S]*MERGED/.test(pathOnlyHtml), 'YO!info PR rows reserve purple merged styling for merged PR badges');
     assert.ok(/<span class="info-tree-field-label">Linear:<\/span>[\s\S]*<a href="https:\/\/linear\.test\/DYN-10"[\s\S]*>DYN-10<\/a>[\s\S]*Main Linear description/.test(pathOnlyHtml), 'YO!info generated rows make the Linear identifier clickable and render the Linear description after it');
     assert.ok(pathOnlyHtml.includes('data-info-open-tab="tab-a"') && pathOnlyHtml.includes('data-info-open-ai-window="0"'), 'YO!info Tab and AI fields are actionable links to the owning tab/window');
-    assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && pathOnlyHtml.includes('ASK'), 'YO!info AI rows show shared working/ASK activity indicators');
+    assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && !/\bA(?:S)K\b/.test(pathOnlyHtml), 'YO!info AI rows show shared working/attention activity indicators without a text attention label');
     assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">tmux sub-window:</span>'), 'YO!info leaf rows label Tab session and window actions');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows show labeled branch recency');
@@ -3646,11 +3656,13 @@ async function runEditorPreviewSuite() {
       agent_windows: [{kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude', current: true, window_active: true}],
     });
     const numericTabHtml = api.infoTreeHtmlForTest([numericTabRecord], ['tab']);
+    const numericTabMarkerHtml = numericTabHtml.match(/<span class="session-agent-activity-marker[^"]*">[\s\S]*?<\/span><\/span>/)?.[0] || '';
     assert.ok(numericTabHtml.includes('pane-tab-pin-icon'), 'YO!info Tab(tmux session) token shows the shared pinned-tab icon when the session is pinned');
     assert.ok(/session-yolo-marker[^"]*active[\s\S]*data-auto-session="1"/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the shared YO button state');
     assert.ok(/session-button-number">1<\/span>/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the same numeric session label as the real tab');
-    assert.ok(/session-state-badge[\s\S]*ASK/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows ASK when the session needs input');
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the shared colored working status ball');
+    assert.equal(/session-state-badge/.test(numericTabHtml), false, 'YO!info Tab(tmux session) token omits redundant text badges when the session needs input');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(numericTabMarkerHtml), 'YO!info Tab(tmux session) token shows the shared colored working status ball');
+    assert.equal(numericTabMarkerHtml.includes('agent-icon'), false, 'YO!info Tab(tmux session) token omits the Claude/Codex icon');
     api.setPinnedTabsForTest([]);
     const statusPriorityRecords = [
       {tabKey: 'red-tab', tabLabel: 'red-tab', tabSession: 'red-tab', aiKey: '0:codex', aiLabel: '0:codex', aiKind: 'codex', aiWindow: '0', aiState: 'working'},
@@ -3669,7 +3681,7 @@ async function runEditorPreviewSuite() {
     const redTabSummary = tabSummaryFor('red-tab');
     const yellowTabSummary = tabSummaryFor('yellow-tab');
     const greenTabSummary = tabSummaryFor('green-tab');
-    assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--attention/.test(redTabSummary), 'YO!info Tab group aggregates red ASK inside the shared tab token above other child tmux sub-window states');
+    assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--attention/.test(redTabSummary), 'YO!info Tab group aggregates red attention inside the shared tab token above other child tmux sub-window states');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--cooldown/.test(yellowTabSummary) && !yellowTabSummary.includes('status-indicator--working'), 'YO!info Tab group aggregates yellow cooldown inside the shared tab token above green working child states');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(greenTabSummary), 'YO!info Tab group shows green inside the shared tab token when all child tmux sub-windows are working');
     assert.equal((greenTabSummary.match(/agent-window-status-dot/g) || []).length, 1, 'YO!info Tab group summaries do not render a duplicate standalone status dot next to the tab token');
@@ -3821,7 +3833,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*showDetail:\s*false/.test(infoSource), 'YO!info Tab values route through the shared compact tmux pane-tab token helper instead of private active/inactive tab CSS');
     assert.ok(/function infoGroupLabelHtml\(group = \{\}\)[\s\S]*leadingHtml:\s*infoTabGroupLeadingActivityHtml\(group\)/.test(infoSource), 'YO!info Tab group status is routed into the shared compact tmux pane-tab token instead of prepending a standalone dot');
     assert.equal(infoSource.includes('infoTabGroupStatusHtml(group)}${tabHtml'), false, 'YO!info Tab group summaries do not prepend a duplicate standalone status dot before the tab token');
-    assert.equal(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showLeading:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showState:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showBadges:\s*false/.test(infoSource), false, 'YO!info Tab values do not suppress the real tab YO marker, ASK badge, or status indicators');
+    assert.equal(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showLeading:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showState:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showBadges:\s*false/.test(infoSource), false, 'YO!info Tab values do not suppress the real tab YO marker, state badge path, or status indicators');
     assert.ok(/function tmuxPaneTabTokenHtml\(session, options = \{\}\)[\s\S]*tabIsPinned\(item\)[\s\S]*pinnedTabIconHtml\(item\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'shared compact tmux pane-tab tokens include the same pinned-tab icon helper as real tabs');
     assert.ok(/function infoRecordAiWindowButtonHtml\(record,[\s\S]*data-info-open-ai-window[\s\S]*tmuxWindowButtonHtml\(\{[\s\S]*classes:\s*\['info-tree-ai-window-button'\]/.test(infoSource), 'YO!info AI values route tmux sub-window labels through the shared Info Bar button helper');
     assert.ok(/\.info-tree-ai-value\.tmux-window-bar\s*\{[\s\S]*justify-content:\s*flex-start[\s\S]*\.info-tree-status-badge\s*\{[\s\S]*text-transform:\s*uppercase/.test(infoTreeCss), 'YO!info keeps the shared tmux sub-window button inline while preserving compact status badges');
@@ -4596,7 +4608,7 @@ async function runEditorPreviewSuite() {
     assert.equal(row2[0].range.start.y, 2, 'fresh-next-url row 2 starts on row 2');
   });
 
-  test('ASK prompt question highlights the visible terminal row', () => {
+  test('attention prompt question highlights the visible terminal row', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -4627,7 +4639,7 @@ async function runEditorPreviewSuite() {
       prompt: {visible: false},
     });
 
-    assert.deepStrictEqual(canonical(api.terminalAttentionQuestionTextsForTest('1')), [questionText], 'question text comes from the same payload that drives ASK');
+    assert.deepStrictEqual(canonical(api.terminalAttentionQuestionTextsForTest('1')), [questionText], 'question text comes from the same payload that drives attention');
     assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'attention state paints a question row');
     assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'the exact visible question row is marked');
     const overlay = container.querySelector('.terminal-attention-question-overlay[data-session="1"]');
@@ -4649,7 +4661,7 @@ async function runEditorPreviewSuite() {
     assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), true, 'fallback chooses the newest visible question-looking row');
   });
 
-  test('ASK shortcut footer hint is not highlighted as a question', () => {
+  test('attention shortcut footer hint is not highlighted as a question', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -4679,13 +4691,13 @@ async function runEditorPreviewSuite() {
       prompt: {visible: false},
     });
 
-    assert.deepStrictEqual(canonical(api.terminalAttentionQuestionTextsForTest('1')), [], 'shortcut footer text is chrome, not ASK question text');
+    assert.deepStrictEqual(canonical(api.terminalAttentionQuestionTextsForTest('1')), [], 'shortcut footer text is chrome, not attention question text');
     assert.equal(api.syncTerminalAttentionHighlightForTest('1'), false, 'shortcut footer text does not receive the red question overlay');
     assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'shortcut footer row is left unmarked');
     assert.equal(container.querySelector('.terminal-attention-question-overlay[data-session="1"]'), null, 'shortcut footer row creates no overlay');
   });
 
-  test('ASK prompt question highlights wrapped sentence spans only', () => {
+  test('attention prompt question highlights wrapped sentence spans only', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -4739,7 +4751,7 @@ async function runEditorPreviewSuite() {
     assert.equal(container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]').length, 0, 'all wrapped overlay segments are removed');
   });
 
-  test('ASK fallback highlights wrapped question without swallowing nearby text', () => {
+  test('attention fallback highlights wrapped question without swallowing nearby text', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -4777,7 +4789,7 @@ async function runEditorPreviewSuite() {
     assert.equal(overlays[1].style.width, `${'is in chat?'.length * 10}px`, 'fallback highlight stops before explanatory parenthetical text');
   });
 
-  test('ASK prompt fragment expands to the full visible question sentence', () => {
+  test('attention prompt fragment expands to the full visible question sentence', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -4833,7 +4845,7 @@ async function runEditorPreviewSuite() {
     ], 'overlay expands backward to the full visible question sentence');
   });
 
-  test('ASK/QUES? prompt suffix after version token expands to the full visible question sentence', () => {
+  test('Question/QUES? prompt suffix after version token expands to the full visible question sentence', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -4881,7 +4893,7 @@ async function runEditorPreviewSuite() {
     ], 'version-like dots do not split the question sentence');
   });
 
-  test('ASK note-prefixed wrapped question highlights the entire sentence', () => {
+  test('attention note-prefixed wrapped question highlights the entire sentence', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');

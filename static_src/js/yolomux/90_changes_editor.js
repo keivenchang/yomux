@@ -811,6 +811,22 @@ function sessionFilesPayloadIsRootlessEmpty(payload) {
   return true;
 }
 
+function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
+  if (!payload || payload.loaded !== true) return false;
+  const visibleFiles = Array.isArray(files) ? files : (Array.isArray(payload.files) ? payload.files : []);
+  if (visibleFiles.length) return true;
+  if (sessionFilesRepoRoots(payload).length > 0) return true;
+  if ((Array.isArray(payload.errors) ? payload.errors : []).length) return true;
+  if ((Array.isArray(payload.warnings) ? payload.warnings : []).length) return true;
+  return !sessionFilesPayloadIsRefreshingElsewhere(payload) && sessionFilesPayloadIsRootlessEmpty(payload);
+}
+
+function sessionFilesPanelIsLoading(payload, files = null) {
+  if (fileExplorerSessionFilesLoading) return true;
+  if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
+  return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
+}
+
 function sessionFilesPayloadShouldPreserveCurrent(nextPayload) {
   const session = String(nextPayload?.session || '');
   const current = sessionFilesPayloadForDestination('finder');
@@ -1005,7 +1021,9 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
-  const shouldRender = signature !== sessionFilesSignatureForDestination(destination);
+  const wasLoading = sessionFilesLoadingForDestination(destination);
+  const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
+  if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
@@ -1348,7 +1366,6 @@ function changesLoadingHtml(session = '') {
   const label = session ? sessionLabel(session) : '';
   const loadingText = label ? `${stripTrailingEllipsisText(base)} ${label}` : base;
   return `<span class="changes-loading" aria-live="polite" aria-busy="true">
-    <span class="session-yolo-marker active working changes-loading-yolo" aria-hidden="true">${esc(t('brand.marker'))}</span>
     <span>${textWithMovingEllipsisHtml(loadingText, 'changes-loading-dots')}</span>
   </span>`;
 }
@@ -1647,8 +1664,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <div class="changes-groups"></div>`;
   }
   const payload = fileExplorerSessionFilesPayload;
-  const loading = fileExplorerSessionFilesLoading || sessionFilesPayloadIsRefreshingElsewhere(payload);
   const files = fileExplorerDifferFiles(payload);
+  const loading = sessionFilesPanelIsLoading(payload, files);
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
@@ -1743,8 +1760,9 @@ function changesGroupsSnapshotHtml(files, options = {}) {
 
 function fileExplorerChangesPanelHtml() {
   const staticHtml = fileExplorerChangesPanelStaticHtml();
-  const loading = fileExplorerSessionFilesLoading || sessionFilesPayloadIsRefreshingElsewhere(fileExplorerSessionFilesPayload);
-  const groupsHtml = changesGroupsSnapshotHtml(fileExplorerDifferFiles(), {
+  const files = fileExplorerDifferFiles();
+  const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, files);
+  const groupsHtml = changesGroupsSnapshotHtml(files, {
     payload: fileExplorerSessionFilesPayload,
     compact: fileExplorerMode !== 'diff',
     includeEmptyRepoSections: fileExplorerMode === 'diff' && !loading,

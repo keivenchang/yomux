@@ -588,7 +588,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
           <span class="pane-tab-core">
             <span class="session-yolo-marker">YO</span>
             <span class="session-agent-activity-marker">{_agent_status_glyph_html("claude", "attention", "dock-attention")}</span>
-            <span class="session-button-prefix">8002b ASK</span>
+            <span class="session-button-prefix">8002b</span>
           </span>
         </button>
         <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
@@ -806,7 +806,7 @@ def test_tabber_parent_child_status_balls_share_parent_size_and_phase(browser, t
     assert abs(metrics["parent"]["height"] - metrics["child"]["height"]) <= 0.5, metrics
 
 
-def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser, tmp_path):
+def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(browser, tmp_path):
     page = tmp_path / "attention-dot-pulse.html"
     page.write_text(page_html("""
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
@@ -814,7 +814,7 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
       <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="ask-badge" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK</span>
+      <span id="attention-label" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">&lt;15 sec ago</span>
     """, extra_css="""
       :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
@@ -822,7 +822,7 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
     browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
-        const ids = ['working-dot', 'window-dot', 'popover-dot', 'tabber-dot', 'cooldown-dot', 'ask-badge'];
+        const ids = ['working-dot', 'window-dot', 'popover-dot', 'tabber-dot', 'cooldown-dot', 'attention-label'];
         const firstAnimationValue = value => String(value || '').split(',').map(item => item.trim())[0] || '';
         const pauseAt = (node, fraction) => {
           const animations = node.getAnimations();
@@ -879,9 +879,9 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
         return Object.fromEntries(ids.map(id => [id, read(id)]));
         """
     )
-    if metrics["ask-badge"]["reduced"]:
+    if metrics["attention-label"]["reduced"]:
         pytest.skip("browser prefers reduced motion")
-    badge = metrics["ask-badge"]
+    badge = metrics["attention-label"]
     assert "attention-ring-fade" in badge["animationName"], badge
     assert badge["rest"]["boxShadow"] != badge["peak"]["boxShadow"], badge
     for dot_id in ("working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
@@ -913,7 +913,7 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
         assert abs(metrics["working-dot"]["peak"]["rect"]["height"] - metrics[dot_id]["peak"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
 
     visual_ids = {"working-dot": "green", "window-dot": "red", "cooldown-dot": "yellow"}
-    all_animation_ids = ["working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot", "ask-badge"]
+    all_animation_ids = ["working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot", "attention-label"]
     sample_rects = """
       const ids = arguments[0];
       const fraction = arguments[1];
@@ -958,12 +958,12 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
     assert working_energy_delta < yellow_energy_delta, visual_scores
 
 
-def test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion(browser, tmp_path):
+def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path):
     page = tmp_path / "attention-dot-reduced-motion.html"
     page.write_text(page_html("""
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="ask-pill" class="status-indicator session-state-badge status-indicator--text tab-symbol session-state-needs-input session-state-reminder status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK</span>
+      <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
     """, extra_css="""
       :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
@@ -992,27 +992,27 @@ def test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion(browser, 
                 primaryPlayState: firstAnimation?.playState || '',
               };
             };
-            return {
-              reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
-              working: read('working-dot'),
-              attention: read('attention-dot'),
-              ask: read('ask-pill'),
-            };
+              return {
+                reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+                working: read('working-dot'),
+                attention: read('attention-dot'),
+                cooldown: read('cooldown-dot'),
+              };
             """
         )
         assert metrics["reduced"] is True, metrics
-        ask = metrics["ask"]
-        assert ask["primaryAnimationName"] == "attention-ring-fade", metrics
-        assert ask["primaryAnimationDuration"] == "1.55s", metrics
-        assert ask["primaryAnimationDelay"] == "-0.42s", metrics
-        assert ask["primaryEffectDuration"] > 0, metrics
-        for key in ("working", "attention"):
+        attention = metrics["attention"]
+        assert attention["primaryAnimationName"] == "attention-ring-fade", metrics
+        assert attention["primaryAnimationDuration"] == "1.55s", metrics
+        assert attention["primaryAnimationDelay"] == "-0.42s", metrics
+        assert attention["primaryEffectDuration"] > 0, metrics
+        for key in ("working", "cooldown"):
             dot = metrics[key]
             assert dot["primaryAnimationName"] == "attention-ring-fade", metrics
-            assert dot["primaryAnimationDuration"] == ask["primaryAnimationDuration"], metrics
-            assert dot["primaryAnimationDelay"] == ask["primaryAnimationDelay"], metrics
-            assert dot["primaryAnimationTimingFunction"] == ask["primaryAnimationTimingFunction"], metrics
-            assert dot["primaryEffectDuration"] == ask["primaryEffectDuration"], metrics
+            assert dot["primaryAnimationDuration"] == attention["primaryAnimationDuration"], metrics
+            assert dot["primaryAnimationDelay"] == attention["primaryAnimationDelay"], metrics
+            assert dot["primaryAnimationTimingFunction"] == attention["primaryAnimationTimingFunction"], metrics
+            assert dot["primaryEffectDuration"] == attention["primaryEffectDuration"], metrics
             assert dot["primaryPlayState"] in {"pending", "running"}, metrics
         assert "working-ball-hard-flash" in metrics["working"]["animationName"], metrics
     finally:
@@ -1285,7 +1285,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
                 """
                 const session = arguments[0];
                 return document.getElementById(`panel-${session}`)
-                  && document.getElementById('topbarActivity')?.textContent?.includes('ASK');
+                  && document.getElementById('topbarActivity')?.textContent?.includes('attention');
                 """,
                 session,
             )
@@ -1300,10 +1300,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             const badge = tab?.querySelector('[data-prompt-attention-clear]');
             const before = {
               badgeText: badge?.textContent || '',
-              badgeHasSharedParent: badge?.classList.contains('status-indicator') || false,
-              badgeHasTextModifier: badge?.classList.contains('status-indicator--text') || false,
-              badgeHasAttentionModifier: badge?.classList.contains('status-indicator--attention') || false,
-              badgeHasPulse: badge?.classList.contains('attention-pulse') || false,
+              badgePresent: !!badge,
               tabAttention: tab?.classList.contains('needs-attention') || false,
               panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
               topbarText: topbar?.textContent || '',
@@ -1311,7 +1308,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
               topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('status-indicator--attention') || false,
               topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('attention-pulse') || false,
             };
-            badge?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            clearPromptAttentionForSession(session, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
             const immediate = {
               badgeText: tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '',
@@ -1324,21 +1321,18 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             """,
             session,
         )
-        assert metrics["before"]["badgeText"] == "ASK"
-        assert metrics["before"]["badgeHasSharedParent"] is True
-        assert metrics["before"]["badgeHasTextModifier"] is True
-        assert metrics["before"]["badgeHasAttentionModifier"] is True
-        assert metrics["before"]["badgeHasPulse"] is True
+        assert metrics["before"]["badgeText"] == ""
+        assert metrics["before"]["badgePresent"] is False
         assert metrics["before"]["tabAttention"] is True
         assert metrics["before"]["panelNeedsApproval"] is True
-        assert "1 ASK" in metrics["before"]["topbarText"]
+        assert "1 attention" in metrics["before"]["topbarText"]
         assert metrics["before"]["topbarAskHasSharedParent"] is True
         assert metrics["before"]["topbarAskHasAttentionModifier"] is True
         assert metrics["before"]["topbarAskHasPulse"] is True
-        assert metrics["immediate"]["badgeText"] == "ASK"
+        assert metrics["immediate"]["badgeText"] == ""
         assert metrics["immediate"]["tabAttention"] is True
         assert metrics["immediate"]["panelNeedsApproval"] is True
-        assert "1 ASK" in metrics["immediate"]["topbarText"]
+        assert "1 attention" in metrics["immediate"]["topbarText"]
         assert metrics["immediate"]["newInputFrames"] == 0
         WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
@@ -1349,7 +1343,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
                 return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
                   && !tab?.classList.contains('needs-attention')
                   && !panel?.classList.contains('needs-exec-pane')
-                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 ASK');
+                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 attention');
                 """,
                 session,
             )
@@ -1667,7 +1661,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             }
             const before = snapshot();
             for (const session of sessions) {
-              document.getElementById(`panel-tab-${session}`)?.querySelector('[data-prompt-attention-clear]')?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+              clearPromptAttentionForSession(session, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
             }
             const immediate = snapshot();
             const inputFrames = (window.__askClearWsFrames || []).filter(frame => frame.data.includes('"type":"input"'));
@@ -1676,13 +1670,13 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             list(sessions.values()),
         )
         assert metrics["before"]["ask"] == 2, metrics
-        assert "2 ASK" in metrics["before"]["topbar"], metrics
-        assert [item["badge"] for item in metrics["before"]["sessions"]] == ["ASK", "ASK"], metrics
+        assert "2 attention" in metrics["before"]["topbar"], metrics
+        assert [item["badge"] for item in metrics["before"]["sessions"]] == ["", ""], metrics
         assert [item["tabAttention"] for item in metrics["before"]["sessions"]] == [True, True], metrics
         assert [item["panelNeedsApproval"] for item in metrics["before"]["sessions"]] == [True, True], metrics
         assert metrics["immediate"]["ask"] == 2, metrics
-        assert "2 ASK" in metrics["immediate"]["topbar"], metrics
-        assert [item["badge"] for item in metrics["immediate"]["sessions"]] == ["ASK", "ASK"], metrics
+        assert "2 attention" in metrics["immediate"]["topbar"], metrics
+        assert [item["badge"] for item in metrics["immediate"]["sessions"]] == ["", ""], metrics
         assert [item["tabAttention"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
         assert [item["panelNeedsApproval"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
         assert metrics["inputFrames"] == [], metrics
@@ -1691,7 +1685,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                 """
                 const sessions = arguments[0];
                 return globalActivityCounts().ask === 0
-                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 ASK')
+                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 attention')
                   && sessions.every(session => {
                     const tab = document.getElementById(`panel-tab-${session}`);
                     const panel = document.getElementById(`panel-${session}`);
