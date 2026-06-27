@@ -483,6 +483,7 @@ def _run_build(
 ) -> None:
     # C11: take a cross-process lock so a second server process does not duplicate the walk. If another
     # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
+    started = time.perf_counter()
     expected_signature = _skip_signature(skip_dirs, exclude_signature)
     lock_fd = None
     try:
@@ -528,6 +529,7 @@ def _run_build(
             "entries": len(ri.entries),
             "truncated": ri.truncated,
             "state": "ready",
+            "compute_ms": round((time.perf_counter() - started) * 1000, 3),
         })
     finally:
         if lock_fd is not None:

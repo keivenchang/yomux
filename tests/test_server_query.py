@@ -995,12 +995,14 @@ def test_do_post_share_debug_profile_records_with_share_token():
     assert app_calls == [("share-token-1", {"kind": "share-replay-health"}, {"ip": "203.0.113.9", "user_agent": "Safari"})]
 
 
-def batch_handler(payload):
+def batch_handler(payload, app=None):
     body = json.dumps(payload).encode("utf-8")
     writes = []
     handler = object.__new__(Handler)
     handler.headers = {"Content-Length": str(len(body))}
     handler.rfile = io.BytesIO(body)
+    if app is not None:
+        handler.server = SimpleNamespace(app=app)
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append((status, value))
     return handler, writes
 
@@ -1041,6 +1043,26 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
         {"id": "mkdir", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/new"},
         {"id": "unindex", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo"},
     ]})]
+
+
+def test_handle_fs_batch_records_performance(monkeypatch):
+    records = []
+    app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)))
+    monkeypatch.setattr(server_module.filesystem, "list_directory", lambda path: {"path": path, "entries": []})
+    handler, writes = batch_handler({"requests": [{"id": "root", "type": "list", "path": "/repo"}]}, app=app)
+
+    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+
+    assert writes == [(HTTPStatus.OK, {"responses": [{"id": "root", "ok": True, "status": 200, "payload": {"path": "/repo", "entries": []}}]})]
+    assert len(records) == 1
+    args, kwargs = records[0]
+    assert args == ("fs-batch", "api")
+    assert kwargs["trigger"] == "POST /api/fs/batch"
+    assert kwargs["cache_key"] == {"kind": "fs-batch"}
+    assert kwargs["cache_status"] == "computed"
+    assert kwargs["owner_role"] == "client"
+    assert kwargs["count"] == 1
+    assert kwargs["details"]["ops"] == '{"list": 1}'
 
 
 def test_handle_fs_batch_rejects_invalid_shape():

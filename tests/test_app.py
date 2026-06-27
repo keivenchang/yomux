@@ -223,6 +223,44 @@ def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypat
     assert sum(record["cpu_count"] for record in history["records"]) == 2
     assert sum(record["system_cpu_count"] for record in history["records"]) == 2
     assert sum(record["api_count"] for record in history["records"]) == 0
+    with webapp.performance_record_lock:
+        assert any(record["role"] == "stats-sampler" for record in webapp.performance_records)
+
+
+def test_background_status_includes_performance_summary():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        webapp.record_performance_sample(
+            app_module.BACKGROUND_ROLE_SESSION_FILES,
+            "payload",
+            trigger="request",
+            compute_ms=12.5,
+            payload={"files": [{"path": "/repo/a.py"}]},
+            cache_key=("payload", "session"),
+            cache_status="hit:fresh",
+            cache_hit=True,
+            cache_fresh=True,
+            owner_role="owner",
+        )
+        payload, status = webapp.background_owner_status_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    perf = payload["perf"]
+    assert perf["record_count"] == 1
+    assert perf["recent"][0]["cache_key_kind"] == "payload"
+    assert perf["recent"][0]["cache_hit"] is True
+    assert perf["recent"][0]["cache_fresh"] is True
+    assert perf["summary"] == [{
+        "role": app_module.BACKGROUND_ROLE_SESSION_FILES,
+        "surface": "payload",
+        "count": 1,
+        "compute_ms_avg": 12.5,
+        "compute_ms_max": 12.5,
+        "payload_bytes_total": len(json.dumps({"files": [{"path": "/repo/a.py"}]}, sort_keys=True, separators=(",", ":")).encode("utf-8")),
+        "cache": {"hit:fresh": 1},
+    }]
 
 
 def test_stats_sample_payload_records_shared_agent_activity_and_token_rates(monkeypatch, tmp_path):

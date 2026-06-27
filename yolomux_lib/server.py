@@ -1378,6 +1378,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         )
 
     def handle_fs_batch(self, parsed: Any) -> None:
+        started = time.perf_counter()
         payload = self.read_json_body(64 * 1024)
         if payload is None:
             return
@@ -1389,6 +1390,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_json(error_payload(f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
         responses = []
+        op_counts: dict[str, int] = {}
+        path_samples: list[str] = []
         for index, item in enumerate(requests):
             request_id = item.get("id", index) if isinstance(item, dict) else index
             if not isinstance(item, dict):
@@ -1396,6 +1399,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 continue
             op = str(item.get("type", item.get("op", "")) or "")
             raw_path = str(item.get("path", "") or "")
+            op_counts[op] = op_counts.get(op, 0) + 1
+            if raw_path and len(path_samples) < 8:
+                path_samples.append(raw_path)
             if op not in {"list", "info"}:
                 responses.append({"id": request_id, "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": raw_path})
                 continue
@@ -1405,7 +1411,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 responses.append({"id": request_id, "ok": False, "status": exc.status, "error": str(exc), "path": raw_path})
                 continue
             responses.append({"id": request_id, "ok": True, "status": 200, "payload": result})
-        self.write_json({"responses": responses})
+        response_payload = {"responses": responses}
+        recorder = getattr(getattr(getattr(self, "server", None), "app", None), "record_performance_sample", None)
+        if callable(recorder):
+            recorder(
+                "fs-batch",
+                "api",
+                trigger="POST /api/fs/batch",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=response_payload,
+                cache_key={"kind": "fs-batch"},
+                cache_status="computed",
+                owner_role="client",
+                count=len(requests),
+                details={"ops": json.dumps(op_counts, sort_keys=True), "paths": json.dumps(path_samples)},
+            )
+        self.write_json(response_payload)
 
     def read_urlencoded_form(self) -> dict[str, list[str]]:
         body, error, _status = Handler.read_request_body(self, 16 * 1024, allow_empty=True, allow_missing=True)
