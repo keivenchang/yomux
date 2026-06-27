@@ -12,7 +12,7 @@ actual:
     selected_option: 0
     source: ''
   attention_kind: question
-  attention_label: ASK?
+  attention_label: ASK
   composer:
     accepting: true
     detected_text: ''
@@ -27,7 +27,7 @@ actual:
     y: 31
   display:
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     evidence_lines:
     - Which YOLOmux verifier mode should we use?
     - 1. Pane capture
@@ -129,7 +129,7 @@ expected_promoted:
   approval_type: ''
   approval_visible: false
   attention_kind: question
-  attention_label: ASK?
+  attention_label: ASK
   composer_key: empty
   reason_code: needs-input
   screen_key: needs-input

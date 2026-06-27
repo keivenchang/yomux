@@ -2092,7 +2092,7 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*?value="5\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE background editor file-change poll defaults to 5 seconds');
     assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
     assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber server poll interval defaults to 15 seconds in Preferences');
-    assert.ok(/data-setting-path="performance\.agent_window_cooldown_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'finished yellow ball duration defaults to 60 seconds in Preferences');
+    assert.ok(/data-setting-path="performance\.agent_window_cooldown_seconds"[\s\S]*?value="0"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'finished yellow ball duration defaults to sticky-until-acknowledged in Preferences');
     assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
@@ -2108,7 +2108,7 @@ async function runShareThemeSuite() {
     assert.ok(performanceHtml.includes('Tabber server poll interval'), 'Performance labels the Tabber activity refresh as a server poll interval');
     assert.equal(performanceHtml.includes('Finished yellow ball duration'), false, 'Performance does not own the finished yellow ball duration');
     assert.ok(notificationsHtml.includes('Finished yellow ball duration'), 'Notifications labels the finished yellow ball duration');
-    assert.ok(notificationsHtml.includes('Yellow means the agent is done; look at its output.'), 'Notifications explains what the yellow finished ball means');
+    assert.ok(notificationsHtml.includes('Yellow means the agent is done; look at its output.') && notificationsHtml.includes('0 keeps it yellow until you click the matching tab or tmux window.'), 'Notifications explains that 0 keeps the yellow finished ball until acknowledgement');
     assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
     for (const removedPath of [
       'file_explorer.refresh_seconds',

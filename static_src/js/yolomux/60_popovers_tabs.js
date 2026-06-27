@@ -435,42 +435,72 @@ function yoloMarkerHtml(session, auto, options = {}) {
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
-function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI status indicator summarizes the most urgent visible agent-window ball. Window buttons
-  // render their own balls, and the tab must mirror the strongest one: red attention, then yellow stopped
-  // cooldown, then green working. When the only working signal is the session screen proxy, fall back to
-  // the current/first agent window as a synthetic working row so the tab still shows the green ball.
+function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
+  // The tab's AI status indicator summarizes every visible agent-window ball as one segmented ball.
+  // Its symbol and glow follow the most urgent state: red attention, then yellow stopped cooldown, then
+  // green working. A screen-only working signal still falls back to the current/first agent window.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
   if (!agents.length) return null;
   let selected = null;
+  const byTone = new Map();
   const screenWorking = sessionYoloIsWorking(session, payload);
+  const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent?.state));
   for (const agent of agents) {
     const item = typeof agentWindowActivityIconForStatusItem === 'function'
       ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
       : null;
     if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(item.state)) continue;
     const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
-    if (screenWorking && item.state === 'cooldown' && !explicitStopped) continue;
+    if (screenWorking && !hasWorkingWindow && item.state === 'cooldown' && !explicitStopped) continue;
     const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
     const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
+    const tone = typeof agentWindowActivityTone === 'function' ? agentWindowActivityTone(item.state) : item.state;
+    const toneCurrent = byTone.get(tone);
+    const toneCurrentIsActive = toneCurrent ? agentWindowPayloadCurrent(toneCurrent.agent) === true : false;
+    if (!toneCurrent || current && !toneCurrentIsActive) byTone.set(tone, {agent, item});
     if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
   }
-  if (selected) return selected.agent;
-  if (!screenWorking) return null;
-  const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
-  if (!candidate || agentWindowIsAttentionState(candidate.state)) return null;
-  return {...candidate, state: STATE_KEY.working};
+  if (!selected && screenWorking) {
+    const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
+    if (candidate && !agentWindowIsAttentionState(candidate.state)) {
+      const agent = {...candidate, state: STATE_KEY.working};
+      const item = typeof agentWindowActivityIconForStatusItem === 'function'
+        ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
+        : {state: STATE_KEY.working, icon: '●', label: `${agentLabel(agent.kind)} ${t('state.working')}`};
+      selected = {agent, item};
+      byTone.set(STATE_KEY.working, selected);
+    }
+  }
+  if (!selected) return null;
+  const statusTones = typeof agentWindowStatusToneOrder === 'function'
+    ? agentWindowStatusToneOrder([...byTone.keys()])
+    : [...byTone.keys()];
+  const label = statusTones
+    .map(tone => byTone.get(tone)?.item?.label || '')
+    .filter(Boolean)
+    .join('; ') || selected.item?.label || agentLabel(selected.agent?.kind);
+  return {...selected, statusTones, label};
+}
+
+function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
+  return sessionStatusAgentWindowSummaryForTab(session, info, payload)?.agent || null;
 }
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const yoloHtml = yoloMarkerHtml(session, auto, {...options, yoloWorking: false, payload});
-  const statusAgent = sessionStatusAgentWindowForTab(session, info, payload);
-  if (statusAgent) {
-    const iconHtml = agentWindowActivityIconHtmlForStatus(statusAgent, statusAgent.kind, session);
+  const statusSummary = sessionStatusAgentWindowSummaryForTab(session, info, payload);
+  if (statusSummary?.agent) {
+    const statusAgent = statusSummary.agent;
+    const iconHtml = agentWindowActivityIconHtml(statusAgent.kind, statusAgent.state, agentWindowIdleSeconds(statusAgent), {
+      ...agentWindowActivityOptionsForStatus(statusAgent, session),
+      item: statusSummary.item,
+      label: statusSummary.label,
+      statusTones: statusSummary.statusTones,
+    });
     if (iconHtml) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
@@ -795,7 +825,7 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
   }
-  if (agentWindowIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
+  if (agentWindowIsAttentionState(state)) return `ASK ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
 }

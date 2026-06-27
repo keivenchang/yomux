@@ -1426,27 +1426,27 @@ async function runLayoutRestoreSuite() {
   });
 
   test('t@2114', () => {
-    // GLOBAL activity status line: cross-session YOLO-screen RUN / ASK? / blocked / idle rollup.
+    // GLOBAL activity status line: cross-session YOLO-screen RUN / ASK / blocked / idle rollup.
     const api = loadYolomux('', ['1', '2', '3', '4']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle'}});
     api.setAutoApproveStateForTest('2', {enabled: true});
     const idleEnabledCounts = api.globalActivityCounts();
     assert.equal(idleEnabledCounts.running, 0, 'YOLO enabled but idle does not count as running');
-    assert.equal(idleEnabledCounts.ask, 0, 'YOLO enabled but idle does not count as ASK?');
+    assert.equal(idleEnabledCounts.ask, 0, 'YOLO enabled but idle does not count as ASK');
     assert.equal(idleEnabledCounts.blocked, 0, 'YOLO enabled but idle does not count as blocked');
     assert.equal(api.browserFaviconBadgeCount(idleEnabledCounts), 0, 'favicon badge is 0 when enabled sessions are idle');
     const idleHtml = api.globalActivityStatusLineHtml();
-    assert.ok(/0 RUN/.test(idleHtml) && /0 ASK\?/.test(idleHtml) && /0 blocked/.test(idleHtml), 'status line shows explicit zero RUN / ASK? / blocked counts');
+    assert.ok(/0 RUN/.test(idleHtml) && /0 ASK/.test(idleHtml) && /0 blocked/.test(idleHtml), 'status line shows explicit zero RUN / ASK / blocked counts');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     api.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'needs-input'}});
     api.setAutoApproveStateForTest('3', {enabled: true, screen: {key: 'blocked'}});
     api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'idle'}});
     const counts = api.globalActivityCounts();
     assert.equal(counts.running, 1, 'one working session counts as running');
-    assert.equal(counts.ask, 1, 'one needs-input session counts as ASK?');
+    assert.equal(counts.ask, 1, 'one needs-input session counts as ASK');
     assert.equal(counts.blocked, 1, 'one blocked session counts as blocked');
-    assert.equal(counts.attention, 2, 'attention is ASK? plus blocked');
+    assert.equal(counts.attention, 2, 'attention is ASK plus blocked');
     assert.equal(counts.idle, 1, 'the remaining session is idle');
     assert.equal(counts.total, 4, 'all tmux sessions are counted');
     assert.equal(api.browserFaviconBadgeCount(counts), 1, 'favicon badge counts actively running sessions only');
@@ -1476,7 +1476,7 @@ async function runLayoutRestoreSuite() {
       ],
     });
     const bellCounts = signalApi.globalActivityCounts();
-    assert.equal(bellCounts.ask, 1, 'tmux bell windows count as ASK? attention');
+    assert.equal(bellCounts.ask, 1, 'tmux bell windows count as ASK attention');
     assert.equal(bellCounts.attention, 2, 'tmux bell attention combines with YO blocked attention');
     signalApi.setTmuxSignalStateForTest({
       windows: [{
@@ -1496,7 +1496,7 @@ async function runLayoutRestoreSuite() {
       }],
     });
     const actionRequiredCounts = signalApi.globalActivityCounts();
-    assert.equal(actionRequiredCounts.ask, 1, 'Codex action-required pane titles count as ASK? attention');
+    assert.equal(actionRequiredCounts.ask, 1, 'Codex action-required pane titles count as ASK attention');
     assert.equal(actionRequiredCounts.attention, 2, 'Codex action-required attention combines with YO blocked attention');
     const signalClearApi = loadYolomux('', ['1']);
     signalClearApi.setAutoApproveStateForTest('1', {
@@ -1540,7 +1540,7 @@ async function runLayoutRestoreSuite() {
       screen: {key: 'approval', text: 'Do you want to proceed?', signature: 'screen-approval'},
     });
     const approvalCounts = approvalApi.globalActivityCounts();
-    assert.equal(approvalCounts.ask, 3, 'visible approval prompts and questions all count as ASK?');
+    assert.equal(approvalCounts.ask, 3, 'visible approval prompts and questions all count as ASK');
     approvalApi.setTmuxSignalStateForTest({
       windows: [{
         key: '1:0',
@@ -1563,33 +1563,33 @@ async function runLayoutRestoreSuite() {
     approvalApi.setTmuxSignalStateForTest({windows: []});
     const approvalState = approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
     assert.equal(approvalState.key, 'needs-approval', 'auto-enabled visible approval still surfaces attention until it is handled');
-    assert.equal(approvalState.short, 'ASK?');
+    assert.equal(approvalState.short, 'ASK');
     const approvalBadge = approvalApi.sessionStateHtml(approvalState);
-    assert.ok(approvalBadge.includes('ASK?'), 'approval prompt badge uses the ASK? contract');
+    assert.ok(approvalBadge.includes('ASK'), 'approval prompt badge uses the ASK contract');
     assert.ok(approvalBadge.includes('data-prompt-attention-clear="1"'), 'approval prompt badge can be manually cleared');
     const attentionSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/STATE_CLASS\.needsInputPane, state\.key === STATE_KEY\.needsInput && state\.attention === true/.test(attentionSource), 'pane input ring only appears for uncleared ASK? attention');
-    assert.ok(/STATE_CLASS\.needsExecPane, state\.key === STATE_KEY\.needsApproval && state\.attention === true/.test(attentionSource), 'pane approval ring only appears for uncleared ASK? attention');
+    assert.ok(/STATE_CLASS\.needsInputPane, state\.key === STATE_KEY\.needsInput && state\.attention === true/.test(attentionSource), 'pane input ring only appears for uncleared ASK attention');
+    assert.ok(/STATE_CLASS\.needsExecPane, state\.key === STATE_KEY\.needsApproval && state\.attention === true/.test(attentionSource), 'pane approval ring only appears for uncleared ASK attention');
     assert.equal(approvalApi.clearPromptAttentionForSessionForTest('1'), true, 'manual clear records the current prompt signature');
-    assert.equal(approvalApi.globalActivityCounts().ask, 2, 'manual clear removes only the acknowledged prompt from ASK? count');
+    assert.equal(approvalApi.globalActivityCounts().ask, 2, 'manual clear removes only the acknowledged prompt from ASK count');
     const clearedState = approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
     assert.equal(clearedState.attention, false, 'manual clear suppresses the current attention signal');
-    assert.equal(approvalApi.sessionStateHtml(clearedState), '', 'manual clear hides the current ASK? badge');
+    assert.equal(approvalApi.sessionStateHtml(clearedState), '', 'manual clear hides the current ASK badge');
     approvalApi.setAutoApproveStateForTest('1', {
       enabled: true,
       prompt: {visible: true, yes_selected: true, text: 'Would you like to run pwd?', signature: 'codex-pwd'},
       screen: {key: 'idle'},
     });
-    assert.equal(approvalApi.globalActivityCounts().ask, 3, 'changed prompt signature re-arms ASK?');
-    assert.ok(approvalApi.sessionStateHtml(approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []})).includes('ASK?'), 'changed prompt shows the ASK? badge again');
-    assert.equal(approvalApi.clearPromptAttentionForSessionForTest('1'), true, 'manual ASK? clear handles the re-armed prompt');
-    assert.equal(approvalApi.globalActivityCounts().ask, 2, 'manual ASK? clear removes the re-armed prompt attention');
+    assert.equal(approvalApi.globalActivityCounts().ask, 3, 'changed prompt signature re-arms ASK');
+    assert.ok(approvalApi.sessionStateHtml(approvalApi.sessionState('1', {agents: [{kind: 'codex'}], panes: []})).includes('ASK'), 'changed prompt shows the ASK badge again');
+    assert.equal(approvalApi.clearPromptAttentionForSessionForTest('1'), true, 'manual ASK clear handles the re-armed prompt');
+    assert.equal(approvalApi.globalActivityCounts().ask, 2, 'manual ASK clear removes the re-armed prompt attention');
     const promptClearHandlerStart = attentionSource.indexOf('function handlePromptAttentionClearEvent(event)');
     const promptClearHandlerEnd = attentionSource.indexOf("document.addEventListener('click', handlePromptAttentionClearEvent)", promptClearHandlerStart);
-    assert.ok(promptClearHandlerStart > 0 && promptClearHandlerEnd > promptClearHandlerStart, 'manual ASK? clear handler is present in the boot bundle');
+    assert.ok(promptClearHandlerStart > 0 && promptClearHandlerEnd > promptClearHandlerStart, 'manual ASK clear handler is present in the boot bundle');
     const promptClearHandlerBody = attentionSource.slice(promptClearHandlerStart, promptClearHandlerEnd);
-    assert.ok(promptClearHandlerBody.includes('clearPromptAttentionForSession'), 'manual ASK? clear uses the prompt-attention clear path');
-    assert.equal(/socket\.send|handleTerminalData|insertIntoTerminal|paste/.test(promptClearHandlerBody), false, 'manual ASK? clear handler does not send keystrokes or paste frames to tmux');
+    assert.ok(promptClearHandlerBody.includes('clearPromptAttentionForSession'), 'manual ASK clear uses the prompt-attention clear path');
+    assert.equal(/socket\.send|handleTerminalData|insertIntoTerminal|paste/.test(promptClearHandlerBody), false, 'manual ASK clear handler does not send keystrokes or paste frames to tmux');
     const falsePositiveApi = loadYolomux('', ['1', '2', '3', '4', '8001', '8002', '8003', '9']);
     for (const session of ['1', '2', '3', '4', '8001', '8002', '8003', '9']) {
       falsePositiveApi.setAutoApproveStateForTest(session, {screen: {key: 'idle'}});
@@ -1605,9 +1605,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes("ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif'") && source.includes("ctx.strokeText(label, 62, 50)") && source.includes("ctx.fillText(label, 62, 50)"), 'favicon overlays a prominent active count at the bottom-right');
     const html = api.globalActivityStatusLineHtml();
     assert.ok(/1 RUN/.test(html) && /topbar-activity-run active/.test(html), 'status line shows running count');
-    assert.ok(/1 ASK\?/.test(html) && /topbar-activity-ask topbar-activity-attn/.test(html), 'status line shows ASK? count');
+    assert.ok(/1 ASK/.test(html) && /topbar-activity-ask topbar-activity-attn/.test(html), 'status line shows ASK count');
     assert.ok(/1 blocked/.test(html) && /topbar-activity-blocked topbar-activity-attn/.test(html), 'status line shows blocked count');
-    assert.ok(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), 'topbar ASK? inherits the shared status indicator pulse parent');
+    assert.ok(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), 'topbar ASK inherits the shared status indicator pulse parent');
     assert.ok(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), 'topbar blocked inherits the shared status indicator pulse parent');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
@@ -1778,7 +1778,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.sessionStateHtml({key: 'ready-review', short: 'PR', label: 'Ready for review', reason: 'checks pass'}), '', '#7: the redundant ready-review PR pill is suppressed');
     const needsInputBadge = api.sessionStateHtml({key: 'needs-input', short: '?', label: 'Needs input', reason: 'waiting'});
     assert.ok(needsInputBadge.includes('session-state-needs-input'), '#7: actionable states still render a badge');
-    assert.ok(/status-indicator[^"]*status-indicator--text[^"]*session-state-needs-input[^"]*status-indicator--attention[^"]*attention-pulse/.test(needsInputBadge), '#7: ASK? badges inherit shared status indicator text and pulse behavior');
+    assert.ok(/status-indicator[^"]*status-indicator--text[^"]*session-state-needs-input[^"]*status-indicator--attention[^"]*attention-pulse/.test(needsInputBadge), '#7: ASK badges inherit shared status indicator text and pulse behavior');
     // #3: tab badge chips carry no native title (the custom popover is the single source).
     assert.ok(!api.pullRequestNumberIndicatorHtml('5', {number: 123}).includes('title='), '#8: the PR number chip has no native title tooltip');
     assert.ok(!api.pullRequestApprovalIndicatorHtml('5', {number: 123, state: 'open', review_decision: 'APPROVED'}).includes('title='), '#8: the approval chip has no native title tooltip');

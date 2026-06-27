@@ -1441,8 +1441,8 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
 function infoAgentAttentionHtml(record) {
   if (!infoRecordHasAi(record) || typeof agentWindowIsAttentionState !== 'function' || !agentWindowIsAttentionState(record.aiState)) return '';
   return typeof statusIndicatorLabelHtml === 'function'
-    ? statusIndicatorLabelHtml('ASK?', 'attention', 'info-tree-ai-status-label')
-    : '<span class="info-tree-ai-status-label">ASK?</span>';
+    ? statusIndicatorLabelHtml('ASK', 'attention', 'info-tree-ai-status-label')
+    : '<span class="info-tree-ai-status-label">ASK</span>';
 }
 
 function infoRecordAiWindowButtonHtml(record, options = {}) {
@@ -4985,7 +4985,7 @@ function handlePromptAttentionClearEvent(event) {
   if (!node) return false;
   event.preventDefault();
   event.stopPropagation();
-  clearPromptAttentionForSession(node.dataset.session || '');
+  clearPromptAttentionForSession(node.dataset.session || '', {delayMs: agentWindowActivityAcknowledgeDelayMs});
   return true;
 }
 

@@ -1243,7 +1243,7 @@ async function runTabberSuite() {
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(css), false, 'Tabber status balls do not inherit the surface-specific icon size path');
     assert.ok(/\.file-tree-row\.tabber-row \.file-tree-date\s*\{[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(css), 'Tabber keeps the recency column reserved at narrow widths');
     assert.ok(/\.file-tree-date\s*\{[\s\S]*font-size:\s*max\(var\(--ui-font-size-2xs\), calc\(var\(--file-explorer-font-size\) - 1px\)\)[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC7: recency/status text uses a larger row-scale font and end ellipsis');
-    assert.ok(/row\.classList\.toggle\('tabber-status-long', data\.type === 'window' && \/\^\(working for\|ASK\\\?\)\//.test(source), 'SC1: Tabber marks long working/ASK status rows without affecting plain ago rows');
+    assert.ok(/row\.classList\.toggle\('tabber-status-long', data\.type === 'window' && \/\^\(working for\|ASK\)\//.test(source), 'SC1: Tabber marks long working/ASK status rows without affecting plain ago rows');
     assert.ok(/\.file-tree-row\.tabber-row\.tabber-status-long \.file-tree-date\s*\{[\s\S]*display:\s*block[\s\S]*flex:\s*0 1 auto[\s\S]*text-align:\s*start[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC1/SC2: long Tabber statuses fit content and truncate at the end, not from the leading edge');
     assert.equal(/@container[\s\S]*tabber-row \.file-tree-date[\s\S]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
     assert.ok(/function tabberActivityVisibleConsumer\(\)[\s\S]*fileExplorerMode === 'tabber'[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'Tabber activity polling only marks visible Tabber panes as subscribers');
@@ -1437,16 +1437,16 @@ async function runTabberSuite() {
     assert.equal(/\stitle=/.test(activeWindowRow?.nameHtml || ''), false, 'visible Tabber window chrome strips nested native title hovers');
     assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux sub-window row exposes aria-current');
     assert.equal(activeWindowRow?.date, 'working for 3h 45m', 'TD1: working agent Tabber rows use the shared state text with working duration');
-    assert.equal(activeWindowRow?.dateHtml.includes('attention-pulse'), false, 'working Tabber status text does not inherit the ASK? attention pulse');
+    assert.equal(activeWindowRow?.dateHtml.includes('attention-pulse'), false, 'working Tabber status text does not inherit the ASK attention pulse');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'claude', state: 'needs-input', last_active_ts: Date.now() / 1000 - 5, window_index: 0, window_name: 'claude', window_label: '0:claude'},
     ]});
     const askRows = api.tabberRenderedRowsForTest();
     const askWindowRow = askRows.find(r => r.type === 'window' && /^0:claude/.test(r.name));
-    assert.ok((askWindowRow?.dateHtml || '').includes('ASK? &lt;15 sec ago'), 'ASK? Tabber window rows show shared recency text instead of subtype words');
-    assert.equal((askWindowRow?.dateHtml || '').includes('ASK? needs input'), false, 'ASK? Tabber window rows no longer say needs input');
-    assert.equal((askWindowRow?.dateHtml || '').includes('ASK? approval'), false, 'ASK? Tabber window rows no longer say approval');
-    assert.ok(/tabber-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(askWindowRow?.dateHtml || ''), 'ASK? Tabber status text is red and shares the attention pulse phase');
+    assert.ok((askWindowRow?.dateHtml || '').includes('ASK &lt;15 sec ago'), 'ASK Tabber window rows show shared recency text instead of subtype words');
+    assert.equal((askWindowRow?.dateHtml || '').includes('ASK needs input'), false, 'ASK Tabber window rows no longer say needs input');
+    assert.equal((askWindowRow?.dateHtml || '').includes('ASK approval'), false, 'ASK Tabber window rows no longer say approval');
+    assert.ok(/tabber-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(askWindowRow?.dateHtml || ''), 'ASK Tabber status text is red and shares the attention pulse phase');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude'},
     ]});

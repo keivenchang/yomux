@@ -860,6 +860,250 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
     assert query == "session=1&window=2"
 
 
+def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tmp_path):
+    stopped_ts = int(time.time()) - 5
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+                {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "claude", "state": "working", "window_index": 1, "window_label": "1:claude"},
+                    {"kind": "claude", "state": "idle", "window_index": 2, "window_label": "2:claude", "working_stopped_ts": stopped_ts},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+            return !!dot && document.querySelector('.panel-detail-row [data-window-index="1"]')?.classList.contains('active');
+            """
+        )
+    )
+    click_started = time.monotonic()
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown').click()
+    immediate = browser.execute_script(
+        """
+        const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
+        return {
+          active: button?.classList.contains('active') === true,
+          pressed: button?.getAttribute('aria-pressed') || '',
+          stillYellow: !!button?.querySelector('.agent-window-status-dot.status-indicator--cooldown'),
+        };
+        """
+    )
+    assert immediate == {
+        "active": True,
+        "pressed": "true",
+        "stillYellow": True,
+    }
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return window.__bootFetches.some(entry => entry.path === '/api/tmux-window')
+              && document.querySelector('.panel-detail-row [data-window-index="2"]')?.classList.contains('active');
+            """
+        )
+    )
+    request = browser.execute_script(
+        """
+        const fetch = window.__bootFetches.find(entry => entry.path === '/api/tmux-window');
+        return fetch ? `${fetch.method} ${fetch.path}?${new URLSearchParams(fetch.search || '').toString()}` : '';
+        """
+    )
+    assert request == "POST /api/tmux-window?session=1&window=2"
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+            """
+        )
+    )
+    assert time.monotonic() - click_started >= 0.8
+
+
+def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
+    attention_key = '["agent-window","1","2","","claude","needs-input","waiting"]'
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+                {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "claude", "state": "working", "window_index": 1, "window_label": "1:claude"},
+                    {"kind": "claude", "state": "needs-input", "window_index": 2, "window_label": "2:claude", "screen_text": "waiting", "attention_key": attention_key},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+            return !!dot && document.querySelector('.panel-detail-row [data-window-index="1"]')?.classList.contains('active');
+            """
+        )
+    )
+    click_started = time.monotonic()
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention').click()
+    immediate = browser.execute_script(
+        """
+        const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
+        return {
+          active: button?.classList.contains('active') === true,
+          pressed: button?.getAttribute('aria-pressed') || '',
+          stillRed: !!button?.querySelector('.agent-window-status-dot.status-indicator--attention'),
+          ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
+        };
+        """
+    )
+    assert immediate == {
+        "active": True,
+        "pressed": "true",
+        "stillRed": True,
+        "ackPosts": 0,
+    }
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return window.__bootFetches.some(entry => entry.path === '/api/tmux-window')
+              && document.querySelector('.panel-detail-row [data-window-index="2"]')?.classList.contains('active');
+            """
+        )
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention')
+              && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
+            """
+        )
+    )
+    assert time.monotonic() - click_started >= 0.8
+    ack_body = browser.execute_script(
+        """
+        const fetch = window.__bootFetches.find(entry => entry.path === '/api/attention-ack');
+        return fetch?.body || null;
+        """
+    )
+    assert ack_body == {"keys": [attention_key]}
+
+
+def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp_path):
+    attention_key = '["agent-window","1","2","","claude","needs-input","waiting"]'
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 2, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "claude", "state": "needs-input", "window_index": 2, "window_label": "2:claude", "current": True, "window_active": True, "screen_text": "waiting", "attention_key": attention_key},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('#term-1')
+              && document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+            """
+        )
+    )
+    started = time.monotonic()
+    immediate = browser.execute_script(
+        """
+        const container = document.querySelector('#term-1');
+        const beforeFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
+        container.dispatchEvent(new KeyboardEvent('keydown', {key: 'a', bubbles: true, cancelable: true}));
+        const afterFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
+        return {
+          stillRed: !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention'),
+          ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
+          newSocketFrames: afterFrames - beforeFrames,
+        };
+        """
+    )
+    assert immediate == {"stillRed": True, "ackPosts": 0, "newSocketFrames": 0}
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention')
+              && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
+            """
+        )
+    )
+    assert time.monotonic() - started >= 0.8
+    ack_body = browser.execute_script(
+        """
+        const fetch = window.__bootFetches.find(entry => entry.path === '/api/attention-ack');
+        return fetch?.body || null;
+        """
+    )
+    assert ack_body == {"keys": [attention_key]}
+
+
 def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_glowing_ball(browser, tmp_path):
     transcript_sessions = {
         "1": {
@@ -1229,7 +1473,7 @@ def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(bro
     assert data["dotWorkingTone"] is True, data
 
 
-def test_dockview_tab_agent_ball_uses_most_urgent_window_state(browser, tmp_path):
+def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_path):
     stopped_ts = int(time.time()) - 5
     transcript_sessions = {
         "1": {
@@ -1293,6 +1537,12 @@ def test_dockview_tab_agent_ball_uses_most_urgent_window_state(browser, tmp_path
                 attention: dot ? dot.classList.contains('status-indicator--attention') : false,
                 cooldown: dot ? dot.classList.contains('status-indicator--cooldown') : false,
                 working: dot ? dot.classList.contains('status-indicator--working') : false,
+                segmented: dot ? dot.classList.contains('agent-window-status-dot--segmented') : false,
+                toneAttention: dot ? dot.classList.contains('agent-window-status-dot--tone-attention') : false,
+                toneCooldown: dot ? dot.classList.contains('agent-window-status-dot--tone-cooldown') : false,
+                toneWorking: dot ? dot.classList.contains('agent-window-status-dot--tone-working') : false,
+                segmentClass: dot ? Array.from(dot.classList).find(name => /^agent-window-status-dot--(attention|cooldown|working)-/.test(name)) || '' : '',
+                backgroundImage: dotStyle?.backgroundImage || '',
                 delay,
                 delaySeconds: Number((delay.match(/-?[0-9.]+/) || [0])[0]),
                 animationName: dotStyle?.animationName || '',
@@ -1317,7 +1567,15 @@ def test_dockview_tab_agent_ball_uses_most_urgent_window_state(browser, tmp_path
     assert red_case["claude"]["attention"] is True, red_case
     assert red_case["codex"]["cooldown"] is True, red_case
     assert red_case["tab"]["attention"] is True, red_case
+    assert red_case["tab"]["segmented"] is True, red_case
+    assert red_case["tab"]["toneAttention"] is True, red_case
+    assert red_case["tab"]["toneCooldown"] is True, red_case
+    assert red_case["tab"]["toneWorking"] is False, red_case
+    assert red_case["tab"]["segmentClass"] == "agent-window-status-dot--attention-cooldown", red_case
+    assert "conic-gradient" in red_case["tab"]["backgroundImage"], red_case
     assert red_case["tab"]["iconState"] == red_case["claude"]["iconState"], red_case
+    assert abs(red_case["tab"]["animationCurrentTime"] - red_case["claude"]["animationCurrentTime"]) <= 75, red_case
+    assert abs(red_case["tab"]["animationCurrentTime"] - red_case["codex"]["animationCurrentTime"]) <= 75, red_case
 
     yellow_case = load_with([
         {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"},
@@ -1326,12 +1584,20 @@ def test_dockview_tab_agent_ball_uses_most_urgent_window_state(browser, tmp_path
     assert yellow_case["claude"]["working"] is True, yellow_case
     assert yellow_case["codex"]["cooldown"] is True, yellow_case
     assert yellow_case["tab"]["cooldown"] is True, yellow_case
+    assert yellow_case["tab"]["segmented"] is True, yellow_case
+    assert yellow_case["tab"]["toneAttention"] is False, yellow_case
+    assert yellow_case["tab"]["toneCooldown"] is True, yellow_case
+    assert yellow_case["tab"]["toneWorking"] is True, yellow_case
+    assert yellow_case["tab"]["segmentClass"] == "agent-window-status-dot--cooldown-working", yellow_case
+    assert "conic-gradient" in yellow_case["tab"]["backgroundImage"], yellow_case
     assert yellow_case["tab"]["iconState"] == yellow_case["codex"]["iconState"], yellow_case
     assert yellow_case["tab"]["animationName"] == yellow_case["codex"]["animationName"], yellow_case
     assert yellow_case["tab"]["animationDuration"] == yellow_case["codex"]["animationDuration"], yellow_case
     assert yellow_case["tab"]["animationTiming"] == yellow_case["codex"]["animationTiming"], yellow_case
     assert yellow_case["tab"]["delay"] == yellow_case["codex"]["delay"], yellow_case
     assert yellow_case["tab"]["animationDelay"] == yellow_case["codex"]["animationDelay"], yellow_case
+    assert abs(yellow_case["tab"]["animationCurrentTime"] - yellow_case["claude"]["animationCurrentTime"]) <= 75, yellow_case
+    assert abs(yellow_case["tab"]["animationCurrentTime"] - yellow_case["codex"]["animationCurrentTime"]) <= 75, yellow_case
 
 
 def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):

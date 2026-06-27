@@ -1812,6 +1812,11 @@ function terminalAttentionRawText(value) {
   return String(value || '').replace(/\u00a0/g, ' ');
 }
 
+function terminalAttentionQuestionChromeHintText(value) {
+  const text = terminalAttentionTextPart(value).replace(/^[>❯$#\s]+/, '').trim();
+  return /^[?？]\s+for\s+(?:shortcuts|help|commands)\b/i.test(text);
+}
+
 function terminalAttentionQuestionTexts(session) {
   const state = sessionState(session, transcriptMeta.sessions?.[session]);
   if (![STATE_KEY.needsInput, STATE_KEY.needsApproval].includes(String(state?.key || '')) || state?.attention === false) return [];
@@ -1839,7 +1844,7 @@ function terminalAttentionQuestionTexts(session) {
   const texts = [];
   for (const candidate of candidates) {
     const text = terminalAttentionTextPart(candidate);
-    if (!text || seen.has(text)) continue;
+    if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) continue;
     seen.add(text);
     texts.push(text);
   }
@@ -2048,6 +2053,7 @@ function terminalAttentionQuestionSentenceRanges(text) {
     const rawSentence = source.slice(start, end);
     const trimOffset = rawSentence.length - rawSentence.trimStart().length;
     const sentence = rawSentence.trim();
+    if (terminalAttentionQuestionChromeHintText(sentence)) continue;
     const content = sentence.replace(/[?？]/g, '').replace(/^[>❯$#\s]+/, '').trim();
     if (content) {
       ranges.push({
@@ -2093,7 +2099,7 @@ function terminalAttentionQuestionCandidateTexts(questionTexts) {
   const candidates = [];
   const add = value => {
     const text = terminalAttentionTextPart(value);
-    if (!text || seen.has(text)) return;
+    if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) return;
     seen.add(text);
     candidates.push(text);
   };

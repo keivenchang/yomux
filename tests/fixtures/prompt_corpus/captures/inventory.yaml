@@ -12,7 +12,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: empty
     reason_code: needs-input
     screen_key: needs-input
@@ -32,7 +32,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: empty
     reason_code: needs-input
     screen_key: needs-input
@@ -52,7 +52,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: empty
     reason_code: needs-input
     screen_key: needs-input
@@ -72,7 +72,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: empty
     reason_code: needs-input
     screen_key: needs-input
@@ -92,7 +92,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: empty
     reason_code: needs-input
     screen_key: needs-input
@@ -292,7 +292,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: draft
     reason_code: needs-input
     screen_key: needs-input
@@ -312,7 +312,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: draft
     reason_code: needs-input
     screen_key: needs-input
@@ -366,13 +366,13 @@ fixtures:
   client_name: Codex CLI
   client_version: codex-cli 0.141.0
   client_version_slug: codex-cli-0.141.0
-  description: 'Positive: Codex question remains ASK? even when an answer draft is in the composer'
+  description: 'Positive: Codex question remains ASK even when an answer draft is in the composer'
   expected:
     agent_kind: codex
     approval_type: ''
     approval_visible: false
     attention_kind: question
-    attention_label: ASK?
+    attention_label: ASK
     composer_key: draft
     reason_code: needs-input
     screen_key: needs-input

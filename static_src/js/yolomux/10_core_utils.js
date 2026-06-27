@@ -1342,6 +1342,15 @@ function setFocusedTerminal(session, options = {}) {
   updatePanelInactiveOverlays();
   sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
+    const acknowledgeDelayMs = Number.isFinite(Number(options.acknowledgeAgentWindowDelayMs))
+      ? Math.max(0, Number(options.acknowledgeAgentWindowDelayMs))
+      : (typeof agentWindowActivityAcknowledgeDelayMs === 'number' ? agentWindowActivityAcknowledgeDelayMs : 0);
+    if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
+      clearPromptAttentionForSession(session, {delayMs: acknowledgeDelayMs});
+    }
+    if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
+      acknowledgeAgentWindowActivity(session, null, {delayMs: acknowledgeDelayMs});
+    }
     rememberFileExplorerExplicitSyncSession(session);
     scheduleFileExplorerActiveTabSync(session, {explicit: true});
     recordFocusNavTransition(previousItem, session);

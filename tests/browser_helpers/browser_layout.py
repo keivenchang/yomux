@@ -1804,6 +1804,35 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           return jsonResponse({ok: true, renamed: true, session, new_session: newSession, sessions: staleSessions});
         }
         if (url.pathname === '/api/ensure-session') return jsonResponse({ok: true, created: false});
+        if (url.pathname === '/api/attention-ack') {
+          const acknowledged = Array.from(new Set((Array.isArray(body?.keys) ? body.keys : [body?.key]).map(key => String(key || '')).filter(Boolean)));
+          const autoPayload = window.__fixtureAutoApprovePayload || {
+            session_order: window.__fixtureSessions,
+            sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, {target: session, enabled: false, last_action: 'off'}])),
+            rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+          };
+          for (const key of acknowledged) {
+            let parts = [];
+            try { parts = JSON.parse(key); } catch (error) {}
+            const session = String(Array.isArray(parts) ? parts[1] || '' : '');
+            const state = autoPayload.sessions?.[session];
+            if (!state) continue;
+            const keys = Array.isArray(state.attention_acks?.keys) ? state.attention_acks.keys : [];
+            if (!keys.includes(key)) keys.push(key);
+            state.attention_acks = {keys};
+            if (state.prompt?.attention_key === key || state.prompt_attention_key === key) {
+              if (state.prompt) state.prompt.attention_acknowledged = true;
+              state.prompt_attention_acknowledged = true;
+            }
+            for (const row of Array.isArray(state.agent_windows) ? state.agent_windows : []) {
+              if (row.attention_key === key) row.attention_acknowledged = true;
+              if (row.cooldown_attention_key === key) row.cooldown_acknowledged = true;
+            }
+          }
+          window.__fixtureAutoApprovePayload = autoPayload;
+          emitFixtureClientEvent('auto_approve_changed', {status: 200, data: autoPayload});
+          return jsonResponse({ok: true, acknowledged, auto_approve: autoPayload, status: 200});
+        }
         if (url.pathname === '/api/auto-approve') {
           return jsonResponse(window.__fixtureAutoApprovePayload || {
             session_order: window.__fixtureSessions,

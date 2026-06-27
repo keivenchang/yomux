@@ -3889,7 +3889,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
-  row.classList.toggle('tabber-status-long', data.type === 'window' && /^(working for|ASK\?)/.test(String(data.dateText || '')));
+  row.classList.toggle('tabber-status-long', data.type === 'window' && /^(working for|ASK)/.test(String(data.dateText || '')));
   row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');

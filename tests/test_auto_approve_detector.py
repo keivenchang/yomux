@@ -107,7 +107,7 @@ def test_auto_approve_cli_state_keeps_normal_questions_out_of_approval_path():
     assert pane_text is None
     assert state.reason_code == "needs-input"
     assert state.attention_kind == "question"
-    assert state.display["attention_label"] == "ASK?"
+    assert state.display["attention_label"] == "ASK"
     assert state.approval["approval_visible"] is False
 
 

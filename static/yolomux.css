@@ -2115,7 +2115,7 @@ body.theme-light .latency-meter {
 /* Re-declare the pulse cadence at higher specificity (.status-indicator beats the bare
    .heartbeat-pulse) so the prefers-reduced-motion rule `.heartbeat-pulse { animation: none }` cannot
    zero the status balls' timing. Without this the balls freeze under reduced motion while the
-   high-specificity ASK? pillbox keeps pulsing (the balls' animation-name survives but their
+   high-specificity ASK pillbox keeps pulsing (the balls' animation-name survives but their
    duration/iteration get reset to 0). Same cadence as the parent; only the specificity differs. */
 .status-indicator.heartbeat-pulse {
   animation-duration: var(--pulse-duration);
@@ -2187,6 +2187,41 @@ body.theme-light .latency-meter {
   margin-inline-start: 0;
   font-family: var(--ui-font);
   font-stretch: normal;
+}
+.status-indicator--dot.agent-window-status-dot--segmented {
+  --agent-status-segment-attention: var(--bad);
+  --agent-status-segment-cooldown: var(--accent-gold);
+  --agent-status-segment-working: var(--pr-status-passing);
+  display: inline-block;
+  height: 1em;
+  color: transparent;
+  background: var(--agent-status-segment-bg, currentColor);
+  overflow: hidden;
+}
+.agent-window-status-dot--attention-cooldown {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-attention) 0 50%,
+    var(--agent-status-segment-cooldown) 0 100%
+  );
+}
+.agent-window-status-dot--attention-working {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-attention) 0 50%,
+    var(--agent-status-segment-working) 0 100%
+  );
+}
+.agent-window-status-dot--cooldown-working {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-cooldown) 0 50%,
+    var(--agent-status-segment-working) 0 100%
+  );
+}
+.agent-window-status-dot--attention-cooldown-working {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-attention) 0 33.333%,
+    var(--agent-status-segment-cooldown) 0 66.666%,
+    var(--agent-status-segment-working) 0 100%
+  );
 }
 /* Agent status = a static AI symbol followed by a separate glowing status ball:
    [symbol][ball]. Working uses a quieter green glow; attention and cooldown keep stronger red/yellow

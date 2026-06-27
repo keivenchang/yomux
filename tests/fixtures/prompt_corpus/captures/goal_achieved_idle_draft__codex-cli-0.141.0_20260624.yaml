@@ -85,7 +85,7 @@ operations: []
 raw_capture: |
   • Confirmed and fixed.
 
-  Active YO Rotation is no longer used: I removed appearance.yolo_rotate_ms, yoloRotationDelay(), --yolo-rotate-delay, and --yolo-rotation-duration from runtime/source/generated assets. The old “Red reminder duration” setting is now renamed to Red/yellow/green status pulse period, and it drives the real shared --pulse-duration used by ASK? and the red/yellow/green status balls.
+  Active YO Rotation is no longer used: I removed appearance.yolo_rotate_ms, yoloRotationDelay(), --yolo-rotate-delay, and --yolo-rotation-duration from runtime/source/generated assets. The old “Red reminder duration” setting is now renamed to Red/yellow/green status pulse period, and it drives the real shared --pulse-duration used by ASK and the red/yellow/green status balls.
 
   Also restarted 8001 and verified served assets contain no old rotation tokens.
 
@@ -109,7 +109,7 @@ source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 800
 styled_capture: |
   • Confirmed and fixed.
 
-  Active YO Rotation is no longer used: I removed appearance.yolo_rotate_ms, yoloRotationDelay(), --yolo-rotate-delay, and --yolo-rotation-duration from runtime/source/generated assets. The old “Red reminder duration” setting is now renamed to Red/yellow/green status pulse period, and it drives the real shared --pulse-duration used by ASK? and the red/yellow/green status balls.
+  Active YO Rotation is no longer used: I removed appearance.yolo_rotate_ms, yoloRotationDelay(), --yolo-rotate-delay, and --yolo-rotation-duration from runtime/source/generated assets. The old “Red reminder duration” setting is now renamed to Red/yellow/green status pulse period, and it drives the real shared --pulse-duration used by ASK and the red/yellow/green status balls.
 
   Also restarted 8001 and verified served assets contain no old rotation tokens.
 

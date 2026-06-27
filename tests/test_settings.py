@@ -247,7 +247,7 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
 
     assert catalog["appearance.tab_width"]["limits"] == {"min": 120, "max": 420}
     assert catalog["appearance.tab_width"]["units"] == "pixels"
-    assert catalog["performance.agent_window_cooldown_seconds"]["default"] == 60
+    assert catalog["performance.agent_window_cooldown_seconds"]["default"] == 0
     assert catalog["performance.agent_window_cooldown_seconds"]["limits"] == {"min": 0, "max": 300}
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
     assert catalog["uploads.subdir"]["empty_allowed"] is True

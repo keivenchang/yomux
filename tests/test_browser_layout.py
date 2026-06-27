@@ -588,7 +588,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
           <span class="pane-tab-core">
             <span class="session-yolo-marker">YO</span>
             <span class="session-agent-activity-marker">{_agent_status_glyph_html("claude", "attention", "dock-attention")}</span>
-            <span class="session-button-prefix">8002b ASK?</span>
+            <span class="session-button-prefix">8002b ASK</span>
           </span>
         </button>
         <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
@@ -814,7 +814,7 @@ def test_status_balls_share_ask_badge_pulse_cadence_and_actually_pulsate(browser
       <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="ask-badge" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK?</span>
+      <span id="ask-badge" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK</span>
     """, extra_css="""
       :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
@@ -963,7 +963,7 @@ def test_status_balls_keep_ask_pill_pulse_cadence_under_reduced_motion(browser, 
     page.write_text(page_html("""
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-      <span id="ask-pill" class="status-indicator session-state-badge status-indicator--text tab-symbol session-state-needs-input session-state-reminder status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK?</span>
+      <span id="ask-pill" class="status-indicator session-state-badge status-indicator--text tab-symbol session-state-needs-input session-state-reminder status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK</span>
     """, extra_css="""
       :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
@@ -1285,7 +1285,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
                 """
                 const session = arguments[0];
                 return document.getElementById(`panel-${session}`)
-                  && document.getElementById('topbarActivity')?.textContent?.includes('ASK?');
+                  && document.getElementById('topbarActivity')?.textContent?.includes('ASK');
                 """,
                 session,
             )
@@ -1313,33 +1313,47 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             };
             badge?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
-            const after = {
+            const immediate = {
               badgeText: tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '',
               tabAttention: tab?.classList.contains('needs-attention') || false,
               panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
               topbarText: topbar?.textContent || '',
               newInputFrames: afterSocketFrames.slice(beforeSocketFrames.length).filter(frame => String(frame).includes('"type":"input"')).length,
             };
-            return {before, after};
+            return {before, immediate};
             """,
             session,
         )
-        assert metrics["before"]["badgeText"] == "ASK?"
+        assert metrics["before"]["badgeText"] == "ASK"
         assert metrics["before"]["badgeHasSharedParent"] is True
         assert metrics["before"]["badgeHasTextModifier"] is True
         assert metrics["before"]["badgeHasAttentionModifier"] is True
         assert metrics["before"]["badgeHasPulse"] is True
         assert metrics["before"]["tabAttention"] is True
         assert metrics["before"]["panelNeedsApproval"] is True
-        assert "1 ASK?" in metrics["before"]["topbarText"]
+        assert "1 ASK" in metrics["before"]["topbarText"]
         assert metrics["before"]["topbarAskHasSharedParent"] is True
         assert metrics["before"]["topbarAskHasAttentionModifier"] is True
         assert metrics["before"]["topbarAskHasPulse"] is True
-        assert metrics["after"]["badgeText"] == ""
-        assert metrics["after"]["tabAttention"] is False
-        assert metrics["after"]["panelNeedsApproval"] is False
-        assert "0 ASK?" in metrics["after"]["topbarText"]
-        assert metrics["after"]["newInputFrames"] == 0
+        assert metrics["immediate"]["badgeText"] == "ASK"
+        assert metrics["immediate"]["tabAttention"] is True
+        assert metrics["immediate"]["panelNeedsApproval"] is True
+        assert "1 ASK" in metrics["immediate"]["topbarText"]
+        assert metrics["immediate"]["newInputFrames"] == 0
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const session = arguments[0];
+                const tab = document.getElementById(`panel-tab-${session}`);
+                const panel = document.getElementById(`panel-${session}`);
+                return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
+                  && !tab?.classList.contains('needs-attention')
+                  && !panel?.classList.contains('needs-exec-pane')
+                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 ASK');
+                """,
+                session,
+            )
+        )
     finally:
         if app is not None:
             stop = getattr(getattr(app, "control_server", None), "stop", None)
@@ -1590,23 +1604,40 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             for (const session of sessions) {
               document.getElementById(`panel-tab-${session}`)?.querySelector('[data-prompt-attention-clear]')?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
             }
-            const after = snapshot();
+            const immediate = snapshot();
             const inputFrames = (window.__askClearWsFrames || []).filter(frame => frame.data.includes('"type":"input"'));
-            return {before, after, inputFrames};
+            return {before, immediate, inputFrames};
             """,
             list(sessions.values()),
         )
         assert metrics["before"]["ask"] == 2, metrics
-        assert "2 ASK?" in metrics["before"]["topbar"], metrics
-        assert [item["badge"] for item in metrics["before"]["sessions"]] == ["ASK?", "ASK?"], metrics
+        assert "2 ASK" in metrics["before"]["topbar"], metrics
+        assert [item["badge"] for item in metrics["before"]["sessions"]] == ["ASK", "ASK"], metrics
         assert [item["tabAttention"] for item in metrics["before"]["sessions"]] == [True, True], metrics
         assert [item["panelNeedsApproval"] for item in metrics["before"]["sessions"]] == [True, True], metrics
-        assert metrics["after"]["ask"] == 0, metrics
-        assert "0 ASK?" in metrics["after"]["topbar"], metrics
-        assert [item["badge"] for item in metrics["after"]["sessions"]] == ["", ""], metrics
-        assert [item["tabAttention"] for item in metrics["after"]["sessions"]] == [False, False], metrics
-        assert [item["panelNeedsApproval"] for item in metrics["after"]["sessions"]] == [False, False], metrics
+        assert metrics["immediate"]["ask"] == 2, metrics
+        assert "2 ASK" in metrics["immediate"]["topbar"], metrics
+        assert [item["badge"] for item in metrics["immediate"]["sessions"]] == ["ASK", "ASK"], metrics
+        assert [item["tabAttention"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
+        assert [item["panelNeedsApproval"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
         assert metrics["inputFrames"] == [], metrics
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const sessions = arguments[0];
+                return globalActivityCounts().ask === 0
+                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 ASK')
+                  && sessions.every(session => {
+                    const tab = document.getElementById(`panel-tab-${session}`);
+                    const panel = document.getElementById(`panel-${session}`);
+                    return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
+                      && !tab?.classList.contains('needs-attention')
+                      && !panel?.classList.contains('needs-exec-pane');
+                  });
+                """,
+                list(sessions.values()),
+            )
+        )
     finally:
         if server is not None and thread is not None:
             stop_browser_share_server(server, thread)

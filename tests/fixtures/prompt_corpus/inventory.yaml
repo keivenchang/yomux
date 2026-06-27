@@ -801,7 +801,7 @@ live_capture_targets:
   family: claude-free-text-question
   why_currently_synthetic: Real Claude AskUserQuestion captures cover selector/accessibility variants, but not a free-text-only shape.
 purpose: 'Corpus inventory for YOLOmux prompt detection: agent_tui capture JSON fixtures for visible approval/question panes
-  that should raise ASK? and negative panes that must stay quiet.'
+  that should raise ASK and negative panes that must stay quiet.'
 required_families:
 - codex-shell-approval-3-option
 - codex-shell-approval-2-option
@@ -842,7 +842,7 @@ required_families:
 parity_groups:
 - id: visible-working-counter
   status: covered-by-both
-  contract: Both clients are working/busy and must render as RUN without raising ASK? or YOLO?.
+  contract: Both clients are working/busy and must render as RUN without raising ASK or YOLO?.
   why_names_differ: The Claude capture name came from the visible `Clauding…` status counter; the Codex capture name came from the command-send scenario that produced the visible working counter. They are the same detector state, not missing counterparts.
   fixtures:
   - agent: claude
@@ -856,7 +856,7 @@ parity_groups:
     file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml
 - id: goal-active
   status: covered-by-both
-  contract: Both clients can show a goal-following busy state that must render as RUN without raising ASK? or YOLO?.
+  contract: Both clients can show a goal-following busy state that must render as RUN without raising ASK or YOLO?.
   why_names_differ: >-
     Both captures use the same `goal_active` case name, but the visible UI differs: Claude shows `/goal active` beside the
     `Clauding…` counter, while Codex shows `Pursuing goal` or `Goal achieved` beside the working counter.
@@ -880,7 +880,7 @@ parity_groups:
     file: captures/goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
 - id: normal-choice-question
   status: covered-by-both
-  contract: Both clients can ask non-permission user questions that should show ASK?.
+  contract: Both clients can ask non-permission user questions that should show ASK.
   why_names_differ: Claude calls this AskUserQuestion and its fixtures preserve selector/accessibility variants; Codex fixtures use choice/non-permission wording from its numbered prompt layout.
   fixtures:
   - agent: claude
@@ -906,7 +906,7 @@ parity_groups:
     file: captures/question_with_answer_draft__codex-cli-0.141.0_20260620.yaml
 - id: claude-interrupted-question
   status: intentionally-not-one-to-one
-  contract: Claude's interrupted awaiting-user-instruction prompt should show ASK?; Codex interrupt/stop states in this corpus do not expose the same question prompt.
+  contract: Claude's interrupted awaiting-user-instruction prompt should show ASK; Codex interrupt/stop states in this corpus do not expose the same question prompt.
   why_names_differ: Claude renders `Interrupted · What should Claude do instead?` as an active needs-input screen. Codex Ctrl-C/stop behavior is captured separately as command/session interruption behavior, not as a matching user-question surface.
   fixtures:
   - agent: claude

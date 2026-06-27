@@ -343,7 +343,7 @@ def test_mock_fixture_list_reports_cursor_status(monkeypatch, capsys):
             "case_name": "choice_question",
             "path": PROMPT_CORPUS_DIR / "captures" / "choice_question.yaml",
             "cursor": {"x": 2, "y": 37},
-            "expected": {"attention_label": "ASK?", "screen_key": "needs-input"},
+            "expected": {"attention_label": "ASK", "screen_key": "needs-input"},
         },
         {
             "agent": "claude",
@@ -357,7 +357,7 @@ def test_mock_fixture_list_reports_cursor_status(monkeypatch, capsys):
     mock_agent_common.print_mock_fixture_list(include_idle=True)
 
     output = capsys.readouterr().out
-    assert "choice_question [ASK?] choice_question.yaml cursor=2,37" in output
+    assert "choice_question [ASK] choice_question.yaml cursor=2,37" in output
     assert "cursor=2,37" in output
     assert "synthetic_plan [idle]" not in output
 
@@ -381,7 +381,7 @@ def test_mock_fixture_list_prints_full_rows_for_terminal_wrap(monkeypatch, capsy
             "case_name": "interrupted_what_should_claude_do_instead",
             "path": PROMPT_CORPUS_DIR / "captures" / file_name,
             "cursor": {},
-            "expected": {"attention_label": "ASK?", "screen_key": "needs-input"},
+            "expected": {"attention_label": "ASK", "screen_key": "needs-input"},
         },
     ])
     monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "claude")
@@ -391,7 +391,7 @@ def test_mock_fixture_list_prints_full_rows_for_terminal_wrap(monkeypatch, capsy
 
     output = capsys.readouterr().out
     lines = output.splitlines()
-    assert any(line.startswith("  ⎿  interrupted_what_should_claude_do_instead [ASK?]") for line in lines)
+    assert any(line.startswith("  ⎿  interrupted_what_should_claude_do_instead [ASK]") for line in lines)
     assert file_name in output
     assert "…" not in output
 
@@ -403,7 +403,7 @@ def test_mocklist_alias_prints_fixture_list(monkeypatch, capsys):
             "case_name": "choice_question",
             "path": PROMPT_CORPUS_DIR / "captures" / "choice_question.yaml",
             "cursor": {"x": 2, "y": 37},
-            "expected": {"attention_label": "ASK?", "screen_key": "needs-input"},
+            "expected": {"attention_label": "ASK", "screen_key": "needs-input"},
         },
     ])
     monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
@@ -476,7 +476,7 @@ def test_mock_list_defaults_to_current_agent_and_list_all_includes_shared_cases(
     monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
     mock_agent_common.handle_command("mock list", {})
     codex_output = capsys.readouterr().out
-    assert "codex_question_case [ASK?] codex_question_case.yaml" in codex_output
+    assert "codex_question_case [ASK] codex_question_case.yaml" in codex_output
     assert "codex_idle_case" not in codex_output
     assert "unknown_case" not in codex_output
     assert "generic_case" not in codex_output
@@ -495,7 +495,7 @@ def test_mock_list_defaults_to_current_agent_and_list_all_includes_shared_cases(
     all_output = capsys.readouterr().out
     assert "claude_idle_case [idle] claude_case.yaml" in all_output
     assert "claude_approval_case [YOLO?] claude_approval_case.yaml" in all_output
-    assert "unknown_case [ASK?] unknown_case.yaml" in all_output
+    assert "unknown_case [ASK] unknown_case.yaml" in all_output
     assert "generic_case [RUN] generic_case.yaml" in all_output
     assert "codex_question_case" not in all_output
 
@@ -514,7 +514,7 @@ def test_claude_default_mock_list_has_no_unknown_or_generic_cases(monkeypatch):
     assert rows
     assert not {str(case.get("agent") or "") for case in rows} & {"unknown", "generic"}
     assert all(mock_agent_common.mock_fixture_outcome_label(case) != "idle" for case in rows)
-    assert any(mock_agent_common.mock_fixture_outcome_label(case) == "ASK?" for case in rows)
+    assert any(mock_agent_common.mock_fixture_outcome_label(case) == "ASK" for case in rows)
     assert any(mock_agent_common.mock_fixture_outcome_label(case) == "YOLO?" for case in rows)
     assert any(mock_agent_common.mock_fixture_outcome_label(case) == "RUN" for case in rows)
     idle_rows = mock_agent_common.mock_fixture_list_cases(include_idle=True, only_idle=True)
@@ -536,21 +536,21 @@ def test_mock_fixture_list_dedupes_same_fixture_identity(monkeypatch, capsys):
             "case_name": "choice_question_real",
             "path": duplicate_path,
             "cursor": {"x": 36, "y": 10},
-            "expected": {"attention_label": "ASK?"},
+            "expected": {"attention_label": "ASK"},
         },
         {
             "agent": "codex",
             "case_name": "choice_question_real",
             "path": duplicate_path,
             "cursor": {"x": 36, "y": 10},
-            "expected": {"attention_label": "ASK?"},
+            "expected": {"attention_label": "ASK"},
         },
         {
             "agent": "codex",
             "case_name": "choice_question_real",
             "path": PROMPT_CORPUS_DIR / "captures" / "choice_question_real_other.yaml",
             "cursor": {"x": 36, "y": 10},
-            "expected": {"attention_label": "ASK?"},
+            "expected": {"attention_label": "ASK"},
         },
     ])
     monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
@@ -599,9 +599,9 @@ def test_mock_fixture_list_prefers_real_capture_over_synthetic_duplicate(monkeyp
 
 
 def test_mock_fixture_outcome_labels_come_from_expected_metadata():
-    assert mock_agent_common.mock_fixture_outcome_label({"expected": {"attention_label": "ASK?"}}) == "ASK?"
+    assert mock_agent_common.mock_fixture_outcome_label({"expected": {"attention_label": "ASK"}}) == "ASK"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"approval_visible": True}}) == "YOLO?"
-    assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "needs-input"}}) == "ASK?"
+    assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "needs-input"}}) == "ASK"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "working"}}) == "RUN"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "input-draft"}}) == "draft"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "idle"}}) == "idle"
@@ -2531,7 +2531,7 @@ def test_tmux_claude_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_a
     booted, pane = visual_tmux.wait_until(session, lambda text: '❯ Try "fix typecheck errors"' in text)
     assert booted, pane
     visual_tmux.send_keys(session, "mock", "Enter")
-    listed, pane = visual_tmux.wait_until(session, lambda text: "parser_dependency_choice_question [ASK?]" in text)
+    listed, pane = visual_tmux.wait_until(session, lambda text: "parser_dependency_choice_question [ASK]" in text)
     assert listed, pane
     list_rows = "\n".join(line for line in pane.splitlines() if "⎿" in line)
     assert "…" not in list_rows

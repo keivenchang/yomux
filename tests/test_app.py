@@ -606,6 +606,36 @@ def test_auto_approve_status_reuses_cached_roster(monkeypatch):
     assert second["cache"]["stale"] is False
 
 
+def test_attention_acknowledgement_is_server_owned(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
+    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1"], None))
+    monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(webapp, "prompt_and_screen_status", lambda *args, **kwargs: (
+        {"visible": True, "yes_selected": True, "text": "Run sleep 10?", "signature": "prompt-sig"},
+        {"key": "idle", "text": ""},
+    ))
+    monkeypatch.setattr(webapp, "agent_window_status_payloads", lambda *args, **kwargs: [])
+    try:
+        payload = webapp.auto_approve_session_status("1", discovered_sessions={})
+        key = webapp.attention_ack_key("prompt", "1", "prompt-sig")
+        assert payload["prompt_attention_key"] == key
+        assert payload["prompt"]["attention_key"] == key
+        assert payload["prompt_attention_acknowledged"] is False
+
+        result, status = webapp.acknowledge_attention({"keys": [key]})
+        assert status == HTTPStatus.OK
+        assert result["acknowledged"] == [key]
+
+        payload = webapp.auto_approve_session_status("1", discovered_sessions={})
+        assert payload["attention_acks"] == {"keys": [key]}
+        assert payload["prompt_attention_acknowledged"] is True
+        assert payload["prompt"]["attention_acknowledged"] is True
+    finally:
+        webapp.control_server.stop()
+
+
 def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     refreshes = []

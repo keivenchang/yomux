@@ -345,7 +345,7 @@ def test_classify_agent_pane_marks_questions_as_attention_not_approval():
     assert state.screen["key"] == "needs-input"
     assert state.agent_kind == ""
     assert state.attention_kind == "question"
-    assert state.attention_label == "ASK?"
+    assert state.attention_label == "ASK"
     assert state.display["screen_key"] == "needs-input"
     assert state.display["attention_kind"] == "question"
     assert state.display["question_text"] == "Which backend should I use?"
@@ -427,7 +427,7 @@ def test_classify_agent_pane_prompt_corpus_exposes_display_and_approval_fields(c
     else:
         assert state.reason_code == "needs-input"
         assert state.attention_kind == "question"
-        assert state.attention_label == "ASK?"
+        assert state.attention_label == "ASK"
         assert state.approval["approval_visible"] is False
         assert state.approval["approval_type"] == ""
         assert state.approval["approval_action"] == ""

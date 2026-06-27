@@ -1359,9 +1359,9 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: 'ASK?', priority: 0, attention: true},
+  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: 'ASK', priority: 0, attention: true},
   'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  [STATE_KEY.needsInput]: {label: 'Needs input', short: 'ASK?', priority: 1, attention: true},
+  [STATE_KEY.needsInput]: {label: 'Needs input', short: 'ASK', priority: 1, attention: true},
   [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
@@ -1385,8 +1385,89 @@ function stateDef(key) {
   return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
 }
 
-function promptAttentionClearKey(session, signature) {
-  return JSON.stringify([String(session || ''), String(signature || '')]);
+function attentionAcknowledgementKey(parts = []) {
+  return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
+}
+
+function attentionAcknowledgementKeysFromPayload(payload = {}) {
+  const keys = payload?.attention_acks?.keys;
+  return Array.isArray(keys) ? keys.map(key => String(key || '')).filter(Boolean) : [];
+}
+
+function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
+  const value = String(key || '');
+  if (!value) return false;
+  if (promptAttentionClears.has(value)) return true;
+  if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
+  return false;
+}
+
+function recordAttentionAcknowledgementKey(key) {
+  const value = String(key || '');
+  if (!value) return false;
+  setLimitedMapEntry(promptAttentionClears, value, Date.now(), 1024);
+  return true;
+}
+
+function applyAttentionAcknowledgementResponse(payload = {}) {
+  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
+  for (const key of keys) recordAttentionAcknowledgementKey(key);
+  if (payload?.auto_approve && typeof applyAutoApprovePayload === 'function') {
+    applyAutoApprovePayload(payload.auto_approve);
+  } else {
+    const sessionsToRefresh = new Set();
+    for (const key of keys) {
+      try {
+        const parts = JSON.parse(String(key || ''));
+        if (Array.isArray(parts) && parts[1]) sessionsToRefresh.add(String(parts[1]));
+      } catch (_) {}
+    }
+    for (const session of sessionsToRefresh) refreshTrackedSessionChrome(session);
+    updateTopbarActivityStatus();
+    syncTerminalAttentionHighlights();
+  }
+}
+
+function postAttentionAcknowledgementKeys(keys, options = {}) {
+  const unique = Array.from(new Set((Array.isArray(keys) ? keys : [keys]).map(key => String(key || '')).filter(Boolean)));
+  if (!unique.length) return false;
+  if (options.localOnly === true || typeof apiFetchJson !== 'function') {
+    applyAttentionAcknowledgementResponse({acknowledged: unique});
+    return true;
+  }
+  apiFetchJson('/api/attention-ack', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({keys: unique}),
+  })
+    .then(applyAttentionAcknowledgementResponse)
+    .catch(error => {
+      console.warn('attention acknowledgement failed', error);
+    });
+  return true;
+}
+
+function acknowledgeAttentionKeys(keys, options = {}) {
+  const unique = Array.from(new Set((Array.isArray(keys) ? keys : [keys]).map(key => String(key || '')).filter(Boolean)));
+  if (!unique.length) return false;
+  const delayMs = Math.max(0, Number(options.delayMs) || 0);
+  if (delayMs > 0) {
+    for (const key of unique) {
+      const existing = attentionAcknowledgementTimers.get(key);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        attentionAcknowledgementTimers.delete(key);
+        postAttentionAcknowledgementKeys([key], {...options, delayMs: 0});
+      }, delayMs);
+      attentionAcknowledgementTimers.set(key, timer);
+    }
+    return true;
+  }
+  return postAttentionAcknowledgementKeys(unique, options);
+}
+
+function promptAttentionClearKey(session, signature, payload = null) {
+  return String(payload?.prompt_attention_key || payload?.prompt?.attention_key || '') || attentionAcknowledgementKey(['prompt', session, signature]);
 }
 
 function promptAttentionPayloadSignature(payload = {}) {
@@ -1401,31 +1482,30 @@ function promptAttentionPayloadSignature(payload = {}) {
   return '';
 }
 
-function promptAttentionIsCleared(session, signature) {
-  return Boolean(signature) && promptAttentionClears.has(promptAttentionClearKey(session, signature));
+function promptAttentionIsCleared(session, signature, payload = null) {
+  return Boolean(signature) && attentionAcknowledgementKeyIsRecorded(promptAttentionClearKey(session, signature, payload), payload);
 }
 
 function promptAttentionExtra(session, payload = {}) {
   const signature = promptAttentionPayloadSignature(payload);
-  const cleared = promptAttentionIsCleared(session, signature);
+  const clearKey = promptAttentionClearKey(session, signature, payload);
+  const cleared = promptAttentionIsCleared(session, signature, payload);
   return {
     session,
     promptSignature: signature,
+    promptAttentionKey: clearKey,
     promptAttentionCleared: cleared,
     attention: !cleared,
     showBadge: !cleared,
   };
 }
 
-function clearPromptAttentionForSession(session) {
-  const signature = promptAttentionPayloadSignature(autoApproveStates.get(session) || {});
+function clearPromptAttentionForSession(session, options = {}) {
+  const payload = autoApproveStates.get(session) || {};
+  const signature = promptAttentionPayloadSignature(payload);
   if (!signature) return false;
-  setLimitedMapEntry(promptAttentionClears, promptAttentionClearKey(session, signature), Date.now(), 512);
-  refreshSessionChrome(session);
-  updateTopbarActivityStatus();
-  trackSessionStateChanges();
-  syncTerminalAttentionHighlight(session);
-  return true;
+  const key = promptAttentionClearKey(session, signature, payload);
+  return acknowledgeAttentionKeys([key], options);
 }
 
 function terminalDisconnected(session) {
@@ -1892,7 +1972,7 @@ function updateDocumentTitle() {
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
-// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/ASK?/blocked.
+// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/ASK/blocked.
 function globalActivityCounts() {
   const signalWindows = tmuxSignalWindows();
   let running = 0;
@@ -1907,7 +1987,7 @@ function globalActivityCounts() {
     const signalSession = tmuxSignalWindowSession(windowRecord);
     const signalPayload = signalSession ? (autoApproveStates.get(signalSession) || {}) : {};
     const signalPromptSignature = signalSession ? promptAttentionPayloadSignature(signalPayload) : '';
-    const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature) : false;
+    const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature, signalPayload) : false;
     if (windowRecord?.bell_flag === true && !signalPromptCleared) {
       const signalKey = tmuxSignalWindowKey(windowRecord);
       if (signalKey) bellSignalWindows.add(signalKey);
@@ -1934,7 +2014,7 @@ function globalActivityCounts() {
       ? (payload?.prompt?.yes_selected === true ? STATE_KEY.needsApproval : STATE_KEY.needsInput)
       : key;
     const promptSignature = promptAttentionPayloadSignature(payload);
-    const promptCleared = promptAttentionIsCleared(session, promptSignature);
+    const promptCleared = promptAttentionIsCleared(session, promptSignature, payload);
     if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
     else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
     else if (key === STATE_KEY.blocked) blocked += 1;
@@ -1955,7 +2035,7 @@ function globalActivityStatusLineHtml() {
   const askTone = counts.ask ? 'attention' : '';
   const blockedTone = counts.blocked ? 'attention' : '';
   parts.push(`<span class="${esc(statusIndicatorInlineClasses(runTone, 'topbar-activity-run', counts.running ? 'active' : ''))}">${counts.running} RUN</span>`);
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses(askTone, 'topbar-activity-ask', counts.ask ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(askTone)}>${counts.ask} ASK?</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(askTone, 'topbar-activity-ask', counts.ask ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(askTone)}>${counts.ask} ASK</span>`);
   parts.push(`<span class="${esc(statusIndicatorInlineClasses(blockedTone, 'topbar-activity-blocked', counts.blocked ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(blockedTone)}>${counts.blocked} blocked</span>`);
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
@@ -1983,13 +2063,39 @@ function updateTopbarActivityStatus() {
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
-function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
+const attentionAnimationDelayProperty = '--attention-animation-delay';
+
+function attentionAnimationDurationMs(durationMs = redReminderMs) {
   const duration = Math.max(1, Number(durationMs) || Number(redReminderMs) || 1);
+  return duration;
+}
+
+function attentionAnimationPhaseMs(now = Date.now(), durationMs = redReminderMs) {
+  const duration = attentionAnimationDurationMs(durationMs);
+  return ((Number(now) || 0) % duration + duration) % duration;
+}
+
+function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
+  const duration = attentionAnimationDurationMs(durationMs);
   return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
-function attentionAnimationStyle(now = Date.now(), durationMs = redReminderMs, property = '--attention-animation-delay') {
-  return `${property}: ${attentionAnimationDelay(now, durationMs)}`;
+function attentionAnimationClockDelay(now = Date.now(), durationMs = redReminderMs) {
+  const current = document?.documentElement?.style?.getPropertyValue?.(attentionAnimationDelayProperty)?.trim();
+  return current || setAttentionAnimationClockDelay(now, durationMs);
+}
+
+function attentionAnimationStyle(now = Date.now(), durationMs = redReminderMs, property = attentionAnimationDelayProperty) {
+  const value = property === attentionAnimationDelayProperty
+    ? attentionAnimationClockDelay(now, durationMs)
+    : attentionAnimationDelay(now, durationMs);
+  return `${property}: ${value}`;
+}
+
+function setAttentionAnimationClockDelay(now = Date.now(), durationMs = redReminderMs) {
+  const delay = attentionAnimationDelay(now, durationMs);
+  document?.documentElement?.style?.setProperty?.(attentionAnimationDelayProperty, delay);
+  return delay;
 }
 
 function syncAttentionAnimation(node, active) {
@@ -1997,11 +2103,10 @@ function syncAttentionAnimation(node, active) {
   node.classList?.toggle?.('attention-pulse', active === true);
   node.classList?.toggle?.('heartbeat-pulse', active === true);
   if (active) {
-    if (!node.style.getPropertyValue('--attention-animation-delay')) {
-      node.style.setProperty('--attention-animation-delay', attentionAnimationDelay());
-    }
+    attentionAnimationClockDelay();
+    node.style.removeProperty(attentionAnimationDelayProperty);
   } else {
-    node.style.removeProperty('--attention-animation-delay');
+    node.style.removeProperty(attentionAnimationDelayProperty);
   }
 }
 

@@ -102,7 +102,7 @@ Visual behavior contracts live in [`docs/specs/GUI.md`](specs/GUI.md). Use this 
 
 - Reproduce the exact visible state in a browser/Selenium fixture. Do not declare a visual fix done from source grep, unit assertions, or one screenshot.
 - For animation, color, glow, and pulse bugs, target the exact DOM element under the user's screenshot, capture computed styles, and sample at least three rendered frames or equivalent pixel/computed-style values across one animation period. Test `prefers-reduced-motion` when the bug touches motion.
-- Compare against a known-good element in the same page when the contract has one, such as `ASK?` for status-ball cadence. Status-ball-specific acceptance criteria live in [`docs/specs/GUI.md` -> Agent Status Indicators](specs/GUI.md#agent-status-indicators).
+- Compare against a known-good element in the same page when the contract has one, such as `ASK` for status-ball cadence. Status-ball-specific acceptance criteria live in [`docs/specs/GUI.md` -> Agent Status Indicators](specs/GUI.md#agent-status-indicators).
 - If the fix changes `static_src`, run `python3 tools/static_build.py` and verify the served `static/` bundle changed. If the behavior depends on Python/server state or live tmux activity, restart the active dev server before saying the live port is fixed.
 - Keep raw screenshots and run logs under `/tmp`; commit only the regression test and a short durable note. For shared visual components, grep for duplicate size/color/animation paths first and route every surface through one parent token/helper in the same change.
 

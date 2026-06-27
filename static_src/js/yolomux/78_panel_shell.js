@@ -1107,6 +1107,13 @@ function bindPanelShell(panel, session) {
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   panel.addEventListener('pointerdown', event => {
     if (isTmuxSession(session)) {
+      const windowTarget = event.target?.closest?.('[data-window-index]');
+      const chromeTarget = event.target?.closest?.('[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session]');
+      if (windowTarget) return;
+      if (chromeTarget) {
+        setFocusedTerminal(session, {userInitiated: true, acknowledgeAgentWindow: false});
+        return;
+      }
       if (eventTargetIsTerminalFocusSurface(event?.target)) {
         focusTerminalFromUserAction(session);
       } else {
@@ -1870,6 +1877,9 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
+    if (typeof acknowledgeAgentWindowActivity === 'function') {
+      acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
+    }
     tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);
     return;
   }

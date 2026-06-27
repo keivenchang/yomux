@@ -689,6 +689,14 @@ def post_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     request.write_app_result(request.server.app.set_auto_approve(session, enabled))
 
 
+def post_attention_ack(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    request.write_app_result(request.server.app.acknowledge_attention(payload))
+
+
 def post_notify(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
@@ -1001,6 +1009,7 @@ CORE_ROUTES = (
     Route("POST", "/api/kill-session", "admin", post_kill_session, group="core"),
     Route("POST", "/api/upload", "admin", post_upload, group="core"),
     Route("POST", "/api/auto-approve", "admin", post_auto_approve, group="core"),
+    Route("POST", "/api/attention-ack", "admin", post_attention_ack, body_limit=16 * 1024, group="core"),
     Route("POST", "/api/notify", "admin", post_notify, group="core"),
     Route("POST", "/api/settings", "admin", post_settings, body_limit=64 * 1024, group="core"),
     Route("POST", "/api/watch/roots", "admin", post_watch_roots, body_limit=64 * 1024, group="core"),

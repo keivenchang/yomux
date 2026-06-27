@@ -224,6 +224,8 @@ METADATA_BADGE_PULSE_SECONDS = 20.0
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
+ATTENTION_ACK_MAX_KEYS = 4096
+ATTENTION_ACK_TTL_SECONDS = 7 * 24 * 3600
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 30.0
 SESSION_FILES_CACHE_VERSION = 1
@@ -1115,6 +1117,8 @@ class TmuxWebtermApp:
         self.stats_history_raw_buckets: dict[tuple[int, int], dict[str, Any]] = {}
         self.stats_history_rollup_buckets: dict[tuple[int, int], dict[str, Any]] = {}
         self.stats_history_sequence = 0
+        self.attention_ack_lock = threading.RLock()
+        self.attention_ack_keys: dict[str, float] = {}
         self.stats_agent_token_lock = threading.Lock()
         self.stats_agent_token_state: dict[str, dict[str, Any]] = {}
         self.stats_agent_activity_state: dict[str, dict[str, Any]] = {}
@@ -8262,6 +8266,110 @@ class TmuxWebtermApp:
         return self.activity_record_recency_ts(record if isinstance(record, dict) else None)
 
     @staticmethod
+    def attention_ack_key(*parts: Any) -> str:
+        return json.dumps([str(part or "") for part in parts], separators=(",", ":"))
+
+    @staticmethod
+    def prompt_attention_signature(prompt: dict[str, Any] | None, screen: dict[str, Any] | None) -> str:
+        prompt_payload = prompt if isinstance(prompt, dict) else {}
+        screen_payload = screen if isinstance(screen, dict) else {}
+        if prompt_payload.get("visible") is True:
+            for key in ("signature", "hash", "question_text", "text", "command"):
+                value = str(prompt_payload.get(key) or "").strip()
+                if value:
+                    return value
+        if str(screen_payload.get("key") or "") in {"approval", "needs-approval", "needs-input"}:
+            for key in ("signature", "hash", "question_text", "text", "key"):
+                value = str(screen_payload.get(key) or "").strip()
+                if value:
+                    return value
+        return ""
+
+    def prompt_attention_key(self, session: str, prompt: dict[str, Any] | None, screen: dict[str, Any] | None) -> str:
+        signature = self.prompt_attention_signature(prompt, screen)
+        return self.attention_ack_key("prompt", session, signature) if signature else ""
+
+    @staticmethod
+    def agent_window_attention_signature(state: str, screen: dict[str, Any] | None, stopped_ts: float = 0.0) -> str:
+        if state == "cooldown":
+            return str(stopped_ts) if stopped_ts > 0 else ""
+        if state not in {"approval", "needs-approval", "needs-input", "interrupted"}:
+            return ""
+        screen_payload = screen if isinstance(screen, dict) else {}
+        for key in ("signature", "hash", "question_text", "text", "key"):
+            value = str(screen_payload.get(key) or "").strip()
+            if value:
+                return value
+        return state
+
+    def agent_window_attention_key(self, session: str, window: str, pane_target: str, kind: str, state: str, signature: str) -> str:
+        if not signature:
+            return ""
+        return self.attention_ack_key("agent-window", session, self.agent_window_index_key(window), pane_target, kind, state, signature)
+
+    def prune_attention_ack_keys_locked(self, now: float | None = None) -> None:
+        current = time.time() if now is None else now
+        for key, ts in list(self.attention_ack_keys.items()):
+            if current - ts > ATTENTION_ACK_TTL_SECONDS:
+                self.attention_ack_keys.pop(key, None)
+        while len(self.attention_ack_keys) > ATTENTION_ACK_MAX_KEYS:
+            oldest = min(self.attention_ack_keys, key=lambda item: self.attention_ack_keys[item])
+            self.attention_ack_keys.pop(oldest, None)
+
+    def attention_acknowledged(self, key: str) -> bool:
+        if not key:
+            return False
+        with self.attention_ack_lock:
+            self.prune_attention_ack_keys_locked()
+            return key in self.attention_ack_keys
+
+    def attention_ack_payload_for_session(self, session: str) -> dict[str, Any]:
+        with self.attention_ack_lock:
+            self.prune_attention_ack_keys_locked()
+            keys = []
+            for key in self.attention_ack_keys:
+                try:
+                    parts = json.loads(key)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(parts, list) and len(parts) >= 2 and str(parts[1]) == str(session):
+                    keys.append(key)
+        return {"keys": sorted(keys)}
+
+    def invalidate_auto_approve_cache(self) -> None:
+        with self.auto_approve_cache_condition:
+            self.auto_approve_cache = None
+            self.auto_approve_cache_refreshing = False
+            self.auto_approve_cache_condition.notify_all()
+
+    def acknowledge_attention(self, payload: dict[str, Any] | None) -> tuple[dict[str, Any], HTTPStatus]:
+        source = payload if isinstance(payload, dict) else {}
+        raw_keys = source.get("keys") if isinstance(source.get("keys"), list) else [source.get("key")]
+        keys: list[str] = []
+        for raw in raw_keys:
+            key = str(raw or "").strip()
+            if not key or len(key) > 512 or key in keys:
+                continue
+            keys.append(key)
+        if not keys:
+            return {"error": "attention acknowledgement keys required"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        with self.attention_ack_lock:
+            for key in keys:
+                self.attention_ack_keys[key] = now
+            self.prune_attention_ack_keys_locked(now)
+        self.invalidate_auto_approve_cache()
+        auto_payload, status = self.auto_approve_status()
+        if status == HTTPStatus.OK and isinstance(auto_payload, dict):
+            self.publish_client_event(
+                "auto_approve_changed",
+                {"status": int(status), "data": auto_payload},
+                trigger="attention_ack",
+                cache="ready",
+            )
+        return {"ok": True, "acknowledged": keys, "auto_approve": auto_payload, "status": int(status)}, HTTPStatus.OK
+
+    @staticmethod
     def agent_window_index_key(value: Any) -> str:
         try:
             number = int(value)
@@ -8400,6 +8508,7 @@ class TmuxWebtermApp:
             state = self.agent_window_state_from_screen(screen)
             elapsed = self.float_value(screen.get("display_elapsed_seconds"), self.float_value(screen.get("status_elapsed_seconds"), -1.0))
             last_active_ts = self.agent_window_last_active_ts(activity, session, window)
+            working_stopped_ts = last_active_ts if state == "idle" and last_active_ts > 0 else 0.0
             window_index: int | None
             try:
                 window_index = int(window)
@@ -8418,7 +8527,11 @@ class TmuxWebtermApp:
             path_entries = copy.deepcopy(path_record.get("path_entries") if isinstance(path_record, dict) else [])
             paths = [str(item.get("path") or "") for item in path_entries if isinstance(item, dict) and str(item.get("path") or "")]
             fallback_path = str(path_record.get("path") or "") if isinstance(path_record, dict) else ""
-            rows.append({
+            attention_signature = self.agent_window_attention_signature(state, screen)
+            attention_key = self.agent_window_attention_key(session, window, str(agent.pane_target or ""), kind, state, attention_signature)
+            cooldown_signature = self.agent_window_attention_signature("cooldown", screen, working_stopped_ts)
+            cooldown_attention_key = self.agent_window_attention_key(session, window, str(agent.pane_target or ""), kind, "cooldown", cooldown_signature)
+            row = {
                 "kind": kind,
                 "state": state,
                 "window": window,
@@ -8441,11 +8554,19 @@ class TmuxWebtermApp:
                 "working_elapsed_seconds": elapsed if state == "working" and elapsed >= 0 else None,
                 "idle_since": last_active_ts if state == "idle" and last_active_ts > 0 else None,
                 "last_active_ts": last_active_ts,
+                "working_stopped_ts": working_stopped_ts if working_stopped_ts > 0 else None,
                 "observed_ts": observed_ts,
                 "screen_text": str(screen.get("text") or ""),
                 "status_tokens": screen.get("status_tokens") if isinstance(screen.get("status_tokens"), (int, float)) else None,
                 "_agent_order": agent_index,
-            })
+            }
+            if attention_key:
+                row["attention_key"] = attention_key
+                row["attention_acknowledged"] = self.attention_acknowledged(attention_key)
+            if cooldown_attention_key:
+                row["cooldown_attention_key"] = cooldown_attention_key
+                row["cooldown_acknowledged"] = self.attention_acknowledged(cooldown_attention_key)
+            rows.append(row)
         state_rank = {"working": 0, "approval": 1, "needs-input": 2, "idle": 3}
         rows.sort(key=lambda item: (state_rank.get(str(item.get("state") or ""), 9), item.get("window_index") if isinstance(item.get("window_index"), int) else 9999, int(item.get("_agent_order") or 0)))
         for item in rows:
@@ -8508,8 +8629,16 @@ class TmuxWebtermApp:
             capture_bare_session_when_roster=capture_bare_session_when_roster,
         )
         add_phase_timing(timings, "prompt_screen", prompt_started)
+        prompt_attention_key = self.prompt_attention_key(session, prompt, screen)
+        if prompt_attention_key:
+            prompt["attention_key"] = prompt_attention_key
+            prompt["attention_acknowledged"] = self.attention_acknowledged(prompt_attention_key)
         payload["prompt"] = prompt
         payload["screen"] = screen
+        payload["attention_acks"] = self.attention_ack_payload_for_session(session)
+        if prompt_attention_key:
+            payload["prompt_attention_key"] = prompt_attention_key
+            payload["prompt_attention_acknowledged"] = self.attention_acknowledged(prompt_attention_key)
         info = discovered_sessions.get(session) if discovered_sessions is not None else None
         agent_windows_started = time.perf_counter()
         payload["agent_windows"] = self.agent_window_status_payloads(
