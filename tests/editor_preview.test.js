@@ -161,6 +161,7 @@ async function runEditorPreviewSuite() {
     const dateCell = row => row.querySelector(':scope > .file-tree-date');
     const tokensCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
+    const paneTabsCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
     const treeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const settingsRuntimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
@@ -200,13 +201,14 @@ async function runEditorPreviewSuite() {
     assert.equal(/#a9ff7a/.test(sessionsCss), false, 'working balls do not peak into the old yellow-lime tone');
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'the --active agent glyph keeps the glow-cadence; status states use a static symbol plus a glowing ball');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*display:\s*inline-flex[\s\S]*gap:\s*2px/.test(sessionsCss), 'agent status symbols and balls render side by side through the shared inline-flex activity wrapper');
-    assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*14px/.test(sessionsCss), 'the shared activity wrapper owns the single agent status-ball size token');
+    assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)/.test(sessionsCss), 'the shared activity wrapper owns the base agent status-ball size token');
+    assert.ok(/\.tmux-window-button \.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*calc\(var\(--agent-status-ball-size-base\) \* 3 \/ 5\)/.test(paneTabsCss), 'tmux sub-window buttons share the compact agent status-ball size override');
     assert.ok(/\.agent-window-status-dot\s*\{[\s\S]*font-family:\s*var\(--ui-font\)[\s\S]*font-stretch:\s*normal/.test(sessionsCss), 'agent status dots reset inherited condensed tab text so Tabber session-tab balls do not shrink');
     assert.ok(/\.status-indicator--dot\.agent-window-status-dot--segmented\s*\{[\s\S]*background:\s*var\(--agent-status-segment-bg, currentColor\)/.test(sessionsCss), 'multi-state session tabs render one segmented status ball inside the shared dot footprint');
     assert.ok(/\.agent-window-status-dot--attention-cooldown-working\s*\{[\s\S]*conic-gradient\([\s\S]*var\(--agent-status-segment-attention\)[\s\S]*var\(--agent-status-segment-cooldown\)[\s\S]*var\(--agent-status-segment-working\)/.test(sessionsCss), 'tri-color session tab status balls divide red, yellow, and green through one conic gradient');
     assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*agentWindowStatusToneOrder\(options\.statusTones \|\| \[tone\]\)[\s\S]*agent-window-status-dot--segmented[\s\S]*agent-window-status-dot--tone-/.test(activitySource), 'the shared status dot renderer owns segmented multi-tone tab balls');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
-    assert.equal((sessionsCss.match(/--agent-status-ball-size:/g) || []).length, 1, 'agent status-ball size has one owner');
+    assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared tmux-window compact override');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(sessionsCss), false, 'status balls do not size themselves from the surface-specific agent icon token');
     assert.equal(/agent-symbol-status-alternate|agent-status-dot-alternate|--agent-alternate-animation-delay|--agent-alternate-pulse-duration/.test(sessionsCss + activitySource + layoutSource), false, 'agent status indicators no longer alternate symbol and ball');
     assert.equal(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid/.test(sessionsCss), false, 'ASK/cooldown agent glyphs and dots are not grid-stacked overlays');

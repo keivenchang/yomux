@@ -1235,9 +1235,9 @@ async function runTabberSuite() {
     assert.ok(/function setTabberSessionFileLookbackHours\(hours, options = \{\}\)[\s\S]*clearTabberSessionFilesStates\(\)[\s\S]*fetchTabberActivity\(\)/.test(source), 'changing Tabber lookback reloads the cached activity agent-window records');
     assert.ok(/\.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-agent-icon-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber owns one row-scale agent icon-size token');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.session-agent-activity-marker \.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*var\(--tabber-agent-icon-size\)/.test(css), 'Tabber parent session tabs use the shared row-scale agent icon-size token');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*var\(--tabber-agent-icon-size\)/.test(css), 'Tabber child process rows use the same row-scale agent icon-size token');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-token\s*\{[\s\S]*display:\s*inline-flex[\s\S]*max-width:\s*100%/.test(css), 'Tabber child process rows wrap shared tmux-window buttons in a row-sized token');
     assert.ok(/\.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*var\(--agent-window-icon-size\)[\s\S]*height:\s*var\(--agent-window-icon-size\)/.test(css), 'shared agent process icons inherit width and height from the shared activity-size variable');
-    assert.equal((css.match(/--agent-status-ball-size:/g) || []).length, 1, 'status ball size has one shared owner outside Tabber-specific row sizing');
+    assert.equal((css.match(/--agent-status-ball-size:/g) || []).length, 2, 'status ball size has only the base owner and shared tmux-window compact override');
     assert.ok(/\.agent-window-status-dot\s*\{[\s\S]*font-family:\s*var\(--ui-font\)[\s\S]*font-stretch:\s*normal/.test(css), 'Tabber status balls reset inherited condensed tab typography instead of shrinking beside the agent icon');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(css), 'Tabber status balls inherit the shared agent status-ball glyph size parent');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(css), false, 'Tabber status balls do not inherit the surface-specific icon size path');
@@ -1281,7 +1281,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('function setTreeItemAria(row') && (source.match(/setTreeItemAria\(row/g) || []).length >= 2, 'DOIT.61 B5: treeitem aria is shared');
     assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
     assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
-    assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, pid: data.pid})") && source.includes('function agentWindowPayloadCurrent(agent)') && source.includes('data.activityIconHtml || agentIcon'), 'DOIT.61 B7/PD: current window state, activity glyphs, and pid are passed as separate data');
+    assert.ok(/function tabberWindowButtonHtml\(data, label\)[\s\S]*tmuxWindowDisplayLabel\(visibleName, Math\.floor\(pid\)\)[\s\S]*tmuxWindowButtonHtml\(\{[\s\S]*classes:\s*\['tabber-window-button'\][\s\S]*showNumberLabel:\s*false[\s\S]*stripTitleAttrs\(buttonHtml\)/.test(source) && source.includes('function agentWindowPayloadCurrent(agent)'), 'DOIT.61 B7/PD: Tabber tmux sub-window rows route through the shared compact button helper while showing pid text and stripping native titles');
     assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux sub-window record source as Tabber');
     assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux sub-window pid formatter');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');
@@ -1441,7 +1441,8 @@ async function runTabberSuite() {
     assert.equal(/\stitle=/.test((activeSessionRow.nameHtml || '').split('<div class="session-popover"')[0]), false, 'visible Tabber tab chrome strips nested native title hovers');
     assert.ok(activeSessionRow.classes.includes('tabber-active-session'), 'A5: the current tmux session row gets the active-session class');
     const activeWindowRow = rows.find(r => r.type === 'window' && /^0:claude/.test(r.name));
-    assert.ok(activeWindowRow?.nameHtml.includes('tabber-window-pid') && activeWindowRow.nameHtml.includes('(pid=12345)'), 'PD4: agent Tabber rows render canonical index:agent plus pid');
+    assert.ok(activeWindowRow?.nameHtml.includes('tmux-window-button tabber-window-button') && activeWindowRow.nameHtml.includes('data-tabber-window-button="shared"'), 'PD4: agent Tabber rows render through the shared compact tmux sub-window button');
+    assert.ok(activeWindowRow?.nameHtml.includes('(pid=12345)'), 'PD4: agent Tabber rows render pid inside the compact visible sub-window label');
     assert.equal(/\stitle=/.test(activeWindowRow?.nameHtml || ''), false, 'visible Tabber window chrome strips nested native title hovers');
     assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux sub-window row exposes aria-current');
     assert.equal(activeWindowRow?.date, 'working for 3h 45m', 'TD1: working agent Tabber rows use the shared state text with working duration');
@@ -1458,7 +1459,8 @@ async function runTabberSuite() {
       {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude'},
     ]});
     const shellWindowRow = rows.find(r => r.type === 'window' && /1:bash/.test(r.name));
-    assert.ok(shellWindowRow?.nameHtml.includes('tabber-window-pid') && shellWindowRow.nameHtml.includes('(pid=54321)'), 'PD5: bash Tabber rows still render their pid from record data');
+    assert.ok(shellWindowRow?.nameHtml.includes('tmux-window-button tabber-window-button') && shellWindowRow.nameHtml.includes('1:bash'), 'PD5: bash Tabber rows use the same compact tmux sub-window button shell');
+    assert.ok(shellWindowRow?.nameHtml.includes('(pid=54321)'), 'PD5: bash Tabber rows render pid inside the compact visible sub-window label');
     assert.equal(shellWindowRow?.icon, '', 'shell/process window leaf rows do not render the old neutral process glyph');
     assert.notEqual(shellWindowRow?.date, 'working for 3h 45m', 'TD4: non-AI tmux sub-windows do not inherit working duration text');
     assert.equal(rows.some(r => r.type === 'window' && ['▢', '■', '⌁'].includes(r.icon)), false, 'tmux sub-window rows never render checkbox-looking or decorative process glyphs');
@@ -1512,14 +1514,14 @@ async function runTabberSuite() {
     assert.equal(rows.some(r => r.type === 'session' && r.nameHtml.includes('data-tabber-expand')), false, 'session description text is part of the row activation target');
     assert.equal(activeWindowRow?.classes.includes('tabber-active-window'), true, '#2: the current AI window is marked by row emphasis instead of a competing dot');
     assert.equal(rows.some(r => r.type === 'window' && /tabber-window-active/.test(r.nameHtml)), false, '#2: current-window state no longer renders a circle marker beside agent status icons');
-    assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon claude')), 'Claude Tabber window rows show the shared Claude icon');
-    assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber window rows show the shared Codex icon');
+    assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tmux-window-button tabber-window-button') && r.nameHtml.includes('agent-icon claude')), 'Claude Tabber window rows show the shared Claude icon inside the shared button shell');
+    assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tmux-window-button tabber-window-button') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber window rows show the shared Codex icon inside the shared button shell');
     const claudeWindowRow = activeWindowRow;
-    assert.ok(/tabber-window-label[^>]*>[\s\S]*agent-icon claude[\s\S]*tabber-window-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'Claude icon renders before the canonical window name');
-    assert.equal(/tabber-window-label[^>]*>[\s\S]*tabber-window-text[^>]*>0:claude<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), false, 'Claude icon no longer renders after the canonical window name');
-    assert.equal(/agent-icon[\s\S]*tabber-window-text[^>]*>1:bash</.test(shellWindowRow?.nameHtml || ''), false, 'bash Tabber rows do not gain a leading agent icon');
-    assert.ok(/agent-icon claude[^"]*agent-window-agent-icon--working[\s\S]*tabber-window-text[^>]*>0:claude<[\s\S]*tabber-window-pid/.test(claudeWindowRow?.nameHtml || ''), 'working agent glyph stays before the canonical window name and pid stays after it');
-    assert.ok(/agent-window-agent-icon--working[\s\S]*?status-indicator--dot[\s\S]*?status-indicator--working[\s\S]*?tabber-window-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'working Tabber rows render the green status ball (a working-tone status dot) beside the static agent symbol');
+    assert.ok(/tmux-window-button tabber-window-button[\s\S]*agent-icon claude[\s\S]*tmux-window-name-text[^>]*>0:claude \(pid=12345\)</.test(claudeWindowRow?.nameHtml || ''), 'Claude icon renders before the canonical window name plus pid');
+    assert.equal(/tmux-window-button tabber-window-button[\s\S]*tmux-window-name-text[^>]*>0:claude \(pid=12345\)<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), false, 'Claude icon no longer renders after the canonical window name plus pid');
+    assert.equal(/agent-icon[\s\S]*tmux-window-name-text[^>]*>1:bash</.test(shellWindowRow?.nameHtml || ''), false, 'bash Tabber rows do not gain a leading agent icon');
+    assert.ok(/agent-icon claude[^"]*agent-window-agent-icon--working[\s\S]*tmux-window-name-text[^>]*>0:claude \(pid=12345\)</.test(claudeWindowRow?.nameHtml || ''), 'working agent glyph stays before the canonical window name plus pid');
+    assert.ok(/agent-window-agent-icon--working[\s\S]*?status-indicator--dot[\s\S]*?status-indicator--working[\s\S]*?tmux-window-name-text[^>]*>0:claude \(pid=12345\)</.test(claudeWindowRow?.nameHtml || ''), 'working Tabber rows render the green status ball (a working-tone status dot) beside the static agent symbol');
     api.setFileExplorerTreeSortModeForTest('newest');
     api.setTabberActivityForTest({activity: {'1:1': {last_user_input_ts: 99999}, '1:0': {last_user_input_ts: 1}}});
     api.setTabberCollapsedForTest(['/s_1']);

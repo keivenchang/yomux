@@ -1816,7 +1816,8 @@ function tmuxWindowButtonHtml(options = {}) {
     : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '');
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
   const numberLabel = String(options.numberLabel || options.indexText || visibleName);
-  return `<${tag} ${attrs.join(' ')}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${labelHtml}</span></span><span class="tmux-window-number-label">${esc(numberLabel)}</span></${tag}>`;
+  const numberHtml = options.showNumberLabel === false ? '' : `<span class="tmux-window-number-label">${esc(numberLabel)}</span>`;
+  return `<${tag} ${attrs.join(' ')}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${labelHtml}</span></span>${numberHtml}</${tag}>`;
 }
 
 function tmuxWindowAgentKey(name) {

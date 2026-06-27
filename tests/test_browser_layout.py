@@ -53,6 +53,20 @@ def _working_agent_glyph_html(kind, element_id):
     return _agent_status_glyph_html(kind, "working", element_id)
 
 
+def _tabber_window_button_html(kind, label, glyph_html, active=False):
+    active_class = " active" if active else ""
+    return f"""
+      <span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">
+        <span class="tab tmux-window-button tabber-window-button{active_class}" data-tabber-window-button="shared">
+          <span class="tmux-window-name-label">
+            {glyph_html}
+            <span class="tmux-window-name-text">{label}</span>
+          </span>
+        </span>
+      </span>
+    """
+
+
 def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
     page = tmp_path / "debug-agent-status-axis-guides.html"
     page.write_text(page_html("""
@@ -435,18 +449,12 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
         </button>
         <div id="tabber-claude-row" class="file-tree-row tabber-row selected" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            <span class="tabber-window-label">
-              {_working_agent_glyph_html("claude", "tabber-claude")}
-              <span class="tabber-window-text">0:claude</span>
-            </span>
+            {_tabber_window_button_html("claude", "0:claude", _working_agent_glyph_html("claude", "tabber-claude"))}
           </span>
         </div>
         <div id="tabber-codex-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            <span class="tabber-window-label">
-              {_working_agent_glyph_html("codex", "tabber-codex")}
-              <span class="tabber-window-text">1:codex</span>
-            </span>
+            {_tabber_window_button_html("codex", "1:codex", _working_agent_glyph_html("codex", "tabber-codex"))}
           </span>
         </div>
       </section>
@@ -518,10 +526,7 @@ def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
       <section class="glow-pixel-fixture">
         <div id="tabber-glow-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            <span class="tabber-window-label">
-              {_working_agent_glyph_html("codex", "tabber-glow")}
-              <span class="tabber-window-text">0:codex</span>
-            </span>
+            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-glow"))}
           </span>
         </div>
       </section>
@@ -530,7 +535,7 @@ def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
       .glow-pixel-fixture { display: grid; justify-items: start; gap: 24px; }
       #tabber-glow-row { width: 320px; padding: 14px 18px; background: #101820; overflow: visible; }
       #tabber-glow-row .file-tree-name,
-      #tabber-glow-row .tabber-window-label,
+      #tabber-glow-row .tabber-window-token,
       #tabber-glow-row .agent-window-activity { overflow: visible; }
     """), encoding="utf-8")
     browser.get(page.as_uri())
@@ -604,10 +609,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         </div>
         <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            <span class="tabber-window-label">
-              {_agent_status_glyph_html("claude", "cooldown", "tabber-window-cooldown")}
-              <span class="tabber-window-text">0:claude</span>
-            </span>
+            {_tabber_window_button_html("claude", "0:claude", _agent_status_glyph_html("claude", "cooldown", "tabber-window-cooldown"))}
           </span>
         </div>
         <div id="info-pane" class="pane-info-bar">
@@ -704,19 +706,30 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     assert metrics["infoAttention"]["dotToneAttention"] is True, metrics
     assert metrics["tabberSessionWorking"]["dotToneWorking"] is True, metrics
     assert metrics["tabberWindowCooldown"]["dotToneCooldown"] is True, metrics
-    agent_ball_sizes = {metrics[name]["agentStatusBallSize"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")}
-    dot_font_sizes = {metrics[name]["dotFontSize"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")}
-    peak_widths = [metrics[name]["dotWidth"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")]
-    peak_heights = [metrics[name]["dotHeight"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")]
+    aggregate_names = ("dockAttention", "tabberSessionWorking")
+    subwindow_names = ("tabberWindowCooldown", "infoAttention")
+    aggregate_ball_sizes = {metrics[name]["agentStatusBallSize"] for name in aggregate_names}
+    aggregate_dot_font_sizes = {metrics[name]["dotFontSize"] for name in aggregate_names}
+    aggregate_peak_widths = [metrics[name]["dotWidth"] for name in aggregate_names]
+    aggregate_peak_heights = [metrics[name]["dotHeight"] for name in aggregate_names]
+    subwindow_peak_widths = [metrics[name]["dotWidth"] for name in subwindow_names]
+    subwindow_peak_heights = [metrics[name]["dotHeight"] for name in subwindow_names]
     transforms = {metrics[name]["dotTransform"] for name in ("dockAttention", "tabberSessionWorking", "tabberWindowCooldown", "infoAttention")}
-    assert agent_ball_sizes == {"14px"}, metrics
-    assert dot_font_sizes == {"14px"}, metrics
-    assert max(peak_widths) - min(peak_widths) <= 0.5, metrics
-    assert max(peak_heights) - min(peak_heights) <= 0.5, metrics
+    assert aggregate_ball_sizes == {"14px"}, metrics
+    assert aggregate_dot_font_sizes == {"14px"}, metrics
+    for name in subwindow_names:
+        assert "calc(" in metrics[name]["agentStatusBallSize"], (name, metrics)
+        assert 7.5 <= float(metrics[name]["dotFontSize"].replace("px", "")) <= 9.5, (name, metrics)
+        assert metrics[name]["dotWidth"] < min(aggregate_peak_widths), (name, metrics)
+        assert metrics[name]["dotHeight"] < min(aggregate_peak_heights), (name, metrics)
+    assert max(aggregate_peak_widths) - min(aggregate_peak_widths) <= 0.5, metrics
+    assert max(aggregate_peak_heights) - min(aggregate_peak_heights) <= 0.5, metrics
+    assert max(subwindow_peak_widths) - min(subwindow_peak_widths) <= 0.5, metrics
+    assert max(subwindow_peak_heights) - min(subwindow_peak_heights) <= 0.5, metrics
     assert len(transforms) == 1, metrics
 
 
-def test_tabber_parent_child_status_balls_share_parent_size_and_phase(browser, tmp_path):
+def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(browser, tmp_path):
     page = tmp_path / "tabber-parent-child-status-ball-parity.html"
     page.write_text(page_html(f"""
       <section class="tabber-ball-parity-fixture">
@@ -733,10 +746,7 @@ def test_tabber_parent_child_status_balls_share_parent_size_and_phase(browser, t
         </div>
         <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 22px;">
           <span class="file-tree-name">
-            <span class="tabber-window-label">
-              {_working_agent_glyph_html("codex", "tabber-window-working")}
-              <span class="tabber-window-text">0:codex</span>
-            </span>
+            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-window-working"))}
           </span>
         </div>
       </section>
@@ -746,7 +756,7 @@ def test_tabber_parent_child_status_balls_share_parent_size_and_phase(browser, t
       .file-tree-row.tabber-row { width: 620px; padding: 5px 8px; background: #2c3340; overflow: visible; }
       .file-tree-name,
       .tabber-session-tab,
-      .tabber-window-label,
+      .tabber-window-token,
       .agent-window-activity { overflow: visible; }
     """), encoding="utf-8")
     browser.get(page.as_uri())
@@ -792,9 +802,13 @@ def test_tabber_parent_child_status_balls_share_parent_size_and_phase(browser, t
         """
     )
     assert metrics["parent"]["iconSize"] != metrics["child"]["iconSize"], metrics
+    assert metrics["parent"]["agentStatusBallSize"] == "14px", metrics
+    assert metrics["parent"]["dotFontSize"] == "14px", metrics
+    assert "calc(" in metrics["child"]["agentStatusBallSize"], metrics
+    assert 7.5 <= float(metrics["child"]["dotFontSize"].replace("px", "")) <= 9.5, metrics
+    assert metrics["child"]["width"] < metrics["parent"]["width"], metrics
+    assert metrics["child"]["height"] < metrics["parent"]["height"], metrics
     for side in ("parent", "child"):
-        assert metrics[side]["agentStatusBallSize"] == "14px", metrics
-        assert metrics[side]["dotFontSize"] == "14px", metrics
         assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
         assert "attention-ring-fade" in metrics[side]["animationName"], metrics
         assert "working-ball-hard-flash" in metrics[side]["animationName"], metrics
@@ -802,8 +816,6 @@ def test_tabber_parent_child_status_balls_share_parent_size_and_phase(browser, t
     assert metrics["parent"]["animationDelay"] == metrics["child"]["animationDelay"], metrics
     assert metrics["parent"]["animationTimingFunction"] == metrics["child"]["animationTimingFunction"], metrics
     assert metrics["parent"]["transform"] == metrics["child"]["transform"], metrics
-    assert abs(metrics["parent"]["width"] - metrics["child"]["width"]) <= 0.5, metrics
-    assert abs(metrics["parent"]["height"] - metrics["child"]["height"]) <= 0.5, metrics
 
 
 def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(browser, tmp_path):
@@ -1040,14 +1052,18 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
         </span>
       </button>
       <div class="file-tree-row tabber-row" style="--file-explorer-font-size: 14px;">
-        <span class="tabber-window-label">
-          <span id="tabber" class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s">
-            <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#667ef8" d="M3 12a9 9 0 1 0 18 0A9 9 0 0 0 3 12z"/></svg>
+        <span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">
+          <span class="tab tmux-window-button tabber-window-button" data-tabber-window-button="shared">
+            <span class="tmux-window-name-label">
+              <span id="tabber" class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s">
+                <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#667ef8" d="M3 12a9 9 0 1 0 18 0A9 9 0 0 0 3 12z"/></svg>
+                </span>
+                <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse">●</span>
+              </span>
+              <span class="tmux-window-name-text">1:codex</span>
             </span>
-            <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse">●</span>
           </span>
-          <span class="tabber-window-text">1:codex</span>
         </span>
       </div>
     """, extra_css="""
@@ -2207,7 +2223,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                     </div>
                     <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="1" role="treeitem" aria-selected="false" style="padding-left: 27px;">
                       <span class="file-tree-icon tabber-icon"></span>
-                      <span class="file-tree-name"><span class="tabber-window-label"><span class="tabber-window-text">0:bash</span></span></span>
+                      <span class="file-tree-name"><span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info"><span class="tab tmux-window-button tabber-window-button" data-tabber-window-button="shared"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:bash</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -2225,7 +2241,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                     </div>
                     <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="2" role="treeitem" aria-selected="false" style="padding-left: 27px;">
                       <span class="file-tree-icon tabber-icon"></span>
-                      <span class="file-tree-name"><span class="tabber-window-label"><span class="tabber-window-text">0:bash</span></span></span>
+                      <span class="file-tree-name"><span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info"><span class="tab tmux-window-button tabber-window-button" data-tabber-window-button="shared"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:bash</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -2307,7 +2323,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             const activeRow = sessionRows.find(row => row.dataset.tabberSession === '1');
             const inactiveRow = sessionRows.find(row => row.dataset.tabberSession === '2');
             const activeWindowRow = windowRows.find(row => row.dataset.tabberSession === '1');
-            const activeWindowText = activeWindowRow?.querySelector('.tabber-window-text');
+            const activeWindowText = activeWindowRow?.querySelector('.tmux-window-name-text');
             const windowIcons = windowRows.map(row => (row.querySelector('.file-tree-icon')?.textContent || '').trim());
             const nonSessionWithSessionTab = Array.from(document.querySelectorAll('.file-tree-row:not([data-tabber-type="session"]) .tabber-session-tab')).length;
             return {
@@ -2316,6 +2332,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
               activeWindow: rectFor(activeWindowRow),
               activeWindowTextColor: activeWindowText ? getComputedStyle(activeWindowText).color : '',
               expectedText: resolvedColor(document.body, 'var(--text)'),
+              expectedWindowButtonText: resolvedColor(document.body, 'var(--pane-ctl-fg, var(--pc-control-fg))'),
               expectedActiveText: resolvedColor(document.body, 'var(--pane-tab-active-text)'),
               expectedMutedText: resolvedColor(document.body, 'var(--muted)'),
               windowIcons,
@@ -2347,7 +2364,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             assert metrics["active"]["descriptionColor"] == metrics["active"]["tabColor"], (label, metrics)
             assert metrics["inactive"]["tabColor"] == metrics["expectedMutedText"], (label, metrics)
             assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
-            assert metrics["activeWindowTextColor"] == metrics["expectedText"], (label, metrics)
+            assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
         assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)
         assert metrics["active"]["tabRadius"] == "6px", (label, metrics)
         assert metrics["active"]["dateDisplay"] != "none", (label, metrics)

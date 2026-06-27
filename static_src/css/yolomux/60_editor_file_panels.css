@@ -3589,6 +3589,22 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
 .file-tree-row.tabber-row.selected .tabber-session-tab {
   box-shadow: 0 0 0 1px var(--active-control-focus-ring);
 }
+.file-tree-row.tabber-row .tabber-window-token {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: 0;
+  justify-content: flex-start;
+  overflow: visible;
+  vertical-align: middle;
+}
+.file-tree-row.tabber-row .tabber-window-button {
+  max-width: 100%;
+}
+.file-tree-row.tabber-row .tabber-window-button .tmux-window-name-label {
+  justify-content: flex-start;
+}
 .file-tree-row.tabber-row .tabber-window-label {
   min-width: 0;
   display: inline-flex;

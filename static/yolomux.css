@@ -2211,7 +2211,10 @@ body.theme-light .latency-meter {
 }
 .agent-window-activity {
   --agent-window-icon-size: 18px;
-  --agent-status-ball-size: 14px;
+  /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
+     two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
+  --agent-status-ball-size-base: 14px;
+  --agent-status-ball-size: var(--agent-status-ball-size-base);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   display: inline-flex;
@@ -6746,6 +6749,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   --agent-window-icon-size: 14px;
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
+  /* Sub-window (per-window) status ball is 3/5 the diameter of the Tab's aggregate ball. */
+  --agent-status-ball-size: calc(var(--agent-status-ball-size-base) * 3 / 5);
   margin-inline-start: 0;
   margin-inline-end: 1px;
 }
@@ -14613,6 +14618,22 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
 }
 .file-tree-row.tabber-row.selected .tabber-session-tab {
   box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+}
+.file-tree-row.tabber-row .tabber-window-token {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: 0;
+  justify-content: flex-start;
+  overflow: visible;
+  vertical-align: middle;
+}
+.file-tree-row.tabber-row .tabber-window-button {
+  max-width: 100%;
+}
+.file-tree-row.tabber-row .tabber-window-button .tmux-window-name-label {
+  justify-content: flex-start;
 }
 .file-tree-row.tabber-row .tabber-window-label {
   min-width: 0;

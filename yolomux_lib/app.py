@@ -149,6 +149,9 @@ from .tmux_utils import tmux_has_exact_session
 from .tmux_utils import tmux_paste_text
 from .tmux_utils import tmux_session_client_rows
 from .tmux_utils import tmux_session_target
+from .tmux_theme import apply_tmux_theme_color_to_existing
+from .tmux_theme import apply_tmux_theme_color_to_new_session
+from .tmux_theme import tmux_theme_color_from_settings
 from .tmux_signals import fetch_tmux_signal_snapshot
 from .tmux_signals import TmuxSignalEventWatcher
 from .tmux_signals import window_record_key
@@ -1012,6 +1015,11 @@ def compact_pull_request_for_history(value: Any) -> dict[str, Any] | None:
     return result or None
 
 
+def patch_updates_active_color(patch: Any) -> bool:
+    appearance = patch.get("appearance") if isinstance(patch, dict) else None
+    return isinstance(appearance, dict) and "active_color" in appearance
+
+
 def requires_known_session(refresh: bool = False, maintenance: bool = True) -> Callable[[Callable[..., tuple[Any, HTTPStatus]]], Callable[..., tuple[Any, HTTPStatus]]]:
     def decorator(func: Callable[..., tuple[Any, HTTPStatus]]) -> Callable[..., tuple[Any, HTTPStatus]]:
         @wraps(func)
@@ -1176,6 +1184,7 @@ class TmuxWebtermApp:
         self.client_watch_filesystem_last_full_at = 0.0
         self.client_watch_snapshot_running = False
         self.client_directory_poll_running = False
+        self.tmux_theme_color = ""
         self.client_watch_thread: threading.Thread | None = None
         self.client_watch_running = False
         self.client_watch_wake_event = threading.Event()
@@ -6200,9 +6209,20 @@ class TmuxWebtermApp:
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         payload = save_settings(patch)
+        self.sync_tmux_theme_from_settings(payload, force=patch_updates_active_color(patch))
         self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
         self.client_watch_wake_event.set()
         return payload
+
+    def sync_tmux_theme_from_settings(self, payload: dict[str, Any], force: bool = False) -> dict[str, Any] | None:
+        color = tmux_theme_color_from_settings(payload.get("settings") if isinstance(payload, dict) else None)
+        if not force and color == self.tmux_theme_color:
+            return None
+        result = apply_tmux_theme_color_to_existing(color, runner=tmux)
+        self.tmux_theme_color = color
+        if result.get("errors"):
+            logger.debug("tmux theme sync failed for %s: %s", color, result.get("errors"))
+        return result
 
     def yolo_rules_payload(self) -> dict[str, Any]:
         return yolo_rules.rules_status()
@@ -8201,6 +8221,11 @@ class TmuxWebtermApp:
         if result.returncode != 0:
             error = cmd_error(result, "tmux new-session failed")
             return {"session": session, "created": False, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+        color = self.tmux_theme_color or tmux_theme_color_from_settings(settings_payload().get("settings", {}))
+        theme_result = apply_tmux_theme_color_to_new_session(session, color, runner=tmux)
+        self.tmux_theme_color = color
+        if theme_result.get("errors"):
+            logger.debug("tmux theme apply failed for new session %s: %s", session, theme_result.get("errors"))
         self.refresh_sessions()
         self.log_event(
             session,

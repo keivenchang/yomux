@@ -208,7 +208,10 @@
 }
 .agent-window-activity {
   --agent-window-icon-size: 18px;
-  --agent-status-ball-size: 14px;
+  /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
+     two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
+  --agent-status-ball-size-base: 14px;
+  --agent-status-ball-size: var(--agent-status-ball-size-base);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   display: inline-flex;

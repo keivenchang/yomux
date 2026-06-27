@@ -1863,6 +1863,69 @@ def test_tmux_signal_event_does_not_force_auto_approve_poll():
         webapp.control_server.stop()
 
 
+def test_save_settings_active_color_syncs_existing_tmux_theme(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    calls = []
+    events = []
+
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda patch: {"settings": {"appearance": {"active_color": "blue"}}, "mtime_ns": 123},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "apply_tmux_theme_color_to_existing",
+        lambda color, runner: calls.append((color, runner)) or {"applied": True, "errors": []},
+    )
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
+    try:
+        payload = webapp.save_settings({"appearance": {"active_color": "blue"}})
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["settings"]["appearance"]["active_color"] == "blue"
+    assert calls == [("blue", app_module.tmux)]
+    assert webapp.tmux_theme_color == "blue"
+    assert events[0][0] == "settings_changed"
+    assert webapp.client_watch_wake_event.is_set()
+
+
+def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp([])
+    refresh_calls = []
+    tmux_calls = []
+
+    def fake_refresh_sessions(maintenance=True):
+        refresh_calls.append(maintenance)
+        if len(refresh_calls) >= 2:
+            webapp.sessions = ["1"]
+        return []
+
+    def fake_tmux(args, timeout=5.0):
+        tmux_calls.append((args, timeout))
+        return app_module.subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(webapp, "refresh_sessions", fake_refresh_sessions)
+    monkeypatch.setattr(app_module, "available_agent_commands", lambda: ["term"])
+    monkeypatch.setattr(app_module, "session_workdir", lambda session: tmp_path)
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"appearance": {"active_color": "purple"}}})
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+    try:
+        payload, status = webapp.create_next_session("term")
+    finally:
+        webapp.control_server.stop()
+
+    commands = [args for args, _timeout in tmux_calls]
+    assert status == HTTPStatus.OK
+    assert payload["session"] == "1"
+    assert commands[0][:6] == ["new-session", "-d", "-s", "1", "-c", str(tmp_path)]
+    assert ["set-option", "-t", "1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
+    assert ["set-window-option", "-t", "1:", "pane-active-border-style", "fg=#7c3aed"] in commands
+    assert commands[-1] == ["refresh-client", "-S"]
+    assert webapp.tmux_theme_color == "purple"
+
+
 def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     started = []

@@ -494,7 +494,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("updates", "check_interval_minutes"): "Minutes, 1+. How often the origin/main update checker runs when updates.notify_level is not none.",
     ("updates", "notify_level"): "major | minor | patch | none. Minimum YOLOMUX_VERSION change that triggers the origin/main update notification. patch means any semver version bump; none disables update checks and notifications.",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Differ, and editor defaults.",
-    ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, and YO markers). Green is the default.",
+    ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, YO markers, and tmux status/pane chrome). Green is the default.",
     ("appearance", "separator_color"): "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Theme preserves the dark/light defaults.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",

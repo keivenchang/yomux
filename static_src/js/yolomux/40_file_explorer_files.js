@@ -3676,7 +3676,7 @@ function buildTabberTree() {
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: label,
-        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText, dateHtml},
+        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText, dateHtml},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -3781,6 +3781,32 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const nameText = text;
   const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
   return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+}
+
+function tabberWindowButtonHtml(data, label) {
+  const visibleName = String(label || '').trim();
+  if (!visibleName) return '';
+  if (typeof tmuxWindowButtonHtml !== 'function') {
+    const iconHtml = ['claude', 'codex'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
+    return tabberWindowLabelHtml(visibleName, iconHtml, {active: data?.active === true, pid: data?.pid});
+  }
+  const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;
+  const pid = Number(data?.pid);
+  const visibleNameWithPid = Number.isFinite(pid) && pid > 0 ? tmuxWindowDisplayLabel(visibleName, Math.floor(pid)) : visibleName;
+  const buttonHtml = tmuxWindowButtonHtml({
+    tag: 'span',
+    classes: ['tabber-window-button'],
+    session: data?.session,
+    visibleName: visibleNameWithPid,
+    numberLabel: windowIndex,
+    showNumberLabel: false,
+    active: data?.active === true,
+    agentStatus: data?.agentStatus || null,
+    agentKey: data?.agentKey,
+    attrs: ['data-tabber-window-button="shared"'],
+    ariaPressed: false,
+  });
+  return `<span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${stripTitleAttrs(buttonHtml)}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {
@@ -3911,13 +3937,10 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (titleText) row.dataset.tabberTitle = titleText;
   else delete row.dataset.tabberTitle;
   row.removeAttribute('title');
-  const windowAgentIconHtml = data.type === 'window' && ['claude', 'codex'].includes(data.agentKey)
-    ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)}))
-    : '';
   const nameHtml = data.type === 'session'
     ? tabberSessionChromeHtml(renderData)
     : data.type === 'window'
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, pid: data.pid})
+      ? tabberWindowButtonHtml(renderData, label)
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
