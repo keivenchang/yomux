@@ -209,6 +209,28 @@ function agentWindowPayloadCurrent(agent) {
   return null;
 }
 
+function activeTmuxWindowIndexFromInfo(info = null) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  for (const pane of [
+    panes.find(item => item?.window_active === true && item?.active === true),
+    panes.find(item => item?.window_active === true),
+    info?.selected_pane,
+  ]) {
+    const index = tmuxWindowIndexKey(pane?.window_index ?? pane?.window);
+    if (index !== null) return index;
+  }
+  return null;
+}
+
+function agentWindowWithInfoActiveWindow(agent, activeIndex = null) {
+  if (activeIndex === null) return agent;
+  const agentIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  if (agentIndex === null) return agent;
+  const active = agentIndex === activeIndex;
+  if (agent?.current === active && agent?.window_active === active) return agent;
+  return {...agent, current: active, window_active: active};
+}
+
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
@@ -230,8 +252,10 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
       last_active_ts: 0,
       idle_since: null,
     }));
+  const activeIndex = activeTmuxWindowIndexFromInfo(info);
   return fallback
     .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
+    .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
 }
 

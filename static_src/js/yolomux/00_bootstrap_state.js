@@ -729,8 +729,7 @@ const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
 const shareViewFitStorageKey = 'yolomux.share.viewFit.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
-// YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
-// sub-tab is remembered across reloads.
+// Legacy merged-pane sub-tab compatibility only. YO!info and YO!agent now have separate virtual tabs.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const infoLookbackHoursStorageKey = 'yolomux.infoPanel.lookbackHours.v1';
 const transcriptPreviewMessages = 200;
@@ -831,8 +830,8 @@ function urlFlagEnabled(name) {
     return false;
   }
 }
-const debugModeEnabled = urlFlagEnabled('debug');
 const jsDebugCollectionEnabled = true;
+let debugModeEnabled = urlFlagEnabled('debug');
 const jsDebugEventLimit = 200;
 const jsDebugRenderDebounceMs = 500;
 let jsDebugEventSeq = 0;
@@ -972,14 +971,14 @@ const TAB_TYPES = [
     // resolve to the standalone YO!agent item below.
     key: 'info',
     id: infoItemId,
-    aliases: ['info', infoItemId],
-    match: item => item === infoItemId,
+    aliases: ['info', 'info2', 'yo-info2', 'yoinfo2', infoItemId, '__info2__'],
+    match: item => item === infoItemId || item === '__info2__',
     label: () => infoTabLabel(),
     shortLabel: () => infoTabLabel(),
     terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
     param: () => 'info',
-    detail: () => t('info.subtitle'),
+    detail: () => t('menu.file.info.detail'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     renderAttached: () => {
@@ -1070,7 +1069,7 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
-  ...(debugModeEnabled ? [{
+  {
     key: 'debug',
     id: debugPaneItemId,
     aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
@@ -1083,12 +1082,15 @@ const TAB_TYPES = [
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
-    renderAttached: () => renderDebugPanels(),
+    renderAttached: () => {
+      enableDebugMode();
+      renderDebugPanels();
+    },
     className: () => 'debug-item',
     icon: 'tab-meta',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
-  }] : []),
+  },
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1228,9 +1230,7 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 function virtualTabItems() {
-  return debugModeEnabled
-    ? [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId]
-    : [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId];
+  return [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1305,18 +1305,7 @@ function setLimitedMapEntry(map, key, value, limit) {
   }
 }
 
-let infoBranchSort = {key: 'updated', dir: 'desc'};
 let shareInfoBranchRowsOverride = null;
-const infoBranchColumnWidthStorageKey = 'yolomux.infoBranchColumnWidth.v1';
-const infoBranchColumnDefaultWidthPx = 320;
-const infoBranchColumnMinWidthPx = 230;
-const infoBranchColumnMaxWidthPx = 900;
-const infoDescColumnWidthStorageKey = 'yolomux.infoDescColumnWidth.v1';
-const infoDescColumnDefaultWidthPx = 310;
-const infoDescColumnMinWidthPx = 310;
-const infoDescColumnMaxWidthPx = 1600;
-let infoBranchColumnWidthPx = readStoredInfoColumnWidth('branch');
-let infoDescColumnWidthPx = readStoredInfoColumnWidth('desc');
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
@@ -1350,7 +1339,6 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
-const watchedPrContextMenu = createContextMenuController();   // "Watch this PR" on YO!info PR cells
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 let sessionRenameDialog = null;
 let fileExplorerManualSelectionActive = false;

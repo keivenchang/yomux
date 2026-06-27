@@ -103,7 +103,7 @@ def test_parse_tmux_signal_snapshot_reports_bad_rows():
     assert payload["ok"] is False
     assert payload["window_count"] == 0
     assert payload["pane_count"] == 0
-    assert payload["errors"] == ["invalid tmux window signal row", "invalid tmux pane signal row"]
+    assert payload["errors"] == ["invalid tmux sub-window signal row", "invalid tmux pane signal row"]
 
 
 def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):

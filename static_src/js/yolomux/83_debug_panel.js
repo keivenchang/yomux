@@ -1699,6 +1699,7 @@ function debugPanelHtml() {
 }
 
 function createDebugPanel() {
+  enableDebugMode();
   const panel = document.createElement('article');
   panel.className = 'panel js-debug-panel';
   panel.id = panelDomId(debugPaneItemId);

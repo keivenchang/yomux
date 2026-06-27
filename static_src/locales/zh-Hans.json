@@ -256,7 +256,7 @@
   "info.header.branch": "分支",
   "info.header.desc": "描述",
   "info.header.path": "路径",
-  "info.header.session": "会话",
+  "info.header.session": "标签/AI",
   "info.header.updated": "更新",
   "info.loadFailed": "仓库元数据加载失败。",
   "info.loadingRepo": "正在加载仓库元数据...",

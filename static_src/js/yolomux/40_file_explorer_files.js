@@ -3361,7 +3361,7 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 
 // ---------------------------------------------------------------------------
 // Tabber — the Finder pane's third mode (Finder / Differ / Tabber). A live, default-expanded tree:
-// tmux sessions (level 0) -> their tmux windows (level 1, index:process, the current window marked) -> for
+// tmux sessions (level 0) -> their tmux sub-windows (level 1, index:process, the current window marked) -> for
 // claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
 // updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
@@ -3774,14 +3774,23 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
 }
 
 function tabberSessionChromeHtml(data) {
-  const classes = ['tabber-session-tab', 'session-popover-host', data.active === true ? 'active' : ''].filter(Boolean).join(' ');
+  const classes = ['tabber-session-tab', 'session-popover-host'];
   const session = String(data.session || '').trim();
   const info = transcriptMeta.sessions?.[session] || {};
   const state = sessionState(session, info);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
-  const tabHtml = stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto));
-  return `<span class="${classes}" data-tabber-session-chrome="shared" data-pane-tab="${esc(session)}" draggable="true">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+  return tmuxPaneTabTokenHtml(session, {
+    tag: 'span',
+    classes,
+    active: data.active === true,
+    info,
+    state,
+    auto,
+    attrs: ['data-tabber-session-chrome="shared"', 'draggable="true"'],
+    contentHtml: stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto)),
+    afterHtml: sessionPopoverHtml(session, info, agentKind, auto, state),
+  });
 }
 
 function bindTabberSessionChrome(row, session) {
@@ -3996,7 +4005,7 @@ function openTabberSession(session, options = {}) {
 }
 
 // Delegated activation for Tabber rows. Clicking the disclosure icon toggles a node; clicking the row body
-// acts: session -> open the session's tab; window -> open the tab + switch the tmux window; repo root ->
+// acts: session -> open the session's tab; window -> open the tab + switch the tmux sub-window; repo root ->
 // point the Finder at it + open the tab + switch the window.
 function handleTabberRowActivate(row, event) {
   const fullPath = row.dataset.path;

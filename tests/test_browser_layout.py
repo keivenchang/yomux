@@ -3255,6 +3255,304 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
 
+def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
+    page = tmp_path / "info-tree-sticky-parent.html"
+    records = "\n".join(
+        f"""
+        <div class="info-tree-record info-tree-item{' info-tree-item-last' if index == 23 else ''}">
+          <div class="info-tree-record-main">
+            <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link">tab-{index}</button></span></div>
+            <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">PR:</span><span class="info-tree-field-value"><a href="#">#1</a> PR description {index}</span></div>
+            <div class="info-tree-field info-tree-field-updated"><span class="info-tree-field-label">updated:</span><span class="info-tree-field-value"><span class="info-tree-meta-updated">{index} days ago</span></span></div>
+          </div>
+        </div>
+        """
+        for index in range(24)
+    )
+    page.write_text(page_html(f"""
+      <div class="info-tree-panel" style="width: 680px; height: 260px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
+        <div id="info-tree-actions" class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
+        <div class="info-pane">
+          <div id="info-tree-scroller" class="info-list info-tree-list">
+            <div class="info-tree">
+              <details class="info-tree-group info-tree-item" data-info-dimension="path" data-info-depth="0" open>
+              <summary id="path-summary">
+                <span class="info-tree-group-dimension">Path</span>
+                <span class="info-tree-group-label-line"><span class="info-tree-group-label">/repo/app</span><span class="info-tree-group-child-count">(2 branches)</span></span>
+              </summary>
+              <div class="info-tree-group-children">
+                <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="branch" data-info-depth="1" open>
+                  <summary id="branch-summary">
+                    <span class="info-tree-group-dimension">Branch</span>
+                    <span class="info-tree-group-label-line"><span class="info-tree-group-label">feature/context</span></span>
+                  </summary>
+                  <div class="info-tree-group-children">
+                    <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="pr" data-info-depth="2" open>
+                      <summary id="pr-summary">
+                        <span class="info-tree-group-dimension">PR</span>
+                        <span class="info-tree-group-label-line"><span class="info-tree-group-label">#42 sticky parent</span></span>
+                      </summary>
+                      <div class="info-tree-group-children">{records}</div>
+                    </details>
+                  </div>
+                </details>
+              </div>
+            </details>
+            </div>
+          </div>
+        </div>
+      </div>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const scroller = document.getElementById('info-tree-scroller');
+        const actions = document.getElementById('info-tree-actions');
+        const infoPane = document.querySelector('.info-pane');
+        const rootSummary = document.getElementById('path-summary');
+        const branchSummary = document.getElementById('branch-summary');
+        const prSummary = document.getElementById('pr-summary');
+        const initialBranchTop = branchSummary.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+        scroller.scrollTop = scroller.scrollHeight;
+        scroller.scrollTop = initialBranchTop + 90;
+        return new Promise(resolve => requestAnimationFrame(() => {
+          const scrollerRect = scroller.getBoundingClientRect();
+          const actionsRect = actions.getBoundingClientRect();
+          const rootRect = rootSummary.getBoundingClientRect();
+          const branchRect = branchSummary.getBoundingClientRect();
+          const prRect = prSummary.getBoundingClientRect();
+          const topElement = document.elementFromPoint(scrollerRect.left + 110, scrollerRect.top + Math.min(12, rootRect.height / 2));
+          const branchElement = document.elementFromPoint(scrollerRect.left + 110, scrollerRect.top + rootRect.height + Math.min(12, branchRect.height / 2));
+          const prElement = document.elementFromPoint(scrollerRect.left + 110, scrollerRect.top + rootRect.height + branchRect.height + Math.min(12, prRect.height / 2));
+          const rootStyle = getComputedStyle(rootSummary);
+          const branchStyle = getComputedStyle(branchSummary);
+          const prStyle = getComputedStyle(prSummary);
+          const actionsStyle = getComputedStyle(actions);
+          const maskStyle = getComputedStyle(infoPane, '::before');
+          const actionElement = document.elementFromPoint(actionsRect.left + 110, actionsRect.bottom - Math.min(4, actionsRect.height / 2));
+          const branchLabel = branchSummary.querySelector('.info-tree-group-label');
+          const branchLabelRange = document.createRange();
+          branchLabelRange.selectNodeContents(branchLabel);
+          const branchLabelTextRect = branchLabelRange.getBoundingClientRect();
+          const treeRect = document.querySelector('.info-tree').getBoundingClientRect();
+          const records = [...document.querySelectorAll('.info-tree-record')];
+          const recordStyle = getComputedStyle(records[0]);
+          const recordLineStyle = getComputedStyle(records[0], '::after');
+          const firstRecordRect = records[0].getBoundingClientRect();
+          const secondRecordRect = records[1].getBoundingClientRect();
+          const rootConnector = getComputedStyle(rootSummary, '::after');
+          const branchConnector = getComputedStyle(branchSummary, '::after');
+          const branchRowConnector = getComputedStyle(branchSummary.parentElement, '::before');
+          resolve({
+            overflow: scroller.scrollHeight > scroller.clientHeight,
+            scrollTop: scroller.scrollTop,
+            scrollerBelowActions: scrollerRect.top >= actionsRect.bottom - 1,
+            rootTopDelta: rootRect.top - scrollerRect.top,
+            rootHeight: rootRect.height,
+            branchTopDelta: branchRect.top - scrollerRect.top,
+            branchHeight: branchRect.height,
+            branchBottom: branchRect.bottom,
+            prTopDelta: prRect.top - scrollerRect.top,
+            prHeight: prRect.height,
+            prBottom: prRect.bottom,
+            topText: topElement ? topElement.textContent : '',
+            branchText: branchElement ? branchElement.textContent : '',
+            prText: prElement ? prElement.textContent : '',
+            rootPosition: rootStyle.position,
+            branchPosition: branchStyle.position,
+            prPosition: prStyle.position,
+            branchAlignItems: branchStyle.alignItems,
+            branchAlignContent: branchStyle.alignContent,
+            rootBorder: rootStyle.borderTopWidth,
+            branchBorder: branchStyle.borderTopWidth,
+            prBorder: prStyle.borderTopWidth,
+            branchTextTopGap: Math.round(branchLabelTextRect.top - branchRect.top),
+            branchTextBottomGap: Math.round(branchRect.bottom - branchLabelTextRect.bottom),
+            maskContent: maskStyle.content,
+            maskPosition: maskStyle.position,
+            maskHeight: maskStyle.height,
+            maskBg: maskStyle.backgroundColor,
+            maskPointerEvents: maskStyle.pointerEvents,
+            actionsPosition: actionsStyle.position,
+            actionsZ: Number.parseInt(actionsStyle.zIndex, 10),
+            actionElementId: actionElement ? actionElement.id : '',
+            actionText: actionElement ? actionElement.textContent : '',
+            rootZ: Number.parseInt(rootStyle.zIndex, 10),
+            branchZ: Number.parseInt(branchStyle.zIndex, 10),
+            prZ: Number.parseInt(prStyle.zIndex, 10),
+            treeTopDelta: treeRect.top - scrollerRect.top + scroller.scrollTop,
+            recordBorderWidth: recordStyle.borderTopWidth,
+            recordBorderColor: recordStyle.borderTopColor,
+            recordShadow: recordStyle.boxShadow,
+            recordLineTop: recordLineStyle.insetBlockStart,
+            recordLineBottom: recordLineStyle.insetBlockEnd,
+            recordGap: Math.round(secondRecordRect.top - firstRecordRect.bottom),
+            rootConnectorContent: rootConnector.content,
+            branchConnectorContent: branchConnector.content,
+            branchConnectorBg: branchConnector.backgroundImage,
+            branchConnectorColor: branchConnector.backgroundColor,
+            branchConnectorWidth: branchConnector.width,
+            branchConnectorHeight: branchConnector.height,
+            branchRowConnectorContent: branchRowConnector.content,
+          });
+        }));
+        """
+    )
+    assert metrics["overflow"], metrics
+    assert metrics["scrollTop"] > 0, metrics
+    assert metrics["scrollerBelowActions"], metrics
+    assert metrics["rootPosition"] == "sticky", metrics
+    assert metrics["branchPosition"] == "sticky", metrics
+    assert metrics["prPosition"] == "sticky", metrics
+    assert metrics["actionsPosition"] == "relative", metrics
+    assert metrics["branchAlignItems"] == "center", metrics
+    assert metrics["branchAlignContent"] == "center", metrics
+    assert 0 <= metrics["rootTopDelta"] <= 6, metrics
+    assert metrics["rootHeight"] <= 32, metrics
+    assert abs(metrics["branchTopDelta"] - metrics["rootHeight"]) <= 4, metrics
+    assert metrics["branchHeight"] <= 32, metrics
+    assert metrics["branchBottom"] > metrics["branchTopDelta"], metrics
+    assert abs(metrics["prTopDelta"] - metrics["rootHeight"] - metrics["branchHeight"]) <= 4, metrics
+    assert metrics["prHeight"] <= 32, metrics
+    assert metrics["prBottom"] > metrics["prTopDelta"], metrics
+    assert "/repo/app" in metrics["topText"], metrics
+    assert "feature/context" in metrics["branchText"], metrics
+    assert "#42 sticky parent" in metrics["prText"], metrics
+    sticky_text = "\n".join([metrics["topText"], metrics["branchText"], metrics["prText"]])
+    assert "tab-" not in sticky_text, metrics
+    assert "days ago" not in sticky_text, metrics
+    assert metrics["rootBorder"] == "0px", metrics
+    assert metrics["branchBorder"] == "0px", metrics
+    assert metrics["prBorder"] == "0px", metrics
+    assert abs(metrics["branchTextTopGap"] - metrics["branchTextBottomGap"]) <= 2, metrics
+    assert metrics["maskContent"] in ('""', "''"), metrics
+    assert metrics["maskPosition"] == "absolute", metrics
+    assert metrics["maskHeight"] == "27px", metrics
+    assert metrics["maskBg"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["maskPointerEvents"] == "none", metrics
+    assert metrics["actionsZ"] > metrics["prZ"], metrics
+    assert metrics["actionElementId"] == "info-tree-actions" or "YO!info controls" in metrics["actionText"], metrics
+    assert metrics["branchZ"] > metrics["rootZ"], metrics
+    assert metrics["prZ"] > metrics["branchZ"], metrics
+    assert 0 <= metrics["treeTopDelta"] <= 6, metrics
+    assert metrics["recordBorderWidth"] == "1px", metrics
+    assert metrics["recordBorderColor"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["recordShadow"] == "none", metrics
+    assert metrics["recordLineTop"] == "-1px", metrics
+    assert metrics["recordLineBottom"] == "-1px", metrics
+    assert metrics["recordGap"] == 0, metrics
+    assert metrics["rootConnectorContent"] == "none", metrics
+    assert metrics["branchConnectorContent"] in ('""', "''"), metrics
+    assert metrics["branchConnectorBg"] == "none", metrics
+    assert metrics["branchConnectorColor"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["recordBorderColor"] == metrics["branchConnectorColor"], metrics
+    assert metrics["branchConnectorWidth"] == "11px", metrics
+    assert metrics["branchConnectorHeight"] == "1px", metrics
+    assert metrics["branchRowConnectorContent"] == "none", metrics
+
+
+def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
+    page = tmp_path / "info-tree-top-mask.html"
+    page.write_text(page_html("""
+      <div class="info-tree-panel" style="width: 760px; height: 190px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
+        <div class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
+        <div class="info-pane">
+          <div id="info-tree-scroller" class="info-list info-tree-list">
+            <div class="info-tree">
+              <details class="info-tree-group info-tree-item" data-info-dimension="pr" data-info-depth="0" open>
+                <summary id="previous-pr">
+                  <span class="info-tree-group-dimension">PR</span>
+                  <span class="info-tree-group-label-line"><span class="info-tree-group-label">#81 previous group</span></span>
+                </summary>
+                <div class="info-tree-group-children">
+                  <div id="previous-record" class="info-tree-record info-tree-item info-tree-item-last">
+                    <div class="info-tree-record-main">
+                      <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span class="info-tree-field-value">/repo/previous</span></div>
+                      <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><span id="leak-sentinel" style="color: #80ff00; font: 900 18px/1 var(--mono-font);">LEAKGREENLEAKGREENLEAKGREEN</span></span></div>
+                    </div>
+                  </div>
+                </div>
+              </details>
+              <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="pr" data-info-depth="0" open>
+                <summary id="next-pr">
+                  <span class="info-tree-group-dimension">PR</span>
+                  <span class="info-tree-group-label-line"><span class="info-tree-group-label">#80 next group</span></span>
+                </summary>
+                <div class="info-tree-group-children">
+                  <div class="info-tree-record info-tree-item info-tree-item-last">
+                    <div class="info-tree-record-main">
+                      <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span class="info-tree-field-value">/repo/next</span></div>
+                    </div>
+                  </div>
+                  <div class="info-tree-record info-tree-item info-tree-item-last" style="min-height: 220px;">
+                    <div class="info-tree-record-main">
+                      <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span class="info-tree-field-value">/repo/filler</span></div>
+                    </div>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
+        </div>
+      </div>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const scroller = document.getElementById('info-tree-scroller');
+        const next = document.getElementById('next-pr');
+        const sentinel = document.getElementById('leak-sentinel');
+        const scrollerRectAtZero = scroller.getBoundingClientRect();
+        const nextTopAtZero = next.getBoundingClientRect().top - scrollerRectAtZero.top + scroller.scrollTop;
+        scroller.scrollTop = Math.max(0, nextTopAtZero - 30);
+        return new Promise(resolve => requestAnimationFrame(() => {
+          const firstScrollerRect = scroller.getBoundingClientRect();
+          const firstSentinelRect = sentinel.getBoundingClientRect();
+          scroller.scrollTop += firstSentinelRect.top - firstScrollerRect.top - 8;
+          requestAnimationFrame(() => {
+          const scrollerRect = scroller.getBoundingClientRect();
+          const nextRect = next.getBoundingClientRect();
+          const sentinelRect = sentinel.getBoundingClientRect();
+          const maskStyle = getComputedStyle(document.querySelector('.info-pane'), '::before');
+          resolve({
+            dpr: window.devicePixelRatio || 1,
+            scrollerRect: {
+              left: scrollerRect.left,
+              top: scrollerRect.top,
+              right: scrollerRect.right,
+              bottom: scrollerRect.bottom,
+            },
+            nextTopDelta: nextRect.top - scrollerRect.top,
+            sentinelTopDelta: sentinelRect.top - scrollerRect.top,
+            sentinelBottomDelta: sentinelRect.bottom - scrollerRect.top,
+            maskHeight: Number.parseFloat(maskStyle.height),
+            maskBg: maskStyle.backgroundColor,
+          });
+          });
+        }));
+        """
+    )
+    assert 0 <= metrics["sentinelTopDelta"] <= metrics["maskHeight"], metrics
+    assert metrics["sentinelBottomDelta"] > 0, metrics
+    assert metrics["nextTopDelta"] >= metrics["maskHeight"] - 2, metrics
+    assert metrics["maskBg"] != "rgba(0, 0, 0, 0)", metrics
+
+    image = browser_screenshot_rgb(browser)
+    dpr = metrics["dpr"]
+    rect = metrics["scrollerRect"]
+    x0 = max(0, round((rect["left"] + 18) * dpr))
+    x1 = min(image.width - 1, round((rect["right"] - 18) * dpr))
+    y0 = max(0, round((rect["top"] + 2) * dpr))
+    y1 = min(image.height - 1, round((rect["top"] + min(metrics["maskHeight"] - 3, metrics["nextTopDelta"] - 3)) * dpr))
+    green_pixels = 0
+    for y in range(y0, max(y0 + 1, y1), 2):
+        for x in range(x0, max(x0 + 1, x1), 2):
+            r, g, b = image.getpixel((x, y))[:3]
+            if g >= 130 and g - r >= 50 and g - b >= 50:
+                green_pixels += 1
+    assert green_pixels == 0, {"greenPixels": green_pixels, **metrics}
+
+
 @pytest.mark.parametrize("width, expected_rows", [(860, [3, 3]), (493, [1, 2, 2, 1])])
 def test_pane_tabs_stay_within_panel(browser, tmp_path, width, expected_rows):
     # Tabs wrap to fit the panel at any width: the toolbar never overflows the panel, the rows wrap to the
@@ -4038,7 +4336,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
           transcriptMetaLoadError = '';
           const branches = Array.from({length: 180}, (_value, index) => ({
             name: `feature/long-info-row-${index + 1}`,
-            subject: `Long YO!info row ${index + 1} that makes the branch table scroll.`,
+            subject: `Long YO!info tree row ${index + 1} that makes the relationship tree scroll.`,
             updated: `2026-06-${String((index % 28) + 1).padStart(2, '0')}`,
             updated_ts: 1800000000 - index,
             current: index === 0,
@@ -4089,7 +4387,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
               active: activeItemForSide('left'),
               scrollHeight: scroller?.scrollHeight || 0,
               clientHeight: scroller?.clientHeight || 0,
-              rows: document.querySelectorAll('#info-content .info-row').length,
+              rows: document.querySelectorAll('#info-content .info-tree-record').length,
               tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
             };
           }
@@ -4104,7 +4402,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
             preSwitchCapturedTop: paneViewState.get(infoItemId)?.scrollContainers?.find(entry => entry.scrollTop > 0)?.scrollTop || 0,
             clientHeight: scroller.clientHeight,
             scrollHeight: scroller.scrollHeight,
-            rowCount: document.querySelectorAll('#info-content .info-row').length,
+            rowCount: document.querySelectorAll('#info-content .info-tree-record').length,
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -5771,11 +6069,21 @@ LIGHT_MODE_SURFACES = """
   <div class="session-rename-actions"><button id="session-rename-cancel">Cancel</button></div>
 </div>
 <div class="yoagent-message-body markdown-body"><pre id="md-pre"><code>code</code></pre></div>
-<div class="info-pane" style="background:var(--bg)">
+<div class="info-pane" id="info-pane">
   <div class="info-row header"><div class="info-cell" id="info-hdr">Session</div></div>
   <div class="info-row"><div class="info-cell" id="info-row-text">main</div>
     <div class="info-cell"><a id="info-link" href="#">branch</a></div></div>
   <div class="info-row current"><div class="info-cell" id="info-cur">current</div></div>
+  <div class="info-list info-tree-list" id="info-content">
+    <div class="info-tree">
+      <details class="info-tree-group" open>
+        <summary id="info-tree-summary"><span class="info-tree-group-dimension">PR</span><span class="info-tree-group-label-line"><span class="info-tree-group-label">#1 full title</span><span class="info-tree-group-child-count" id="info-tree-child-count">(2 branches)</span></span></summary>
+        <div class="info-tree-group-children">
+          <div class="info-tree-record" id="info-tree-record"><div class="info-tree-record-main"><div class="info-tree-field info-tree-field-pr" id="info-tree-desc"><span class="info-tree-field-label" id="info-tree-label">PR:</span><span class="info-tree-field-value"><a href="#">#1</a> description</span></div><div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link" id="info-tree-session">tab</button></span></div></div></div>
+        </div>
+      </details>
+    </div>
+  </div>
 </div>
 """
 
@@ -5814,6 +6122,12 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
           const s = getComputedStyle(el);
           out[el.id] = {color: s.color, bg: s.backgroundColor};
         }
+        const bodyStyle = getComputedStyle(document.body);
+        out.bodyVars = {
+          infoTreeBorder: bodyStyle.getPropertyValue('--info-tree-border').trim(),
+          infoTreeLine: bodyStyle.getPropertyValue('--info-tree-line').trim(),
+          infoRecordBorder: bodyStyle.getPropertyValue('--info-tree-record-border').trim(),
+        };
         return out;
         """
     )
@@ -5823,8 +6137,12 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
         return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
 
-    for box in ("cp-dlg", "ks-dlg", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre"):
+    for box in ("cp-dlg", "ks-dlg", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre", "info-pane", "info-content", "info-tree-summary"):
         assert _lum(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
+    assert style["bodyVars"]["infoTreeBorder"] == "#8793a3", style["bodyVars"]
+    assert style["bodyVars"]["infoTreeLine"] == "rgb(100 116 139 / 0.16)", style["bodyVars"]
+    assert style["bodyVars"]["infoRecordBorder"] == style["bodyVars"]["infoTreeLine"], style["bodyVars"]
+    assert style["bodyVars"]["infoTreeLine"] != style["bodyVars"]["infoTreeBorder"], style["bodyVars"]
 
     # (b) Text must contrast with its surface. Where the element bg is transparent, it sits on the white page.
     page_white = "rgb(255, 255, 255)"
@@ -5836,6 +6154,8 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
         # the YO!info table — rows/header/current/links must read on the light pane.
         "info-hdr": None, "info-row-text": None, "info-link": None, "info-cur": None,
+        # YO!info leaf rows use a transparent fill and must stay readable on the light pane surface.
+        "info-tree-summary": "info-tree-summary", "info-tree-child-count": "info-tree-summary", "info-tree-record": "info-content", "info-tree-label": "info-content", "info-tree-session": "info-content", "info-tree-desc": "info-content",
     }
     for eid, bg_id in text_checks.items():
         bg = style[bg_id]["bg"] if bg_id else page_white

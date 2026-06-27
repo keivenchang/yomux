@@ -256,7 +256,7 @@
   "info.header.branch": "分支",
   "info.header.desc": "描述",
   "info.header.path": "路徑",
-  "info.header.session": "工作階段",
+  "info.header.session": "標籤/AI",
   "info.header.updated": "更新",
   "info.loadFailed": "儲存庫中繼資料載入失敗。",
   "info.loadingRepo": "正在載入儲存庫中繼資料...",

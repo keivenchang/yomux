@@ -2105,6 +2105,23 @@ def test_transcripts_payload_exposes_server_version(monkeypatch):
     assert payload["server_uptime_seconds"] >= 0
 
 
+def test_transcripts_payload_includes_indexed_repos_only_on_full_metadata(monkeypatch):
+    indexed = [{"root": "/repo", "other_branches": {"branches": [{"name": "feature"}]}}]
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    monkeypatch.setattr(app_module, "indexed_repo_summaries", lambda cache=None, allow_network=False: indexed)
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
+    monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
+    try:
+        full = webapp.build_transcripts_payload()
+        lightweight = webapp.build_transcripts_payload(lightweight=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert full["indexed_repos"] == indexed
+    assert lightweight["indexed_repos"] == []
+
+
 def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     calls = []
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])

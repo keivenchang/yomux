@@ -1000,8 +1000,7 @@ body.theme-light .branch-link {
 }
 .popover-value a.pr-status-failing,
 .meta a.pr-status-failing,
-.summary-context a.pr-status-failing,
-.info-cell a.pr-status-failing {
+.summary-context a.pr-status-failing {
   color: var(--pr-status-failing);
 }
 .popover-value a.pr-status-pending,
@@ -1009,27 +1008,22 @@ body.theme-light .branch-link {
 .meta a.pr-status-pending,
 .meta a.pr-status-draft,
 .summary-context a.pr-status-pending,
-.summary-context a.pr-status-draft,
-.info-cell a.pr-status-pending,
-.info-cell a.pr-status-draft {
+.summary-context a.pr-status-draft {
   color: var(--accent-gold);
 }
 .popover-value a.pr-status-passing,
 .meta a.pr-status-passing,
-.summary-context a.pr-status-passing,
-.info-cell a.pr-status-passing {
+.summary-context a.pr-status-passing {
   color: var(--pr-status-passing);
 }
 .popover-value a.pr-status-merged,
 .meta a.pr-status-merged,
 .summary-context a.pr-status-merged,
-.branch-meta a.pr-status-merged,
-.info-cell a.pr-status-merged {
+.branch-meta a.pr-status-merged {
   color: var(--pr-status-merged);
 }
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,
-.summary-context a.pr-status-closed,
-.info-cell a.pr-status-closed {
+.summary-context a.pr-status-closed {
   color: var(--pr-status-closed);
 }

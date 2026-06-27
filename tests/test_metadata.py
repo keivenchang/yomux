@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 from yolomux_lib import github_client
@@ -94,6 +95,68 @@ def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
 
     roots = {s["root"] for s in session_repo_summaries(info, root)}
     assert roots == {root}
+
+
+def test_indexed_repo_summaries_discovers_repos_under_indexed_root_without_branch_cap(tmp_path):
+    indexed = tmp_path / "indexed"
+    indexed.mkdir()
+    repo_a = indexed / "repo-a"
+    repo_b = indexed / "repo-b"
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+    current_branch = _git(repo_a, "branch", "--show-current").stdout.strip()
+    branch_names = [f"feature/{index}" for index in range(metadata.OTHER_BRANCH_LIMIT + 3)]
+    for branch in branch_names:
+        _git(repo_a, "branch", branch)
+    _git(repo_a, "checkout", current_branch)
+
+    summaries = metadata.indexed_repo_summaries([str(indexed)], cache=MetadataCache(), allow_network=False)
+    by_root = {summary["root"]: summary for summary in summaries}
+    repo_a_root = str(repo_a.resolve())
+    repo_b_root = str(repo_b.resolve())
+    repo_a_branches = {branch["name"] for branch in by_root[repo_a_root]["other_branches"]["branches"]}
+
+    assert {repo_a_root, repo_b_root}.issubset(by_root)
+    assert all(branch in repo_a_branches for branch in branch_names)
+    assert by_root[repo_a_root]["other_branches"]["hidden_count"] == 0
+    assert by_root[repo_a_root]["indexed"] is True
+
+
+def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):
+    indexed = tmp_path / "indexed"
+    indexed.mkdir()
+    repo = indexed / "repo"
+    _init_repo(repo)
+    current_branch = _git(repo, "branch", "--show-current").stdout.strip()
+    remote_branch = "keivenchang/OPS-6052__fix-harmony-analysis-normal-text"
+    _git(repo, "checkout", "-b", remote_branch)
+    (repo / "remote.txt").write_text("remote\n", encoding="utf-8")
+    _git(repo, "add", "remote.txt")
+    _git(repo, "commit", "-m", "remote branch")
+    remote_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", current_branch)
+    _git(repo, "branch", "-D", remote_branch)
+    _git(repo, "update-ref", f"refs/remotes/origin/{remote_branch}", remote_sha)
+
+    summaries = metadata.indexed_repo_summaries([str(indexed)], cache=MetadataCache(), allow_network=False)
+    branches = {branch["name"]: branch for branch in summaries[0]["other_branches"]["branches"]}
+
+    assert remote_branch not in branches
+
+
+def test_indexed_repo_summaries_includes_linked_worktree_current_branch(tmp_path):
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    _init_repo(main)
+    _git(main, "worktree", "add", "-q", str(wt), "-b", "feature-linked")
+
+    summaries = metadata.indexed_repo_summaries([str(tmp_path)], cache=MetadataCache(), allow_network=False)
+    by_root = {summary["root"]: summary for summary in summaries}
+    wt_root = str(wt.resolve())
+    wt_branch_names = [branch["name"] for branch in by_root[wt_root]["other_branches"]["branches"]]
+
+    assert wt_root in by_root
+    assert wt_branch_names == ["feature-linked"]
 
 
 def test_session_repo_summaries_dedupes_same_repo_candidates_before_summary(monkeypatch):
@@ -789,7 +852,7 @@ def test_linked_worktree_inventory_only_reports_checked_out_branch(tmp_path):
     assert wt_names == ["feature"]
 
 
-def test_local_branch_inventory_includes_remote_only_pr_branch(tmp_path):
+def test_local_branch_inventory_excludes_remote_only_pr_branch(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -817,9 +880,82 @@ def test_local_branch_inventory_includes_remote_only_pr_branch(tmp_path):
     inventory = metadata.local_branch_inventory(str(repo), current_branch)
     branches = {branch["name"]: branch for branch in inventory["branches"]}
 
-    assert pr_branch in branches
-    assert branches[pr_branch]["remote"] is True
-    assert branches[pr_branch]["pull_request"]["number"] == 10423
+    assert current_branch in branches
+    assert branches[current_branch]["remote"] is False
+    assert pr_branch not in branches
+
+
+def test_local_branch_inventory_uses_git_branch_default_order(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "init")
+
+    def commit_branch(branch: str, filename: str, value: str, commit_date: str) -> None:
+        _git(repo, "checkout", "-b", branch)
+        (repo / filename).write_text(f"{value}\n", encoding="utf-8")
+        _git(repo, "add", filename)
+        env = os.environ.copy()
+        env["GIT_AUTHOR_DATE"] = commit_date
+        env["GIT_COMMITTER_DATE"] = commit_date
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", value],
+            capture_output=True,
+            check=True,
+            env=env,
+            text=True,
+        )
+
+    commit_branch("z-newer", "newer.txt", "newer", "2030-01-02T00:00:00+0000")
+    _git(repo, "checkout", "master")
+    commit_branch("a-older", "older.txt", "older", "2000-01-02T00:00:00+0000")
+    _git(repo, "checkout", "master")
+
+    default_order = _git(repo, "branch", "--format=%(refname:short)").stdout.splitlines()
+    committerdate_order = _git(
+        repo,
+        "for-each-ref",
+        "--sort=-committerdate",
+        "--format=%(refname:short)",
+        "refs/heads",
+    ).stdout.splitlines()
+    inventory = metadata.local_branch_inventory(str(repo), "master", branch_limit=None)
+
+    assert default_order != committerdate_order
+    assert [branch["name"] for branch in inventory["branches"]] == default_order
+
+
+def test_indexed_repo_summaries_excludes_remote_only_pr_without_local_branch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "init")
+    current_branch = _git(repo, "branch", "--show-current").stdout.strip()
+    pr_branch = "keivenchang/DIS-2064__frontend-coverage"
+    _git(repo, "checkout", "-b", pr_branch)
+    (repo / "frontend.txt").write_text("coverage\n", encoding="utf-8")
+    _git(repo, "add", "frontend.txt")
+    _git(repo, "commit", "-m", "test(frontend): match tooltip conventions")
+    pr_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", current_branch)
+    _git(repo, "branch", "-D", pr_branch)
+    _git(repo, "update-ref", f"refs/remotes/origin/{pr_branch}", pr_sha)
+    _git(repo, "update-ref", "refs/remotes/origin/pull-request/10228", pr_sha)
+
+    summaries = metadata.indexed_repo_summaries([str(repo)], cache=MetadataCache(), allow_network=False)
+    branches = {branch["name"]: branch for branch in summaries[0]["other_branches"]["branches"]}
+
+    assert current_branch in branches
+    assert branches[current_branch]["remote"] is False
+    assert pr_branch not in branches
 
 
 def test_open_pr_on_other_branch_resolves_by_head_branch(monkeypatch):
@@ -875,3 +1011,45 @@ def test_other_branch_with_local_pr_number_still_uses_by_number(monkeypatch):
     pr = git_data["other_branches"]["branches"][0]["pull_request"]
     assert pr["number"] == 9981
     assert branch_queries == []  # by-number path used; no by-branch fallback
+
+
+def test_branch_linear_metadata_includes_pr_and_branch_ids(monkeypatch):
+    seen = []
+
+    def fake_linear_issue_metadata(identifier, cache, allow_network=True):
+        seen.append((identifier, allow_network))
+        return {
+            "identifier": identifier,
+            "title": f"{identifier} title",
+            "state": "In Progress",
+            "url": f"https://linear.test/{identifier}",
+            "source": "test",
+        }
+
+    monkeypatch.setattr(metadata, "linear_issue_metadata", fake_linear_issue_metadata)
+    git_data = {
+        "other_branches": {
+            "branches": [
+                {
+                    "name": "keivenc/DIS-2212__frontend",
+                    "current": False,
+                    "subject": "branch subject references DIS-2213",
+                    "pull_request": {
+                        "title": "PR mentions DIS-2214",
+                        "description": "body mentions DIS-2215",
+                        "linear_ids": ["DIS-2216"],
+                    },
+                },
+                {"name": "main", "current": False, "subject": "main"},
+            ],
+        },
+    }
+
+    metadata.enrich_branch_linear_metadata(git_data, MetadataCache(), allow_network=True)
+    branch = git_data["other_branches"]["branches"][0]
+
+    assert branch["linear_ids"] == ["DIS-2212", "DIS-2213", "DIS-2214", "DIS-2215", "DIS-2216"]
+    assert [item["identifier"] for item in branch["linear"]] == branch["linear_ids"]
+    assert branch["linear"][0]["title"] == "DIS-2212 title"
+    assert seen == [(identifier, True) for identifier in branch["linear_ids"]]
+    assert git_data["other_branches"]["branches"][1]["linear"] == []

@@ -2654,7 +2654,7 @@ const shareWrappedTextDigestSelectors = [
   '.pane-tab .session-button-dir',
   '.file-tree-name',
   '.changes-file-name',
-  '.info-row',
+  '.info-tree-record',
   '.tabber-row-label',
 ];
 

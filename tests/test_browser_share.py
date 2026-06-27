@@ -743,7 +743,7 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
         #appRoot {{ position: relative; width: 900px; height: 520px; }}
         #mount {{ width: 420px; height: 260px; padding: 24px; }}
         #info-content {{ width: 320px; height: 150px; overflow: auto; }}
-        #info-content .info-row {{ min-width: 1120px; }}
+        #info-content .info-tree {{ min-width: 1120px; }}
         </style></head>
         <body class="theme-dark theme-resolved-dark editor-theme-dark share-view-mode share-view-readonly">
           <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
@@ -774,11 +774,10 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
               installShareReadonlyInteractionBlocker();
               const panel = createInfoPanel();
               document.getElementById('mount').append(panel);
-              applyShareUiState({{info: {{branchSort: {{key: 'session', dir: 'asc'}}, columnWidths: {{branch: 520, desc: 740}}, branchRows: hostBranchRows}}}});
+              applyShareUiState({{info: {{grouping: ['path'], sort: {{key: 'name', dir: 'asc'}}, branchRows: hostBranchRows}}}});
               await frame();
               const scroller = document.getElementById('info-content');
-              const rootStyle = getComputedStyle(document.documentElement);
-              const rowSessions = () => Array.from(document.querySelectorAll('#info-content .info-row:not(.header) .info-cell:first-child')).map(cell => cell.textContent.trim());
+              const rowPaths = () => Array.from(document.querySelectorAll('#info-content .info-tree-group[data-info-dimension="path"] .info-tree-group-label')).map(cell => cell.textContent.trim());
               applyShareScrollState({{target: 'info', kind: 'info', top: 32, left: 220}});
               await frame();
               await frame();
@@ -790,15 +789,13 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
               await frame();
               await frame();
               return {{
-                rows: rowSessions(),
+                rows: rowPaths(),
                 hostTop,
                 hostLeft,
                 afterLocalTop: Math.round(scroller.scrollTop),
                 afterLocalLeft: Math.round(scroller.scrollLeft),
                 scrollWidth: scroller.scrollWidth,
                 clientWidth: scroller.clientWidth,
-                branchWidth: rootStyle.getPropertyValue('--info-branch-column-width').trim(),
-                descWidth: rootStyle.getPropertyValue('--info-desc-column-width').trim(),
                 errors: window.__shareInfoErrors,
               }};
             }})();
@@ -815,10 +812,8 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
     )
     assert "error" not in metrics, metrics
     assert metrics["errors"] == [], metrics
-    assert metrics["rows"][:2] == ["host-1", "host-2"], metrics
+    assert metrics["rows"][:2] == ["/repo/host-one", "/repo/host-two"], metrics
     assert metrics["scrollWidth"] > metrics["clientWidth"], metrics
-    assert metrics["branchWidth"] == "520px", metrics
-    assert metrics["descWidth"] == "740px", metrics
     assert metrics["hostTop"] > 0, metrics
     assert metrics["hostLeft"] > 0, metrics
     assert metrics["afterLocalTop"] == metrics["hostTop"], metrics

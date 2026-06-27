@@ -107,7 +107,7 @@ def yolomux_help_primer() -> str:
     if not primer:
         primer = (
             "Pane: a visible YOLOmux split region. Tab: one item inside a pane, such as a tmux session, Finder/File Explorer, File, Preferences, Changes, or YO!agent. "
-            "A tmux session tab has its own tmux windows and tmux panes. Finder and File Explorer are the same tab with platform-specific naming. "
+            "A tmux session tab has its own tmux sub-windows and tmux panes. Finder and File Explorer are the same tab with platform-specific naming. "
             "YO!agent insights come from detected Claude/Codex agents, their session transcripts, git metadata, and changed-file summaries."
         )
     _YOAGENT_HELP_PRIMER_CACHE = "YOLOmux help primer from README.md:\n" + primer + "\n" + YOAGENT_CONTEXT_CHAIN_PRIMER
@@ -931,9 +931,9 @@ def deterministic_yoagent_help_reply(question: str) -> str:
     mentions_finder = "finder" in text or "file explorer" in text
     mentions_split = "split" in text or "drag" in text
     if mentions_pane and ("what" in text or "difference" in text or "mean" in text):
-        return "A YOLOmux Pane is a visible browser split region. It can hold multiple Tabs but shows one Tab at a time. A tmux pane is different: it is a split inside a tmux window, inside one tmux session tab."
+        return "A YOLOmux Pane is a visible browser split region. It can hold multiple Tabs but shows one Tab at a time. A tmux pane is different: it is a split inside a tmux sub-window, inside one tmux session tab."
     if mentions_window and ("tmux" in text or mentions_tab or "difference" in text):
-        return "In YOLOmux, window means a tmux window. A YOLOmux Tab can be a tmux session, and that tmux session has its own tmux windows and tmux panes. YOLOmux itself is organized as Panes and Tabs, not windows."
+        return "In YOLOmux, use tmux sub-window for the tmux concept formerly called window. A YOLOmux Tab can be a tmux session, and that tmux session has its own tmux sub-windows and tmux panes. YOLOmux itself is organized as Panes and Tabs, not windows."
     if mentions_tab and ("what" in text or "difference" in text or "mean" in text):
         return "A YOLOmux Tab is an item inside a Pane: a tmux session, Finder/File Explorer, a File editor/viewer, Preferences, Changes, or YO!agent. Tabs can be active, minimized in a pane's tab strip, or inactive."
     if mentions_finder:

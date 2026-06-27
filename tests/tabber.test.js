@@ -123,7 +123,7 @@ async function runTabberSuite() {
     api.bindTabberPanelForTest(panel);
 
     api.syncTabberTreeActiveSelectionForTest(panel, {scrollIntoView: true});
-    assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_1', 'active Tabber row follows the active tmux window');
+    assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_1', 'active Tabber row follows the active tmux sub-window');
     assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_1/w_1'], 'active window sync selects the active Tabber window row');
     assert.equal(windowOne.classList.contains('selected'), true, 'active window row gets shared selected class');
     assert.equal(windowOne.classList.contains('current-file'), true, 'active window row gets shared current-file class');
@@ -139,7 +139,7 @@ async function runTabberSuite() {
     assert.equal(api.currentSessionActionTarget(), '2', 'Tabber Enter opens the selected tmux session');
   });
 
-  test('Tabber active window follows the optimistic tmux window override', () => {
+  test('Tabber active window follows the optimistic tmux sub-window override', () => {
     const api = loadYolomux('', ['1']);
     api.setFocusedPanelItem('1');
     api.setFileExplorerModeForTest('tabber');
@@ -150,16 +150,16 @@ async function runTabberSuite() {
       ],
     });
 
-    assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_0', 'Tabber starts on the backend active tmux window');
+    assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_0', 'Tabber starts on the backend active tmux sub-window');
     api.setTmuxWindowActiveIndexOverrideForTest('1', '1');
-    assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_1', 'known tmux window override moves the active Tabber row before readback');
+    assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_1', 'known tmux sub-window override moves the active Tabber row before readback');
     let rows = api.tabberRenderedRowsForTest();
     assert.equal(rows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.classes.includes('tabber-active-window'), true, 'Tabber row highlight honors the optimistic known-window override');
     assert.equal(rows.find(r => r.type === 'window' && /0:codex/.test(r.name))?.classes.includes('tabber-active-window'), false, 'stale backend-active Tabber row is not highlighted while an override is active');
     api.setTmuxWindowActiveIndexPendingForTest('1');
-    assert.equal(api.activeTabberRowPathForTest(), '/s_1', 'unknown tmux window changes fall back to the session row until readback confirms');
+    assert.equal(api.activeTabberRowPathForTest(), '/s_1', 'unknown tmux sub-window changes fall back to the session row until readback confirms');
     rows = api.tabberRenderedRowsForTest();
-    assert.equal(rows.some(r => r.type === 'window' && r.classes.includes('tabber-active-window')), false, 'pending unknown tmux window changes do not leave a stale active window highlighted');
+    assert.equal(rows.some(r => r.type === 'window' && r.classes.includes('tabber-active-window')), false, 'pending unknown tmux sub-window changes do not leave a stale active window highlighted');
   });
 
   test('Tabber window click keeps the optimistic target through stale session updates', () => {
@@ -205,8 +205,8 @@ async function runTabberSuite() {
       stopPropagation() { this.propagationStopped = true; },
     };
     panel.listeners.get('click')[0](click);
-    assert.equal(click.defaultPrevented, true, 'Tabber handles the tmux window row click');
-    assert.equal(api.tmuxWindowActiveIndexOverrideForTest('1'), '1', 'Tabber click installs the direct tmux window override before async readback');
+    assert.equal(click.defaultPrevented, true, 'Tabber handles the tmux sub-window row click');
+    assert.equal(api.tmuxWindowActiveIndexOverrideForTest('1'), '1', 'Tabber click installs the direct tmux sub-window override before async readback');
     assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_1', 'Tabber moves to the direct target immediately');
 
     api.applyTranscriptsPayloadForTest({session_order: ['1'], sessions: {'1': staleInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
@@ -251,7 +251,7 @@ async function runTabberSuite() {
       return Promise.resolve(jsonResponse({}));
     });
 
-    api.tmuxWindowForTest('1', {windowIndex: '1'}, 'tmux window 1:claude');
+    api.tmuxWindowForTest('1', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     for (let i = 0; i < 12; i += 1) await flushAsyncWork();
     assert.equal(api.tmuxWindowActiveIndexOverrideForTest('1'), undefined, 'confirmed readback releases the short direct-click override');
 
@@ -1204,18 +1204,20 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level0-color:\s*var\(--markdown-heading\)[\s\S]*--tabber-level1-color:\s*var\(--code-function\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber uses restrained level colors and keeps path rows normal text');
     assert.ok(/body\.theme-light \.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level0-color:\s*var\(--text\)[\s\S]*--tabber-level1-color:\s*var\(--text\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber light mode keeps session, window, and path row text dark');
     assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="tab"\]:not\(\.selected\) > \.file-tree-name,[\s\S]*color:\s*var\(--tabber-level0-color\)/.test(css), 'non-tmux Tabber pane rows do not use purple');
-    assert.ok(/\.file-tree-row\.tabber-active-window:not\(\.selected\) \.file-tree-name\s*\{[\s\S]*font-weight:\s*800/.test(css), 'current Tabber tmux window is shown by bold row text instead of a competing circle marker');
+    assert.ok(/\.file-tree-row\.tabber-active-window:not\(\.selected\) \.file-tree-name\s*\{[\s\S]*font-weight:\s*800/.test(css), 'current Tabber tmux sub-window is shown by bold row text instead of a competing circle marker');
+    const sharedTmuxTabCss = css.match(/\.tmux-pane-tab-token\s*\{([\s\S]*?)\}/)?.[1] || '';
+    assert.ok(/height:\s*var\(--pane-tab-height\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use the shared pane-tab height');
+    assert.ok(/padding:\s*1px 5px 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab padding');
+    assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use the shared pane-tab border token');
+    assert.ok(/border-radius:\s*6px 6px 0 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
+    assert.ok(/font-family:\s*var\(--tab-font\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab font');
+    assert.ok(/line-height:\s*var\(--tab-line-height\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab line height');
+    assert.ok(/\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: compact tmux tab tokens inherit active pane-tab tokens');
     const tabberSessionTabCss = css.match(/\.file-tree-row\.tabber-row \.tabber-session-tab\s*\{([\s\S]*?)\}/)?.[1] || '';
-    assert.ok(/height:\s*var\(--pane-tab-height\)/.test(tabberSessionTabCss), 'A2: Tabber session label uses the shared pane-tab height');
     assert.ok(/inline-size:\s*100%/.test(tabberSessionTabCss) && /max-inline-size:\s*100%/.test(tabberSessionTabCss), 'A2/A4: Tabber session label stretches to the row instead of the pane tab width cap');
     assert.equal(/max-inline-size:\s*min\(var\(--pane-tab-width\), 100%\)/.test(tabberSessionTabCss), false, 'A2/A4: Tabber session label has no shared pane-tab-width max cap');
-    assert.ok(/padding:\s*1px 5px 0/.test(tabberSessionTabCss), 'A2: Tabber session label uses pane-tab padding');
     assert.ok(/color:\s*var\(--tabber-detail-color\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session text uses the dim Tabber detail color');
     assert.ok(/background:\s*var\(--pane-bar-bg, var\(--panel2\)\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session background matches dockview inactive tabs');
-    assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session border uses the shared pane-tab border token');
-    assert.ok(/border-radius:\s*6px 6px 0 0/.test(tabberSessionTabCss), 'A2: Tabber session label uses pane-tab top radius');
-    assert.ok(/font-family:\s*var\(--tab-font\)/.test(tabberSessionTabCss), 'A2: Tabber session label uses pane-tab font');
-    assert.ok(/line-height:\s*var\(--tab-line-height\)/.test(tabberSessionTabCss), 'A2: Tabber session label uses pane-tab line height');
     assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\]:not\(\.tabber-active-session\):not\(\.selected\):hover \.tabber-session-tab\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)/.test(css), 'A2: inactive Tabber session hover uses the shared inactive-tab hover token');
     assert.ok(/\.file-tree-row\.tabber-row\.tabber-active-session \.tabber-session-tab,[\s\S]*\.tabber-session-tab\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: active Tabber session labels use active pane-tab tokens');
     assert.ok(/\.file-tree-row\.tabber-row\.selected \.tabber-session-tab\s*\{[\s\S]*box-shadow:\s*0 0 0 1px var\(--active-control-focus-ring\)/.test(css), 'A2/A3: selected tree rows keep a visible focus ring on the tab-shaped label');
@@ -1226,6 +1228,7 @@ async function runTabberSuite() {
     assert.ok(/\.session-popover-host > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-pane-modal\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover surface as real tabs');
     assert.ok(/\.session-popover-host\.popover-open > \.session-popover,\s*\.pane-tab-detached-popover\.popover-open\s*\{[\s\S]*visibility:\s*visible[\s\S]*opacity:\s*1/.test(css), 'TR2: Tabber session popovers open through the same visibility selector as real tabs');
     assert.ok(source.includes("'tabber-session-tab', 'session-popover-host'"), 'TR2: Tabber session tabs opt into the shared popover host class');
+    assert.ok(/function tabberSessionChromeHtml\(data\)[\s\S]*tmuxPaneTabTokenHtml\(session,[\s\S]*contentHtml:\s*stripTitleAttrs\(tmuxPaneTabHtml\(session/.test(source), 'TR1: Tabber session rows use the shared compact tmux pane-tab token helper');
     assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*width:\s*min\(420px/.test(css), false, 'TR2: Tabber does not keep a divergent one-off popover width');
     assert.equal(source.includes("tabber: {type: 'loading'"), false, 'Tabber no longer renders a client-side touched-path loading row');
     assert.ok(source.includes('function tabberLookbackControlHtml()') && source.includes('data-tabber-lookback'), 'Tabber renders a dedicated touched-path lookback control');
@@ -1277,8 +1280,8 @@ async function runTabberSuite() {
     assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
     assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
     assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, pid: data.pid})") && source.includes('function agentWindowPayloadCurrent(agent)') && source.includes('data.activityIconHtml || agentIcon'), 'DOIT.61 B7/PD: current window state, activity glyphs, and pid are passed as separate data');
-    assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux window record source as Tabber');
-    assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux window pid formatter');
+    assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux sub-window record source as Tabber');
+    assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux sub-window pid formatter');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');
     assert.ok(/type === 'repo' && row\.dataset\.tabberRepoRoot\) \{[\s\S]*switchWindow\(\);[\s\S]*setFileExplorerMode\('files'\)/.test(source), 'Tabber repo clicks also install the tmux-window override before leaving Tabber mode');
     assert.equal(source.includes("if (entry.tabber?.type !== 'session') fileExplorerTabberCollapsed.add(path)"), false, 'Tabber collapse-all and disclosure toggles include session rows');
@@ -1340,7 +1343,7 @@ async function runTabberSuite() {
     assert.equal(entries.find(e => e.tabber && e.tabber.session === '2')?.tabber.active, false, 'A5: inactive tmux sessions stay inactive');
     assert.ok(String(s1.tabber.branchText || '').length > 0, 'B2: the repo branch is retained as Tabber metadata');
     const windows = entriesByDir.get('/' + s1.name);
-    assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 has its two tmux windows');
+    assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 has its two tmux sub-windows');
     const claudeWin = windows.find(w => /0:claude/.test(w.tabber.label));
     assert.ok(claudeWin, 'B2: window label is index:process (0:claude)');
     assert.equal(claudeWin.tabber.label, '0:claude', 'PL/WI: AI window labels use the canonical index:agent label without raw pid text');
@@ -1373,8 +1376,8 @@ async function runTabberSuite() {
     const scopedWindow1 = scopedWindows.find(row => row.tabber.windowIndex === 1);
     const scopedRepos0 = scopedTree.entriesByDir.get('/' + scopedSession.name + '/' + scopedWindow0.name).map(row => row.tabber.label);
     const scopedRepos1 = scopedTree.entriesByDir.get('/' + scopedSession.name + '/' + scopedWindow1.name).map(row => row.tabber.label);
-    assert.deepEqual(scopedRepos0, ['/home/u/codex-a'], 'Tabber repo rows under window 0 use only files attributed to tmux window 0');
-    assert.deepEqual(scopedRepos1, ['/home/u/codex-b'], 'Tabber repo rows under window 1 use only files attributed to tmux window 1');
+    assert.deepEqual(scopedRepos0, ['/home/u/codex-a'], 'Tabber repo rows under window 0 use only files attributed to tmux sub-window 0');
+    assert.deepEqual(scopedRepos1, ['/home/u/codex-b'], 'Tabber repo rows under window 1 use only files attributed to tmux sub-window 1');
     assert.ok((scopedWindow0.tabber.activityIconHtml || '').includes('agent-window-agent-icon--active'), 'current idle Codex Tabber window renders the moving active glyph');
     assert.equal((scopedWindow0.tabber.activityIconHtml || '').includes('agent-window-status-dot'), false, 'current idle Codex Tabber window does not add a competing status dot');
     assert.equal((scopedWindow1.tabber.activityIconHtml || '').includes('agent-window-agent-icon--active'), false, 'inactive idle Codex Tabber window does not pulse');
@@ -1403,7 +1406,7 @@ async function runTabberSuite() {
     ]});
     sortedApi.setFileExplorerTreeSortModeForTest('za');
     const windowLabels = sortedApi.buildTabberTree().entriesByDir.get('/s_1').map(row => row.tabber.label);
-    assert.deepEqual(windowLabels, ['0:codex', '1:claude', '2:bash'], 'TS2: tmux window rows stay in tmux index order regardless of Tabber sort mode');
+    assert.deepEqual(windowLabels, ['0:codex', '1:claude', '2:bash'], 'TS2: tmux sub-window rows stay in tmux index order regardless of Tabber sort mode');
     const renamedSessionApi = loadYolomux('', ['1', '2', '8002b']);
     renamedSessionApi.setTranscriptInfoForTest('8002b', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude'}]});
     const renamedSessionHtml = renamedSessionApi.tmuxPaneTabHtml('8002b', renamedSessionApi.transcriptInfoForTest('8002b'), null, false);
@@ -1430,7 +1433,7 @@ async function runTabberSuite() {
     const activeWindowRow = rows.find(r => r.type === 'window' && /^0:claude/.test(r.name));
     assert.ok(activeWindowRow?.nameHtml.includes('tabber-window-pid') && activeWindowRow.nameHtml.includes('(pid=12345)'), 'PD4: agent Tabber rows render canonical index:agent plus pid');
     assert.equal(/\stitle=/.test(activeWindowRow?.nameHtml || ''), false, 'visible Tabber window chrome strips nested native title hovers');
-    assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux window row exposes aria-current');
+    assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux sub-window row exposes aria-current');
     assert.equal(activeWindowRow?.date, 'working for 3h 45m', 'TD1: working agent Tabber rows use the shared state text with working duration');
     assert.equal(activeWindowRow?.dateHtml.includes('attention-pulse'), false, 'working Tabber status text does not inherit the ASK? attention pulse');
     api.setAutoApproveStateForTest('1', {agent_windows: [
@@ -1448,8 +1451,8 @@ async function runTabberSuite() {
     const shellWindowRow = rows.find(r => r.type === 'window' && /1:bash/.test(r.name));
     assert.ok(shellWindowRow?.nameHtml.includes('tabber-window-pid') && shellWindowRow.nameHtml.includes('(pid=54321)'), 'PD5: bash Tabber rows still render their pid from record data');
     assert.equal(shellWindowRow?.icon, '', 'shell/process window leaf rows do not render the old neutral process glyph');
-    assert.notEqual(shellWindowRow?.date, 'working for 3h 45m', 'TD4: non-AI tmux windows do not inherit working duration text');
-    assert.equal(rows.some(r => r.type === 'window' && ['▢', '■', '⌁'].includes(r.icon)), false, 'tmux window rows never render checkbox-looking or decorative process glyphs');
+    assert.notEqual(shellWindowRow?.date, 'working for 3h 45m', 'TD4: non-AI tmux sub-windows do not inherit working duration text');
+    assert.equal(rows.some(r => r.type === 'window' && ['▢', '■', '⌁'].includes(r.icon)), false, 'tmux sub-window rows never render checkbox-looking or decorative process glyphs');
     assert.equal(activeSessionRow.icon, '▾', 'expanded session rows still use the shared disclosure affordance');
     api.setTranscriptInfoForTest('1', {
       ...session1ShellTranscript,
@@ -1561,7 +1564,7 @@ async function runTabberSuite() {
     assert.equal(delegatedClick.defaultPrevented, true, 'clicking the green Tabber session row body is handled by Tabber');
     assert.equal(api.currentSessionActionTarget(), '2', 'clicking the whole green "2 <desc>" session line opens Tab 2');
     assert.deepEqual(api.editorNav.stack, ['1', '2'], `green session row body click records navigation so Back returns to the prior tab; got ${JSON.stringify(api.editorNav.stack)} index=${api.editorNav.index} navigating=${api.editorNav.navigating}`);
-    assert.ok(firstLevelExpandedRows.findIndex(r => /0:claude/.test(r.name)) < firstLevelExpandedRows.findIndex(r => /1:bash/.test(r.name)), 'Tabber window rows stay in tmux window-index order even when tree sort is newest');
+    assert.ok(firstLevelExpandedRows.findIndex(r => /0:claude/.test(r.name)) < firstLevelExpandedRows.findIndex(r => /1:bash/.test(r.name)), 'Tabber tmux sub-window rows stay in tmux sub-window index order even when tree sort is newest');
     assert.ok(rows.some(r => r.type === 'repo' && r.repoRoot === '/home/u/proj' && r.name === '/home/u/proj'), 'L3: path rows render with absolute paths');
     assert.ok(rows.some(r => r.type === 'repo' && r.repoRoot === '/home/u/proj' && r.icon === '📁'), 'L3: path rows use a folder icon');
     assert.ok(rows.some(r => r.type === 'session' && r.branch === 'devbranch' && r.title.includes('branch: devbranch')), 'B2: the session branch remains available in row metadata/hover text');

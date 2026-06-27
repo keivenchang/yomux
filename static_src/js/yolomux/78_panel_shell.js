@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Shared panel layout, pane-tab shell, tmux window controls, and search/history panel helpers split from 80_panes_preferences.js.
+// Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers split from 80_panes_preferences.js.
 
 function renderPanels(previousActive = [], options = {}) {
   if (renderPanelsDockview(previousActive, options)) return;
@@ -590,7 +590,8 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
   const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
-  tab.className = `pane-tab session-popover-host ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
+  const tmuxTabClass = !isVirtual && !isEditor ? 'tmux-pane-tab-token' : '';
+  tab.className = `pane-tab session-popover-host ${tmuxTabClass} ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
@@ -859,12 +860,44 @@ function fileEditorPaneTabHtml(item, options = {}) {
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
 
-function tmuxPaneTabHtml(session, info, state, auto) {
-  const pr = displayPullRequest(info);
-  const desc = sessionTabDescription(session, info);
+function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
+  const pr = options.showBadges === false ? null : displayPullRequest(info);
+  const desc = options.showDetail === false
+    ? ''
+    : (options.detail !== undefined ? String(options.detail || '') : sessionTabDescription(session, info));
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span></span>`;
+  const leadingHtml = options.leadingHtml !== undefined
+    ? String(options.leadingHtml || '')
+    : options.showLeading === false
+    ? ''
+    : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false});
+  const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
+  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
+  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+    <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
+}
+
+function tmuxPaneTabTokenHtml(session, options = {}) {
+  const item = String(options.item || session || '').trim();
+  if (!item) return '';
+  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMeta.sessions?.[item];
+  const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(item, info);
+  const auto = Object.prototype.hasOwnProperty.call(options, 'auto') ? options.auto : autoApproveStates.get(item)?.enabled === true;
+  const active = Object.prototype.hasOwnProperty.call(options, 'active') ? options.active === true : itemIsActivePaneTab(item);
+  const tag = options.tag || (options.action === false ? 'span' : 'button');
+  const classes = [
+    'tmux-pane-tab-token',
+    ...(Array.isArray(options.classes) ? options.classes : []),
+    tabIsPinned(item) ? 'pinned-tab' : '',
+    active ? 'active' : '',
+  ].filter(Boolean).join(' ');
+  const attrs = [`class="${esc(classes)}"`, `data-pane-tab="${esc(item)}"`, `data-tmux-pane-tab-state="${active ? 'active' : 'inactive'}"`];
+  if (tag === 'button') attrs.unshift('type="button"');
+  if (options.title) attrs.push(`title="${esc(options.title)}"`);
+  if (Array.isArray(options.attrs)) attrs.push(...options.attrs.filter(Boolean));
+  const contentHtml = options.contentHtml || tmuxPaneTabHtml(item, info, state, auto, options);
+  const pinHtml = options.showPin === false ? '' : pinnedTabIconHtml(item);
+  return `<${tag} ${attrs.join(' ')}>${pinHtml}${contentHtml}${options.afterHtml || ''}</${tag}>`;
 }
 
 function bindPaneTabStrip(strip, side) {
@@ -1544,7 +1577,14 @@ function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = tr
     if (!nextSessions) nextSessions = {...payload.sessions};
     nextSessions[session] = merged;
   }
-  return nextSessions ? {...payload, sessions: nextSessions} : payload;
+  const previousIndexedRepos = Array.isArray(previousPayload?.indexed_repos) ? previousPayload.indexed_repos : null;
+  const preserveIndexedRepos = payload.metadata_loading === true && previousIndexedRepos && !payload.indexed_repos?.length;
+  if (!nextSessions && !preserveIndexedRepos) return payload;
+  return {
+    ...payload,
+    ...(nextSessions ? {sessions: nextSessions} : {}),
+    ...(preserveIndexedRepos ? {indexed_repos: previousIndexedRepos} : {}),
+  };
 }
 
 function transcriptPayloadWithTmuxWindowOverrides(payload) {
@@ -1740,6 +1780,38 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
+function tmuxWindowButtonHtml(options = {}) {
+  const tag = options.tag || 'button';
+  const visibleName = String(options.visibleName || '').trim();
+  if (!visibleName) return '';
+  const active = options.active === true;
+  const classes = [
+    'tab',
+    'tmux-window-button',
+    ...(Array.isArray(options.classes) ? options.classes : []),
+    active ? 'active' : '',
+  ].filter(Boolean).join(' ');
+  const title = String(options.title || visibleName);
+  const disabled = options.disabled === true;
+  const disabledTitle = String(options.disabledTitle || title);
+  const attrs = [`class="${esc(classes)}"`];
+  if (tag === 'button') attrs.unshift('type="button"');
+  if (disabled) {
+    attrs.push('disabled', `title="${esc(disabledTitle)}"`, `aria-label="${esc(title)}"`);
+  } else {
+    if (Array.isArray(options.attrs)) attrs.push(...options.attrs.filter(Boolean));
+    attrs.push(`title="${esc(title)}"`, `aria-label="${esc(title)}"`);
+    if (options.ariaPressed !== false) attrs.push(`aria-pressed="${active ? 'true' : 'false'}"`);
+  }
+  const agentStatus = options.agentStatus || null;
+  const activityIconHtml = options.activityIconHtml !== undefined
+    ? String(options.activityIconHtml || '')
+    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '');
+  const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
+  const numberLabel = String(options.numberLabel || options.indexText || visibleName);
+  return `<${tag} ${attrs.join(' ')}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${labelHtml}</span></span><span class="tmux-window-number-label">${esc(numberLabel)}</span></${tag}>`;
+}
+
 function tmuxWindowAgentKey(name) {
   const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
   if (base === 'claude' || base === 'codex') return base;
@@ -1767,19 +1839,28 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
     const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
-    const pressed = active ? 'true' : 'false';
-    const activeClass = active ? ' active' : '';
     const agentStatusForIcon = agentStatus
       ? {...agentStatus, current: active, window_active: active}
       : (active && ['claude', 'codex'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
-    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
-    const attrs = disabled
-      ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
-      : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
-    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${esc(visibleName)}</span></span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+    return tmuxWindowButtonHtml({
+      session,
+      visibleName,
+      numberLabel: record.numberLabel,
+      active,
+      agentStatus: agentStatusForIcon,
+      agentKey,
+      title,
+      disabled,
+      disabledTitle,
+      attrs: [
+        `data-window-index="${esc(record.indexText)}"`,
+        `data-window-session="${esc(session)}"`,
+        `data-window-label="${esc(visibleName)}"`,
+      ],
+    });
   }).join('');
   return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}"${contextAttr} data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }
@@ -1789,11 +1870,11 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
-    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux window ${label}`);
+    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);
     return;
   }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
-  const label = button.dataset.windowDir === 'prev' ? 'previous tmux window' : 'next tmux window';
+  const label = button.dataset.windowDir === 'prev' ? 'previous tmux sub-window' : 'next tmux sub-window';
   tmuxWindow(button.dataset.windowSession, key, label);
 }
 

@@ -3494,7 +3494,6 @@ body.editor-theme-light .file-editor-native-video {
 .transcript-path-value,
 .transcript-path-missing,
 .summary-context-line,
-.info-cell,
 .file-explorer-path-inline,
 .file-editor-path,
 .file-explorer-repo-summary,
@@ -3532,30 +3531,13 @@ body.theme-light .file-tree-row.tabber-row {
   max-inline-size: 100%;
 }
 .file-tree-row.tabber-row .tabber-session-tab {
-  box-sizing: border-box;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
   flex: 1 1 auto;
-  min-width: 0;
   inline-size: 100%;
   max-inline-size: 100%;
-  height: var(--pane-tab-height);
-  padding: 1px 5px 0;
   color: var(--tabber-detail-color);
   background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-bottom-color: var(--pane-inactive-tab-border);
-  border-radius: 6px 6px 0 0;
-  font-family: var(--tab-font);
-  font-size: var(--tab-label-size);
-  font-stretch: condensed;
-  font-weight: 500;
-  line-height: var(--tab-line-height);
-  text-align: start;
-  white-space: nowrap;
-  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 6px;
   cursor: pointer;
 }
 .file-tree-row.tabber-row .tabber-session-tab > .pane-tab-core {

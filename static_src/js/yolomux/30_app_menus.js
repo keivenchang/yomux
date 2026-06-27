@@ -669,30 +669,6 @@ function fileMenuVirtualCommand(item, detail) {
   });
 }
 
-function openYoStatsPane() {
-  if (debugModeEnabled && isLayoutItem(debugPaneItemId)) {
-    return selectSession(debugPaneItemId, {userInitiated: true});
-  }
-  const currentUrl = String(updateActiveSessionParam() || '');
-  const hashIndex = currentUrl.indexOf('#');
-  const pathAndQuery = hashIndex >= 0 ? currentUrl.slice(0, hashIndex) : currentUrl;
-  const hash = hashIndex >= 0 ? currentUrl.slice(hashIndex) : '';
-  const queryIndex = pathAndQuery.indexOf('?');
-  const path = queryIndex >= 0 ? pathAndQuery.slice(0, queryIndex) : pathAndQuery || location.pathname || '/';
-  const params = new URLSearchParams(queryIndex >= 0 ? pathAndQuery.slice(queryIndex + 1) : '');
-  params.set('debug', '1');
-  const current = params.get('sessions') || '';
-  const sessionsParam = current.split(',').map(item => item.trim()).filter(Boolean);
-  if (!sessionsParam.includes('debug')) {
-    sessionsParam.push('debug');
-    params.set('sessions', sessionsParam.join(','));
-  }
-  const query = params.toString();
-  history.replaceState(null, '', `${path}${query ? `?${query}` : ''}${hash}`);
-  location.reload();
-  return null;
-}
-
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const shareSessions = shareSessionsFromLayout();
@@ -700,13 +676,7 @@ function appMenuTree() {
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloWorkingSessions().length;
-  const debugMenuItem = debugModeEnabled
-    ? fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'))
-    : menuCommand(t('tab.debug'), openYoStatsPane, {
-      detail: t('menu.file.debug.detail'),
-      iconHtml: appMenuUiIcon('tab-meta'),
-      targetItem: debugPaneItemId,
-    });
+  const debugMenuItem = fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'));
   return [
     {
       id: 'file',
@@ -783,6 +753,7 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
+        [fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail'))],
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),

@@ -256,7 +256,7 @@
   "info.header.branch": "branch",
   "info.header.desc": "desc",
   "info.header.path": "path",
-  "info.header.session": "session-name",
+  "info.header.session": "Tab/AI",
   "info.header.updated": "updated",
   "info.loadFailed": "Repo metadata failed to load.",
   "info.loadingRepo": "Loading repo metadata...",

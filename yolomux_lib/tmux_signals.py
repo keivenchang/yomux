@@ -501,7 +501,7 @@ def parse_tmux_signal_snapshot(
             continue
         window = parse_window_signal_row(line)
         if window is None:
-            parse_errors.append("invalid tmux window signal row")
+            parse_errors.append("invalid tmux sub-window signal row")
             continue
         windows.append(window)
         windows_by_key[window["key"]] = window

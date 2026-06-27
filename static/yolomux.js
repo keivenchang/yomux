@@ -730,8 +730,7 @@ const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
 const shareViewFitStorageKey = 'yolomux.share.viewFit.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
-// YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
-// sub-tab is remembered across reloads.
+// Legacy merged-pane sub-tab compatibility only. YO!info and YO!agent now have separate virtual tabs.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const infoLookbackHoursStorageKey = 'yolomux.infoPanel.lookbackHours.v1';
 const transcriptPreviewMessages = 200;
@@ -832,8 +831,8 @@ function urlFlagEnabled(name) {
     return false;
   }
 }
-const debugModeEnabled = urlFlagEnabled('debug');
 const jsDebugCollectionEnabled = true;
+let debugModeEnabled = urlFlagEnabled('debug');
 const jsDebugEventLimit = 200;
 const jsDebugRenderDebounceMs = 500;
 let jsDebugEventSeq = 0;
@@ -973,14 +972,14 @@ const TAB_TYPES = [
     // resolve to the standalone YO!agent item below.
     key: 'info',
     id: infoItemId,
-    aliases: ['info', infoItemId],
-    match: item => item === infoItemId,
+    aliases: ['info', 'info2', 'yo-info2', 'yoinfo2', infoItemId, '__info2__'],
+    match: item => item === infoItemId || item === '__info2__',
     label: () => infoTabLabel(),
     shortLabel: () => infoTabLabel(),
     terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
     param: () => 'info',
-    detail: () => t('info.subtitle'),
+    detail: () => t('menu.file.info.detail'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     renderAttached: () => {
@@ -1071,7 +1070,7 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
-  ...(debugModeEnabled ? [{
+  {
     key: 'debug',
     id: debugPaneItemId,
     aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
@@ -1084,12 +1083,15 @@ const TAB_TYPES = [
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
-    renderAttached: () => renderDebugPanels(),
+    renderAttached: () => {
+      enableDebugMode();
+      renderDebugPanels();
+    },
     className: () => 'debug-item',
     icon: 'tab-meta',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
-  }] : []),
+  },
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1229,9 +1231,7 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 function virtualTabItems() {
-  return debugModeEnabled
-    ? [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId]
-    : [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId];
+  return [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1306,18 +1306,7 @@ function setLimitedMapEntry(map, key, value, limit) {
   }
 }
 
-let infoBranchSort = {key: 'updated', dir: 'desc'};
 let shareInfoBranchRowsOverride = null;
-const infoBranchColumnWidthStorageKey = 'yolomux.infoBranchColumnWidth.v1';
-const infoBranchColumnDefaultWidthPx = 320;
-const infoBranchColumnMinWidthPx = 230;
-const infoBranchColumnMaxWidthPx = 900;
-const infoDescColumnWidthStorageKey = 'yolomux.infoDescColumnWidth.v1';
-const infoDescColumnDefaultWidthPx = 310;
-const infoDescColumnMinWidthPx = 310;
-const infoDescColumnMaxWidthPx = 1600;
-let infoBranchColumnWidthPx = readStoredInfoColumnWidth('branch');
-let infoDescColumnWidthPx = readStoredInfoColumnWidth('desc');
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
@@ -1351,7 +1340,6 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
-const watchedPrContextMenu = createContextMenuController();   // "Watch this PR" on YO!info PR cells
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 let sessionRenameDialog = null;
 let fileExplorerManualSelectionActive = false;
@@ -1916,6 +1904,13 @@ function installJsDebugEventCapture() {
       message: jsDebugErrorText(event.reason),
     });
   });
+}
+
+function enableDebugMode() {
+  debugModeEnabled = true;
+  installJsDebugEventCapture();
+  if (typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
+  scheduleJsDebugPanelRefresh();
 }
 
 installJsDebugEventCapture();
@@ -5720,7 +5715,7 @@ function initialLayoutSlots() {
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return layoutWithDebugPaneActive(layoutFromUrl);
+  if (layoutFromUrl) return layoutFromUrl;
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -5729,30 +5724,8 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutWithDebugPaneActive(layoutFromSessionList(selected));
-  return layoutWithDebugPaneActive(defaultLayoutSlots());
-}
-
-function debugPanePreferredSlot(slots) {
-  const keys = layoutSlotKeys(slots);
-  return keys.find(slot => paneTabs(slot, slots).some(item => item === infoItemId || item === yoagentItemId || item === prefsItemId))
-    || keys.find(slot => {
-      const active = activeItemForSide(slot, slots);
-      return active && !isFileExplorerItem(active);
-    })
-    || keys[0]
-    || 'left';
-}
-
-function layoutWithDebugPaneActive(slots) {
-  if (!debugModeEnabled || !isLayoutItem(debugPaneItemId)) return slots;
-  const next = cloneLayoutSlots(slots);
-  const existingSlot = layoutSlotKeys(next).find(slot => paneTabs(slot, next).includes(debugPaneItemId));
-  const slot = existingSlot || debugPanePreferredSlot(next);
-  const tabs = paneTabs(slot, next).filter(item => item !== debugPaneItemId);
-  next[slot] = paneStateWithTabs([...tabs, debugPaneItemId], debugPaneItemId);
-  if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(slot);
-  return compactLayoutSlots(next);
+  if (selected.length) return layoutFromSessionList(selected);
+  return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
@@ -6455,7 +6428,7 @@ function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(s
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  // Spin the YO ball whenever any Claude/Codex window is working, even when that window is hidden.
+  // Spin the YO ball whenever any Claude/Codex tmux sub-window is working, even when that sub-window is hidden.
   return sessionHasWorkingAgentWindow(session, payload) || autoApproveScreenIsWorking(payload);
 }
 
@@ -9662,30 +9635,6 @@ function fileMenuVirtualCommand(item, detail) {
   });
 }
 
-function openYoStatsPane() {
-  if (debugModeEnabled && isLayoutItem(debugPaneItemId)) {
-    return selectSession(debugPaneItemId, {userInitiated: true});
-  }
-  const currentUrl = String(updateActiveSessionParam() || '');
-  const hashIndex = currentUrl.indexOf('#');
-  const pathAndQuery = hashIndex >= 0 ? currentUrl.slice(0, hashIndex) : currentUrl;
-  const hash = hashIndex >= 0 ? currentUrl.slice(hashIndex) : '';
-  const queryIndex = pathAndQuery.indexOf('?');
-  const path = queryIndex >= 0 ? pathAndQuery.slice(0, queryIndex) : pathAndQuery || location.pathname || '/';
-  const params = new URLSearchParams(queryIndex >= 0 ? pathAndQuery.slice(queryIndex + 1) : '');
-  params.set('debug', '1');
-  const current = params.get('sessions') || '';
-  const sessionsParam = current.split(',').map(item => item.trim()).filter(Boolean);
-  if (!sessionsParam.includes('debug')) {
-    sessionsParam.push('debug');
-    params.set('sessions', sessionsParam.join(','));
-  }
-  const query = params.toString();
-  history.replaceState(null, '', `${path}${query ? `?${query}` : ''}${hash}`);
-  location.reload();
-  return null;
-}
-
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const shareSessions = shareSessionsFromLayout();
@@ -9693,13 +9642,7 @@ function appMenuTree() {
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloWorkingSessions().length;
-  const debugMenuItem = debugModeEnabled
-    ? fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'))
-    : menuCommand(t('tab.debug'), openYoStatsPane, {
-      detail: t('menu.file.debug.detail'),
-      iconHtml: appMenuUiIcon('tab-meta'),
-      targetItem: debugPaneItemId,
-    });
+  const debugMenuItem = fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'));
   return [
     {
       id: 'file',
@@ -9776,6 +9719,7 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
+        [fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail'))],
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),
@@ -13862,7 +13806,7 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 
 // ---------------------------------------------------------------------------
 // Tabber — the Finder pane's third mode (Finder / Differ / Tabber). A live, default-expanded tree:
-// tmux sessions (level 0) -> their tmux windows (level 1, index:process, the current window marked) -> for
+// tmux sessions (level 0) -> their tmux sub-windows (level 1, index:process, the current window marked) -> for
 // claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
 // updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
@@ -14275,14 +14219,23 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
 }
 
 function tabberSessionChromeHtml(data) {
-  const classes = ['tabber-session-tab', 'session-popover-host', data.active === true ? 'active' : ''].filter(Boolean).join(' ');
+  const classes = ['tabber-session-tab', 'session-popover-host'];
   const session = String(data.session || '').trim();
   const info = transcriptMeta.sessions?.[session] || {};
   const state = sessionState(session, info);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
-  const tabHtml = stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto));
-  return `<span class="${classes}" data-tabber-session-chrome="shared" data-pane-tab="${esc(session)}" draggable="true">${tabHtml}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+  return tmuxPaneTabTokenHtml(session, {
+    tag: 'span',
+    classes,
+    active: data.active === true,
+    info,
+    state,
+    auto,
+    attrs: ['data-tabber-session-chrome="shared"', 'draggable="true"'],
+    contentHtml: stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto)),
+    afterHtml: sessionPopoverHtml(session, info, agentKind, auto, state),
+  });
 }
 
 function bindTabberSessionChrome(row, session) {
@@ -14497,7 +14450,7 @@ function openTabberSession(session, options = {}) {
 }
 
 // Delegated activation for Tabber rows. Clicking the disclosure icon toggles a node; clicking the row body
-// acts: session -> open the session's tab; window -> open the tab + switch the tmux window; repo root ->
+// acts: session -> open the session's tab; window -> open the tab + switch the tmux sub-window; repo root ->
 // point the Finder at it + open the tab + switch the window.
 function handleTabberRowActivate(row, event) {
   const fullPath = row.dataset.path;
@@ -14823,6 +14776,28 @@ function agentWindowPayloadCurrent(agent) {
   return null;
 }
 
+function activeTmuxWindowIndexFromInfo(info = null) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  for (const pane of [
+    panes.find(item => item?.window_active === true && item?.active === true),
+    panes.find(item => item?.window_active === true),
+    info?.selected_pane,
+  ]) {
+    const index = tmuxWindowIndexKey(pane?.window_index ?? pane?.window);
+    if (index !== null) return index;
+  }
+  return null;
+}
+
+function agentWindowWithInfoActiveWindow(agent, activeIndex = null) {
+  if (activeIndex === null) return agent;
+  const agentIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  if (agentIndex === null) return agent;
+  const active = agentIndex === activeIndex;
+  if (agent?.current === active && agent?.window_active === active) return agent;
+  return {...agent, current: active, window_active: active};
+}
+
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
@@ -14844,8 +14819,10 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
       last_active_ts: 0,
       idle_since: null,
     }));
+  const activeIndex = activeTmuxWindowIndexFromInfo(info);
   return fallback
     .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
+    .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
 }
 
@@ -20284,10 +20261,11 @@ function metaJoin(parts) {
   return parts.filter(Boolean).join('<span class="meta-sep"> · </span>');
 }
 
-function sessionNumberNameHtml(session) {
+function sessionNumberNameHtml(session, options = {}) {
   const label = sessionLabel(session);
   const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
-  return `<span class="${className}">${esc(label)}</span>`;
+  const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml) : esc(label);
+  return `<span class="${className}">${labelHtml}</span>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {
@@ -26225,6 +26203,7 @@ function createDockviewTabRenderer() {
 function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
   syncDockviewTabActiveClass(tab, api);
+  tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
   tab.classList.toggle('file-missing', isFileEditorItem(item) && openFileIsMissing(fileItemPath(item)));
   tab.classList.toggle('pinned-tab', tabIsPinned(item));
   applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMeta.sessions?.[item]));
@@ -26448,7 +26427,7 @@ function bindActionDispatcher(parent, handlers = {}, options = {}) {
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Shared panel layout, pane-tab shell, tmux window controls, and search/history panel helpers split from 80_panes_preferences.js.
+// Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers split from 80_panes_preferences.js.
 
 function renderPanels(previousActive = [], options = {}) {
   if (renderPanelsDockview(previousActive, options)) return;
@@ -27038,7 +27017,8 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
   const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
-  tab.className = `pane-tab session-popover-host ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
+  const tmuxTabClass = !isVirtual && !isEditor ? 'tmux-pane-tab-token' : '';
+  tab.className = `pane-tab session-popover-host ${tmuxTabClass} ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
@@ -27307,12 +27287,44 @@ function fileEditorPaneTabHtml(item, options = {}) {
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
 
-function tmuxPaneTabHtml(session, info, state, auto) {
-  const pr = displayPullRequest(info);
-  const desc = sessionTabDescription(session, info);
+function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
+  const pr = options.showBadges === false ? null : displayPullRequest(info);
+  const desc = options.showDetail === false
+    ? ''
+    : (options.detail !== undefined ? String(options.detail || '') : sessionTabDescription(session, info));
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span></span>`;
+  const leadingHtml = options.leadingHtml !== undefined
+    ? String(options.leadingHtml || '')
+    : options.showLeading === false
+    ? ''
+    : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false});
+  const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
+  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
+  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+    <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
+}
+
+function tmuxPaneTabTokenHtml(session, options = {}) {
+  const item = String(options.item || session || '').trim();
+  if (!item) return '';
+  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMeta.sessions?.[item];
+  const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(item, info);
+  const auto = Object.prototype.hasOwnProperty.call(options, 'auto') ? options.auto : autoApproveStates.get(item)?.enabled === true;
+  const active = Object.prototype.hasOwnProperty.call(options, 'active') ? options.active === true : itemIsActivePaneTab(item);
+  const tag = options.tag || (options.action === false ? 'span' : 'button');
+  const classes = [
+    'tmux-pane-tab-token',
+    ...(Array.isArray(options.classes) ? options.classes : []),
+    tabIsPinned(item) ? 'pinned-tab' : '',
+    active ? 'active' : '',
+  ].filter(Boolean).join(' ');
+  const attrs = [`class="${esc(classes)}"`, `data-pane-tab="${esc(item)}"`, `data-tmux-pane-tab-state="${active ? 'active' : 'inactive'}"`];
+  if (tag === 'button') attrs.unshift('type="button"');
+  if (options.title) attrs.push(`title="${esc(options.title)}"`);
+  if (Array.isArray(options.attrs)) attrs.push(...options.attrs.filter(Boolean));
+  const contentHtml = options.contentHtml || tmuxPaneTabHtml(item, info, state, auto, options);
+  const pinHtml = options.showPin === false ? '' : pinnedTabIconHtml(item);
+  return `<${tag} ${attrs.join(' ')}>${pinHtml}${contentHtml}${options.afterHtml || ''}</${tag}>`;
 }
 
 function bindPaneTabStrip(strip, side) {
@@ -27992,7 +28004,14 @@ function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = tr
     if (!nextSessions) nextSessions = {...payload.sessions};
     nextSessions[session] = merged;
   }
-  return nextSessions ? {...payload, sessions: nextSessions} : payload;
+  const previousIndexedRepos = Array.isArray(previousPayload?.indexed_repos) ? previousPayload.indexed_repos : null;
+  const preserveIndexedRepos = payload.metadata_loading === true && previousIndexedRepos && !payload.indexed_repos?.length;
+  if (!nextSessions && !preserveIndexedRepos) return payload;
+  return {
+    ...payload,
+    ...(nextSessions ? {sessions: nextSessions} : {}),
+    ...(preserveIndexedRepos ? {indexed_repos: previousIndexedRepos} : {}),
+  };
 }
 
 function transcriptPayloadWithTmuxWindowOverrides(payload) {
@@ -28188,6 +28207,38 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
+function tmuxWindowButtonHtml(options = {}) {
+  const tag = options.tag || 'button';
+  const visibleName = String(options.visibleName || '').trim();
+  if (!visibleName) return '';
+  const active = options.active === true;
+  const classes = [
+    'tab',
+    'tmux-window-button',
+    ...(Array.isArray(options.classes) ? options.classes : []),
+    active ? 'active' : '',
+  ].filter(Boolean).join(' ');
+  const title = String(options.title || visibleName);
+  const disabled = options.disabled === true;
+  const disabledTitle = String(options.disabledTitle || title);
+  const attrs = [`class="${esc(classes)}"`];
+  if (tag === 'button') attrs.unshift('type="button"');
+  if (disabled) {
+    attrs.push('disabled', `title="${esc(disabledTitle)}"`, `aria-label="${esc(title)}"`);
+  } else {
+    if (Array.isArray(options.attrs)) attrs.push(...options.attrs.filter(Boolean));
+    attrs.push(`title="${esc(title)}"`, `aria-label="${esc(title)}"`);
+    if (options.ariaPressed !== false) attrs.push(`aria-pressed="${active ? 'true' : 'false'}"`);
+  }
+  const agentStatus = options.agentStatus || null;
+  const activityIconHtml = options.activityIconHtml !== undefined
+    ? String(options.activityIconHtml || '')
+    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '');
+  const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
+  const numberLabel = String(options.numberLabel || options.indexText || visibleName);
+  return `<${tag} ${attrs.join(' ')}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${labelHtml}</span></span><span class="tmux-window-number-label">${esc(numberLabel)}</span></${tag}>`;
+}
+
 function tmuxWindowAgentKey(name) {
   const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
   if (base === 'claude' || base === 'codex') return base;
@@ -28215,19 +28266,28 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
     const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
-    const pressed = active ? 'true' : 'false';
-    const activeClass = active ? ' active' : '';
     const agentStatusForIcon = agentStatus
       ? {...agentStatus, current: active, window_active: active}
       : (active && ['claude', 'codex'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
-    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
-    const attrs = disabled
-      ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
-      : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
-    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${esc(visibleName)}</span></span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+    return tmuxWindowButtonHtml({
+      session,
+      visibleName,
+      numberLabel: record.numberLabel,
+      active,
+      agentStatus: agentStatusForIcon,
+      agentKey,
+      title,
+      disabled,
+      disabledTitle,
+      attrs: [
+        `data-window-index="${esc(record.indexText)}"`,
+        `data-window-session="${esc(session)}"`,
+        `data-window-label="${esc(visibleName)}"`,
+      ],
+    });
   }).join('');
   return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}"${contextAttr} data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }
@@ -28237,11 +28297,11 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
-    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux window ${label}`);
+    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);
     return;
   }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
-  const label = button.dataset.windowDir === 'prev' ? 'previous tmux window' : 'next tmux window';
+  const label = button.dataset.windowDir === 'prev' ? 'previous tmux sub-window' : 'next tmux sub-window';
   tmuxWindow(button.dataset.windowSession, key, label);
 }
 
@@ -28589,12 +28649,6 @@ function createSearchHistoryPanel() {
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // YO!info and YO!agent panel shells split from 80_panes_preferences.js.
-function infoLookbackControlHtml() {
-  const options = sessionFileLookbackOptions()
-    .map(option => `<option value="${esc(option.hours)}"${option.hours === infoSessionFileLookbackHours ? ' selected' : ''}>${esc(option.label)}</option>`)
-    .join('');
-  return `<label class="info-lookback-control">${esc(t('info.lookback'))}<select data-info-lookback>${options}</select></label>`;
-}
 
 function setInfoSessionFileLookbackHours(hours, options = {}) {
   const previous = infoSessionFileLookbackHours;
@@ -28607,6 +28661,37 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
   return infoSessionFileLookbackHours;
 }
 
+function infoGroupingControlsHtml() {
+  const grouping = typeof currentInfoGrouping === 'function' ? currentInfoGrouping() : ['tab', 'path'];
+  const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
+  const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
+  const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];
+  const dimensions = typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : [];
+  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'}];
+  const optionHtml = level => [
+    `<option value="">None</option>`,
+    ...dimensions.map(dimension => `<option value="${esc(dimension.key)}"${grouping[level] === dimension.key ? ' selected' : ''}>${esc(dimension.label)}</option>`),
+  ].join('');
+  const sortValue = `${sort.key}:${sort.dir}`;
+  const sortFieldHtml = sortFields.map(field => `<option value="${esc(field.value || `${field.key}:${field.dir || ''}`)}"${sortValue === (field.value || `${field.key}:${field.dir || ''}`) ? ' selected' : ''}>${esc(field.label)}</option>`).join('');
+  const presetHtml = presets.map(preset => {
+    const active = grouping.join('|') === preset.grouping.join('|');
+    return `<button type="button" class="info-tree-preset${active ? ' active' : ''}" data-info-preset="${esc(preset.key)}" aria-pressed="${active ? 'true' : 'false'}" title="${esc(preset.title)}">${esc(preset.label)}</button>`;
+  }).join('');
+  const searchHtml = `<label class="info-tree-search-control"><span>Search</span><input type="search" data-info-search value="${esc(search)}" placeholder="Search YO!info" aria-label="Search YO!info"></label>`;
+  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="Order by level ${index + 1}">${optionHtml(index)}</select></label>`).join('');
+  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="Sort order">
+          <label class="info-tree-group-select"><span>Sort</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
+        </div>`;
+  return `
+        <div class="info-tree-primary-controls">
+          <div class="info-tree-presets" role="group" aria-label="Grouping presets">${presetHtml}</div>
+          ${searchHtml}
+        </div>
+        <div class="info-tree-group-selects" role="group" aria-label="Grouping levels"><span class="info-tree-order-label">Order by:</span>${selects}</div>
+        ${sortControls}`;
+}
+
 function bindInfoPanel(panel) {
   if (!panel || panel.__yolomuxInfoPanelBound === true) return;
   panel.__yolomuxInfoPanelBound = true;
@@ -28615,48 +28700,91 @@ function bindInfoPanel(panel) {
     refreshTranscripts({force: true});
     refreshActivitySummary({force: true});
   });
-  delegate(panel, 'click', '[data-info-sort]', (_event, button) => {
-    setInfoBranchSort(button.dataset.infoSort);
-    renderInfoPanel();
+  delegate(panel, 'click', '[data-info-preset]', (event, button) => {
+    event.preventDefault();
+    if (typeof setInfoGroupingPreset === 'function') setInfoGroupingPreset(button.dataset.infoPreset || '');
   });
-  delegate(panel, 'click', '[data-info-session-drawer]', (_event, button) => {
-    toggleInfoSessionDrawer(button.dataset.infoSessionDrawer || '');
-  });
-  delegate(panel, 'click', '[data-watched-remove]', (event, button) => {
+  delegate(panel, 'click', '[data-auto-session][data-action="pane-tab-auto-approve"]', async (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    removeWatchedPr(button.dataset.watchedRemove);
+    event.stopImmediatePropagation?.();
+    if (typeof toggleAutoApprove === 'function') await toggleAutoApprove(button.dataset.autoSession || '');
+  });
+  delegate(panel, 'click', '[data-info-open-tab]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const session = button.dataset.infoOpenTab || '';
+    if (session) selectSession(session, {userInitiated: true});
+  });
+  delegate(panel, 'click', '[data-info-open-ai-window]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const session = button.dataset.infoOpenAiTab || '';
+    const windowIndex = button.dataset.infoOpenAiWindow || '';
+    if (!session) return;
+    if (windowIndex !== '' && typeof tmuxWindow === 'function') {
+      tmuxWindow(session, {windowIndex}, button.textContent || `tmux sub-window ${windowIndex}`);
+    }
+    selectSession(session, {userInitiated: true});
+  });
+  delegate(panel, 'click', '[data-info-open-path]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const path = button.dataset.infoOpenPath || '';
+    if (!path) return;
+    (async () => {
+      if (typeof openFileExplorerPane === 'function') await openFileExplorerPane();
+      if (typeof setFileExplorerMode === 'function') setFileExplorerMode('files');
+      if (typeof openFileExplorerAt === 'function') {
+        const opened = await openFileExplorerAt(path, {manualSelection: true});
+        if (opened && typeof selectFileTreePath === 'function') selectFileTreePath(path);
+      }
+    })().catch(error => {
+      statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
+    });
   });
   panel.addEventListener('change', event => {
-    const lookback = event.target.closest('[data-info-lookback]');
-    if (lookback && panel.contains(lookback)) setInfoSessionFileLookbackHours(lookback.value);
+    const select = event.target.closest('[data-info-group-level]');
+    if (select && panel.contains(select) && typeof setInfoGroupingLevel === 'function') {
+      setInfoGroupingLevel(select.dataset.infoGroupLevel, select.value || '');
+      return;
+    }
+    const sortMode = event.target.closest('[data-info-sort-mode]');
+    if (sortMode && panel.contains(sortMode) && typeof setInfoSortMode === 'function') setInfoSortMode(sortMode.value || '');
   });
-  if (typeof bindInfoColumnResizers === 'function') bindInfoColumnResizers(panel);
+  panel.addEventListener('toggle', event => {
+    const details = event.target.closest?.('details[data-info-group-key]');
+    if (!details || !panel.contains(details) || typeof setInfoTreeGroupCollapsed !== 'function') return;
+    setInfoTreeGroupCollapsed(details.dataset.infoGroupKey || '', !details.open);
+  }, true);
+  panel.addEventListener('input', event => {
+    const search = event.target.closest('[data-info-search]');
+    if (search && panel.contains(search) && typeof setInfoSearch === 'function') setInfoSearch(search.value || '');
+  });
 }
 
 function createInfoPanel() {
   const panel = document.createElement('article');
-  panel.className = 'panel info-panel';
+  panel.className = 'panel info-panel info-tree-panel';
   panel.id = panelDomId(infoItemId);
   panel.innerHTML = `
       <div class="panel-head">
         ${virtualPanelControlsHtml(infoItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="info-actions-bar">
+      <div class="info-actions-bar info-tree-actions-bar">
+        ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
-          ${infoLookbackControlHtml()}
           <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
         </div>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
-        <div id="info-content" class="info-list"></div>
-        <div id="info-watched" class="info-watched"></div>
+        <div id="info-content" class="info-list info-tree-list"></div>
       </div>`;
   bindPanelShell(panel, infoItemId);
   bindInfoPanel(panel);
-  renderInfoPanel();
+  if (typeof renderInfoPanel === 'function') renderInfoPanel();
   return panel;
 }
 
@@ -28797,19 +28925,22 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
     button.title = expandLabel;
     button.setAttribute('aria-label', expandLabel);
   });
-  const infoRefresh = panel.querySelector('[data-info-refresh]');
-  if (infoRefresh) {
+  const refresh = panel.querySelector('[data-info-refresh]');
+  if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
-      setMetadataRefreshButtonLoading(infoRefresh, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
     } else {
       const label = t('info.refreshRepo');
-      infoRefresh.textContent = label;
-      infoRefresh.title = label;
-      infoRefresh.setAttribute('aria-label', label);
+      refresh.textContent = label;
+      refresh.title = label;
+      refresh.setAttribute('aria-label', label);
     }
   }
-  const lookback = panel.querySelector('.info-lookback-control');
-  if (lookback) lookback.outerHTML = infoLookbackControlHtml();
+  const bar = panel.querySelector('.info-tree-actions-bar');
+  if (bar) {
+    const actions = bar.querySelector('.info-subtab-actions');
+    bar.innerHTML = `${infoGroupingControlsHtml()}${actions ? actions.outerHTML : ''}`;
+  }
 }
 
 function relocalizeYoagentPanelChrome(panel = document.getElementById(panelDomId(yoagentItemId))) {
@@ -30512,7 +30643,6 @@ function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
   activitySummaryPayload = payload;
   activitySummaryLastRefreshTs = Date.now();
   activitySummaryRefreshing = false;
-  clearInfoSessionDrawerCache();
   if (options.refreshStartupSnapshot === true) captureYoagentStartupActivitySummarySnapshot({replace: true});
   if (options.render === true || options.refreshStartupSnapshot === true) {
     renderInfoPanel();
@@ -33136,6 +33266,7 @@ function debugPanelHtml() {
 }
 
 function createDebugPanel() {
+  enableDebugMode();
   const panel = document.createElement('article');
   panel.className = 'panel js-debug-panel';
   panel.id = panelDomId(debugPaneItemId);
@@ -35262,7 +35393,7 @@ function fileExplorerModeTitle() {
 function fileExplorerModeButtonTitle(mode) {
   // 'Tabber' tooltip is a brand-literal for now (no locale key) to avoid a 14-catalog change while the
   // co-agent is editing locales; the localized title lands with the B6 docs pass.
-  if (mode === 'tabber') return 'Tabber: open tabs, tmux windows, and the paths each agent touched';
+  if (mode === 'tabber') return 'Tabber: open tabs, tmux sub-windows, and the paths each agent touched';
   return mode === 'diff' ? t('changes.show') : t('changes.hide');
 }
 
@@ -45580,7 +45711,7 @@ const shareWrappedTextDigestSelectors = [
   '.pane-tab .session-button-dir',
   '.file-tree-name',
   '.changes-file-name',
-  '.info-row',
+  '.info-tree-record',
   '.tabber-row-label',
 ];
 
@@ -47537,210 +47668,6 @@ async function refreshBackgroundOwnerStatus(options = {}) {
   return backgroundOwnerStatusRefreshPromise;
 }
 
-function renderInfoPanel() {
-  const node = document.getElementById('info-content');
-  if (!node) return;
-  syncTranscriptMetaLoadingUi();
-  applyInfoBranchColumnWidth();
-  bindInfoPrContextMenu(node);   // idempotent — "Watch this PR" on the PR column
-  renderWatchedPrs();   // the Watched PRs section repaints alongside the branch table
-  const serverRoleHtml = infoServerRoleHtml();
-  const rows = infoBranchRows();
-  const hasShareRows = shareViewMode && Array.isArray(shareInfoBranchRowsOverride);
-  if (!rows.length) {
-    if (hasShareRows) {
-      node.innerHTML = `${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`;
-      return;
-    }
-    if (transcriptMetaLoading) {
-      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
-      return;
-    }
-    if (transcriptMetaLoadError) {
-      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
-      return;
-    }
-    if (!transcriptMetaLoaded) {
-      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
-      return;
-    }
-    node.innerHTML = `${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`;
-    return;
-  }
-  const headerCell = (key, label) => {
-    const active = infoBranchSort.key === key;
-    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? t('sort.ascending') : t('sort.descending')) : t('sort.unsorted');
-    const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
-    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="${esc(t('sort.aria', {label, dir: dirLabel}))}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
-  };
-  const resizeHandle = (column, label) => `<button type="button" class="info-column-resizer" data-info-column-resize="${esc(column)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
-  const header = `<div class="info-row header">
-    <div class="info-cell">${headerCell('session', t('info.header.session'))}</div>
-    <div class="info-cell">${headerCell('path', t('info.header.path'))}</div>
-    <div class="info-cell info-resizable-header-cell info-branch-header-cell">${headerCell('branch', t('info.header.branch'))}${resizeHandle('branch', t('info.resizeBranchColumn'))}</div>
-    <div class="info-cell">${headerCell('pr', 'PR')}</div>
-    <div class="info-cell">${headerCell('linear', 'Linear')}</div>
-    <div class="info-cell info-resizable-header-cell info-desc-header-cell">${headerCell('desc', t('info.header.desc'))}${resizeHandle('desc', t('info.resizeDescColumn'))}</div>
-    <div class="info-cell">${headerCell('updated', t('info.header.updated'))}</div>
-  </div>`;
-  const body = rows.map(row => {
-    const sessionToggle = infoSessionDrawerToggleHtml(row);
-    const rowHtml = `<div class="info-row${row.current ? ' current' : ''}">
-    <div class="info-cell info-session-cell" title="${esc(row.session)}">${sessionToggle}${esc(row.session)}</div>
-    <div class="info-cell" title="${esc(row.pathTitle || row.path)}">${esc(row.pathLabel || compactHomePath(row.path) || row.session || '')}</div>
-    <div class="info-cell" title="${esc(row.branch)}">${row.current ? '<span class="info-branch-current">*</span> ' : ''}${infoBranchCellHtml(row)}</div>
-    <div class="info-cell" title="${esc(row.prTitle)}">${infoPrCellHtml(row)}</div>
-    <div class="info-cell" title="${esc(row.linearTitle)}">${infoLinearCellHtml(row)}</div>
-    <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
-    <div class="info-cell" title="${esc(row.updatedTitle || row.updated)}">${esc(row.updatedText || row.updated)}</div>
-  </div>`;
-    return rowHtml + (row.session && infoSessionDrawerOpen.has(row.session) ? cachedInfoSessionDrawerHtml(row.session) : '');
-  }).join('');
-  node.innerHTML = serverRoleHtml + header + body;
-}
-
-function infoColumnResizeConfig(column) {
-  if (column === 'branch') {
-    return {
-      cssVar: '--info-branch-column-width',
-      defaultWidthPx: infoBranchColumnDefaultWidthPx,
-      maxWidthPx: infoBranchColumnMaxWidthPx,
-      minWidthPx: infoBranchColumnMinWidthPx,
-      storageKey: infoBranchColumnWidthStorageKey,
-    };
-  }
-  if (column === 'desc') {
-    return {
-      cssVar: '--info-desc-column-width',
-      defaultWidthPx: infoDescColumnDefaultWidthPx,
-      maxWidthPx: infoDescColumnMaxWidthPx,
-      minWidthPx: infoDescColumnMinWidthPx,
-      storageKey: infoDescColumnWidthStorageKey,
-    };
-  }
-  return null;
-}
-
-function infoColumnWidth(column) {
-  return column === 'desc' ? infoDescColumnWidthPx : infoBranchColumnWidthPx;
-}
-
-function setInfoColumnWidthState(column, value) {
-  if (column === 'desc') infoDescColumnWidthPx = value;
-  else infoBranchColumnWidthPx = value;
-}
-
-function clampInfoColumnWidth(column, value) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return infoBranchColumnDefaultWidthPx;
-  const number = Number(value);
-  if (!Number.isFinite(number)) return config.defaultWidthPx;
-  return Math.max(config.minWidthPx, Math.min(config.maxWidthPx, Math.round(number)));
-}
-
-function readStoredInfoColumnWidth(column) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return infoBranchColumnDefaultWidthPx;
-  return clampInfoColumnWidth(column, storageGet(config.storageKey, config.defaultWidthPx));
-}
-
-function setInfoColumnWidth(column, value, options = {}) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return infoColumnWidth('branch');
-  const width = clampInfoColumnWidth(column, value);
-  const previous = infoColumnWidth(column);
-  setInfoColumnWidthState(column, width);
-  applyInfoColumnWidth(column);
-  if (options.persist !== false) storageSet(config.storageKey, width);
-  if (options.publish !== false && width !== previous) scheduleShareUiStatePublish();
-  return width;
-}
-
-function resetInfoColumnWidth(column) {
-  const config = infoColumnResizeConfig(column);
-  return setInfoColumnWidth(column, config?.defaultWidthPx);
-}
-
-function applyInfoColumnWidth(column, root = document.documentElement) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return;
-  root?.style?.setProperty(config.cssVar, `${clampInfoColumnWidth(column, infoColumnWidth(column))}px`);
-}
-
-function applyInfoColumnWidths(root = document.documentElement) {
-  applyInfoColumnWidth('branch', root);
-  applyInfoColumnWidth('desc', root);
-}
-
-function setInfoBranchColumnWidth(value, options = {}) {
-  return setInfoColumnWidth('branch', value, options);
-}
-
-function setInfoDescColumnWidth(value, options = {}) {
-  return setInfoColumnWidth('desc', value, options);
-}
-
-function resetInfoBranchColumnWidth() {
-  return resetInfoColumnWidth('branch');
-}
-
-function resetInfoDescColumnWidth() {
-  return resetInfoColumnWidth('desc');
-}
-
-function applyInfoBranchColumnWidth(root = document.documentElement) {
-  applyInfoColumnWidths(root);
-}
-
-function infoColumnResizeTarget(handle) {
-  const column = String(handle?.dataset?.infoColumnResize || '');
-  const config = infoColumnResizeConfig(column);
-  return config ? {column, config} : null;
-}
-
-function bindInfoColumnResizers(node) {
-  if (!node || node.__yolomuxInfoColumnResizersBound === true) return;
-  node.__yolomuxInfoColumnResizersBound = true;
-  delegate(node, 'click', '[data-info-column-resize]', event => {
-    event.preventDefault();
-    event.stopPropagation();
-  });
-  delegate(node, 'dblclick', '[data-info-column-resize]', (event, handle) => {
-    const target = infoColumnResizeTarget(handle);
-    if (!target) return;
-    event.preventDefault();
-    event.stopPropagation();
-    resetInfoColumnWidth(target.column);
-  });
-  delegate(node, 'pointerdown', '[data-info-column-resize]', (event, handle) => {
-    const target = infoColumnResizeTarget(handle);
-    if (!target) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const pointerId = event.pointerId;
-    const startX = event.clientX;
-    const startWidth = infoColumnWidth(target.column);
-    const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
-    handle.setPointerCapture?.(pointerId);
-    document.body?.classList.add('info-column-resizing');
-    const move = moveEvent => {
-      const delta = (moveEvent.clientX - startX) * direction;
-      setInfoColumnWidth(target.column, startWidth + delta, {persist: false});
-    };
-    const done = () => {
-      storageSet(target.config.storageKey, infoColumnWidth(target.column));
-      document.body?.classList.remove('info-column-resizing');
-      try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', done);
-      window.removeEventListener('pointercancel', done);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', done);
-    window.addEventListener('pointercancel', done);
-  });
-}
-
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
 // ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
 // Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
@@ -47758,40 +47685,6 @@ function normalizeWatchedPrRef(entry) {
   return '';
 }
 
-function watchedPrStatusText(pr) {
-  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : t('common.unknown'));
-}
-
-// The Watched PRs section of YO!info — PRs tracked independent of any open session's branch. Reuses
-// the pr-status-* badge classes; renders into its own #info-watched container so it can repaint on the
-// (longer) watched-PR poll cadence without re-rendering the branch table.
-function renderWatchedPrs() {
-  const node = document.getElementById('info-watched');
-  if (!node) return;
-  const prs = Array.isArray(watchedPrsData.watched_prs) ? watchedPrsData.watched_prs : [];
-  const heading = `<div class="info-watched-head">${esc(t('info.watched.heading'))}</div>`;
-  if (!prs.length) {
-    node.innerHTML = `${heading}<div class="info-empty info-watched-empty">${esc(t('info.watched.empty'))}</div>`;
-    return;
-  }
-  const rows = prs.map(pr => {
-    const ref = String(pr.ref || `#${pr.number}`);
-    const statusCls = pullRequestStatusClass(pr);
-    const statusText = watchedPrStatusText(pr);
-    const link = linkHtml(pr.url, ref, pr.title || pr.description || '', 'info-watched-ref');
-    return `<div class="info-row info-watched-row" data-watched-ref="${esc(ref)}">
-      <div class="info-cell info-watched-ref-cell">${link}</div>
-      <div class="info-cell info-watched-title" title="${esc(pr.title || '')}">${esc(pr.title || '')}</div>
-      <div class="info-cell info-watched-status"><span class="meta-pr-status ${esc(statusCls)}">${esc(statusText)}</span></div>
-      <div class="info-cell info-watched-actions"><button type="button" class="info-watched-remove" data-watched-remove="${esc(ref)}" title="${esc(t('info.watched.remove'))}" aria-label="${esc(t('info.watched.remove'))}">×</button></div>
-    </div>`;
-  }).join('');
-  const truncated = watchedPrsData.truncated > 0
-    ? `<div class="info-watched-note">${esc(t('info.watched.truncated', {count: String(watchedPrsData.truncated)}))}</div>`
-    : '';
-  node.innerHTML = heading + rows + truncated;
-}
-
 async function refreshWatchedPrs() {
   try {
     const data = await apiFetchJson('/api/watched-prs');
@@ -47807,68 +47700,7 @@ function applyWatchedPrsPayload(data) {
     invalid: Array.isArray(data.invalid) ? data.invalid : [],
   };
   notifyWatchedPrTransitions(watchedPrsData.watched_prs);
-  renderWatchedPrs();
   return true;
-}
-
-// Append a PR ref to github.watched_prs (dedup by canonical ref); accepts owner/repo#N or a PR URL.
-function addWatchedPr(entry) {
-  const ref = normalizeWatchedPrRef(entry);
-  if (!ref) {
-    statusErr(t('info.watched.invalid', {entry: String(entry || '')}));
-    return;
-  }
-  const current = initialSetting('github.watched_prs', []);
-  const list = Array.isArray(current) ? current.slice() : [];
-  if (list.some(item => normalizeWatchedPrRef(item) === ref)) {
-    statusOk(t('info.watched.already', {ref}));
-    return;
-  }
-  list.push(ref);
-  saveSettingsPatch(settingPatch('github.watched_prs', list))
-    .then(() => { statusOk(t('info.watched.added', {ref})); refreshWatchedPrs(); })
-    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
-}
-
-function removeWatchedPr(ref) {
-  const target = normalizeWatchedPrRef(ref) || String(ref || '');
-  const current = initialSetting('github.watched_prs', []);
-  const list = (Array.isArray(current) ? current : []).filter(item => normalizeWatchedPrRef(item) !== target && String(item).trim() !== target);
-  saveSettingsPatch(settingPatch('github.watched_prs', list))
-    .then(() => { statusOk(t('info.watched.removed', {ref: target})); refreshWatchedPrs(); })
-    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
-}
-
-// right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
-// Delegated on #info-content so it covers both the branch-table PR column and any future PR cells.
-function bindInfoPrContextMenu(node) {
-  if (!node || node.dataset.watchedPrMenuBound === '1') return;
-  node.dataset.watchedPrMenuBound = '1';
-  node.addEventListener('contextmenu', event => {
-    const cell = event.target.closest('.info-cell');
-    const link = cell?.querySelector?.('a[href*="github.com/"][href*="/pull/"]');
-    if (!link) return;
-    const ref = normalizeWatchedPrRef(link.getAttribute('href') || '');
-    if (!ref) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showWatchPrContextMenu(ref, event.clientX, event.clientY);
-  });
-}
-
-function showWatchPrContextMenu(ref, x, y) {
-  const already = (Array.isArray(initialSetting('github.watched_prs', [])) ? initialSetting('github.watched_prs', []) : [])
-    .some(item => normalizeWatchedPrRef(item) === ref);
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu watched-pr-context-menu';
-  menu.setAttribute('role', 'menu');
-  appendContextMenuButton(
-    menu,
-    already ? t('info.watched.unwatchThis', {ref}) : t('info.watched.watchThis', {ref}),
-    () => (already ? removeWatchedPr(ref) : addWatchedPr(ref)),
-    () => watchedPrContextMenu.close(),
-  );
-  watchedPrContextMenu.open(menu, x, y);
 }
 
 function yoagentChatScrollOwner(node = document.getElementById('yoagent-content')) {
@@ -48109,14 +47941,1090 @@ function renderYoagentPanel(options = {}) {
 }
 
 function infoBranchRows() {
-  if (shareViewMode && Array.isArray(shareInfoBranchRowsOverride)) {
-    return sortedInfoBranchRows(shareInfoBranchRowsOverride, infoBranchSort);
-  }
-  return sortedInfoBranchRows(rawInfoBranchRows(), infoBranchSort);
+  if (shareViewMode && Array.isArray(shareInfoBranchRowsOverride)) return shareInfoBranchRowsOverride.slice();
+  return rawInfoBranchRows();
 }
 
-function infoBranchCellHtml(row) {
-  return row?.branchHtml || esc(row?.branch || '');
+const infoGroupingStorageKey = 'yolomux.info.grouping.v1';
+const infoLegacyGroupingStorageKey = 'yolomux.info2.grouping.v1';
+const infoSortStorageKey = 'yolomux.info.sort.v1';
+const infoLegacySortStorageKey = 'yolomux.info2.sort.v1';
+const infoDefaultGrouping = Object.freeze(['tab', 'path']);
+const infoDefaultSort = Object.freeze({key: 'date', dir: 'desc'});
+const infoSearchMaxLength = 240;
+const infoSortDefs = Object.freeze([
+  {key: 'name', dir: 'asc', value: 'name:asc', label: 'A-Z'},
+  {key: 'name', dir: 'desc', value: 'name:desc', label: 'Z-A'},
+  {key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'},
+  {key: 'date', dir: 'asc', value: 'date:asc', label: 'oldest'},
+]);
+const infoDimensionDefs = Object.freeze([
+  {key: 'tab', label: 'Tab'},
+  {key: 'ai', label: 'AI'},
+  {key: 'path', label: 'Path'},
+  {key: 'branch', label: 'Branch'},
+  {key: 'linear', label: 'Linear'},
+  {key: 'pr', label: 'PR'},
+]);
+const infoPresetDefs = Object.freeze([
+  {key: 'tab-path', label: 'Tab > Path', title: 'Tab, then path', grouping: ['tab', 'path']},
+  {key: 'path-branch', label: 'Path > Branch', title: 'Path, then branch', grouping: ['path', 'branch']},
+  {key: 'linear-pr', label: 'Linear > PR', title: 'Linear, then PR', grouping: ['linear', 'pr']},
+  {key: 'pr-branch', label: 'PR > Branch', title: 'PR, then branch', grouping: ['pr', 'branch']},
+]);
+let infoGrouping = readStoredInfoGrouping();
+let infoSort = readStoredInfoSort();
+let infoSearch = '';
+const infoCollapsedGroupKeys = new Set();
+
+function infoGroupDimensions() {
+  return infoDimensionDefs.map(dimension => ({...dimension}));
+}
+
+function infoSortFields() {
+  return infoSortDefs.map(def => ({...def}));
+}
+
+function infoGroupingPresets() {
+  return infoPresetDefs.map(preset => ({...preset, grouping: preset.grouping.slice()}));
+}
+
+function normalizeInfoGrouping(value, options = {}) {
+  const valid = new Set(infoDimensionDefs.map(dimension => dimension.key));
+  const input = Array.isArray(value) ? value : String(value || '').split(/[,\s|>]+/);
+  const result = [];
+  for (const item of input) {
+    const key = String(item || '').trim();
+    if (!key || !valid.has(key) || result.includes(key)) continue;
+    result.push(key);
+    if (result.length >= 4) break;
+  }
+  const normalized = result.length ? result : infoDefaultGrouping;
+  return options.migrateLegacyPresets ? normalizeInfoLegacyPresetGrouping(normalized) : normalized.slice();
+}
+
+function normalizeInfoLegacyPresetGrouping(grouping) {
+  const key = (Array.isArray(grouping) ? grouping : []).join('|');
+  if (key === 'tab|ai|path|branch') return ['tab', 'path'];
+  if (key === 'path|branch|tab|ai') return ['path', 'branch'];
+  if (key === 'branch|path|tab|ai') return ['path', 'branch'];
+  if (key === 'ai|tab|path|branch') return ['linear', 'pr'];
+  return Array.isArray(grouping) ? grouping.slice() : infoDefaultGrouping.slice();
+}
+
+function readStoredInfoGrouping() {
+  const raw = storageGet(infoGroupingStorageKey, '') || storageGet(infoLegacyGroupingStorageKey, '');
+  if (!raw) return infoDefaultGrouping.slice();
+  try {
+    const parsed = JSON.parse(raw);
+    return normalizeInfoGrouping(parsed, {migrateLegacyPresets: true});
+  } catch (_) {
+    return normalizeInfoGrouping(raw, {migrateLegacyPresets: true});
+  }
+}
+
+function writeInfoGrouping(value) {
+  infoGrouping = normalizeInfoGrouping(value);
+  storageSet(infoGroupingStorageKey, JSON.stringify(infoGrouping));
+  return infoGrouping.slice();
+}
+
+function currentInfoGrouping() {
+  return infoGrouping.slice();
+}
+
+function normalizeInfoSort(value) {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try {
+      raw = raw.trim().startsWith('{') ? JSON.parse(raw) : raw;
+    } catch (_) {
+      raw = value;
+    }
+  }
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    if (['date-desc', 'date:desc', 'new', 'recent'].includes(text)) raw = {key: 'date', dir: 'desc'};
+    else if (['date-asc', 'date:asc', 'old', 'oldest'].includes(text)) raw = {key: 'date', dir: 'asc'};
+    else if (['name-asc', 'name:asc', 'az', 'a-z'].includes(text)) raw = {key: 'name', dir: 'asc'};
+    else if (['name-desc', 'name:desc', 'za', 'z-a'].includes(text)) raw = {key: 'name', dir: 'desc'};
+    else {
+      const [key, dir] = text.split(/[:|,]/);
+      raw = {key, dir};
+    }
+  }
+  const rawKey = String(raw?.key || '').trim();
+  const key = rawKey === 'date' ? 'date' : (rawKey ? 'name' : infoDefaultSort.key);
+  const dir = String(raw?.dir || '').trim() === 'asc' ? 'asc' : 'desc';
+  return {key, dir};
+}
+
+function readStoredInfoSort() {
+  return normalizeInfoSort(storageGet(infoSortStorageKey, '') || storageGet(infoLegacySortStorageKey, '') || JSON.stringify(infoDefaultSort));
+}
+
+function writeInfoSort(value) {
+  infoSort = normalizeInfoSort(value);
+  storageSet(infoSortStorageKey, JSON.stringify(infoSort));
+  return {...infoSort};
+}
+
+function currentInfoSort() {
+  return {...infoSort};
+}
+
+function normalizeInfoSearch(value) {
+  return String(value || '').slice(0, infoSearchMaxLength);
+}
+
+function currentInfoSearch() {
+  return infoSearch;
+}
+
+function infoTreeGroupIdentity(group = {}) {
+  const key = group.key ?? group.label ?? group.title ?? '';
+  return [String(group.dimension || ''), String(key)];
+}
+
+function infoTreeGroupCollapseKey(group = {}, ancestorGroupIdentities = []) {
+  const identities = Array.isArray(ancestorGroupIdentities) ? ancestorGroupIdentities.slice() : [];
+  identities.push(infoTreeGroupIdentity(group));
+  return encodeURIComponent(JSON.stringify(identities));
+}
+
+function setInfoTreeGroupCollapsed(key, collapsed) {
+  const groupKey = String(key || '');
+  if (!groupKey) return false;
+  const wasCollapsed = infoCollapsedGroupKeys.has(groupKey);
+  if (collapsed) infoCollapsedGroupKeys.add(groupKey);
+  else infoCollapsedGroupKeys.delete(groupKey);
+  return infoCollapsedGroupKeys.has(groupKey) !== wasCollapsed;
+}
+
+function pruneInfoTreeCollapsedGroups(activeKeys) {
+  if (!(activeKeys instanceof Set) || !infoCollapsedGroupKeys.size) return;
+  [...infoCollapsedGroupKeys].forEach(key => {
+    if (!activeKeys.has(key)) infoCollapsedGroupKeys.delete(key);
+  });
+}
+
+function refreshInfoGroupingControls() {
+  document.querySelectorAll('.info-tree-actions-bar').forEach(bar => {
+    const actions = bar.querySelector('.info-subtab-actions');
+    bar.innerHTML = `${typeof infoGroupingControlsHtml === 'function' ? infoGroupingControlsHtml() : ''}${actions ? actions.outerHTML : ''}`;
+  });
+}
+
+function setInfoGrouping(value) {
+  const previous = infoGrouping.join(',');
+  writeInfoGrouping(value);
+  refreshInfoGroupingControls();
+  renderInfoPanel();
+  if (infoGrouping.join(',') !== previous) scheduleShareUiStatePublish();
+}
+
+function setInfoSort(value, options = {}) {
+  const previous = `${infoSort.key}:${infoSort.dir}`;
+  writeInfoSort(value);
+  refreshInfoGroupingControls();
+  renderInfoPanel();
+  if (`${infoSort.key}:${infoSort.dir}` !== previous && options.publish !== false) scheduleShareUiStatePublish();
+  return {...infoSort};
+}
+
+function setInfoSortMode(value, options = {}) {
+  return setInfoSort(value, options);
+}
+
+function setInfoSearch(value, options = {}) {
+  const previous = infoSearch;
+  infoSearch = normalizeInfoSearch(value);
+  if (options.refreshControls === true) refreshInfoGroupingControls();
+  if (options.render !== false) renderInfoPanel();
+  if (infoSearch !== previous && options.publish !== false) scheduleShareUiStatePublish();
+  return infoSearch;
+}
+
+function setInfoGroupingPreset(key) {
+  const preset = infoPresetDefs.find(item => item.key === key);
+  if (preset) setInfoGrouping(preset.grouping);
+}
+
+function setInfoGroupingLevel(level, value) {
+  const index = Number(level);
+  if (!Number.isInteger(index) || index < 0 || index > 3) return;
+  const next = infoGrouping.slice();
+  const key = String(value || '').trim();
+  next[index] = key;
+  setInfoGrouping(next);
+}
+
+function infoDimensionValue(record, dimension) {
+  const fallback = {key: 'none', label: 'None', title: ''};
+  if (!record || !dimension) return fallback;
+  if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
+  if (dimension === 'ai') return {key: record.aiKey, label: record.aiLabel, title: record.aiTitle, sortValue: infoRecordNumericSortValue(record, 'ai')};
+  if (dimension === 'path') return {key: record.pathKey, label: record.pathTitle || record.pathLabel, title: record.pathTitle};
+  if (dimension === 'branch') return {key: record.branchKey, label: record.branchLabel, title: record.branchTitle};
+  if (dimension === 'pr') return {key: record.prKey, label: record.prTitle || record.prLabel, title: record.prTitle, sortValue: infoRecordNumericSortValue(record, 'pr')};
+  if (dimension === 'linear') return {key: record.linearKey, label: record.linearTitle || record.linearLabel, title: record.linearTitle, sortValue: infoRecordNumericSortValue(record, 'linear')};
+  return fallback;
+}
+
+function infoFirstIntegerFromValue(value) {
+  const match = String(value || '').match(/\d+/);
+  return match ? Number(match[0]) : NaN;
+}
+
+function infoPrNumberFromValue(value) {
+  const direct = Number(value);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const text = String(value || '');
+  const hashMatch = text.match(/#\s*(\d+)/);
+  if (hashMatch) return Number(hashMatch[1]);
+  const urlMatch = text.match(/\/pull\/(\d+)(?:\D|$)/);
+  return urlMatch ? Number(urlMatch[1]) : NaN;
+}
+
+function infoRowPrNumber(row = {}) {
+  for (const value of [row.prNumber, row.prLabel, row.prTitle, row.prSort, row.prUrl]) {
+    const number = infoPrNumberFromValue(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return NaN;
+}
+
+function infoRelationshipRecords(rows = infoBranchRows()) {
+  const records = [];
+  const noTab = {session: '', label: 'No tab / no AI', title: 'No tab or AI associated with this branch', kind: '', window: '', tabLabel: 'No tab', aiLabel: 'No AI'};
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const directTabAgents = Array.isArray(row?.tabAgents) && row.tabAgents.length ? row.tabAgents : [];
+    const pathTabAgents = Array.isArray(row?.pathTabAgents) && row.pathTabAgents.length ? row.pathTabAgents : [];
+    const tabAgents = directTabAgents.length ? directTabAgents : (pathTabAgents.length ? pathTabAgents : [noTab]);
+    for (const agent of tabAgents) {
+      const session = String(agent?.session || '');
+      const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || 'No tab');
+      const aiLabel = String(agent?.aiLabel || infoTabAgentAiLabel(agent));
+      const path = String(row?.path || '');
+      const branch = String(row?.branch || '');
+      const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
+        ? row.linearItems.map(item => item.identifier || item.url || '').filter(Boolean).join(', ')
+        : String(row?.linearTitle || '').trim();
+      const prKeyLabel = String(row?.prLabel || row?.prSort || row?.prTitle || '').trim();
+      const prDisplayLabel = String(row?.prDescriptionTitle || row?.prTitle || row?.prSort || row?.prLabel || '').trim();
+      const prNumber = infoRowPrNumber(row);
+      const prCompactLabel = Number.isFinite(prNumber) ? `#${prNumber}` : prKeyLabel;
+      records.push({
+        id: [path, branch, session || 'no-tab', agent?.kind || 'no-ai', agent?.window || '', prCompactLabel || prKeyLabel, linearLabel].join('\n'),
+        tabKey: session || '__no_tab__',
+        tabSession: session,
+        tabLabel,
+        tabTitle: String(agent?.title || tabLabel),
+        aiKey: `${agent?.kind || 'no-ai'}:${agent?.window || ''}:${aiLabel}`,
+        aiKind: String(agent?.kind || ''),
+        aiWindow: String(agent?.window || ''),
+        aiWindowIndex: String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? ''),
+        aiState: String(agent?.state || ''),
+        aiPane: String(agent?.pane || ''),
+        aiPaneTarget: String(agent?.pane_target || ''),
+        aiCurrent: agent?.current === true,
+        aiWindowActive: agent?.window_active === true,
+        aiWorkingStoppedTs: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
+        aiIdleSince: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
+        aiLastActiveTs: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
+        aiLabel,
+        aiTitle: String(agent?.title || aiLabel),
+        pathKey: infoNormalizedPath(path) || '__no_path__',
+        pathLabel: String(row?.pathLabel || compactHomePath(path) || 'No path'),
+        pathTitle: String(row?.pathTitle || path || 'No path'),
+        branchKey: branch || '__no_branch__',
+        branchLabel: branch || 'No branch',
+        branchTitle: branch || 'No branch',
+        branchHtml: row?.branchHtml || esc(branch || 'No branch'),
+        prKey: prCompactLabel || prKeyLabel || '__no_pr__',
+        prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || 'No PR',
+        prTitle: prDisplayLabel || prCompactLabel || 'No PR',
+        prNumber: Number.isFinite(prNumber) ? prNumber : null,
+        prUrl: String(row?.prUrl || ''),
+        prClass: String(row?.prClass || ''),
+        prLifecycleText: String(row?.prLifecycleText || ''),
+        prLifecycleClass: String(row?.prLifecycleClass || ''),
+        prCiText: String(row?.prCiText || ''),
+        prCiClass: String(row?.prCiClass || ''),
+        prHtml: infoPrCellHtml(row) || '',
+        linearKey: linearLabel || '__no_linear__',
+        linearLabel: linearLabel || 'No Linear',
+        linearTitle: String(row?.linearTitle || linearLabel || 'No Linear'),
+        linearHtml: infoLinearCellHtml(row) || '',
+        linearItems: Array.isArray(row?.linearItems) ? row.linearItems.slice(0, 20) : [],
+        desc: String(row?.desc || ''),
+        updated: String(row?.updatedText || row?.updated || ''),
+        updatedTitle: String(row?.updatedTitle || row?.updated || ''),
+        updatedTs: Number.isFinite(row?.updatedTs) ? row.updatedTs : 0,
+      });
+    }
+  }
+  return infoSortedRecords(records, infoSort);
+}
+
+function infoCompareLabels(left, right, direction = 1) {
+  const leftMissing = infoRecordMissingValue(left);
+  const rightMissing = infoRecordMissingValue(right);
+  if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+  return String(left || '').localeCompare(String(right || ''), undefined, {sensitivity: 'base'}) * direction;
+}
+
+function infoCompareNumbers(left, right, direction = 1) {
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  const leftHasNumber = Number.isFinite(leftNumber);
+  const rightHasNumber = Number.isFinite(rightNumber);
+  if (leftHasNumber && rightHasNumber && leftNumber !== rightNumber) return (leftNumber - rightNumber) * direction;
+  if (leftHasNumber !== rightHasNumber) return leftHasNumber ? -1 : 1;
+  return 0;
+}
+
+function infoRecordPrNumber(record = {}) {
+  for (const value of [record.prNumber, record.prLabel, record.prTitle, record.prKey]) {
+    const number = infoPrNumberFromValue(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return NaN;
+}
+
+function infoFirstRecordNumber(record = {}, values = []) {
+  for (const value of values) {
+    const number = infoFirstIntegerFromValue(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return NaN;
+}
+
+function infoRecordLinearNumber(record = {}) {
+  const items = Array.isArray(record.linearItems) ? record.linearItems : [];
+  for (const item of items) {
+    const number = infoFirstRecordNumber(item, [item?.identifier, item?.title, item?.url]);
+    if (Number.isFinite(number)) return number;
+  }
+  return infoFirstRecordNumber(record, [record.linearKey, record.linearLabel, record.linearTitle]);
+}
+
+function infoRecordNumericSortValue(record = {}, dimension = '') {
+  if (dimension === 'pr') return infoRecordPrNumber(record);
+  if (dimension === 'linear') return infoRecordLinearNumber(record);
+  if (dimension === 'tab') return infoFirstRecordNumber(record, [record.tabKey, record.tabLabel, record.tabTitle, record.tabSession]);
+  if (dimension === 'ai') return infoFirstRecordNumber(record, [record.aiWindowIndex, record.aiWindow, record.aiLabel, record.aiKey, record.aiTitle]);
+  return NaN;
+}
+
+function infoCompareNumberThenLabel(leftNumber, rightNumber, leftLabel, rightLabel, direction = 1) {
+  const leftMissing = infoRecordMissingValue(leftLabel);
+  const rightMissing = infoRecordMissingValue(rightLabel);
+  if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+  const leftHasNumber = Number.isFinite(Number(leftNumber));
+  const rightHasNumber = Number.isFinite(Number(rightNumber));
+  if (leftHasNumber && rightHasNumber && Number(leftNumber) !== Number(rightNumber)) return (Number(leftNumber) - Number(rightNumber)) * direction;
+  if (leftHasNumber !== rightHasNumber) return leftHasNumber ? -1 : 1;
+  return infoCompareLabels(leftLabel, rightLabel, direction);
+}
+
+function infoCompareRecordNumberThenLabel(left = {}, right = {}, dimension = '', direction = 1) {
+  return infoCompareNumberThenLabel(
+    infoRecordNumericSortValue(left, dimension),
+    infoRecordNumericSortValue(right, dimension),
+    infoRecordLabel(left, dimension),
+    infoRecordLabel(right, dimension),
+    direction,
+  );
+}
+
+function infoRecordLabel(record = {}, dimension = '') {
+  if (dimension === 'tab') return record.tabLabel;
+  if (dimension === 'ai') return record.aiLabel;
+  if (dimension === 'linear') return record.linearLabel || record.linearTitle;
+  if (dimension === 'pr') return record.prLabel || record.prTitle;
+  if (dimension === 'path') return record.pathLabel;
+  if (dimension === 'branch') return record.branchLabel;
+  return '';
+}
+
+function infoSearchText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function infoSearchField(kind, ...values) {
+  const text = values.map(infoSearchText).filter(Boolean).join(' ');
+  return text ? {kind, text} : null;
+}
+
+function infoSearchFields(kind, ...values) {
+  const seen = new Set();
+  return values
+    .map(infoSearchText)
+    .filter(Boolean)
+    .filter(value => {
+      const key = value.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(text => ({kind, text}));
+}
+
+function infoPrSearchText(record = {}) {
+  if (String(record?.prKey || '') === '__no_pr__') return '';
+  const label = String(record?.prLabel || '').trim();
+  const title = String(record?.prTitle || '').trim();
+  const numberText = Number.isFinite(record?.prNumber)
+    ? `#${record.prNumber}`
+    : (!infoRecordMissingValue(label) ? label : '');
+  const description = title && numberText && title.startsWith(numberText)
+    ? title.slice(numberText.length).trim()
+    : title;
+  return [numberText, description, record.prLifecycleText, record.prCiText].filter(Boolean).join(' ');
+}
+
+function infoLinearSearchFields(record = {}) {
+  if (String(record?.linearKey || '') === '__no_linear__') return [];
+  const items = Array.isArray(record?.linearItems) ? record.linearItems : [];
+  const fields = items
+    .map(item => infoSearchField('linear', item?.identifier, item?.title, item?.state))
+    .filter(Boolean);
+  const label = String(record?.linearLabel || '').trim();
+  const title = String(record?.linearTitle || '').trim();
+  const description = title && label && title.startsWith(label) ? title.slice(label.length).trim() : title;
+  const fallback = infoSearchField('linear', label, description);
+  if (fallback) fields.push(fallback);
+  return fields;
+}
+
+function infoRecordSearchFields(record = {}) {
+  return [
+    ...(infoRecordHasTab(record) ? infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession) : []),
+    ...(infoRecordHasAi(record) ? infoSearchFields('ai', record.aiLabel) : []),
+    !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__'
+      ? infoSearchField('path', record.pathTitle || record.pathLabel)
+      : null,
+    !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__'
+      ? infoSearchField('branch', record.branchTitle || record.branchLabel)
+      : null,
+    infoSearchField('pr', infoPrSearchText(record)),
+    ...infoLinearSearchFields(record),
+    !infoRecordMissingValue(record?.updated) ? infoSearchField('updated', record.updated) : null,
+  ].filter(Boolean);
+}
+
+function infoSearchFieldMatches(field = {}, query = infoSearch) {
+  const text = String(query || '').trim();
+  return Boolean(text && Number.isFinite(fuzzySearchScore(text, [field.text])));
+}
+
+function infoRecordSearchKindMatches(record = {}, kind = '', query = infoSearch) {
+  const text = String(query || '').trim();
+  if (!text || !kind) return false;
+  return infoRecordSearchFields(record).some(field => field.kind === kind && infoSearchFieldMatches(field, text));
+}
+
+function infoRecordMatchesSearch(record = {}, query = infoSearch) {
+  const text = String(query || '').trim();
+  if (!text) return true;
+  return infoRecordSearchFields(record).some(field => infoSearchFieldMatches(field, text));
+}
+
+function infoFilteredRecords(records = [], query = infoSearch) {
+  return (Array.isArray(records) ? records : []).filter(record => infoRecordMatchesSearch(record, query));
+}
+
+function infoSearchHighlightHtml(value, query = infoSearch) {
+  const text = String(value ?? '');
+  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return esc(text);
+  const indexes = new Set();
+  for (const token of tokens) {
+    const match = fuzzySubsequenceMatch(token, text);
+    if (match) for (const matchIndex of match.indexes) indexes.add(matchIndex);
+  }
+  if (!indexes.size) return esc(text);
+  const chars = Array.from(text);
+  const parts = [];
+  let index = 0;
+  while (index < chars.length) {
+    if (!indexes.has(index)) {
+      parts.push(esc(chars[index]));
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < chars.length && indexes.has(index)) index += 1;
+    parts.push(`<mark class="info-tree-search-match">${esc(chars.slice(start, index).join(''))}</mark>`);
+  }
+  return parts.join('');
+}
+
+function infoRecordSearchValueHtml(record = {}, kind = '', value = '', query = infoSearch) {
+  return infoRecordSearchKindMatches(record, kind, query)
+    ? infoSearchHighlightHtml(value, query)
+    : esc(value);
+}
+
+function infoGroupSearchKindMatches(group = {}, query = infoSearch) {
+  const dimension = String(group?.dimension || '');
+  if (!dimension) return false;
+  return (Array.isArray(group.records) ? group.records : []).some(record => infoRecordSearchKindMatches(record, dimension, query));
+}
+
+function infoGroupSearchValueHtml(group = {}, value = '', query = infoSearch) {
+  return infoGroupSearchKindMatches(group, query)
+    ? infoSearchHighlightHtml(value, query)
+    : esc(value);
+}
+
+function infoHighlightedLinkHtml(url, label, title = '', className = '', highlight = false) {
+  const labelHtml = highlight ? infoSearchHighlightHtml(label) : esc(label);
+  if (!url) return `<span>${labelHtml}</span>`;
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  const classAttr = className ? ` class="${esc(className)}"` : '';
+  return `<a href="${esc(url)}" target="_blank" rel="noreferrer noopener" draggable="false"${titleAttr}${classAttr}>${labelHtml}</a>`;
+}
+
+function compareInfoRecords(left, right, sort = infoSort, options = {}) {
+  const normalizedSort = normalizeInfoSort(sort);
+  const direction = normalizedSort.dir === 'desc' ? -1 : 1;
+  let result = 0;
+  if (normalizedSort.key === 'date') {
+    result = infoCompareNumbers(left?.updatedTs, right?.updatedTs, direction);
+  } else {
+    result = infoCompareLabels(left?.pathLabel, right?.pathLabel, direction)
+      || infoCompareLabels(left?.branchLabel, right?.branchLabel, direction)
+      || infoCompareRecordNumberThenLabel(left, right, 'tab', direction)
+      || infoCompareRecordNumberThenLabel(left, right, 'ai', direction)
+      || infoCompareRecordNumberThenLabel(left, right, 'linear', direction)
+      || infoCompareRecordNumberThenLabel(left, right, 'pr', direction);
+  }
+  if (result || options.fallback === false) return result;
+  return (right?.updatedTs || 0) - (left?.updatedTs || 0)
+    || infoCompareLabels(left?.pathLabel, right?.pathLabel)
+    || infoCompareLabels(left?.branchLabel, right?.branchLabel)
+    || infoCompareLabels(left?.tabLabel, right?.tabLabel)
+    || infoCompareLabels(left?.aiLabel, right?.aiLabel)
+    || infoCompareLabels(left?.prLabel, right?.prLabel);
+}
+
+function infoSortedRecords(records = [], sort = infoSort) {
+  return (Array.isArray(records) ? records : []).slice().sort((left, right) => compareInfoRecords(left, right, sort));
+}
+
+function infoGroupRepresentativeRecord(group, sort = infoSort) {
+  return infoSortedRecords(group?.records || [], sort)[0] || {};
+}
+
+function infoGroupTree(records = infoRelationshipRecords(), grouping = infoGrouping, sort = infoSort) {
+  const levels = normalizeInfoGrouping(grouping);
+  const build = (items, depth) => {
+    const dimension = levels[depth];
+    const sortedItems = infoSortedRecords(items, sort);
+    if (!dimension) return {type: 'leaf-list', records: sortedItems};
+    const groups = new Map();
+    for (const record of sortedItems) {
+      const value = infoDimensionValue(record, dimension);
+      const key = String(value.key || value.label || 'none');
+      if (!groups.has(key)) groups.set(key, {type: 'group', dimension, key, label: String(value.label || 'None'), title: String(value.title || value.label || ''), sortValue: value.sortValue, count: 0, records: [], children: []});
+      const group = groups.get(key);
+      if (!Number.isFinite(Number(group.sortValue)) && Number.isFinite(Number(value.sortValue))) group.sortValue = value.sortValue;
+      group.count += 1;
+      group.records.push(record);
+    }
+    const children = [...groups.values()]
+      .sort((left, right) => compareInfoGroups(left, right, sort))
+      .map(group => {
+        const childTree = build(group.records, depth + 1);
+        return {...group, children: childTree.children || childTree.records || []};
+      });
+    return {type: 'tree', dimension, children};
+  };
+  return build(records, 0);
+}
+
+function compareInfoGroups(left, right, sort = infoSort) {
+  const normalizedSort = normalizeInfoSort(sort);
+  const direction = normalizedSort.dir === 'desc' ? -1 : 1;
+  if (normalizedSort.key === 'date') {
+    const selectedResult = compareInfoRecords(infoGroupRepresentativeRecord(left, sort), infoGroupRepresentativeRecord(right, sort), sort, {fallback: false});
+    if (selectedResult) return selectedResult;
+  } else if (left?.dimension === right?.dimension && ['tab', 'ai', 'linear', 'pr'].includes(left?.dimension)) {
+    return infoCompareNumberThenLabel(left.sortValue, right.sortValue, left?.label, right?.label, direction)
+      || (right?.count || 0) - (left?.count || 0);
+  }
+  return infoCompareLabels(left?.label, right?.label, normalizedSort.key === 'date' ? 1 : direction)
+    || (right?.count || 0) - (left?.count || 0);
+}
+
+function infoTreeItemClasses(baseClass, options = {}) {
+  return [
+    baseClass,
+    'info-tree-item',
+    options.first ? 'info-tree-item-first' : '',
+    options.last ? 'info-tree-item-last' : '',
+  ].filter(Boolean).join(' ');
+}
+
+function infoRecordMissingValue(value) {
+  const text = String(value || '').trim();
+  return !text || /^no\s+(?:path|pr|linear|tab|ai|branch)$/i.test(text);
+}
+
+function infoRecordHasTab(record) {
+  return !infoRecordMissingValue(record?.tabLabel) && String(record?.tabKey || '') !== '__no_tab__' && Boolean(record?.tabSession);
+}
+
+function infoRecordHasAi(record) {
+  return !infoRecordMissingValue(record?.aiLabel)
+    && !String(record?.aiKey || '').startsWith('no-ai:')
+    && Boolean(record?.tabSession)
+    && String(record?.aiWindow || '') !== '';
+}
+
+function infoTabIsShown(record = {}) {
+  const session = String(record?.tabSession || record?.tabKey || '').trim();
+  return Boolean(session && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab(session));
+}
+
+function infoRecordTabValueHtml(record = {}, options = {}) {
+  if (!infoRecordHasTab(record)) return '';
+  const label = String(options.label || record?.tabLabel || record?.tabSession || '').trim();
+  if (!label) return '';
+  const active = infoTabIsShown(record);
+  const title = String(options.title || record?.tabTitle || label);
+  const attrs = [`data-info-tab-state="${active ? 'active' : 'inactive'}"`];
+  if (options.action !== false) attrs.push(`data-info-open-tab="${esc(record.tabSession)}"`);
+  const sessionText = sessionLabel(record.tabSession);
+  const sessionLabelHtml = infoRecordSearchKindMatches(record, 'tab')
+    ? infoSearchHighlightHtml(sessionText)
+    : undefined;
+  return tmuxPaneTabTokenHtml(record.tabSession, {
+    tag: options.action === false ? 'span' : 'button',
+    classes: ['info-tree-tab-token', options.action === false ? 'info-tree-tab-token-static' : 'info-tree-tab-token-action'],
+    active,
+    title,
+    attrs,
+    showDetail: false,
+    sessionLabelHtml,
+    leadingHtml: options.leadingHtml,
+  });
+}
+
+function infoPullRequestLifecycleText(pr) {
+  if (!pr?.number) return '';
+  const status = pullRequestStatusLabel(pr).toLowerCase();
+  if (status === 'merged' || pr.merged || pr.merged_at) return t('pr.status.merged');
+  if (status === 'draft' || pr.draft) return t('pr.status.draft');
+  if (status === 'closed') return t('pr.status.closed');
+  return t('pr.status.open');
+}
+
+function infoPullRequestLifecycleClass(pr) {
+  if (!pr?.number) return '';
+  const status = pullRequestStatusLabel(pr).toLowerCase();
+  if (status === 'merged' || pr.merged || pr.merged_at) return 'pr-status-merged';
+  if (status === 'draft' || pr.draft) return 'pr-status-draft';
+  if (status === 'closed') return 'pr-status-closed';
+  return 'pr-status-open';
+}
+
+function infoPullRequestCiText(pr) {
+  if (!pr?.number || infoPullRequestLifecycleClass(pr) === 'pr-status-merged') return '';
+  const checks = pr.checks && typeof pr.checks === 'object' ? pr.checks : null;
+  const checkState = String(checks?.state || checks?.status_label || checks?.conclusion || '').trim();
+  const checkSummary = String(checks?.summary || '').trim();
+  if (checkState && checkState.toLowerCase() !== 'unknown') {
+    const label = checkSummary || checkState;
+    return /^ci\b/i.test(label) ? label : `CI ${label}`;
+  }
+  const status = String(pr?.status_label || '').trim();
+  if (!status || /^(open|merged|closed|draft)$/i.test(status)) return '';
+  if (!/(ci|fail|pend|pass|error|queued|running|success)/i.test(status)) return '';
+  const display = pullRequestStatusDisplay(pr) || status;
+  return /^ci\b/i.test(display) ? display : `CI ${display}`;
+}
+
+function infoPullRequestCiClass(pr) {
+  const checks = pr?.checks && typeof pr.checks === 'object' ? pr.checks : null;
+  const state = String(checks?.state || checks?.status_label || checks?.conclusion || pr?.status_label || '').toLowerCase();
+  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
+  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
+  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
+  return pullRequestCiStatusClass(pr);
+}
+
+function infoStatusBadgeHtml(text, className, options = {}) {
+  const label = String(text || '').trim();
+  if (!label) return '';
+  const labelHtml = options.highlight ? infoSearchHighlightHtml(label) : esc(label);
+  return `<span class="meta-pr-status info-tree-status-badge ${esc(className || 'pr-status-unknown')}">${labelHtml}</span>`;
+}
+
+function infoRecordPrStatusHtml(record) {
+  const parts = [];
+  const highlight = infoRecordSearchKindMatches(record, 'pr');
+  if (record?.prLifecycleText) parts.push(infoStatusBadgeHtml(record.prLifecycleText, record.prLifecycleClass, {highlight}));
+  if (record?.prCiText) parts.push(infoStatusBadgeHtml(record.prCiText, record.prCiClass, {highlight}));
+  return parts.filter(Boolean).join(' ');
+}
+
+function infoRecordPrDescHtml(record) {
+  if (String(record?.prKey || '') === '__no_pr__') return '';
+  const text = String(record?.prTitle || record?.prLabel || '').trim();
+  if (infoRecordMissingValue(text)) return '';
+  const label = String(record?.prLabel || '').trim();
+  const numberText = Number.isFinite(record?.prNumber)
+    ? `#${record.prNumber}`
+    : (!infoRecordMissingValue(label) ? label : '');
+  const highlight = infoRecordSearchKindMatches(record, 'pr');
+  if (!numberText) return infoHighlightedLinkHtml(record?.prUrl || '', text, record?.prUrl || record?.prTitle || text, record?.prClass || '', highlight);
+  const description = text.startsWith(numberText) ? text.slice(numberText.length).trim() : (text === numberText ? '' : text);
+  return [
+    infoHighlightedLinkHtml(record?.prUrl || '', numberText, record?.prUrl || record?.prTitle || numberText, record?.prClass || '', highlight),
+    description ? (highlight ? infoSearchHighlightHtml(description) : esc(description)) : '',
+    infoRecordPrStatusHtml(record),
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function infoLinearItemDescHtml(item = {}, options = {}) {
+  const identifier = String(item?.identifier || '').trim();
+  const title = String(item?.title || '').trim();
+  const url = String(item?.url || '').trim();
+  if (!identifier && !title) return '';
+  const href = url || linearIssueUrl(identifier);
+  const highlight = options.highlight === true;
+  const identifierHtml = identifier ? infoHighlightedLinkHtml(href, identifier, href || title || identifier, '', highlight) : '';
+  const description = title && title !== identifier ? (highlight ? infoSearchHighlightHtml(title) : esc(title)) : '';
+  return [identifierHtml, description].filter(Boolean).join(' ');
+}
+
+function infoRecordLinearDescHtml(record) {
+  if (String(record?.linearKey || '') === '__no_linear__') return '';
+  const highlight = infoRecordSearchKindMatches(record, 'linear');
+  const items = Array.isArray(record?.linearItems) ? record.linearItems : [];
+  const withDescriptions = items
+    .map(item => ({
+      identifier: String(item?.identifier || '').trim(),
+      title: String(item?.title || '').trim(),
+      url: String(item?.url || '').trim(),
+    }))
+    .filter(item => item.identifier || item.title);
+  if (withDescriptions.length) {
+    return withDescriptions.map(item => infoLinearItemDescHtml(item, {highlight})).filter(Boolean).join(' ');
+  }
+  const title = String(record?.linearTitle || '').trim();
+  const label = String(record?.linearLabel || '').trim();
+  if (infoRecordMissingValue(title) && infoRecordMissingValue(label)) return '';
+  if (!infoRecordMissingValue(label)) {
+    const description = title && title !== label
+      ? (title.startsWith(label) ? title.slice(label.length).trim() : title)
+      : '';
+    const href = linearIssueUrl(label);
+    return [
+      infoHighlightedLinkHtml(href, label, href || title || label, '', highlight),
+      description ? (highlight ? infoSearchHighlightHtml(description) : esc(description)) : '',
+    ].filter(Boolean).join(' ');
+  }
+  return highlight ? infoSearchHighlightHtml(title) : esc(title);
+}
+
+function infoRecordFieldHtml(kind, html, title = '') {
+  if (!html) return '';
+  const labels = {
+    path: 'path',
+    branch: 'branch',
+    pr: 'PR',
+    linear: 'Linear',
+    tab: 'Tab(tmux session)',
+    ai: 'tmux sub-window',
+    updated: 'updated',
+  };
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  const label = labels[kind] || kind;
+  return `<div class="info-tree-field info-tree-field-${esc(kind)}"${titleAttr}>
+      <span class="info-tree-field-label">${esc(label)}:</span>
+      <span class="info-tree-field-value">${html}</span>
+    </div>`;
+}
+
+function infoRecordAgentPayload(record) {
+  const agent = {
+    kind: record.aiKind,
+    state: record.aiState,
+    window: record.aiWindow,
+    window_index: record.aiWindowIndex || record.aiWindow,
+    pane: record.aiPane,
+    pane_target: record.aiPaneTarget,
+    current: record.aiCurrent === true,
+    window_active: record.aiWindowActive === true,
+    working_stopped_ts: record.aiWorkingStoppedTs,
+    idle_since: record.aiIdleSince,
+    last_active_ts: record.aiLastActiveTs,
+  };
+  return agent;
+}
+
+function infoRecordAgentActivityItem(record) {
+  if (!infoRecordHasAi(record) || typeof agentWindowActivityIcon !== 'function') return null;
+  const agent = infoRecordAgentPayload(record);
+  return agentWindowActivityIcon(record.aiKind, agent.state, typeof agentWindowIdleSeconds === 'function' ? agentWindowIdleSeconds(agent) : null, {
+    session: record.tabSession,
+    window: agent.window,
+    window_index: agent.window_index,
+    pane: agent.pane,
+    pane_target: agent.pane_target,
+    current: false,
+    window_active: false,
+    working_stopped_ts: agent.working_stopped_ts,
+    scheduleRefresh: false,
+  });
+}
+
+function infoTabGroupStatusRank(state) {
+  const key = String(state || '');
+  if (key === 'attention') return 0;
+  if (key === 'cooldown') return 1;
+  if (key === STATE_KEY.working) return 2;
+  return 9;
+}
+
+function infoTabGroupStatusItem(group = {}) {
+  return infoTabGroupStatusRecord(group)?.item || null;
+}
+
+function infoTabGroupStatusRecord(group = {}) {
+  if (group.dimension !== 'tab') return null;
+  let best = null;
+  for (const record of Array.isArray(group.records) ? group.records : []) {
+    const item = infoRecordAgentActivityItem(record);
+    if (!item || infoTabGroupStatusRank(item.state) >= 9) continue;
+    if (!best || infoTabGroupStatusRank(item.state) < infoTabGroupStatusRank(best.item.state)) best = {record, item};
+  }
+  return best;
+}
+
+function infoTabGroupLeadingActivityHtml(group = {}) {
+  const status = infoTabGroupStatusRecord(group);
+  if (!status?.record || typeof agentWindowActivityIconHtmlForStatus !== 'function') return undefined;
+  const record = status.record;
+  const session = String(record?.tabSession || '').trim();
+  if (!session) return undefined;
+  const payload = autoApproveStates.get(session);
+  const auto = payload?.enabled === true;
+  const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
+  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session);
+  return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
+}
+
+function infoAgentAttentionHtml(record) {
+  if (!infoRecordHasAi(record) || typeof agentWindowIsAttentionState !== 'function' || !agentWindowIsAttentionState(record.aiState)) return '';
+  return typeof statusIndicatorLabelHtml === 'function'
+    ? statusIndicatorLabelHtml('ASK?', 'attention', 'info-tree-ai-status-label')
+    : '<span class="info-tree-ai-status-label">ASK?</span>';
+}
+
+function infoRecordAiWindowButtonHtml(record, options = {}) {
+  if (!infoRecordHasAi(record) || typeof tmuxWindowButtonHtml !== 'function') return '';
+  const label = String(record?.aiLabel || '').trim();
+  if (!label) return '';
+  const labelHtml = infoRecordSearchValueHtml(record, 'ai', label);
+  const agent = infoRecordAgentPayload(record);
+  const active = record.aiCurrent === true || record.aiWindowActive === true;
+  const title = String(options.title || record.aiTitle || label);
+  const attrs = options.action === false
+    ? []
+    : [
+        `data-info-open-ai-tab="${esc(record.tabSession)}"`,
+        `data-info-open-ai-window="${esc(record.aiWindow)}"`,
+      ];
+  return tmuxWindowButtonHtml({
+    tag: options.action === false ? 'span' : 'button',
+    classes: ['info-tree-ai-window-button'],
+    session: record.tabSession,
+    visibleName: label,
+    labelHtml,
+    numberLabel: record.aiWindowIndex || record.aiWindow || label,
+    active,
+    agentStatus: agent,
+    agentKey: record.aiKind,
+    title,
+    attrs,
+    ariaPressed: options.action !== false,
+  });
+}
+
+function infoRecordAiValueHtml(record, options = {}) {
+  if (!infoRecordHasAi(record)) return '';
+  const buttonHtml = infoRecordAiWindowButtonHtml(record, options);
+  if (!buttonHtml) return '';
+  const status = infoAgentAttentionHtml(record);
+  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}</span>`;
+}
+
+function infoRecordMainChipsHtml(record, options = {}) {
+  const hiddenDimensions = new Set(Array.isArray(options.hiddenDimensions) ? options.hiddenDimensions : []);
+  const fields = [];
+  if (!hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__') {
+    const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
+    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>`, record.pathTitle));
+  }
+  if (!hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__') {
+    const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
+    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>`, record.branchTitle));
+  }
+  const linearDesc = infoRecordLinearDescHtml(record);
+  if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
+  const prDesc = infoRecordPrDescHtml(record);
+  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
+  if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
+    fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
+  }
+  if (!hiddenDimensions.has('ai') && infoRecordHasAi(record)) {
+    fields.push(infoRecordFieldHtml('ai', infoRecordAiValueHtml(record), record.aiTitle));
+  }
+  if (!infoRecordMissingValue(record?.updated)) {
+    fields.push(infoRecordFieldHtml('updated', `<span class="info-tree-value-text info-tree-meta-updated">${infoRecordSearchValueHtml(record, 'updated', record.updated)}</span>`, record.updatedTitle));
+  }
+  return fields.join('');
+}
+
+function infoRecordHtml(record, options = {}) {
+  return `<div class="${esc(infoTreeItemClasses('info-tree-record', options))}" data-info-record="${esc(record.id)}">
+    <div class="info-tree-record-main">${infoRecordMainChipsHtml(record, options)}</div>
+  </div>`;
+}
+
+function infoTreeHiddenDimensions(ancestors, dimension) {
+  return Array.from(new Set([...(Array.isArray(ancestors) ? ancestors : []), dimension].filter(Boolean)));
+}
+
+function infoDimensionCountNoun(key, count) {
+  const plural = count !== 1;
+  if (key === 'tab') return plural ? 'tabs' : 'tab';
+  if (key === 'ai') return 'AI';
+  if (key === 'path') return plural ? 'paths' : 'path';
+  if (key === 'branch') return plural ? 'branches' : 'branch';
+  if (key === 'pr') return plural ? 'PRs' : 'PR';
+  if (key === 'linear') return plural ? 'Linear issues' : 'Linear issue';
+  return plural ? 'items' : 'item';
+}
+
+function infoGroupLabelHtml(group = {}) {
+  const label = String(group.label || '');
+  if (group.dimension === 'path' && !infoRecordMissingValue(label) && String(group.key || '') !== '__no_path__') {
+    const path = String(group.key || group.title || label);
+    return `<button type="button" class="info-tree-group-label info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>`;
+  }
+  const representative = infoGroupRepresentativeRecord(group);
+  if (group.dimension === 'ai') {
+    const html = infoRecordAiValueHtml(representative, {action: false});
+    if (html) return `<span class="info-tree-group-label info-tree-group-label-ai">${html}</span>`;
+  }
+  if (group.dimension === 'pr') {
+    const html = infoRecordPrDescHtml(representative);
+    return `<span class="info-tree-group-label info-tree-group-label-pr">${html || 'None'}</span>`;
+  }
+  if (group.dimension === 'linear') {
+    const html = infoRecordLinearDescHtml(representative);
+    return `<span class="info-tree-group-label info-tree-group-label-linear">${html || 'None'}</span>`;
+  }
+  if (group.dimension === 'tab') {
+    const tabHtml = infoRecordTabValueHtml(representative, {
+      action: false,
+      label,
+      title: group.title || label,
+      leadingHtml: infoTabGroupLeadingActivityHtml(group),
+    });
+    return tabHtml || `<span class="info-tree-group-label">${infoGroupSearchValueHtml(group, label)}</span>`;
+  }
+  return `<span class="info-tree-group-label">${infoGroupSearchValueHtml(group, label)}</span>`;
+}
+
+function infoGroupChildCountHtml(group = {}) {
+  const directChildGroups = Array.isArray(group.children) ? group.children.filter(child => child?.type === 'group') : [];
+  if (directChildGroups.length <= 1) return '';
+  const dimension = directChildGroups[0]?.dimension || '';
+  return `<span class="info-tree-group-child-count">(${esc(`${directChildGroups.length} ${infoDimensionCountNoun(dimension, directChildGroups.length)}`)})</span>`;
+}
+
+function infoGroupDimensionLabel(key) {
+  return key === 'tab' ? 'Tab(tmux session):' : `${infoDimensionLabel(key)}:`;
+}
+
+function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ancestorGroupIdentities = [], activeGroupKeys = null) {
+  if (!Array.isArray(children) || !children.length) return '';
+  return children.map((child, index) => {
+    const treeItemOptions = {first: index === 0, last: index === children.length - 1};
+    if (child?.type !== 'group') return infoRecordHtml(child, {...treeItemOptions, hiddenDimensions: ancestorDimensions});
+    const hiddenDimensions = infoTreeHiddenDimensions(ancestorDimensions, child.dimension);
+    const groupKey = infoTreeGroupCollapseKey(child, ancestorGroupIdentities);
+    const childGroupIdentities = [...ancestorGroupIdentities, infoTreeGroupIdentity(child)];
+    if (activeGroupKeys instanceof Set) activeGroupKeys.add(groupKey);
+    const nested = child.children?.length && child.children[0]?.type === 'group'
+      ? infoTreeChildrenHtml(child.children, depth + 1, hiddenDimensions, childGroupIdentities, activeGroupKeys)
+      : (child.children || []).map((record, recordIndex, records) => infoRecordHtml(record, {
+        first: recordIndex === 0,
+        last: recordIndex === records.length - 1,
+        hiddenDimensions,
+      })).join('');
+    const childCount = infoGroupChildCountHtml(child);
+    const openAttr = infoCollapsedGroupKeys.has(groupKey) ? '' : ' open';
+    return `<details class="${esc(infoTreeItemClasses('info-tree-group', treeItemOptions))}" data-info-dimension="${esc(child.dimension)}" data-info-depth="${depth}" data-info-group-key="${esc(groupKey)}"${openAttr}>
+      <summary title="${esc(child.title)}">
+        <span class="info-tree-group-dimension">${esc(infoGroupDimensionLabel(child.dimension))}</span>
+        <span class="info-tree-group-label-line">${infoGroupLabelHtml(child)}${childCount}</span>
+      </summary>
+      <div class="info-tree-group-children">${nested}</div>
+    </details>`;
+  }).join('');
+}
+
+function infoDimensionLabel(key) {
+  return infoDimensionDefs.find(dimension => dimension.key === key)?.label || key;
+}
+
+function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGrouping, sort = infoSort) {
+  const normalizedSort = normalizeInfoSort(sort);
+  const tree = infoGroupTree(records, grouping, normalizedSort);
+  const activeGroupKeys = new Set();
+  const childrenHtml = infoTreeChildrenHtml(tree.children || [], 0, [], [], activeGroupKeys);
+  pruneInfoTreeCollapsedGroups(activeGroupKeys);
+  return `<div class="info-tree" data-info-grouping="${esc(normalizeInfoGrouping(grouping).join(','))}" data-info-sort="${esc(`${normalizedSort.key}:${normalizedSort.dir}`)}" data-info-search="${esc(infoSearch.trim())}">${childrenHtml}</div>`;
+}
+
+function renderInfoPanel() {
+  const node = document.getElementById('info-content');
+  if (!node) return;
+  syncTranscriptMetaLoadingUi();
+  const serverRoleHtml = infoServerRoleHtml();
+  const allRecords = infoRelationshipRecords();
+  const records = infoFilteredRecords(allRecords, infoSearch);
+  if (!records.length) {
+    if (allRecords.length && infoSearch.trim()) {
+      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`;
+      return;
+    }
+    if (transcriptMetaLoading) {
+      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
+      return;
+    }
+    if (transcriptMetaLoadError) {
+      node.innerHTML = `${serverRoleHtml}<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
+      return;
+    }
+    if (!transcriptMetaLoaded) {
+      node.innerHTML = serverRoleHtml + infoMetadataLoadingHtml();
+      return;
+    }
+    node.innerHTML = `${serverRoleHtml}<div class="info-empty">${esc(t('info.empty'))}</div>`;
+    return;
+  }
+  node.innerHTML = serverRoleHtml + infoTreeHtml(records, infoGrouping, infoSort);
 }
 
 function infoPrCellHtml(row) {
@@ -48134,137 +49042,8 @@ function infoLinearCellHtml(row) {
   return row?.linearHtml || '';
 }
 
-const infoSessionDrawerOpen = new Set();
-const infoSessionDrawerHtmlCache = new Map();
-
-function clearInfoSessionDrawerCache() {
-  infoSessionDrawerHtmlCache.clear();
-}
-
-function infoSessionDrawerToggleHtml(row) {
-  const session = String(row?.session || '');
-  if (!session) return '';
-  const expanded = infoSessionDrawerOpen.has(session);
-  const label = expanded ? 'hide session info' : 'show session info';
-  return `<button type="button" class="info-session-drawer-toggle" data-info-session-drawer="${esc(session)}" aria-expanded="${expanded ? 'true' : 'false'}" aria-label="${esc(label)}" title="${esc(label)}"></button>`;
-}
-
-function infoSessionDrawerCacheKey(session) {
-  return [
-    session,
-    activitySummaryPayload?.generated_at || '',
-    transcriptMeta?.server_version || '',
-    infoSessionFileLookbackHours,
-  ].map(value => String(value ?? '')).join('|');
-}
-
-function cachedInfoSessionDrawerHtml(session) {
-  const key = infoSessionDrawerCacheKey(session);
-  const cached = infoSessionDrawerHtmlCache.get(key);
-  if (cached) return cached;
-  const html = infoSessionDrawerHtml(session);
-  infoSessionDrawerHtmlCache.set(key, html);
-  return html;
-}
-
-function toggleInfoSessionDrawer(session) {
-  const key = String(session || '');
-  if (!key) return false;
-  if (infoSessionDrawerOpen.has(key)) {
-    infoSessionDrawerOpen.delete(key);
-  } else {
-    infoSessionDrawerOpen.add(key);
-    if (!activitySummaryPayload?.session_info?.[key] && !activitySummaryRefreshing && typeof refreshActivitySummary === 'function') {
-      refreshActivitySummary({force: true});
-    }
-  }
-  renderInfoPanel();
-  scheduleShareUiStatePublish();
-  return infoSessionDrawerOpen.has(key);
-}
-
-function infoSessionDrawerData(session) {
-  const fromActivity = activitySummaryPayload?.session_info?.[session];
-  if (fromActivity && typeof fromActivity === 'object') return fromActivity;
-  const info = transcriptMeta?.sessions?.[session] || {};
-  const project = info.project || {};
-  return {session, project, git: project.git || null, pull_request: project.pull_request || null, linear: project.linear || [], latest_summary: '', recent_events: []};
-}
-
-function infoSessionCountText(label, value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return '';
-  return `${label} ${Math.max(0, Math.trunc(number))}`;
-}
-
-function infoSessionDrawerPairsHtml(items) {
-  const rows = items.map(item => {
-    const value = String(item?.value ?? '').trim();
-    const html = String(item?.html || '').trim();
-    return item && (value || html) ? {...item, value, html} : null;
-  }).filter(Boolean).map(item => `
-    <div class="info-session-drawer-field">
-      <span class="info-session-drawer-label">${esc(item.label)}</span>
-      <span class="info-session-drawer-value">${item.html || esc(item.value)}</span>
-    </div>`);
-  return rows.join('');
-}
-
-function infoSessionDrawerEventsHtml(events) {
-  const rows = Array.isArray(events) ? events.slice(0, 5) : [];
-  if (!rows.length) return '<div class="info-session-drawer-empty">No recent events</div>';
-  return `<ul class="info-session-drawer-events">${rows.map(event => {
-    const text = [event?.time || '', event?.type || '', event?.message || ''].filter(Boolean).join(' · ');
-    return `<li>${esc(text)}</li>`;
-  }).join('')}</ul>`;
-}
-
-function infoSessionDrawerLinearHtml(linear) {
-  const items = Array.isArray(linear) ? linear : [];
-  if (!items.length) return '';
-  return items.map(issue => linearIssueHtml(issue)).filter(Boolean).join(' ');
-}
-
-function infoSessionDrawerPrHtml(pr) {
-  if (!pr || typeof pr !== 'object') return '';
-  if (pr.number) return pullRequestColumnLinkHtml(pr);
-  return pr.title || pr.description || '';
-}
-
-function infoSessionDrawerHtml(session) {
-  const data = infoSessionDrawerData(session);
-  const git = data.git && typeof data.git === 'object' ? data.git : {};
-  const pr = data.pull_request && typeof data.pull_request === 'object' ? data.pull_request : null;
-  const ci = data.ci && typeof data.ci === 'object' ? data.ci : (pr?.checks && typeof pr.checks === 'object' ? pr.checks : null);
-  const linearHtml = infoSessionDrawerLinearHtml(data.linear);
-  const prHtml = infoSessionDrawerPrHtml(pr);
-  const counts = [
-    infoSessionCountText('dirty', git.dirty_count),
-    infoSessionCountText('ahead', git.ahead),
-    infoSessionCountText('behind', git.behind),
-  ].filter(Boolean).join(' · ');
-  const fields = infoSessionDrawerPairsHtml([
-    {label: 'Full path', value: data.path || git.root || git.cwd || data.cwd || ''},
-    {label: 'Branch', value: git.branch || ''},
-    {label: 'Git', value: counts},
-    {label: 'PR', value: prHtml ? 'pr' : '', html: prHtml},
-    {label: 'CI', value: ci?.status_label || ci?.state || ci?.conclusion || ''},
-    {label: 'Issues', value: linearHtml ? 'issues' : '', html: linearHtml},
-  ]);
-  const summary = String(data.latest_summary || '').trim();
-  const content = activitySummaryPayload?.session_info?.[session]
-    ? `
-      <div class="info-session-drawer-grid">${fields || '<div class="info-session-drawer-empty">No project metadata</div>'}</div>
-      ${summary ? `<div class="info-session-drawer-summary"><span>Latest summary</span><p>${esc(summary)}</p></div>` : ''}
-      <div class="info-session-drawer-section"><span>Recent events</span>${infoSessionDrawerEventsHtml(data.recent_events)}</div>`
-    : `<div class="info-session-drawer-empty">${esc(activitySummaryRefreshing ? 'Loading session info...' : 'Open drawer data by refreshing YO!info')}</div>`;
-  return `<div class="info-row info-session-drawer-row" data-info-session-drawer-row="${esc(session)}">
-    <div class="info-session-drawer">${content}</div>
-  </div>`;
-}
-
 function infoPathLabel(git) {
-  const path = git?.root || git?.cwd || '';
+  const path = infoGitRoot(git);
   const label = compactHomePath(path);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return label;
@@ -48272,34 +49051,68 @@ function infoPathLabel(git) {
 }
 
 function infoPathTitle(git) {
-  const path = git?.root || git?.cwd || '';
+  const path = infoGitRoot(git);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return path;
   return `${path} (worktree of ${parent})`;
 }
 
 function infoGitRoot(git) {
-  return String(git?.root || git?.cwd || '');
+  return String(git?.worktree?.path || git?.root || git?.cwd || '');
+}
+
+function infoNormalizedPath(value) {
+  const text = String(value || '').trim();
+  return typeof normalizeDirectoryPath === 'function' ? normalizeDirectoryPath(text) : text.replace(/\/+$/, '') || text;
+}
+
+function infoGitPathKey(git) {
+  return infoNormalizedPath(infoGitRoot(git));
+}
+
+function infoPathIsWithin(path, root) {
+  const normalizedPath = infoNormalizedPath(path);
+  const normalizedRoot = infoNormalizedPath(root);
+  return Boolean(normalizedPath && normalizedRoot && (normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`)));
 }
 
 function infoBranchSourcesForSession(session, info) {
   const project = info?.project || {};
   const primaryGit = project.git;
-  const primaryRoot = infoGitRoot(primaryGit);
+  const primaryKey = infoGitPathKey(primaryGit);
   const sources = [];
-  const seenRoots = new Set();
+  const seenSources = new Set();
   const addSource = (git, primary) => {
-    const root = infoGitRoot(git);
+    const sourceKey = infoGitPathKey(git);
     const branches = git?.other_branches?.branches;
-    if (!root || !Array.isArray(branches) || !branches.length || seenRoots.has(root)) return;
-    seenRoots.add(root);
+    if (!sourceKey || !Array.isArray(branches) || !branches.length || seenSources.has(sourceKey)) return;
+    seenSources.add(sourceKey);
     sources.push({session, info, project, git, primary: primary === true});
   };
   addSource(primaryGit, true);
   for (const repo of Array.isArray(project.repos) ? project.repos : []) {
-    addSource(repo, Boolean(primaryRoot && infoGitRoot(repo) === primaryRoot));
+    addSource(repo, Boolean(primaryKey && infoGitPathKey(repo) === primaryKey));
+  }
+  for (const row of Array.isArray(info?.window_metadata) ? info.window_metadata : []) {
+    addSource(row?.git, Boolean(primaryKey && infoGitPathKey(row?.git) === primaryKey));
+  }
+  const agents = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
+    : [];
+  for (const agent of agents) {
+    addSource(agent?.git, Boolean(primaryKey && infoGitPathKey(agent?.git) === primaryKey));
+    for (const entry of typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : []) {
+      addSource(entry?.git, Boolean(primaryKey && infoGitPathKey(entry?.git) === primaryKey));
+    }
   }
   return sources;
+}
+
+function infoBranchSourcesForIndexedRepos() {
+  const repos = Array.isArray(transcriptMeta?.indexed_repos) ? transcriptMeta.indexed_repos : [];
+  return repos
+    .filter(git => infoGitPathKey(git) && Array.isArray(git?.other_branches?.branches) && git.other_branches.branches.length)
+    .map(git => ({session: '', info: {}, project: {}, git, primary: false, indexed: true}));
 }
 
 function infoBranchOwnedBySource(git, branch) {
@@ -48308,29 +49121,224 @@ function infoBranchOwnedBySource(git, branch) {
   return branch?.current === true && Boolean(branchName) && (!currentBranch || currentBranch === branchName);
 }
 
+function infoBranchGitMatches(git, branchName, options = {}) {
+  const gitBranch = String(git?.branch || '');
+  if (options.requireBranch === true) return Boolean(branchName && gitBranch && gitBranch === branchName);
+  return !branchName || !gitBranch || gitBranch === branchName;
+}
+
+function infoAgentWindowMatchesBranchGit(agent, sourceRoot, branchName, options = {}) {
+  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+  const gitCandidates = [
+    agent?.git,
+    ...(pathEntries.map(entry => entry?.git)),
+  ].filter(git => git && typeof git === 'object');
+  let sawMatchingRoot = false;
+  for (const git of gitCandidates) {
+    if (infoGitPathKey(git) !== infoNormalizedPath(sourceRoot)) continue;
+    sawMatchingRoot = true;
+    if (infoBranchGitMatches(git, branchName, options)) return true;
+  }
+  if (sawMatchingRoot) return false;
+  if (options.requireBranch === true) return false;
+  const paths = [
+    agent?.path,
+    ...(Array.isArray(agent?.paths) ? agent.paths : []),
+    ...(pathEntries.map(entry => entry?.path)),
+  ].filter(Boolean);
+  return paths.some(path => infoPathIsWithin(path, sourceRoot));
+}
+
+function infoAgentWindowMatchesPathRoot(agent, sourceRoot) {
+  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+  const gitCandidates = [
+    agent?.git,
+    ...(pathEntries.map(entry => entry?.git)),
+  ].filter(git => git && typeof git === 'object');
+  if (gitCandidates.some(git => infoGitPathKey(git) === infoNormalizedPath(sourceRoot))) return true;
+  const paths = [
+    agent?.path,
+    ...(Array.isArray(agent?.paths) ? agent.paths : []),
+    ...(pathEntries.map(entry => entry?.path)),
+  ].filter(Boolean);
+  return paths.some(path => infoPathIsWithin(path, sourceRoot));
+}
+
+function infoSourceWindowRowsForBranch(source, branch, options = {}) {
+  if (!source.session) return [];
+  const root = infoGitPathKey(source.git);
+  const branchName = String(branch?.name || source.git?.branch || '');
+  return (Array.isArray(source.info?.window_metadata) ? source.info.window_metadata : [])
+    .filter(row => {
+      const git = row?.git || {};
+      return infoGitPathKey(git) === root
+        && infoBranchGitMatches(git, branchName, options);
+    });
+}
+
+function infoTabAgentLabel(session, agent = null) {
+  const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
+  if (!agent) return `${tabLabel} / no AI`;
+  return `${tabLabel} / ${infoTabAgentAiLabel(agent)}`;
+}
+
+function infoTabAgentAiLabel(agent = null) {
+  if (!agent) return 'no AI';
+  if (agent.aiLabel) return String(agent.aiLabel);
+  if (agent.label && String(agent.label).includes(' / ')) return String(agent.label).split(' / ').slice(1).join(' / ') || 'AI';
+  const agentLabel = typeof agentWindowCanonicalLabel === 'function'
+    ? agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.label || agent.kind)
+    : String(agent.label || agent.kind || 'AI');
+  return agentLabel || 'AI';
+}
+
+function infoTabAgentEntry(session, agent = null) {
+  const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
+  const aiLabel = infoTabAgentAiLabel(agent);
+  const label = infoTabAgentLabel(session, agent);
+  const title = agent
+    ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
+    : `${label} · no Claude/Codex tmux sub-window detected`;
+  return {
+    session: String(session || ''),
+    label,
+    title,
+    tabLabel,
+    aiLabel,
+    kind: String(agent?.kind || ''),
+    window: String(agent?.window_index ?? agent?.window ?? ''),
+    windowIndex: String(agent?.window_index ?? agent?.window ?? ''),
+    state: String(agent?.state || ''),
+    pane: String(agent?.pane || ''),
+    pane_target: String(agent?.pane_target || ''),
+    current: agentWindowPayloadCurrent(agent) === true,
+    window_active: agent?.window_active === true,
+    working_stopped_ts: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
+    idle_since: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
+    last_active_ts: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
+  };
+}
+
+function infoBranchTabAgentsForSource(source, branch) {
+  if (!source.session) return [];
+  const owned = infoBranchOwnedBySource(source.git, branch);
+  const root = infoGitRoot(source.git);
+  const branchName = String(branch?.name || source.git?.branch || '');
+  const agents = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(source.session, source.info, autoApproveStates.get(source.session))
+    : [];
+  const matchingAgents = agents.filter(agent => infoAgentWindowMatchesBranchGit(agent, root, branchName, {requireBranch: !owned}));
+  if (matchingAgents.length) return matchingAgents.map(agent => infoTabAgentEntry(source.session, agent));
+  const matchingWindows = infoSourceWindowRowsForBranch(source, branch, {requireBranch: !owned});
+  if (!owned) {
+    if (matchingWindows.length) return [infoTabAgentEntry(source.session, null)];
+    return [];
+  }
+  if (source.primary === true && agents.length) return agents.map(agent => infoTabAgentEntry(source.session, agent));
+  if (matchingWindows.length || source.primary === true || !agents.length) return [infoTabAgentEntry(source.session, null)];
+  return [];
+}
+
+function infoPathTabAgentsForSource(source) {
+  if (!source.session) return [];
+  const root = infoGitRoot(source.git);
+  if (!root) return [];
+  const agents = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(source.session, source.info, autoApproveStates.get(source.session))
+    : [];
+  const matchingAgents = agents.filter(agent => infoAgentWindowMatchesPathRoot(agent, root));
+  if (matchingAgents.length) return matchingAgents.map(agent => infoTabAgentEntry(source.session, agent));
+  return [infoTabAgentEntry(source.session, null)];
+}
+
+function mergedInfoTabAgents(...groups) {
+  const seen = new Set();
+  const result = [];
+  for (const group of groups) {
+    for (const item of Array.isArray(group) ? group : []) {
+      const label = String(item?.label || '');
+      const session = String(item?.session || '');
+      const key = `${session}\n${label}`;
+      if (!label || seen.has(key)) continue;
+      seen.add(key);
+      result.push({
+        session,
+        label,
+        title: String(item?.title || label),
+        tabLabel: String(item?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || ''),
+        aiLabel: String(item?.aiLabel || infoTabAgentAiLabel(item)),
+        kind: String(item?.kind || ''),
+        window: String(item?.window || ''),
+        windowIndex: String(item?.windowIndex ?? item?.window_index ?? item?.window ?? ''),
+        state: String(item?.state || ''),
+        pane: String(item?.pane || ''),
+        pane_target: String(item?.pane_target || ''),
+        current: item?.current === true,
+        window_active: item?.window_active === true,
+        working_stopped_ts: Number.isFinite(Number(item?.working_stopped_ts)) ? Number(item.working_stopped_ts) : 0,
+        idle_since: Number.isFinite(Number(item?.idle_since)) ? Number(item.idle_since) : 0,
+        last_active_ts: Number.isFinite(Number(item?.last_active_ts)) ? Number(item.last_active_ts) : 0,
+      });
+    }
+  }
+  return result;
+}
+
+function infoTabAgentsText(items) {
+  return (Array.isArray(items) ? items : []).map(item => item?.label || '').filter(Boolean).join(', ');
+}
+
+function rowWithInfoTabAgents(row, tabAgents) {
+  const merged = mergedInfoTabAgents(tabAgents);
+  const pathAgents = mergedInfoTabAgents(row?.pathTabAgents);
+  const text = infoTabAgentsText(merged);
+  return {
+    ...row,
+    tabAgents: merged,
+    tabAgentsTitle: merged.map(item => item.title || item.label).filter(Boolean).join('\n'),
+    pathTabAgents: pathAgents,
+    pathTabAgentsTitle: pathAgents.map(item => item.title || item.label).filter(Boolean).join('\n'),
+    session: text,
+    current: merged.length > 0,
+  };
+}
+
 function infoBranchRowForSource(source, branch, ownsSession) {
   const {session, info, project, git, primary} = source;
   const useCurrentProjectMetadata = ownsSession && primary;
   const currentPr = useCurrentProjectMetadata ? displayPullRequest(info) : null;
   const currentLinear = useCurrentProjectMetadata ? project.linear || [] : [];
-  const linearIds = currentLinear.length
-    ? currentLinear.map(issue => issue.identifier).filter(Boolean)
-    : branch.linear_ids || [];
-  const linearHtml = currentLinear.length
-    ? currentLinear.map(issue => linearIssueHtml(issue)).join(' ')
+  const branchLinear = Array.isArray(branch.linear) ? branch.linear : [];
+  const branchLinearIds = Array.isArray(branch.linear_ids) ? branch.linear_ids : [];
+  const prLinearIds = Array.isArray(branch.pull_request?.linear_ids) ? branch.pull_request.linear_ids : [];
+  const linearSourceItems = currentLinear.length ? currentLinear : branchLinear;
+  const fallbackLinearIds = Array.from(new Set([...branchLinearIds, ...prLinearIds].map(item => String(item || '').trim()).filter(Boolean)));
+  const linearIds = linearSourceItems.length
+    ? linearSourceItems.map(issue => issue.identifier).filter(Boolean)
+    : fallbackLinearIds;
+  const linearHtml = linearSourceItems.length
+    ? linearSourceItems.map(issue => linearIssueHtml(issue)).join(' ')
     : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
   const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
   const prValue = currentPr?.number ? currentPr : branch.pull_request;
   const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
+  const prNumber = infoPrNumberFromValue(prValue?.number);
+  const prDescriptionTitle = prValue?.number
+    ? [`#${prValue.number}`, prValue.title || prValue.description || branch.subject || ''].filter(Boolean).join(' ')
+    : '';
   const repoUrl = git?.github_repo?.url || '';
   const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
   const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
-  const linearTitle = currentLinear.length
-    ? currentLinear.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
+  const prLifecycleText = prValue?.number ? infoPullRequestLifecycleText(prValue) : '';
+  const prLifecycleClass = prValue?.number ? infoPullRequestLifecycleClass(prValue) : '';
+  const prCiText = prValue?.number ? infoPullRequestCiText(prValue) : '';
+  const prCiClass = prCiText ? infoPullRequestCiClass(prValue) : '';
+  const linearTitle = linearSourceItems.length
+    ? linearSourceItems.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
     : linearIds.join(' ');
-  const linearItems = currentLinear.length
-    ? currentLinear.map(issue => ({
+  const linearItems = linearSourceItems.length
+    ? linearSourceItems.map(issue => ({
       identifier: String(issue?.identifier || ''),
       state: String(issue?.state || ''),
       title: String(issue?.title || ''),
@@ -48346,7 +49354,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     180,
   );
   return {
-    session: ownsSession ? session : '',
+    session: '',
     path: infoGitRoot(git),
     pathLabel: infoPathLabel(git),
     pathTitle: infoPathTitle(git),
@@ -48359,23 +49367,39 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
     prHtml: prHtml || '',
     prTitle,
+    prDescriptionTitle,
     prUrl,
     prLabel,
+    prNumber: Number.isFinite(prNumber) ? prNumber : null,
     prClass,
+    prLifecycleText,
+    prLifecycleClass,
+    prCiText,
+    prCiClass,
     prSort: prTitle || (prValue?.number ? String(prValue.number) : ''),
     linearHtml,
     linearItems,
     linearTitle,
-    current: ownsSession,
+    current: false,
     sourcePrimary: primary,
+    tabAgents: infoBranchTabAgentsForSource(source, branch),
+    pathTabAgents: infoPathTabAgentsForSource(source),
   };
 }
 
-function preferInfoBranchRow(existing, next) {
+function preferInfoBranchMetadataRow(existing, next) {
   if (!existing) return next;
-  if (next.session && !existing.session) return next;
-  if (next.session && next.sourcePrimary && !existing.sourcePrimary) return next;
+  if (next.tabAgents?.length && !existing.tabAgents?.length) return next;
+  if (next.tabAgents?.length && next.sourcePrimary && !existing.sourcePrimary) return next;
   return existing;
+}
+
+function mergeInfoBranchRow(existing, next) {
+  if (!existing) return rowWithInfoTabAgents(next, next.tabAgents);
+  const preferred = preferInfoBranchMetadataRow(existing, next);
+  const mergedAgents = mergedInfoTabAgents(existing.tabAgents, next.tabAgents);
+  const mergedPathAgents = mergedInfoTabAgents(existing.pathTabAgents, next.pathTabAgents);
+  return rowWithInfoTabAgents({...preferred, pathTabAgents: mergedPathAgents}, mergedAgents);
 }
 
 function rawInfoBranchRows() {
@@ -48385,41 +49409,50 @@ function rawInfoBranchRows() {
     const info = transcriptMeta.sessions?.[session];
     for (const source of infoBranchSourcesForSession(session, info)) {
       for (const branch of source.git?.other_branches?.branches || []) {
-        const key = `${infoGitRoot(source.git)}\n${branch.name || ''}`;
+        const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
         const row = infoBranchRowForSource(source, branch, infoBranchOwnedBySource(source.git, branch));
-        rowsByKey.set(key, preferInfoBranchRow(rowsByKey.get(key), row));
+        rowsByKey.set(key, mergeInfoBranchRow(rowsByKey.get(key), row));
       }
     }
   }
-  return [...rowsByKey.values()];
-}
-
-function setInfoBranchSort(key) {
-  if (!infoBranchSortColumns.has(key)) return;
-  const previous = `${infoBranchSort.key}:${infoBranchSort.dir}`;
-  if (infoBranchSort.key === key) {
-    infoBranchSort = {key, dir: infoBranchSort.dir === 'asc' ? 'desc' : 'asc'};
-  } else {
-    infoBranchSort = {key, dir: 'asc'};
+  for (const source of infoBranchSourcesForIndexedRepos()) {
+    for (const branch of source.git?.other_branches?.branches || []) {
+      const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
+      const row = infoBranchRowForSource(source, branch, false);
+      rowsByKey.set(key, mergeInfoBranchRow(rowsByKey.get(key), row));
+    }
   }
-  if (`${infoBranchSort.key}:${infoBranchSort.dir}` !== previous) scheduleShareUiStatePublish();
-}
-
-const infoBranchSortColumns = new Set(['session', 'path', 'branch', 'pr', 'linear', 'desc', 'updated']);
-
-function normalizeShareInfoSort(value = {}) {
-  const key = infoBranchSortColumns.has(value?.key) ? value.key : 'updated';
-  const dir = value?.dir === 'asc' ? 'asc' : 'desc';
-  return {key, dir};
+  return [...rowsByKey.values()];
 }
 
 function shareInfoString(value, limit = 500) {
   return String(value || '').slice(0, limit);
 }
 
+function shareInfoTabAgentsSnapshot(items) {
+  return Array.isArray(items)
+    ? items.slice(0, 20).map(item => ({
+      session: shareInfoString(item?.session, 80),
+      label: shareInfoString(item?.label, 200),
+      title: shareInfoString(item?.title, 500),
+      tabLabel: shareInfoString(item?.tabLabel, 120),
+      aiLabel: shareInfoString(item?.aiLabel, 120),
+      kind: shareInfoString(item?.kind, 40),
+      window: shareInfoString(item?.window, 40),
+    })).filter(item => item.label)
+    : [];
+}
+
 function shareInfoRowSnapshot(row = {}) {
+  const tabAgents = shareInfoTabAgentsSnapshot(row.tabAgents);
+  const pathTabAgents = shareInfoTabAgentsSnapshot(row.pathTabAgents);
+  const tabAgentText = tabAgents.length ? infoTabAgentsText(tabAgents) : shareInfoString(row.session, 200);
   return {
-    session: shareInfoString(row.session, 80),
+    session: tabAgentText,
+    tabAgents,
+    tabAgentsTitle: tabAgents.map(item => item.title || item.label).filter(Boolean).join('\n'),
+    pathTabAgents,
+    pathTabAgentsTitle: pathTabAgents.map(item => item.title || item.label).filter(Boolean).join('\n'),
     path: shareInfoString(row.path, 1000),
     pathLabel: shareInfoString(row.pathLabel, 1000),
     pathTitle: shareInfoString(row.pathTitle, 1000),
@@ -48432,6 +49465,7 @@ function shareInfoRowSnapshot(row = {}) {
     prTitle: shareInfoString(row.prTitle, 1000),
     prUrl: shareInfoString(row.prUrl, 1000),
     prLabel: shareInfoString(row.prLabel, 100),
+    prNumber: Number.isFinite(infoRowPrNumber(row)) ? infoRowPrNumber(row) : null,
     prClass: shareInfoString(row.prClass, 100),
     prSort: shareInfoString(row.prSort, 1000),
     linearTitle: shareInfoString(row.linearTitle, 1000),
@@ -48454,11 +49488,9 @@ function cleanShareInfoRows(value) {
 
 function shareInfoStateSnapshot(options = {}) {
   const snapshot = {
-    branchSort: normalizeShareInfoSort(infoBranchSort),
-    columnWidths: {
-      branch: clampInfoColumnWidth('branch', infoBranchColumnWidthPx),
-      desc: clampInfoColumnWidth('desc', infoDescColumnWidthPx),
-    },
+    grouping: currentInfoGrouping(),
+    sort: currentInfoSort(),
+    search: currentInfoSearch(),
   };
   if (options.includeRows !== false) snapshot.branchRows = infoBranchRows().map(shareInfoRowSnapshot);
   return snapshot;
@@ -48466,42 +49498,19 @@ function shareInfoStateSnapshot(options = {}) {
 
 function applyShareInfoState(info = {}) {
   if (!info || typeof info !== 'object') return;
-  if ('branchSort' in info) infoBranchSort = normalizeShareInfoSort(info.branchSort);
+  if ('grouping' in info || 'infoGrouping' in info || 'info2Grouping' in info) {
+    infoGrouping = normalizeInfoGrouping(info.grouping || info.infoGrouping || info.info2Grouping);
+  }
+  if ('sort' in info || 'infoSort' in info || 'info2Sort' in info) {
+    infoSort = normalizeInfoSort(info.sort || info.infoSort || info.info2Sort);
+  }
+  if ('search' in info || 'infoSearch' in info || 'info2Search' in info) {
+    setInfoSearch(info.search ?? info.infoSearch ?? info.info2Search, {publish: false, render: false});
+  }
   if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
-  const widths = info.columnWidths && typeof info.columnWidths === 'object' ? info.columnWidths : {};
-  if ('branch' in widths) setInfoColumnWidth('branch', widths.branch, {persist: false, publish: false});
-  if ('desc' in widths) setInfoColumnWidth('desc', widths.desc, {persist: false, publish: false});
+  refreshInfoGroupingControls();
   renderInfoPanel();
   restoreShareScrollTargetByKey('info');
-}
-
-function infoBranchSortValue(row, key) {
-  if (key === 'updated') return Number.isFinite(row.updatedTs) ? row.updatedTs : 0;
-  if (key === 'pr') return row.prSort || row.prTitle || '';
-  if (key === 'linear') return row.linearTitle || '';
-  return row[key] || '';
-}
-
-function compareInfoBranchRows(left, right, sortState) {
-  const key = infoBranchSortColumns.has(sortState?.key) ? sortState.key : 'updated';
-  const direction = sortState?.dir === 'asc' ? 1 : -1;
-  const leftValue = infoBranchSortValue(left, key);
-  const rightValue = infoBranchSortValue(right, key);
-  let result = 0;
-  if (typeof leftValue === 'number' && typeof rightValue === 'number') {
-    result = leftValue - rightValue;
-  } else {
-    result = String(leftValue).localeCompare(String(rightValue), undefined, {numeric: true, sensitivity: 'base'});
-  }
-  if (result !== 0) return result * direction;
-  return (right.updatedTs - left.updatedTs)
-    || String(left.session).localeCompare(String(right.session), undefined, {numeric: true, sensitivity: 'base'})
-    || String(left.path).localeCompare(String(right.path), undefined, {numeric: true, sensitivity: 'base'})
-    || String(left.branch).localeCompare(String(right.branch), undefined, {numeric: true, sensitivity: 'base'});
-}
-
-function sortedInfoBranchRows(rows, sortState = infoBranchSort) {
-  return rows.slice().sort((left, right) => compareInfoBranchRows(left, right, sortState));
 }
 
 function bindPanelControls(panel, session) {
@@ -49052,20 +50061,20 @@ const terminalTmuxWindowRepeatBySession = new Map();
 
 function terminalTmuxPrefixWindowShortcut(key) {
   const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux window', repeatable: true};
-  if (value === 'l') return {label: 'last tmux window', requireChanged: true};
-  if (value === 'w') return {label: 'tmux window chooser', requireChanged: true};
-  if (value === "'") return {label: 'tmux window prompt', requireChanged: true};
-  if (value === 'f') return {label: 'tmux find window', requireChanged: true};
-  if (/^[0-9]$/.test(value)) return {label: `tmux window ${value}`, windowIndex: value};
+  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
+  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
+  if (value === 'l') return {label: 'last tmux sub-window', requireChanged: true};
+  if (value === 'w') return {label: 'tmux sub-window chooser', requireChanged: true};
+  if (value === "'") return {label: 'tmux sub-window prompt', requireChanged: true};
+  if (value === 'f') return {label: 'tmux find sub-window', requireChanged: true};
+  if (/^[0-9]$/.test(value)) return {label: `tmux sub-window ${value}`, windowIndex: value};
   return null;
 }
 
 function terminalTmuxAltWindowShortcut(key) {
   const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux window', repeatable: true};
+  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
+  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
   return null;
 }
 
@@ -49241,7 +50250,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
       }
     }).catch(error => {
-      console.warn('tmux window signal readback failed', error);
+      console.warn('tmux sub-window signal readback failed', error);
       if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return;
       if (attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
@@ -50237,7 +51246,6 @@ async function applyTranscriptsPayload(payload, options = {}) {
   transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
   transcriptMetaLoaded = true;
   transcriptMetaLoadError = '';
-  clearInfoSessionDrawerCache();
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
   maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
   applyAgentAvailabilityPayload(transcriptMeta);

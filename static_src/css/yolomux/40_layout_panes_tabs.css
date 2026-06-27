@@ -1263,6 +1263,46 @@ body.theme-light .drop-slot.drag-over {
   border-color: rgba(255, 255, 255, 0.92);
   background: var(--pane-inactive-tab-bg-hover);
 }
+.tmux-pane-tab-token {
+  box-sizing: border-box;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  height: var(--pane-tab-height);
+  padding: 1px 5px 0;
+  color: var(--pane-tab-text);
+  background: var(--pane-inactive-tab-bg);
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-bottom-color: var(--pane-inactive-tab-border);
+  border-radius: 6px 6px 0 0;
+  font-family: var(--tab-font);
+  font-size: var(--tab-label-size);
+  font-stretch: condensed;
+  font-weight: 500;
+  line-height: var(--tab-line-height);
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+}
+button.tmux-pane-tab-token {
+  cursor: pointer;
+}
+button.tmux-pane-tab-token:hover,
+button.tmux-pane-tab-token:focus-visible {
+  color: var(--pane-tab-text);
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: rgba(255, 255, 255, 0.92);
+  text-decoration: none;
+  outline: 0;
+}
+.tmux-pane-tab-token.active {
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
+}
 .pane-tab.active {
   color: var(--pane-tab-unfocused-active-text);
   background: var(--pane-tab-unfocused-active-bg);
@@ -1295,10 +1335,12 @@ body.theme-light .drop-slot.drag-over {
   -webkit-mask: var(--icon-pin) center / contain no-repeat;
   mask: var(--icon-pin) center / contain no-repeat;
 }
-.pane-tab.pinned-tab {
+.pane-tab.pinned-tab,
+.tmux-pane-tab-token.pinned-tab {
   padding-inline-start: 4px;
 }
-.pane-tab.pinned-tab .pane-tab-core {
+.pane-tab.pinned-tab .pane-tab-core,
+.tmux-pane-tab-token.pinned-tab .pane-tab-core {
   min-width: 0;
 }
 /* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
@@ -1677,7 +1719,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   font-weight: 500;
 }
 .pane-info-bar .tmux-window-button,
-.panel-detail-row .tmux-window-button {
+.panel-detail-row .tmux-window-button,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button {
   flex: 0 0 auto;
   max-width: none;
   overflow: visible;
@@ -1686,7 +1729,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
 }
 .pane-info-bar .tmux-window-button:not(.active):hover,
-.panel-detail-row .tmux-window-button:not(.active):hover {
+.panel-detail-row .tmux-window-button:not(.active):hover,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active):hover {
   color: var(--pc-control-hover-fg);
   background: var(--pane-tab-control-hover-bg);
   border-color: var(--pane-tab-control-hover-border);
@@ -1713,8 +1757,10 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 }
 .pane-info-bar .tmux-window-button .tmux-window-name-label,
 .panel-detail-row .tmux-window-button .tmux-window-name-label,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button .tmux-window-name-label,
 .pane-info-bar .tmux-window-button .tmux-window-name-text,
-.panel-detail-row .tmux-window-button .tmux-window-name-text {
+.panel-detail-row .tmux-window-button .tmux-window-name-text,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button .tmux-window-name-text {
   max-width: none;
   overflow: visible;
   text-overflow: clip;

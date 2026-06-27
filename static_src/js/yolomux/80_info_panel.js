@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // YO!info and YO!agent panel shells split from 80_panes_preferences.js.
-function infoLookbackControlHtml() {
-  const options = sessionFileLookbackOptions()
-    .map(option => `<option value="${esc(option.hours)}"${option.hours === infoSessionFileLookbackHours ? ' selected' : ''}>${esc(option.label)}</option>`)
-    .join('');
-  return `<label class="info-lookback-control">${esc(t('info.lookback'))}<select data-info-lookback>${options}</select></label>`;
-}
 
 function setInfoSessionFileLookbackHours(hours, options = {}) {
   const previous = infoSessionFileLookbackHours;
@@ -19,6 +13,37 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
   return infoSessionFileLookbackHours;
 }
 
+function infoGroupingControlsHtml() {
+  const grouping = typeof currentInfoGrouping === 'function' ? currentInfoGrouping() : ['tab', 'path'];
+  const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
+  const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
+  const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];
+  const dimensions = typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : [];
+  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'}];
+  const optionHtml = level => [
+    `<option value="">None</option>`,
+    ...dimensions.map(dimension => `<option value="${esc(dimension.key)}"${grouping[level] === dimension.key ? ' selected' : ''}>${esc(dimension.label)}</option>`),
+  ].join('');
+  const sortValue = `${sort.key}:${sort.dir}`;
+  const sortFieldHtml = sortFields.map(field => `<option value="${esc(field.value || `${field.key}:${field.dir || ''}`)}"${sortValue === (field.value || `${field.key}:${field.dir || ''}`) ? ' selected' : ''}>${esc(field.label)}</option>`).join('');
+  const presetHtml = presets.map(preset => {
+    const active = grouping.join('|') === preset.grouping.join('|');
+    return `<button type="button" class="info-tree-preset${active ? ' active' : ''}" data-info-preset="${esc(preset.key)}" aria-pressed="${active ? 'true' : 'false'}" title="${esc(preset.title)}">${esc(preset.label)}</button>`;
+  }).join('');
+  const searchHtml = `<label class="info-tree-search-control"><span>Search</span><input type="search" data-info-search value="${esc(search)}" placeholder="Search YO!info" aria-label="Search YO!info"></label>`;
+  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="Order by level ${index + 1}">${optionHtml(index)}</select></label>`).join('');
+  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="Sort order">
+          <label class="info-tree-group-select"><span>Sort</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
+        </div>`;
+  return `
+        <div class="info-tree-primary-controls">
+          <div class="info-tree-presets" role="group" aria-label="Grouping presets">${presetHtml}</div>
+          ${searchHtml}
+        </div>
+        <div class="info-tree-group-selects" role="group" aria-label="Grouping levels"><span class="info-tree-order-label">Order by:</span>${selects}</div>
+        ${sortControls}`;
+}
+
 function bindInfoPanel(panel) {
   if (!panel || panel.__yolomuxInfoPanelBound === true) return;
   panel.__yolomuxInfoPanelBound = true;
@@ -27,48 +52,91 @@ function bindInfoPanel(panel) {
     refreshTranscripts({force: true});
     refreshActivitySummary({force: true});
   });
-  delegate(panel, 'click', '[data-info-sort]', (_event, button) => {
-    setInfoBranchSort(button.dataset.infoSort);
-    renderInfoPanel();
+  delegate(panel, 'click', '[data-info-preset]', (event, button) => {
+    event.preventDefault();
+    if (typeof setInfoGroupingPreset === 'function') setInfoGroupingPreset(button.dataset.infoPreset || '');
   });
-  delegate(panel, 'click', '[data-info-session-drawer]', (_event, button) => {
-    toggleInfoSessionDrawer(button.dataset.infoSessionDrawer || '');
-  });
-  delegate(panel, 'click', '[data-watched-remove]', (event, button) => {
+  delegate(panel, 'click', '[data-auto-session][data-action="pane-tab-auto-approve"]', async (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    removeWatchedPr(button.dataset.watchedRemove);
+    event.stopImmediatePropagation?.();
+    if (typeof toggleAutoApprove === 'function') await toggleAutoApprove(button.dataset.autoSession || '');
+  });
+  delegate(panel, 'click', '[data-info-open-tab]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const session = button.dataset.infoOpenTab || '';
+    if (session) selectSession(session, {userInitiated: true});
+  });
+  delegate(panel, 'click', '[data-info-open-ai-window]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const session = button.dataset.infoOpenAiTab || '';
+    const windowIndex = button.dataset.infoOpenAiWindow || '';
+    if (!session) return;
+    if (windowIndex !== '' && typeof tmuxWindow === 'function') {
+      tmuxWindow(session, {windowIndex}, button.textContent || `tmux sub-window ${windowIndex}`);
+    }
+    selectSession(session, {userInitiated: true});
+  });
+  delegate(panel, 'click', '[data-info-open-path]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const path = button.dataset.infoOpenPath || '';
+    if (!path) return;
+    (async () => {
+      if (typeof openFileExplorerPane === 'function') await openFileExplorerPane();
+      if (typeof setFileExplorerMode === 'function') setFileExplorerMode('files');
+      if (typeof openFileExplorerAt === 'function') {
+        const opened = await openFileExplorerAt(path, {manualSelection: true});
+        if (opened && typeof selectFileTreePath === 'function') selectFileTreePath(path);
+      }
+    })().catch(error => {
+      statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
+    });
   });
   panel.addEventListener('change', event => {
-    const lookback = event.target.closest('[data-info-lookback]');
-    if (lookback && panel.contains(lookback)) setInfoSessionFileLookbackHours(lookback.value);
+    const select = event.target.closest('[data-info-group-level]');
+    if (select && panel.contains(select) && typeof setInfoGroupingLevel === 'function') {
+      setInfoGroupingLevel(select.dataset.infoGroupLevel, select.value || '');
+      return;
+    }
+    const sortMode = event.target.closest('[data-info-sort-mode]');
+    if (sortMode && panel.contains(sortMode) && typeof setInfoSortMode === 'function') setInfoSortMode(sortMode.value || '');
   });
-  if (typeof bindInfoColumnResizers === 'function') bindInfoColumnResizers(panel);
+  panel.addEventListener('toggle', event => {
+    const details = event.target.closest?.('details[data-info-group-key]');
+    if (!details || !panel.contains(details) || typeof setInfoTreeGroupCollapsed !== 'function') return;
+    setInfoTreeGroupCollapsed(details.dataset.infoGroupKey || '', !details.open);
+  }, true);
+  panel.addEventListener('input', event => {
+    const search = event.target.closest('[data-info-search]');
+    if (search && panel.contains(search) && typeof setInfoSearch === 'function') setInfoSearch(search.value || '');
+  });
 }
 
 function createInfoPanel() {
   const panel = document.createElement('article');
-  panel.className = 'panel info-panel';
+  panel.className = 'panel info-panel info-tree-panel';
   panel.id = panelDomId(infoItemId);
   panel.innerHTML = `
       <div class="panel-head">
         ${virtualPanelControlsHtml(infoItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="info-actions-bar">
+      <div class="info-actions-bar info-tree-actions-bar">
+        ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
-          ${infoLookbackControlHtml()}
           <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
         </div>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
-        <div id="info-content" class="info-list"></div>
-        <div id="info-watched" class="info-watched"></div>
+        <div id="info-content" class="info-list info-tree-list"></div>
       </div>`;
   bindPanelShell(panel, infoItemId);
   bindInfoPanel(panel);
-  renderInfoPanel();
+  if (typeof renderInfoPanel === 'function') renderInfoPanel();
   return panel;
 }
 
@@ -209,19 +277,22 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
     button.title = expandLabel;
     button.setAttribute('aria-label', expandLabel);
   });
-  const infoRefresh = panel.querySelector('[data-info-refresh]');
-  if (infoRefresh) {
+  const refresh = panel.querySelector('[data-info-refresh]');
+  if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
-      setMetadataRefreshButtonLoading(infoRefresh, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
     } else {
       const label = t('info.refreshRepo');
-      infoRefresh.textContent = label;
-      infoRefresh.title = label;
-      infoRefresh.setAttribute('aria-label', label);
+      refresh.textContent = label;
+      refresh.title = label;
+      refresh.setAttribute('aria-label', label);
     }
   }
-  const lookback = panel.querySelector('.info-lookback-control');
-  if (lookback) lookback.outerHTML = infoLookbackControlHtml();
+  const bar = panel.querySelector('.info-tree-actions-bar');
+  if (bar) {
+    const actions = bar.querySelector('.info-subtab-actions');
+    bar.innerHTML = `${infoGroupingControlsHtml()}${actions ? actions.outerHTML : ''}`;
+  }
 }
 
 function relocalizeYoagentPanelChrome(panel = document.getElementById(panelDomId(yoagentItemId))) {

@@ -171,7 +171,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK? badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'ASK? status labels inherit shared status-indicator tone behavior without badge text-transform');
-    assert.ok(/function agentWindowStatusDotHtml\(item\)[\s\S]*const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(activitySource), 'tmux window status dots inherit shared dot behavior through the shared activity-tone helper');
+    assert.ok(/function agentWindowStatusDotHtml\(item\)[\s\S]*const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(activitySource), 'tmux sub-window status dots inherit shared dot behavior through the shared activity-tone helper');
     assert.ok(/sessionPopoverAgentWindowRowHtml\(agent[\s\S]*agentWindowActivityIconHtmlForStatus\(agent, agent\.kind/.test(popoverSource), 'session popover agent rows reuse the shared activity glyph/status renderer');
     assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK?/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
@@ -712,7 +712,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__files__', '__search_history__', '__prefs__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__files__', '__search_history__', '__prefs__', '__debug__', '3']);
   });
 
   test('t@6373', () => {
@@ -767,7 +767,7 @@ async function runEditorPreviewSuite() {
       {indexText: '1', buttonNameLabel: 'bash', nameLabel: 'bash (pid=111)', numberLabel: '1', indexedButtonLabel: '1:bash', indexedNameLabel: '1:bash (pid=111)', processLabel: 'bash (pid=111)', pid: 111, active: false},
       {indexText: '2', buttonNameLabel: 'codex(2)', nameLabel: 'codex(2) (pid=222)', numberLabel: '2', indexedButtonLabel: '2:codex', indexedNameLabel: '2:codex (pid=222)', processLabel: 'codex (pid=222)', pid: 222, active: false},
       {indexText: '3', buttonNameLabel: 'codex(3)', nameLabel: 'codex(3) (pid=3333)', numberLabel: '3', indexedButtonLabel: '3:codex', indexedNameLabel: '3:codex (pid=3333)', processLabel: 'codex (pid=3333)', pid: 3333, active: true},
-    ], 'P5: tmux window records sort by index and disambiguate duplicate names with the window index');
+    ], 'P5: tmux sub-window records sort by index and disambiguate duplicate names with the window index');
     const duplicateBashRecords = api.tmuxWindowRecords([
       {window: '2', window_name: 'bash', pid: 202},
       {window: '3', window_name: 'bash', pid: 303},
@@ -779,12 +779,12 @@ async function runEditorPreviewSuite() {
     assert.ok(windowBarHtml.includes('data-tmux-window-label-mode="names"'), 'P5: normal window bars prefer names');
     assert.ok(windowBarHtml.includes('data-window-index="1"'), 'P5: window bar button targets window 1');
     assert.ok(windowBarHtml.includes('data-window-index="2"'), 'P5: window bar button targets window 2');
-    assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux window button is highlighted and pressed');
-    assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label"><span class="tmux-window-name-text">1:bash</span></span>'), 'tmux window buttons show index:name without pid');
-    assert.ok(/<span class="tmux-window-name-label"><span class="agent-window-activity[\s\S]*agent-icon codex[\s\S]*<span class="tmux-window-name-text">2:codex<\/span>/.test(windowBarHtml), 'AI tmux window button labels use the shared glyph before the canonical index:agent kind');
-    assert.equal(windowBarHtml.includes('(pid='), false, 'tmux window button labels do not show process pids');
-    assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux window names like node');
-    assert.equal(windowBarHtml.includes('data-window-agent'), false, 'tmux window buttons no longer carry per-agent color tags');
+    assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux sub-window button is highlighted and pressed');
+    assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label"><span class="tmux-window-name-text">1:bash</span></span>'), 'tmux sub-window buttons show index:name without pid');
+    assert.ok(/<span class="tmux-window-name-label"><span class="agent-window-activity[\s\S]*agent-icon codex[\s\S]*<span class="tmux-window-name-text">2:codex<\/span>/.test(windowBarHtml), 'AI tmux sub-window button labels use the shared glyph before the canonical index:agent kind');
+    assert.equal(windowBarHtml.includes('(pid='), false, 'tmux sub-window button labels do not show process pids');
+    assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux sub-window names like node');
+    assert.equal(windowBarHtml.includes('data-window-agent'), false, 'tmux sub-window buttons no longer carry per-agent color tags');
     const nowSeconds = Date.now() / 1000;
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'codex', state: 'working', window_index: 3, last_active_ts: nowSeconds, window_label: '3:codex'},
@@ -844,7 +844,7 @@ async function runEditorPreviewSuite() {
     }));
     assert.equal(api.tmuxWindowBarLabelMode(api.tmuxWindowRecords(manyWindows)), 'numbers', 'P5: many windows fall back to numeric labels');
     assert.ok(api.tmuxWindowBarHtml('1', {panes: manyWindows}).includes('data-tmux-window-label-mode="numbers"'), 'P5: numeric fallback is reflected in the rendered bar');
-    assert.ok(api.tmuxWindowBarHtml('1', {panes: manyWindows}, {infoBar: true}).includes('data-tmux-window-label-mode="names"'), 'Info Bar tmux window buttons keep names instead of minimizing to numbers');
+    assert.ok(api.tmuxWindowBarHtml('1', {panes: manyWindows}, {infoBar: true}).includes('data-tmux-window-label-mode="names"'), 'Info Bar tmux sub-window buttons keep names instead of minimizing to numbers');
     const longBranch = 'keivenchang/DIS-2239__parity-commit-link-frontend-crates';
     const longTitle = 'fix(performance): repair v1 PARITY commit + case-doc links after';
     const longMetaInfo = {
@@ -890,18 +890,18 @@ async function runEditorPreviewSuite() {
     assert.equal(controls.includes('>codex</button>') || controls.includes('>node</button>'), false, 'DOIT.56 N3: terminal header no longer duplicates active window/process names');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const yoloCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'tmux window bar is rendered on the Info Bar before the close button');
+    assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'tmux sub-window bar is rendered on the Info Bar before the close button');
     assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
     assert.ok(/\.panel\.details-collapsed \.pane-info-bar,[\s\S]*\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(yoloCss), 'Info Bar window bar collapses with the Info Bar');
     assert.equal(yoloCss.includes('.panel-agent-badge'), false, 'DOIT.57 T1: the duplicate Info Bar agent-badge CSS is removed');
     assert.equal(source.includes('panel-agent-slot'), false, 'DOIT.57 T1: no agent-badge slot is rendered in the Info Bar');
     assert.ok(/\.tmux-window-button\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(yoloCss), 'DOIT.57 T2: the active window button is a pressed toggle via the shared active-control tokens');
     assert.equal(/\.tmux-window-button\.active\s*\{[^}]*#[0-9a-fA-F]{3,6}/.test(yoloCss), false, 'DOIT.57 T2: the active window button uses theme-aware tokens, not hardcoded hex');
-    assert.ok(/\.tmux-window-button \.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*14px[\s\S]*height:\s*14px/.test(yoloCss), 'tmux window agent glyphs stay compact beside the canonical label');
-    assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\s*\{[\s\S]*text-shadow:\s*0 0 0 var\(--active-control-text\), 0 0 4px var\(--active-control-text\)/.test(yoloCss), 'active tmux window status dots reuse active-control text for contrast');
+    assert.ok(/\.tmux-window-button \.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*14px[\s\S]*height:\s*14px/.test(yoloCss), 'tmux sub-window agent glyphs stay compact beside the canonical label');
+    assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\s*\{[\s\S]*text-shadow:\s*0 0 0 var\(--active-control-text\), 0 0 4px var\(--active-control-text\)/.test(yoloCss), 'active tmux sub-window status dots reuse active-control text for contrast');
     assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*color:\s*var\(--bad\)[\s\S]*text-shadow:\s*0 0 0 var\(--bad\), 0 0 6px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\.85\)/.test(yoloCss), 'active ASK? window dots keep the saturated red attention color instead of the active-control white halo');
-    assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(yoloCss), 'active tmux window activity dots inherit the shared brightness pulse in the built CSS');
-    assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux window buttons have no per-agent tint CSS');
+    assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(yoloCss), 'active tmux sub-window activity dots inherit the shared brightness pulse in the built CSS');
+    assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux sub-window buttons have no per-agent tint CSS');
     assert.ok(source.includes("agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown initializes from the persisted setting');
     assert.ok(source.includes("agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown live-updates from settings changes');
     assert.ok(source.includes("if (key === 'cooldown') return 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
@@ -912,7 +912,7 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes("status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse"), 'cooldown tone inherits heartbeat in the built source');
     assert.ok(/\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb:\s*245 197 66/.test(yoloCss), 'cooldown dots use the yellow glow in the built CSS');
     assert.equal(/status-indicator--dot\.status-indicator--working\.heartbeat-pulse[\s\S]{0,240}animation-direction:\s*alternate/.test(yoloCss), false, 'working dots no longer double the pulse period with alternate direction');
-    assert.ok(/\.pane-info-bar \.tmux-window-bar,[\s\S]*\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*max-width:\s*none[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(yoloCss), 'Info Bar tmux window bar right-aligns without shrinking next to the close button');
+    assert.ok(/\.pane-info-bar \.tmux-window-bar,[\s\S]*\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*max-width:\s*none[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(yoloCss), 'Info Bar tmux sub-window bar right-aligns without shrinking next to the close button');
     assert.ok(/\.pane-info-bar-meta\.pane-info-bar-meta-overflow \.pane-info-bar-scroll-text\s*\{[\s\S]*animation-name:\s*pane-info-bar-scroll[\s\S]*animation-delay:\s*0s[\s\S]*animation-timing-function:\s*var\(--pane-info-bar-scroll-timing\)[\s\S]*animation-direction:\s*normal/.test(yoloCss), 'overflowing Info Bar metadata holds at the start, scrolls forward, holds at the end, then repeats');
     assert.ok(/@keyframes pane-info-bar-scroll\s*\{[\s\S]*transform:\s*translateX\(var\(--pane-info-bar-scroll-offset\)\)/.test(yoloCss), 'Info Bar metadata scroll uses a precomputed negative offset that animates in browsers');
     assert.equal(yoloCss.includes('translateX(calc(-1 * var(--pane-info-bar-scroll-distance)))'), false, 'Info Bar metadata scroll does not use unsupported calc multiplication in transform');
@@ -920,7 +920,7 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('observePaneInfoBarResizeTarget(text)'), 'Info Bar overflow sync observes text width changes from font/layout updates');
     assert.ok(source.includes('Math.abs(previousDistance - distance) <= 4'), 'Info Bar scroll keeps the same animation track through tiny layout jitter');
     assert.ok(source.includes('if (changed) schedulePaneInfoBarMetaOverflowSync(meta)'), 'unchanged Info Bar metadata does not reschedule and restart scrolling on every metadata poll');
-    assert.ok(source.includes('if (existing.outerHTML === html) return;'), 'unchanged Info Bar tmux window buttons are not replaced and do not reset sibling scrolling');
+    assert.ok(source.includes('if (existing.outerHTML === html) return;'), 'unchanged Info Bar tmux sub-window buttons are not replaced and do not reset sibling scrolling');
     assert.equal(/\.pane-info-bar-meta\.pane-info-bar-meta-overflow \.pane-info-bar-scroll-text\s*\{[\s\S]*animation-direction:\s*alternate/.test(yoloCss), false, 'overflowing Info Bar metadata does not reverse-scroll back to the start');
     assert.ok(source.includes('const PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS = 3'), 'Info Bar metadata scroll holds the beginning for three seconds');
     assert.ok(source.includes('const PANE_INFO_BAR_SCROLL_END_HOLD_SECONDS = 2'), 'Info Bar metadata scroll holds the end for two seconds');
@@ -937,21 +937,21 @@ async function runEditorPreviewSuite() {
     lateClose.className = 'panel-detail-close';
     lateDetailRow.appendChild(lateClose);
     latePanel.appendChild(lateDetailRow);
-    assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'late metadata panel starts without a tmux window bar');
+    assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'late metadata panel starts without a tmux sub-window bar');
     lateApi.setTranscriptInfoForTest('late', {panes: [
       {target: 'late:0.0', window: '0', window_name: 'claude', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/agent'},
       {target: 'late:1.0', window: '1', window_name: 'bash', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/repo/shell'},
     ]});
     lateApi.updatePanelWindowStepButtonsForTest('late', lateApi.transcriptInfoForTest('late'));
     const lateBars = lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]');
-    assert.equal(lateBars.length, 1, 'late transcript metadata inserts one tmux window bar');
+    assert.equal(lateBars.length, 1, 'late transcript metadata inserts one tmux sub-window bar');
     assert.deepStrictEqual(
       Array.from(lateBars[0].querySelectorAll('[data-window-index]')).map(button => button.dataset.windowIndex),
       ['0', '1'],
-      'late transcript metadata inserts the tmux window bar instead of leaving the Info Bar stuck without window buttons',
+      'late transcript metadata inserts the tmux sub-window bar instead of leaving the Info Bar stuck without window buttons',
     );
     lateApi.updatePanelWindowStepButtonsForTest('late', {panes: []});
-    assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'empty window metadata removes the stale tmux window bar');
+    assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'empty window metadata removes the stale tmux sub-window bar');
     const calls = [];
     const button1 = tmuxWindowButtonElement('1', '1', false);
     const button3 = tmuxWindowButtonElement('1', '3', true);
@@ -960,7 +960,7 @@ async function runEditorPreviewSuite() {
       calls.push({url: String(url), method: options.method || 'GET'});
       return new Promise(() => {});
     });
-    api.tmuxWindowForTest('1', {windowIndex: '1'}, 'tmux window 1:bash');
+    api.tmuxWindowForTest('1', {windowIndex: '1'}, 'tmux sub-window 1:bash');
     assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'direct window clicks mark the clicked button active synchronously before POST resolution');
     assert.equal(tmuxWindowButtonFromElement(api.testElementForId('body'), '1')?.getAttribute('aria-pressed'), 'true', 'direct window clicks sync aria-pressed before POST resolution');
     assert.equal(tmuxWindowButtonFromElement(api.testElementForId('body'), '3')?.classList.contains('active'), false, 'direct window clicks clear the previous active button synchronously');
@@ -983,11 +983,11 @@ async function runEditorPreviewSuite() {
     api.setTranscriptInfoForTest('meta-preview', directMetaInfo);
     const metaNode = api.testElementForId('meta-meta-preview');
     metaNode.innerHTML = 'stale';
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:bash');
-    assert.notEqual(metaNode.innerHTML, 'stale', 'clicking a known tmux window updates path/repo metadata without waiting for the next transcript poll');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:bash');
+    assert.notEqual(metaNode.innerHTML, 'stale', 'clicking a known tmux sub-window updates path/repo metadata without waiting for the next transcript poll');
     assert.ok(metaNode.innerHTML.includes('/tmp/shell'), 'known target-window pane path is reflected immediately in the Info Bar');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: bash', 'terminal detail label follows the optimistic target window, not stale backend-active metadata');
-    assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=meta-preview&window=1', method: 'POST'}], 'tmux window click still posts the authoritative select-window request');
+    assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=meta-preview&window=1', method: 'POST'}], 'tmux sub-window click still posts the authoritative select-window request');
     const relativeApi = loadYolomux('', ['meta-preview']);
     relativeApi.setTranscriptInfoForTest('meta-preview', {
       selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/agent/src'},
@@ -1027,18 +1027,18 @@ async function runEditorPreviewSuite() {
     assert.ok(relativeMetaNode.innerHTML.includes('/tmp/shell'), 'Ctrl-b numeric target uses the known target-window pane path immediately');
     const tmuxPrefixObserver = source.slice(source.indexOf('function observeTerminalTmuxPrefixWindowSwitches(session, data)'), source.indexOf('function handleTerminalData(session, data)'));
     assert.ok(tmuxPrefixObserver.includes("char === '\\x02'") && tmuxPrefixObserver.includes('terminalTmuxPrefixWindowShortcut(char)'), 'terminal transport observes tmux prefix window shortcuts without owning the bytes');
-    assert.equal(source.includes('function previewTmuxWindowInfo'), false, 'tmux window switching has no relative-index predictor');
-    assert.equal(source.includes('function previewTmuxWindowLabel'), false, 'tmux window switching has no optimistic local label repaint');
+    assert.equal(source.includes('function previewTmuxWindowInfo'), false, 'tmux sub-window switching has no relative-index predictor');
+    assert.equal(source.includes('function previewTmuxWindowLabel'), false, 'tmux sub-window switching has no optimistic local label repaint');
     assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*const sequence = directIndex !== null[\s\S]*setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*setTmuxWindowActiveIndexPending\(session\)[\s\S]*expectedIndex: directIndex, sequence[\s\S]*previousIndex, sequence/.test(source), 'terminal prefix observer highlights explicit targets and carries a sequence through readback');
     assert.ok(/function handleTerminalData\(session, data\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)/.test(source), 'tmux prefix observation happens before sending the unchanged terminal bytes');
     assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*applyTmuxWindowActiveIndexToTranscriptInfo\(String\(session\), indexKey, \{render: true\}\)/.test(source), 'known direct tmux targets overlay transcript metadata immediately so stale polls do not flash the old window');
     assert.ok(/async function applyTranscriptsPayload\(payload, options = \{\}\)[\s\S]*transcriptMeta = transcriptPayloadWithTmuxWindowOverrides\(payload\)/.test(source), 'incoming transcript payloads preserve pending direct-window overrides');
     assert.ok(/function transcriptPayloadWithPriorSessionMetadata\(payload, previousPayload = transcriptMeta\)[\s\S]*mergeSessionMetadataDuringLightweightRefresh/.test(source), 'incoming lightweight transcript payloads preserve prior repo metadata so YO!info does not flash empty');
-    assert.ok(/async function refreshTmuxWindowActiveFromSignals\(session, options = \{\}\)[\s\S]*apiFetchJson\(tmuxWindowSignalReadbackUrl\(session\)/.test(source), 'tmux window readback uses the session-scoped lightweight tmux-signals endpoint');
-    assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when a known tmux window target is selected');
-    assert.ok(/function setTmuxWindowActiveIndexPending\(session, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when an unknown tmux window target is pending');
-    assert.ok(/function applyTmuxSignalActiveWindowsToTranscriptInfo\(payload = \{\}\)[\s\S]*updatePanelHeader\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]*renderInfoPanel\(\);[\s\S]*refreshTabberPanels\(\)/.test(source), 'probe-confirmed tmux window readback repaints the Tabber without waiting for the activity poll');
+    assert.ok(/async function refreshTmuxWindowActiveFromSignals\(session, options = \{\}\)[\s\S]*apiFetchJson\(tmuxWindowSignalReadbackUrl\(session\)/.test(source), 'tmux sub-window readback uses the session-scoped lightweight tmux-signals endpoint');
+    assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when a known tmux sub-window target is selected');
+    assert.ok(/function setTmuxWindowActiveIndexPending\(session, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when an unknown tmux sub-window target is pending');
+    assert.ok(/function applyTmuxSignalActiveWindowsToTranscriptInfo\(payload = \{\}\)[\s\S]*updatePanelHeader\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]*renderInfoPanel\(\);[\s\S]*refreshTabberPanels\(\)/.test(source), 'probe-confirmed tmux sub-window readback repaints the Tabber without waiting for the activity poll');
   });
 
   await testAsync('lightweight transcript refresh keeps existing YO!info branch rows', async () => {
@@ -1089,7 +1089,7 @@ async function runEditorPreviewSuite() {
     assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.branch)), [], 'a later full metadata payload can still clear rows when there is truly no branch metadata');
   });
 
-  await testAsync('tmux window direct failure rolls back optimistic metadata', async () => {
+  await testAsync('tmux sub-window direct failure rolls back optimistic metadata', async () => {
     const api = loadYolomux('', ['meta-preview']);
     const info = {
       agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
@@ -1109,7 +1109,7 @@ async function runEditorPreviewSuite() {
       return Promise.resolve(jsonResponse({entries: [], path: '/repo/claude'}));
     });
 
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'direct click applies the known target-window metadata synchronously');
 
     await flushAsyncWork();
@@ -1119,7 +1119,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: codex', 'failed direct select restores the previous active-window metadata');
   });
 
-  await testAsync('tmux window explicit readback ignores stale active window', async () => {
+  await testAsync('tmux sub-window explicit readback ignores stale active window', async () => {
     const api = loadYolomux('', ['meta-preview']);
     const button0 = tmuxWindowButtonElement('meta-preview', '0', true);
     const button1 = tmuxWindowButtonElement('meta-preview', '1', false);
@@ -1188,7 +1188,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'stale transcript payloads do not revert the terminal title to the old active window');
   });
 
-  await testAsync('direct tmux window clicks do not bounce through stale transcript or partial signal pushes', async () => {
+  await testAsync('direct tmux sub-window clicks do not bounce through stale transcript or partial signal pushes', async () => {
     const api = loadYolomux('', ['meta-preview']);
     const button0 = tmuxWindowButtonElement('meta-preview', '0', true);
     const button1 = tmuxWindowButtonElement('meta-preview', '1', false);
@@ -1213,10 +1213,10 @@ async function runEditorPreviewSuite() {
       return Promise.resolve(jsonResponse({}));
     });
 
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'the direct target is active immediately after click');
     await api.applyTranscriptsPayloadForTest({session_order: ['meta-preview'], sessions: {'meta-preview': staleInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'a stale transcript push cannot repaint the old active tmux window while a direct target is pending');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'a stale transcript push cannot repaint the old active tmux sub-window while a direct target is pending');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'the terminal label stays on the direct target while stale transcript data is pending');
 
     api.applyTmuxSignalsPayloadForTest({windows: [{
@@ -1232,7 +1232,7 @@ async function runEditorPreviewSuite() {
     assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'partial stale signal pushes do not repaint generated window bars back to the old active window');
   });
 
-  await testAsync('direct tmux window target survives stale in-place button bar refresh', async () => {
+  await testAsync('direct tmux sub-window target survives stale in-place button bar refresh', async () => {
     const api = loadYolomux('', ['meta-preview']);
     const button0 = tmuxWindowButtonElement('meta-preview', '0', true);
     const button1 = tmuxWindowButtonElement('meta-preview', '1', false);
@@ -1251,7 +1251,7 @@ async function runEditorPreviewSuite() {
       return Promise.resolve(jsonResponse({}));
     });
 
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'direct click marks 1:claude active before the POST settles');
 
     api.updatePanelWindowStepButtonsForTest('meta-preview', staleInfo);
@@ -1259,7 +1259,7 @@ async function runEditorPreviewSuite() {
     assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'stale header refresh cannot replace the button bar with 0:codex active');
   });
 
-  await testAsync('direct tmux window readback only confirms from raw tmux active state', async () => {
+  await testAsync('direct tmux sub-window readback only confirms from raw tmux active state', async () => {
     const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
     const staleInfo = {
       agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
@@ -1295,7 +1295,7 @@ async function runEditorPreviewSuite() {
       return Promise.resolve(jsonResponse({}));
     });
 
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'the direct click still applies the optimistic target immediately');
     for (let i = 0; i < 20; i += 1) await flushAsyncWork();
 
@@ -1306,7 +1306,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'the terminal tab label does not bounce back to the old process after stale delayed readback');
   });
 
-  await testAsync('confirmed direct tmux window target ignores delayed stale signal snapshots', async () => {
+  await testAsync('confirmed direct tmux sub-window target ignores delayed stale signal snapshots', async () => {
     const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
     const staleInfo = {
       agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
@@ -1355,7 +1355,7 @@ async function runEditorPreviewSuite() {
       return Promise.resolve(jsonResponse({}));
     });
 
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     for (let i = 0; i < 12; i += 1) await flushAsyncWork();
 
     assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), undefined, 'confirmed direct target can release the short pressed-button override');
@@ -1370,7 +1370,7 @@ async function runEditorPreviewSuite() {
     assert.ok(requests.some(url => url.startsWith('/api/tmux-signals')), 'the test exercised the direct-window signal readback path');
   });
 
-  await testAsync('newer direct tmux window clicks ignore older delayed readbacks', async () => {
+  await testAsync('newer direct tmux sub-window clicks ignore older delayed readbacks', async () => {
     const api = loadYolomux('', ['meta-preview']);
     const staleInfo = {
       agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
@@ -1410,8 +1410,8 @@ async function runEditorPreviewSuite() {
       return Promise.resolve(jsonResponse({}));
     });
 
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '0'}, 'tmux window 0:codex');
-    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '0'}, 'tmux sub-window 0:codex');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), '1', 'latest direct click owns the optimistic target');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'latest direct click shows Claude before readback');
 
@@ -1423,7 +1423,7 @@ async function runEditorPreviewSuite() {
     assert.equal(requests.filter(url => url.startsWith('/api/tmux-signals')).length, 0, 'stale POST completion is ignored before it can start a readback');
   });
 
-  await testAsync('tmux window relative readback lands on backend active window', async () => {
+  await testAsync('tmux sub-window relative readback lands on backend active window', async () => {
     const api = loadYolomux('', ['meta-preview']);
     api.setTranscriptInfoForTest('meta-preview', {
       selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/agent/src'},
@@ -1554,7 +1554,7 @@ async function runEditorPreviewSuite() {
 
   test('t@6493', () => {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/\.actions button,\s*\.info-refresh,\s*\.info-sort-button,\s*\.btn-base,\s*\.changes-repo-head,[\s\S]*\.file-editor-toolbar button,[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(css), 'I1: common button reset/flex base is centralized');
+    assert.ok(/\.actions button,\s*\.info-refresh,\s*\.info-tree-preset,\s*\.btn-base,\s*\.changes-repo-head,[\s\S]*\.file-editor-toolbar button,[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(css), 'I1: common button reset/flex base is centralized');
     assert.equal(/\.actions button\s*\{[^}]*display:\s*inline-flex/.test(css), false, 'I1: topbar actions do not restate the shared inline-flex base');
     assert.equal(/\.info-refresh\s*\{[^}]*cursor:\s*pointer/.test(css), false, 'I1: info refresh does not restate shared cursor behavior');
     assert.equal(/\.file-editor-mode-control button\s*\{[^}]*background:\s*transparent/.test(css), false, 'I1: editor mode buttons do not restate shared transparent background');
@@ -1762,16 +1762,16 @@ async function runEditorPreviewSuite() {
       {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
     ]});
     const agentPopover = api.sessionPopoverHtml('4', {panes: []}, 'claude', false);
-    assert.ok(/session-agent-kind[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*agent-window-status-dot[^"]*status-indicator--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows a static Claude symbol plus green ball before the tmux window label');
+    assert.ok(/session-agent-kind[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*agent-window-status-dot[^"]*status-indicator--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows a static Claude symbol plus green ball before the tmux sub-window label');
     assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot[^"]*status-indicator--attention[^"]*attention-pulse[\s\S]*1:codex/.test(agentPopover), 'ASK? popover row shows a static Codex symbol plus red attention ball before the label');
     assert.ok(/agent-window-activity agent-window-activity--attention[^"]*"[^>]*style="--attention-animation-delay:[^"]*"[\s\S]*agent-window-status-dot/.test(agentPopover), 'ASK? agent glyph and status ball inherit one shared animation phase from their wrapper');
     assert.equal(/agent-window-status-dot[^>]*style="--attention-animation-delay:/.test(agentPopover), false, 'ASK? status dot does not carry its own independent animation phase');
     assert.ok(/class="[^"]*session-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(agentPopover), 'ASK? popover status text inherits the shared red attention pulse and phase');
     assert.ok(agentPopover.includes('ASK? &lt;15 sec ago'), 'ASK? popover status text shows recency instead of approval/needs-input subtype words');
     assert.equal(agentPopover.includes('ASK? needs input') || agentPopover.includes('ASK? approval'), false, 'ASK? popover status text drops subtype words');
-    assert.ok(agentPopover.includes('tmux window 0:claude'), 'working agent row labels the tmux window explicitly');
-    assert.ok(agentPopover.includes('tmux window 1:codex'), 'ASK? agent row labels the tmux window explicitly');
-    assert.equal(agentPopover.includes('tmux window tmux window'), false, 'agent row does not double-label tmux window');
+    assert.ok(agentPopover.includes('tmux sub-window 0:claude'), 'working agent row labels the tmux sub-window explicitly');
+    assert.ok(agentPopover.includes('tmux sub-window 1:codex'), 'ASK? agent row labels the tmux sub-window explicitly');
+    assert.equal(agentPopover.includes('tmux sub-window tmux sub-window'), false, 'agent row does not double-label tmux sub-window');
     api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: '4:1::codex', scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude'},
@@ -1821,30 +1821,32 @@ async function runEditorPreviewSuite() {
     api.setDocumentQuerySelectorAllForTest(() => []);
   });
 
-  test('t@6675', () => {
+  await testAsync('t@6675', async () => {
     const normalApi = loadYolomux('', ['1', '2']);
     const normalFileMenu = normalApi.appMenuTree().find(menu => menu.id === 'file');
     const normalStatsItem = normalFileMenu.items.find(item => item.label === 'YO!stats');
     assert.ok(normalStatsItem, 'File menu exposes YO!stats without requiring a manual debug=1 URL edit');
-    assert.equal(normalStatsItem.checked, undefined, 'YO!stats is not checked until the debug pane is active');
+    assert.equal(normalStatsItem.checked, false, 'YO!stats is not checked until the debug pane is active');
     assert.equal(normalApi.debugModeEnabledForTest(), false, 'normal pages do not open the YO!stats pane by default');
     normalApi.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/preopen', status: 200, ok: true, durationMs: 7.5});
     assert.equal(normalApi.jsDebugEventsForTest().length, 1, 'YO!stats starts collecting API timing before the pane is opened');
-    normalStatsItem.action();
-    assert.equal(normalApi.reloadCountForTest(), 1, 'opening YO!stats from a normal page reloads with instrumentation enabled from boot');
-    assert.equal(parseUrl(normalApi.lastUrlForTest()).get('debug'), '1', 'YO!stats menu action enables debug=1 in the URL');
-    assert.ok((parseUrl(normalApi.lastUrlForTest()).get('sessions') || '').split(',').includes('debug'), 'YO!stats menu action requests the stats tab after reload');
+    await normalStatsItem.action();
+    assert.equal(normalApi.reloadCountForTest(), 0, 'opening YO!stats from a normal page does not reload');
+    assert.equal(parseUrl(normalApi.lastUrlForTest()).get('debug'), null, 'YO!stats menu action does not add debug=1 to the URL');
+    assert.equal(normalApi.debugModeEnabledForTest(), true, 'opening YO!stats enables in-page instrumentation');
+    const normalStatsPanes = Object.values(normalApi.serialize(normalApi.currentSlots()).panes);
+    assert.ok(normalStatsPanes.some(pane => pane.tabs.includes(normalApi.debugPaneItemId) && pane.active === normalApi.debugPaneItemId), 'YO!stats opens as a normal active layout tab');
 
     const api = loadYolomux('?debug=1', ['1', '2']);
-    assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 enables the YO!stats pane');
+    assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 still enables instrumentation for legacy diagnostic URLs');
     assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,debug,image-viewer,file-editor');
-    assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane when enabled');
+    assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane');
     assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'YO!stats pane serializes to the readable debug item');
     const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
     const statsItem = fileMenu.items.find(item => item.targetItem === api.debugPaneItemId);
     assert.ok(statsItem, 'File menu exposes YO!stats when enabled');
     assert.equal(statsItem.label, 'YO!stats', 'File menu labels the debug stats tab as YO!stats');
-    assert.equal(statsItem.checked, true, 'YO!stats menu item is checked while the stats tab is in the layout');
+    assert.equal(statsItem.checked, false, 'debug=1 alone does not check YO!stats when the stats tab is not in the layout');
     const paletteRows = api.commandPaletteCommandItems().filter(item => item.targetItem === api.debugPaneItemId);
     assert.equal(paletteRows.length, 1, 'command palette lists the Debug pane once through the Tabs group');
     assert.equal(paletteRows[0].label, 'YO!stats', 'command palette labels the debug stats tab as YO!stats');
@@ -1984,7 +1986,7 @@ async function runEditorPreviewSuite() {
     assert.ok(debugText.includes('Error') && debugText.includes('boom'), 'debug text exports JS error rows');
     assert.equal(debugText.includes('"events"'), false, 'debug copy payload is compact text, not JSON');
     const url = api.syncInitialLayoutUrlForTest();
-    assert.equal(parseUrl(url).get('debug'), '1', 'layout URL updates preserve debug=1');
+    assert.equal(parseUrl(url).get('debug'), '1', 'layout URL updates preserve an explicit legacy debug=1 flag');
     api.recordSseDebugEventForTest('fs_changed', {time: (Date.now() / 1000) + 1000, payload: {trigger: 'watch', cache: 'ready'}}, {data: 'x'});
     assert.equal(api.jsDebugEventsForTest().at(-1).receiveLatencyMs, 0, 'SSE debug receive time clamps tiny client/server clock skew to zero');
     const openedApi = loadYolomux('?debug=1&sessions=debug', ['1']);
@@ -1995,9 +1997,9 @@ async function runEditorPreviewSuite() {
     const injectedApi = loadYolomux('?sessions=files,6,5&layout=row@22(slot2,row@50(left,slot1))&tabs=slot2:files;left:6;slot1:5,info&debug=1', ['5', '6']);
     assert.deepStrictEqual(canonical(injectedApi.serialize(injectedApi.currentSlots()).panes), {
       left: {tabs: ['6'], active: '6'},
-      slot1: {tabs: ['5', injectedApi.infoItemId, injectedApi.debugPaneItemId], active: injectedApi.debugPaneItemId},
+      slot1: {tabs: ['5', injectedApi.infoItemId], active: '5'},
       slot2: {tabs: [injectedApi.fileExplorerItemId], active: injectedApi.fileExplorerItemId},
-    }, 'debug=1 injects and activates Debug in an existing URL layout');
+    }, 'debug=1 enables instrumentation without injecting Debug into an existing URL layout');
   });
 
   test('YO!stats graph retains 24 hours with old timing buckets compressed', () => {
@@ -2706,14 +2708,14 @@ async function runEditorPreviewSuite() {
     });
     const parityPopoverHtml = api.sessionPopoverHtml('5', parityInfo, 'claude', false);
     const parityPopoverText = parityPopoverHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(/1:claude \(pid=222\)(?:\s+○)?\s+—\s+1 hr ago/.test(parityPopoverText), 'popover keeps tmux window_active row current while showing idle transcript recency');
+    assert.ok(/1:claude \(pid=222\)(?:\s+○)?\s+—\s+1 hr ago/.test(parityPopoverText), 'popover keeps the active tmux sub-window row current while showing idle transcript recency');
     assert.ok(parityPopoverText.includes('0:codex (pid=111) — working for 1m 5s'), 'non-focused window keeps its own working state');
     assert.equal((parityPopoverHtml.match(/session-agent-row[^"]*current/g) || []).length, 1, 'popover marks exactly one agent window current');
-    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('5', parityInfo)), ['1'], 'window bar marks the tmux window_active window');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('5', parityInfo)), ['1'], 'tmux sub-window bar marks the active tmux sub-window');
     const parityRows = api.tabberRenderedRowsForTest();
     const parityClaudeRow = parityRows.find(row => row.type === 'window' && /^1:claude/.test(row.name));
     const parityCodexRow = parityRows.find(row => row.type === 'window' && /^0:codex/.test(row.name));
-    assert.equal(parityClaudeRow?.classes.includes('tabber-active-window'), true, 'Tabber marks the same active tmux window as the popover and window bar');
+    assert.equal(parityClaudeRow?.classes.includes('tabber-active-window'), true, 'Tabber marks the same active tmux sub-window as the popover and window bar');
     assert.equal(parityClaudeRow?.date, '1 hr ago', 'Tabber current window displays idle transcript recency instead of tmux selection as activity');
     assert.ok((parityCodexRow?.nameHtml || '').includes('agent-window-agent-icon--working'), 'Tabber working glyph uses the same working state as the popover');
     const parityTree = api.buildTabberTree();
@@ -2761,23 +2763,23 @@ async function runEditorPreviewSuite() {
     });
     const perWindowHtml = api.sessionPopoverHtml('5', perWindowInfo, 'claude', false);
     const perWindowText = perWindowHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(perWindowText.includes('tmux window 0:claude') && perWindowText.includes('/repo/claude') && perWindowText.includes('claude-branch'), 'popover attributes path and branch to the Claude window');
-    assert.ok(perWindowText.includes('tmux window 1:codex') && perWindowText.includes('/repo/codex-a') && perWindowText.includes('/repo/codex-b') && perWindowText.includes('codex-branch'), 'popover attributes touched repo paths and branch to the Codex window');
+    assert.ok(perWindowText.includes('tmux sub-window 0:claude') && perWindowText.includes('/repo/claude') && perWindowText.includes('claude-branch'), 'popover attributes path and branch to the Claude window');
+    assert.ok(perWindowText.includes('tmux sub-window 1:codex') && perWindowText.includes('/repo/codex-a') && perWindowText.includes('/repo/codex-b') && perWindowText.includes('codex-branch'), 'popover attributes touched repo paths and branch to the Codex window');
     assert.equal(perWindowText.includes('/home/u'), false, 'touched repo attribution replaces the bare pane cwd fallback in per-window agent popovers');
     const tabberTree = api.buildTabberTree();
     const sessionFive = tabberTree.entries.find(entry => entry.tabber?.session === '5');
     const tabberCodexWindow = tabberTree.entriesByDir.get('/' + sessionFive.name).find(row => row.tabber.windowIndex === 1);
     const tabberCodexPaths = tabberTree.entriesByDir.get('/' + sessionFive.name + '/' + tabberCodexWindow.name).map(row => row.tabber.label);
     assert.deepEqual(tabberCodexPaths, ['/repo/codex-a', '/repo/codex-b'], 'popover and Tabber share the same per-window touched repo resolver');
-    assert.ok(perWindowText.includes('tmux window 0:claude (pid=12345)'), 'popover header shows the Claude PID from the same pane record source as Tabber');
-    assert.ok(perWindowText.includes('tmux window 1:codex (pid=24680)'), 'popover header shows the Codex PID from the same pane record source as Tabber');
+    assert.ok(perWindowText.includes('tmux sub-window 0:claude (pid=12345)'), 'popover header shows the Claude PID from the same pane record source as Tabber');
+    assert.ok(perWindowText.includes('tmux sub-window 1:codex (pid=24680)'), 'popover header shows the Codex PID from the same pane record source as Tabber');
     assert.ok(perWindowHtml.includes('Session ID') && perWindowHtml.includes('data-copy-path="claude-session-id"') && perWindowHtml.includes('data-copy-path="/logs/claude-session.jsonl"'), 'HT1/HT3: agent popovers show session ID and transcript location with shared copy buttons');
     assert.equal(perWindowHtml.includes('Transcript ID'), false, 'Codex/Claude ID rows are no longer mislabeled as transcript IDs');
     assert.ok(/popover-label">Transcript<\/div><div class="popover-value">[\s\S]*data-copy-path="\/logs\/claude-session\.jsonl"/.test(perWindowHtml), 'the transcript path remains a separate Transcript row');
     assert.ok(perWindowHtml.includes('data-copy-path="codex-thread-id"') && perWindowHtml.includes('data-copy-path="/logs/codex-thread.jsonl"'), 'HT2: transcript rows are attributed per AI window');
-    assert.equal(perWindowText.split('tmux window 0:claude').length - 1, 1, 'Claude window label appears once in the merged state/metadata row');
-    assert.equal(perWindowText.split('tmux window 1:codex').length - 1, 1, 'Codex window label appears once in the merged state/metadata row');
-    assert.equal(perWindowHtml.includes('session-window-metadata-title'), false, 'per-window metadata no longer repeats the tmux window label as a title');
+    assert.equal(perWindowText.split('tmux sub-window 0:claude').length - 1, 1, 'Claude window label appears once in the merged state/metadata row');
+    assert.equal(perWindowText.split('tmux sub-window 1:codex').length - 1, 1, 'Codex window label appears once in the merged state/metadata row');
+    assert.equal(perWindowHtml.includes('session-window-metadata-title'), false, 'per-window metadata no longer repeats the tmux sub-window label as a title');
     assert.equal(perWindowText.includes('/repo/selected-session-path'), false, 'multi-agent popover does not render the old selected-pane path as a flat session path');
 
     api.setTabberSessionFilesForTest('5', []);
@@ -2796,8 +2798,8 @@ async function runEditorPreviewSuite() {
     });
     const sharedHtml = api.sessionPopoverHtml('5', sharedWindowInfo, 'claude', false);
     const sharedText = sharedHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.equal(sharedText.split('tmux window 0:claude').length - 1, 1, 'shared-path Claude window label appears once');
-    assert.equal(sharedText.split('tmux window 1:codex').length - 1, 1, 'shared-path Codex window label appears once');
+    assert.equal(sharedText.split('tmux sub-window 0:claude').length - 1, 1, 'shared-path Claude window label appears once');
+    assert.equal(sharedText.split('tmux sub-window 1:codex').length - 1, 1, 'shared-path Codex window label appears once');
     assert.equal(sharedText.split('/repo/shared').length - 1, 1, 'shared metadata collapses to one path block after the window rows');
     assert.equal(sharedHtml.includes('session-window-metadata-title'), false, 'shared metadata no longer renders a duplicate label title');
 
@@ -2979,6 +2981,68 @@ async function runEditorPreviewSuite() {
     assert.equal(row.pathTitle, '/home/test/yolomux.dev3 (worktree of /home/test/yolomux)', 'YO!info path tooltip keeps the absolute path and parent');
   });
 
+  test('t@info-branch-worktree-path-identity', () => {
+    const api = loadYolomux('', ['parent', 'linked']);
+    api.setTranscriptInfoForTest('parent', {
+      project: {
+        git: {
+          root: '/repo/main',
+          branch: 'bug-10719',
+          other_branches: {
+            branches: [
+              {name: 'bug-10719', current: true, updated: 'today', updated_ts: 300, subject: 'parent checkout branch'},
+            ],
+          },
+        },
+        repos: [],
+        pull_request: null,
+        linear: [],
+      },
+    });
+    const linkedGit = {
+      root: '/repo/main',
+      branch: 'bug-10719',
+      worktree: {
+        path: '/repo/wt-bug-10719',
+        parent_root: '/repo/main',
+        name: 'wt-bug-10719',
+      },
+      other_branches: {
+        branches: [
+          {name: 'bug-10719', current: true, updated: 'now', updated_ts: 500, subject: 'linked checkout branch'},
+        ],
+      },
+    };
+    api.setTranscriptInfoForTest('linked', {
+      agent_windows: [
+        {kind: 'codex', state: 'idle', window_index: 0, git: linkedGit, path_entries: [{path: '/repo/wt-bug-10719', git: linkedGit}]},
+      ],
+      project: {
+        git: linkedGit,
+        repos: [],
+        pull_request: null,
+        linear: [],
+      },
+    });
+
+    const rowKey = row => `${row.path}\n${row.branch}`;
+    const rows = new Map(api.infoBranchRows().map(row => [rowKey(row), row]));
+    assert.equal(rows.size, 2, 'YO!info keeps parent checkout and linked worktree rows separate even when branch names match');
+    assert.deepStrictEqual([...rows.keys()].sort(), ['/repo/main\nbug-10719', '/repo/wt-bug-10719\nbug-10719']);
+    assert.deepStrictEqual(canonical(rows.get('/repo/main\nbug-10719').tabAgents.map(item => item.label)), ['parent / no AI'], 'parent checkout keeps its own Tab/AI owner');
+    assert.deepStrictEqual(canonical(rows.get('/repo/wt-bug-10719\nbug-10719').tabAgents.map(item => item.label)), ['linked / 0:codex'], 'linked worktree keeps its own Tab/AI owner');
+    assert.equal(rows.get('/repo/wt-bug-10719\nbug-10719').pathLabel, '/repo/wt-bug-10719 (worktree of /repo/main)', 'linked worktree displays the checkout path and parent context');
+
+    const relationshipKeys = api.infoRelationshipRecords()
+      .filter(record => record.branchKey === 'bug-10719')
+      .map(record => `${record.pathKey}|${record.tabLabel}|${record.aiLabel}`)
+      .sort();
+    assert.deepStrictEqual(canonical(relationshipKeys), [
+      '/repo/main|parent|no AI',
+      '/repo/wt-bug-10719|linked|0:codex',
+    ], 'YO!info relationship records use the checkout path, not the shared parent root, as Path identity');
+  });
+
   test('t@info-branch-repo-inventory', () => {
     const api = loadYolomux('', ['s1']);
     api.setTranscriptInfoForTest('s1', {
@@ -3020,66 +3084,706 @@ async function runEditorPreviewSuite() {
     });
     const rowKey = row => `${row.path}\n${row.branch}`;
     const rows = new Map(api.infoBranchRows().map(row => [rowKey(row), row]));
-    assert.equal(rows.get('/repo/app\nmain').session, 's1', 'YO!info keeps the session label for the primary checked-out branch');
+    assert.deepStrictEqual(canonical(rows.get('/repo/app\nmain').tabAgents.map(item => item.label)), ['s1 / no AI'], 'YO!info lists the Tab/AI entry for the primary checked-out branch');
     assert.equal(rows.get('/repo/app\nfeature/app').session, '', 'YO!info leaves non-current primary repo branches unassigned');
-    assert.equal(rows.get('/repo/lib\nlib-main').session, 's1', 'YO!info assigns the session to a checked-out branch in a secondary touched repo');
+    assert.deepStrictEqual(canonical(rows.get('/repo/lib\nlib-main').tabAgents.map(item => item.label)), ['s1 / no AI'], 'YO!info assigns the tab to a checked-out branch in a secondary touched repo');
     assert.equal(rows.get('/repo/lib\nfeature/lib').session, '', 'YO!info shows secondary repo branches without pretending the session owns them');
     assert.equal(rows.get('/repo/lib\nfeature/lib').updatedTs, 100, 'YO!info keeps the branch last-modified timestamp from the touched repo inventory');
     assert.equal(rows.get('/repo/lib\nfeature/lib').pathLabel, '/repo/lib', 'YO!info shows the secondary touched repo path');
   });
 
-  test('t@info-session-drawer', () => {
-    const api = loadYolomux('', ['s1']);
+  test('t@info-branch-explicit-window-branch-owner', () => {
+    const api = loadYolomux('', ['s1', 'shell', 'activity']);
     api.setTranscriptInfoForTest('s1', {
+      agent_windows: [{kind: 'codex', state: 'idle', window_index: 1, git: {root: '/repo/app', branch: 'feature/app'}}],
       project: {
         git: {
           root: '/repo/app',
-          cwd: '/repo/app/src',
-          branch: 'feature/info',
-          dirty_count: 3,
-          ahead: 2,
-          behind: 1,
+          branch: 'main',
           other_branches: {
             branches: [
-              {name: 'feature/info', current: true, updated: 'today', updated_ts: 400, subject: 'info drawer'},
+              {name: 'main', current: true, updated: 'today', updated_ts: 400, subject: 'app main'},
+              {name: 'feature/app', current: false, updated: 'yesterday', updated_ts: 300, subject: 'agent branch'},
+              {name: 'feature/other', current: false, updated: 'last week', updated_ts: 100, subject: 'unowned branch'},
             ],
           },
         },
-        pull_request: {number: 42, title: 'Add info drawer', url: 'https://example.test/pull/42', status_label: 'passing', checks: {status_label: 'passing'}},
-        linear: [{identifier: 'GUI-7', title: 'Info drawer metadata', state: 'In Progress', url: 'https://linear.test/GUI-7'}],
+        pull_request: null,
+        linear: [],
       },
     });
-    api.setActivitySummaryPayloadForTest({
-      generated_at: '2026-06-19T18:00:00+00:00',
-      session_file_hours: 336,
-      session_info: {
-        s1: {
-          path: '/repo/app',
-          git: {root: '/repo/app', branch: 'feature/info', dirty_count: 3, ahead: 2, behind: 1},
-          pull_request: {number: 42, title: 'Add info drawer', url: 'https://example.test/pull/42', status_label: 'passing', checks: {status_label: 'passing'}},
-          ci: {status_label: 'passing'},
-          linear: [{identifier: 'GUI-7', title: 'Info drawer metadata', state: 'In Progress', url: 'https://linear.test/GUI-7'}],
-          latest_summary: 'Latest YO!info summary line',
-          recent_events: [{time: '2026-06-19T18:00:01Z', type: 'state_changed', message: 'ready'}],
+    api.setTranscriptInfoForTest('shell', {
+      window_metadata: [{
+        window_index: '2',
+        git: {
+          root: '/repo/app',
+          branch: 'feature/shell',
+          other_branches: {
+            branches: [
+              {name: 'feature/shell', current: true, updated: 'now', updated_ts: 500, subject: 'shell window branch'},
+            ],
+          },
+        },
+      }],
+      project: {
+        git: null,
+        repos: [],
+        pull_request: null,
+        linear: [],
+      },
+    });
+    api.setTranscriptInfoForTest('activity', {
+      project: {
+        git: null,
+        repos: [],
+        pull_request: null,
+        linear: [],
+      },
+    });
+    api.setTabberActivityForTest({
+      activity: {},
+      agents: [],
+      agent_windows: {
+        activity: [{
+          kind: 'claude',
+          state: 'working',
+          window_index: 0,
+          git: {
+            root: '/repo/activity',
+            branch: 'feature/activity',
+            other_branches: {
+              branches: [
+                {name: 'feature/activity', current: true, updated: 'now', updated_ts: 600, subject: 'activity window branch'},
+              ],
+            },
+          },
+        }],
+      },
+    });
+
+    const rowKey = row => `${row.path}\n${row.branch}`;
+    const rows = new Map(api.infoBranchRows().map(row => [rowKey(row), row]));
+    assert.deepStrictEqual(canonical(rows.get('/repo/app\nfeature/app').tabAgents.map(item => item.label)), ['s1 / 1:codex'], 'YO!info assigns a non-current branch to the AI window whose git metadata names that branch');
+    assert.equal(rows.get('/repo/app\nfeature/other').session, '', 'YO!info keeps unrelated non-current branches unassigned');
+    assert.deepStrictEqual(canonical(rows.get('/repo/app\nfeature/shell').tabAgents.map(item => item.label)), ['shell / no AI'], 'YO!info uses tmux sub-window git metadata as a branch source even without an AI window');
+    assert.deepStrictEqual(canonical(rows.get('/repo/activity\nfeature/activity').tabAgents.map(item => item.label)), ['activity / 0:claude'], 'YO!info uses activity agent-window git metadata as a branch source when transcript project metadata has no repo inventory');
+
+    const records = api.infoRelationshipRecords();
+    const featureRecord = records.find(record => record.pathKey === '/repo/app' && record.branchKey === 'feature/app');
+    assert.equal(`${featureRecord?.tabLabel}|${featureRecord?.aiLabel}`, 's1|1:codex', 'YO!info relationship records carry explicit non-current branch ownership instead of No tab / No AI');
+    assert.equal(records.some(record => record.pathKey === '/repo/app' && record.branchKey === 'feature/app' && record.tabLabel === 'No tab'), false, 'YO!info does not emit a No tab fallback for an explicitly owned branch');
+  });
+
+  test('t@info-branch-tab-ai-aggregation', () => {
+    const api = loadYolomux('', ['s1', 's2']);
+    const project = {
+      git: {
+        root: '/repo/app',
+        branch: 'main',
+        other_branches: {
+          branches: [
+            {name: 'main', current: true, updated: '1 minute ago', updated_ts: 300, subject: 'app current'},
+          ],
         },
       },
+      pull_request: null,
+      linear: [],
+    };
+    api.setTranscriptInfoForTest('s1', {
+      agent_windows: [{kind: 'claude', state: 'working', window_index: 0, git: {root: '/repo/app', branch: 'main'}}],
+      project,
     });
-    const closed = api.infoSessionDrawerHtmlForTest('s1');
-    assert.ok(closed.includes('/repo/app'), 'D3: drawer renders cached full path from the activity-summary payload');
-    assert.ok(closed.includes('feature/info'), 'D3: drawer renders branch metadata');
-    assert.ok(closed.includes('dirty 3 · ahead 2 · behind 1'), 'D3: drawer renders dirty/ahead/behind counts');
-    assert.ok(closed.includes('#42'), 'D3: drawer renders PR metadata through the shared PR renderer');
-    assert.ok(closed.includes('passing'), 'D3: drawer renders CI status');
-    assert.ok(closed.includes('GUI-7'), 'D3: drawer renders issue metadata');
-    assert.ok(closed.includes('Latest YO!info summary line'), 'D3: drawer renders latest summary');
-    assert.ok(closed.includes('state_changed · ready'), 'D3: drawer renders recent events');
-    assert.equal(api.toggleInfoSessionDrawerForTest('s1'), true, 'D3: opening the drawer records per-session open state');
-    assert.equal(api.toggleInfoSessionDrawerForTest('s1'), false, 'D3: closing the drawer clears only that session open state');
-    const drawerSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/const infoSessionDrawerHtmlCache = new Map\(\)/.test(drawerSource), 'D3: drawer HTML is cached per session/payload signature');
-    assert.ok(/function applyActivitySummaryPayloadFromPush[\s\S]*clearInfoSessionDrawerCache\(\)/.test(drawerSource), 'D3: activity-summary payload refresh invalidates drawer cache');
-    assert.ok(/async function applyTranscriptsPayload[\s\S]*clearInfoSessionDrawerCache\(\)/.test(drawerSource), 'D3: transcript metadata refresh invalidates drawer cache');
-    assert.ok(/function toggleInfoSessionDrawer[\s\S]*refreshActivitySummary\(\{force: true\}\)/.test(drawerSource), 'D3: opening a drawer lazily fetches all-session activity data when absent');
+    api.setTranscriptInfoForTest('s2', {
+      agent_windows: [{kind: 'codex', state: 'idle', window_index: 1, git: {root: '/repo/app', branch: 'main'}}],
+      project,
+    });
+
+    const [row] = api.infoBranchRows();
+
+    assert.equal(row.path, '/repo/app');
+    assert.equal(row.branch, 'main');
+    assert.deepStrictEqual(canonical(row.tabAgents.map(item => item.label)), ['s1 / 0:claude', 's2 / 1:codex'], 'YO!info aggregates every Tab/AI pair for a path+branch row');
+    assert.equal(row.session, 's1 / 0:claude, s2 / 1:codex', 'the legacy sort/share text follows the aggregated Tab/AI labels');
+  });
+
+  test('t@info-tree-active-sub-window-follows-tmux-signals', () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const project = {
+      git: {
+        root: '/repo/app',
+        branch: 'main',
+        other_branches: {
+          branches: [
+            {name: 'main', current: true, updated: 'now', updated_ts: 10, subject: 'main'},
+          ],
+        },
+      },
+      pull_request: null,
+      linear: [],
+    };
+    api.setTranscriptInfoForTest('meta-preview', {
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/app'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/app'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/app'},
+      ],
+      agent_windows: [
+        {kind: 'codex', state: 'idle', current: true, window_active: true, window_index: 0, git: {root: '/repo/app', branch: 'main'}},
+        {kind: 'claude', state: 'idle', current: false, window_active: false, window_index: 1, git: {root: '/repo/app', branch: 'main'}},
+      ],
+      project,
+    });
+
+    api.applyTmuxSignalsPayloadForTest({windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      active: false,
+      panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/app', current_command: 'codex'}],
+    }, {
+      session: 'meta-preview',
+      window_index: '1',
+      active: true,
+      panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/app', current_command: 'claude'}],
+    }]});
+
+    const rows = api.sessionAgentWindowStatusPayloadsForTest('meta-preview', api.transcriptInfoForTest('meta-preview'));
+    assert.equal(rows.find(row => row.window_index === 0)?.window_active, false, 'stale agent_windows current flags are cleared when tmux says window 0 is inactive');
+    assert.equal(rows.find(row => row.window_index === 1)?.window_active, true, 'stale agent_windows current flags follow the active tmux sub-window');
+    const records = api.infoRelationshipRecords();
+    assert.equal(records.find(record => record.aiWindow === '0')?.aiWindowActive, false, 'YO!info record state clears the old active sub-window');
+    assert.equal(records.find(record => record.aiWindow === '1')?.aiWindowActive, true, 'YO!info record state follows the switched tmux sub-window');
+    const html = api.infoTreeHtmlForTest(records, ['path']);
+    assert.ok(/class="tab tmux-window-button info-tree-ai-window-button active"[\s\S]*data-info-open-ai-window="1"/.test(html), 'YO!info renders the switched tmux sub-window as the active Info Bar-style button');
+    assert.equal(/class="tab tmux-window-button info-tree-ai-window-button active"[\s\S]*data-info-open-ai-window="0"/.test(html), false, 'YO!info does not keep the previous sub-window button active after a tmux switch');
+    const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
+    assert.ok(/function sessionAgentWindowStatusPayloads[\s\S]*activeTmuxWindowIndexFromInfo\(info\)[\s\S]*agentWindowWithInfoActiveWindow\(agent, activeIndex\)/.test(activitySource), 'shared agent-window payloads normalize current/window_active from live tmux pane state before YO!info reads them');
+  });
+
+  test('t@info-tree-relationship-grouping', () => {
+    const api = loadYolomux('', ['tab-a', 'tab-b', '1']);
+    const appProject = {
+      git: {
+        root: '/repo/app',
+        branch: 'main',
+        other_branches: {
+          branches: [
+            {name: 'main', current: true, updated: 'today', updated_ts: 500, subject: 'app main', pull_request: {number: 10, url: 'https://example.test/pull/10', title: 'App main PR full description', state: 'open', checks: {state: 'failure', summary: 'CI error'}}, linear_ids: ['DYN-10'], linear: [{identifier: 'DYN-10', title: 'Main Linear description', url: 'https://linear.test/DYN-10'}]},
+            {name: 'feature/app', current: false, updated: 'yesterday', updated_ts: 200, subject: 'app feature', pull_request: {number: 11, url: 'https://example.test/pull/11', title: 'App feature PR linked through path', merged: true}},
+          ],
+        },
+      },
+      repos: [
+        {
+          root: '/repo/lib',
+          branch: 'lib-main',
+          other_branches: {
+            branches: [
+              {name: 'lib-main', current: true, updated: 'today', updated_ts: 450, subject: 'lib main'},
+            ],
+          },
+        },
+      ],
+      pull_request: null,
+      linear: [],
+    };
+    api.setTranscriptInfoForTest('tab-a', {
+      agent_windows: [
+        {kind: 'claude', state: 'working', window_index: 0, git: {root: '/repo/app', branch: 'main'}},
+        {kind: 'codex', state: 'idle', window_index: 0, git: {root: '/repo/lib', branch: 'lib-main'}},
+      ],
+      project: appProject,
+    });
+    api.setTranscriptInfoForTest('tab-b', {
+      agent_windows: [
+        {kind: 'codex', state: 'needs-input', window_index: 0, git: {root: '/repo/app', branch: 'main'}},
+      ],
+      project: appProject,
+    });
+
+    const records = api.infoRelationshipRecords();
+    assert.deepStrictEqual(canonical(records.map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathKey}|${record.branchKey}`)), [
+      'tab-a|0:claude|/repo/app|main',
+      'tab-b|0:codex|/repo/app|main',
+      'tab-a|0:codex|/repo/lib|lib-main',
+      'tab-a|0:claude|/repo/app|feature/app',
+      'tab-b|0:codex|/repo/app|feature/app',
+    ], 'YO!info emits direct branch owners first, then path-level Tab/AI relationships for branches without direct owners');
+    assert.equal(records.some(record => record.prLabel === '#11 App feature PR linked through path' && record.tabLabel === 'No tab'), false, 'YO!info does not list a PR as No tab when its branch path is tied to a Tab');
+    const appFeatureRecord = records.find(record => record.pathKey === '/repo/app' && record.branchKey === 'feature/app' && record.tabLabel === 'tab-a');
+    assert.equal(appFeatureRecord?.prLabel, '#11', 'YO!info relationship records keep the PR number as the compact clickable label');
+    assert.equal(appFeatureRecord?.prTitle, '#11 App feature PR linked through path', 'YO!info relationship records keep the full PR title beside the linked number');
+    assert.equal(appFeatureRecord?.prUrl, 'https://example.test/pull/11', 'YO!info relationship records carry the PR URL so the PR number is clickable');
+    assert.equal(appFeatureRecord?.prLifecycleText, 'MERGED', 'YO!info relationship records carry PR lifecycle status for merged badges');
+    const appMainRecord = records.find(record => record.pathKey === '/repo/app' && record.branchKey === 'main' && record.tabLabel === 'tab-a');
+    assert.equal(appMainRecord?.prLifecycleText, 'OPEN', 'YO!info relationship records carry explicit Open lifecycle status');
+    assert.equal(appMainRecord?.prCiText, 'CI error', 'YO!info relationship records carry CI status separately from PR description');
+    assert.equal(appMainRecord?.aiState, 'working', 'YO!info relationship records carry agent-window state for activity dots');
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'feature linked').map(record => `${record.tabLabel}|${record.branchLabel}|${record.prTitle}`)), [
+      'tab-a|feature/app|#11 App feature PR linked through path',
+      'tab-b|feature/app|#11 App feature PR linked through path',
+    ], 'YO!info search filters relationships by fuzzy PR description matches');
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'DYN10').map(record => record.branchLabel)), ['main', 'main'], 'YO!info search matches Linear identifiers without requiring exact punctuation');
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'codx').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [
+      'tab-b|0:codex|/repo/app',
+      'tab-a|0:codex|/repo/lib',
+      'tab-b|0:codex|/repo/app',
+    ], 'YO!info search can match a fuzzy tmux sub-window label inside the AI field');
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [
+      'tab-a|0:codex|/repo/lib',
+    ], 'YO!info search can match branch text inside the Branch field');
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'codx lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [], 'YO!info search does not combine one query across different field types');
+    const visibleSearchRecords = [
+      {id: 'tab-7777', tabKey: '7777', tabLabel: '7777', tabTitle: '7777', tabSession: '7777', aiKey: 'ai-0', aiKind: 'codex', aiWindow: '0', aiWindowIndex: 0, aiLabel: '0:codex', pathKey: '/repo/no-match', pathLabel: '/repo/no-match', pathTitle: '/repo/no-match', branchKey: 'main', branchLabel: 'main', branchTitle: 'main'},
+      {id: 'split-seven', tabKey: '7', tabLabel: '7', tabTitle: '7', tabSession: '7', aiKey: 'ai-7', aiKind: 'codex', aiWindow: '7', aiWindowIndex: 7, aiLabel: '7:codex', pathKey: '/repo/7-path', pathLabel: '/repo/7-path', pathTitle: '/repo/7-path', branchKey: 'branch-7', branchLabel: 'branch-7', branchTitle: 'branch-7', prKey: '#70', prLabel: '#70', prTitle: '#70 one seven only', prNumber: 70, linearKey: 'DIS-7', linearLabel: 'DIS-7', linearTitle: 'DIS-7 one seven only'},
+    ];
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(visibleSearchRecords, '777').map(record => record.id)), ['tab-7777'], 'YO!info search does not assemble one fuzzy token from separate Tab/AI/Path/Branch/PR/Linear fields');
+    api.setInfoSearchForTest('777', {publish: false});
+    const searchHighlightHtml = api.infoTreeHtmlForTest(api.infoFilteredRecordsForTest(visibleSearchRecords, '777'), ['tab', 'path']);
+    assert.ok(/class="info-tree-search-match">777<\/mark>7/.test(searchHighlightHtml), 'YO!info highlights the visible matched Tab session text');
+    assert.equal(searchHighlightHtml.includes('split-seven'), false, 'YO!info search hides records that only contain split non-matching 7 values');
+    api.setInfoSearchForTest('', {publish: false});
+    api.setInfoSearchForTest('feature linked', {publish: false});
+    assert.equal(api.currentInfoSearchForTest(), 'feature linked', 'YO!info stores the current search text');
+    assert.ok(api.infoTreeHtmlForTest(api.infoFilteredRecordsForTest(records, api.currentInfoSearchForTest()), ['path', 'branch']).includes('data-info-search="feature linked"'), 'YO!info tree html records the active search query for DOM/share diagnostics');
+    api.setInfoSearchForTest('', {publish: false});
+
+    const tabTree = api.infoGroupTree(records, ['tab', 'ai', 'path', 'branch']);
+    assert.deepStrictEqual(canonical(tabTree.children.map(group => `${group.dimension}:${group.label}:${group.count}`)), [
+      'tab:tab-a:3',
+      'tab:tab-b:2',
+    ], 'grouping by Tab starts with Tab buckets and preserves per-tab relationship counts');
+
+    const pathTree = api.infoGroupTree(records, ['path', 'branch', 'tab', 'ai'], {key: 'branch', dir: 'asc'});
+    assert.deepStrictEqual(canonical(pathTree.children.map(group => `${group.dimension}:${group.label}:${group.count}`)), [
+      'path:/repo/app:4',
+      'path:/repo/lib:1',
+    ], 'grouping by Path starts with Path buckets and shows one path can own multiple Tab/AI records');
+    assert.deepStrictEqual(canonical(pathTree.children.find(group => group.label === '/repo/app').children.map(group => `${group.dimension}:${group.label}:${group.count}`)), [
+      'branch:feature/app:2',
+      'branch:main:2',
+    ], 'path grouping nests branch buckets below each path');
+
+    const prTree = api.infoGroupTree(records, ['pr', 'path', 'branch', 'tab'], {key: 'pr', dir: 'asc'});
+    assert.deepStrictEqual(canonical(prTree.children.map(group => `${group.dimension}:${group.key}:${group.label}:${group.count}`)), [
+      'pr:#10:#10 App main PR full description:2',
+      'pr:#11:#11 App feature PR linked through path:2',
+      'pr:__no_pr__:No PR:1',
+    ], 'grouping by PR keeps the stable compact PR key but shows path-linked PRs under related Tab/AI records');
+
+    const prDescTree = api.infoGroupTree(records, ['pr', 'path', 'branch', 'tab'], {key: 'pr', dir: 'desc'});
+    assert.deepStrictEqual(canonical(prDescTree.children.map(group => group.label)), [
+      '#11 App feature PR linked through path',
+      '#10 App main PR full description',
+      'No PR',
+    ], 'YO!info PR sorting can be reversed while keeping rows without PRs last');
+
+    const dateAscTree = api.infoGroupTree(records, ['pr', 'path', 'branch', 'tab'], {key: 'date', dir: 'asc'});
+    assert.deepStrictEqual(canonical(dateAscTree.children.map(group => group.label)), [
+      '#11 App feature PR linked through path',
+      'No PR',
+      '#10 App main PR full description',
+    ], 'YO!info can sort grouped PR records by branch date oldest first');
+
+    const tabDescTree = api.infoGroupTree(records, ['tab', 'ai', 'path', 'branch'], {key: 'tab', dir: 'desc'});
+    assert.deepStrictEqual(canonical(tabDescTree.children.map(group => group.label)), [
+      'tab-b',
+      'tab-a',
+    ], 'YO!info can sort group headers by Tab name in reverse lexical order');
+
+    const numericPrTree = api.infoGroupTree([
+      {prKey: '#1111', prLabel: '#1111 large PR', prTitle: '#1111 large PR', prNumber: 1111},
+      {prKey: '#9', prLabel: '#9 something', prTitle: '#9 something', prNumber: 9},
+      {prKey: '__no_pr__', prLabel: 'No PR', prTitle: 'No PR'},
+    ], ['pr'], {key: 'pr', dir: 'asc'});
+    assert.deepStrictEqual(canonical(numericPrTree.children.map(group => group.label)), [
+      '#9 something',
+      '#1111 large PR',
+      'No PR',
+    ], 'YO!info PR grouping sorts by PR number instead of lexical label order');
+    const numericPrDescTree = api.infoGroupTree([
+      {prKey: '#1111', prLabel: '#1111 large PR', prTitle: '#1111 large PR', prNumber: 1111},
+      {prKey: '#9', prLabel: '#9 something', prTitle: '#9 something', prNumber: 9},
+      {prKey: '__no_pr__', prLabel: 'No PR', prTitle: 'No PR'},
+    ], ['pr'], {key: 'name', dir: 'desc'});
+    assert.deepStrictEqual(canonical(numericPrDescTree.children.map(group => group.label)), [
+      '#1111 large PR',
+      '#9 something',
+      'No PR',
+    ], 'YO!info PR grouping reverses by extracted PR number while keeping missing PRs last');
+    const numericLinearTree = api.infoGroupTree([
+      {linearKey: 'DIS-1111', linearLabel: 'DIS-1111', linearTitle: 'DIS-1111 large issue'},
+      {linearKey: 'DIS-9', linearLabel: 'DIS-9', linearTitle: 'DIS-9 small issue'},
+      {linearKey: '__no_linear__', linearLabel: 'No Linear', linearTitle: 'No Linear'},
+    ], ['linear'], {key: 'name', dir: 'asc'});
+    assert.deepStrictEqual(canonical(numericLinearTree.children.map(group => group.label)), [
+      'DIS-9 small issue',
+      'DIS-1111 large issue',
+      'No Linear',
+    ], 'YO!info Linear grouping sorts by extracted issue number instead of lexical label order');
+    const numericTabTree = api.infoGroupTree([
+      {tabKey: 'tab-1111', tabLabel: 'tab-1111'},
+      {tabKey: 'tab-9', tabLabel: 'tab-9'},
+      {tabKey: '__no_tab__', tabLabel: 'No tab'},
+    ], ['tab'], {key: 'name', dir: 'asc'});
+    assert.deepStrictEqual(canonical(numericTabTree.children.map(group => group.label)), [
+      'tab-9',
+      'tab-1111',
+      'No tab',
+    ], 'YO!info Tab grouping sorts by the first extracted number before lexical fallback');
+    const lexicalBranchPathRecords = [
+      {pathKey: '/repo/path-1111', pathLabel: '/repo/path-1111', branchKey: 'branch-1111', branchLabel: 'branch-1111'},
+      {pathKey: '/repo/path-9', pathLabel: '/repo/path-9', branchKey: 'branch-9', branchLabel: 'branch-9'},
+    ];
+    assert.deepStrictEqual(canonical(api.infoGroupTree(lexicalBranchPathRecords, ['branch'], {key: 'name', dir: 'asc'}).children.map(group => group.label)), [
+      'branch-1111',
+      'branch-9',
+    ], 'YO!info Branch grouping stays lexical instead of extracting numbers');
+    assert.deepStrictEqual(canonical(api.infoGroupTree(lexicalBranchPathRecords, ['path'], {key: 'name', dir: 'asc'}).children.map(group => group.label)), [
+      '/repo/path-1111',
+      '/repo/path-9',
+    ], 'YO!info Path grouping stays lexical instead of extracting numbers');
+    const missingSortRecords = [
+      {tabKey: '__no_tab__', tabLabel: 'No tab', aiKey: 'no-ai::No AI', aiLabel: 'No AI', pathKey: '__no_path__', pathLabel: 'No path', branchKey: '__no_branch__', branchLabel: 'No branch', prKey: '__no_pr__', prLabel: 'No PR', prTitle: 'No PR', linearKey: '__no_linear__', linearLabel: 'No Linear', linearTitle: 'No Linear'},
+      {tabKey: 'zeta-tab', tabLabel: 'zeta-tab', aiKey: 'z:codex', aiLabel: 'z:codex', pathKey: '/zeta', pathLabel: '/zeta', branchKey: 'zeta', branchLabel: 'zeta', prKey: '#200', prLabel: '#200 zeta PR', prTitle: '#200 zeta PR', prNumber: 200, linearKey: 'ZZZ-200', linearLabel: 'ZZZ-200', linearTitle: 'ZZZ-200 zeta issue'},
+      {tabKey: 'alpha-tab', tabLabel: 'alpha-tab', aiKey: '0:claude', aiLabel: '0:claude', pathKey: '/alpha', pathLabel: '/alpha', branchKey: 'alpha', branchLabel: 'alpha', prKey: '#100', prLabel: '#100 alpha PR', prTitle: '#100 alpha PR', prNumber: 100, linearKey: 'AAA-100', linearLabel: 'AAA-100', linearTitle: 'AAA-100 alpha issue'},
+    ];
+    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['tab'], {key: 'tab', dir: 'asc'}).children.map(group => group.label)), ['alpha-tab', 'zeta-tab', 'No tab'], 'YO!info A-Z Tab grouping treats No tab as after z');
+    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['ai'], {key: 'ai', dir: 'asc'}).children.map(group => group.label)), ['0:claude', 'z:codex', 'No AI'], 'YO!info A-Z AI grouping treats No AI as after z');
+    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'asc'}).children.map(group => group.label)), ['AAA-100 alpha issue', 'ZZZ-200 zeta issue', 'No Linear'], 'YO!info A-Z Linear grouping treats No Linear as after z');
+    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'asc'}).children.map(group => group.label)), ['#100 alpha PR', '#200 zeta PR', 'No PR'], 'YO!info A-Z PR grouping treats No PR as after numbered PRs');
+    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'desc'}).children.map(group => group.label)), ['ZZZ-200 zeta issue', 'AAA-100 alpha issue', 'No Linear'], 'YO!info reverse Linear grouping keeps No Linear after real Linear issues');
+    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'desc'}).children.map(group => group.label)), ['#200 zeta PR', '#100 alpha PR', 'No PR'], 'YO!info reverse PR grouping keeps No PR after numbered PRs');
+    assert.deepStrictEqual(canonical(api.infoGroupingPresetsForTest().map(preset => `${preset.key}:${preset.label}:${preset.grouping.join('>')}`)), [
+      'tab-path:Tab > Path:tab>path',
+      'path-branch:Path > Branch:path>branch',
+      'linear-pr:Linear > PR:linear>pr',
+      'pr-branch:PR > Branch:pr>branch',
+    ], 'YO!info quick presets include the PR > Branch preset after the existing three presets');
+    api.setInfoGroupingPresetForTest('linear-pr');
+    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['linear', 'pr'], 'YO!info Linear > PR quick preset selects Linear then PR');
+    api.setInfoGroupingPresetForTest('pr-branch');
+    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['pr', 'branch'], 'YO!info PR > Branch quick preset selects PR then Branch');
+    const storedGroupingFor = grouping => loadYolomux('', ['stored'], 'http:', 'Linux x86_64', 'admin', {
+      localStorage: {'yolomux.info2.grouping.v1': JSON.stringify(grouping)},
+    }).currentInfoGroupingForTest();
+    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'ai', 'path', 'branch'])), ['tab', 'path'], 'YO!info migrates the old stored Tab-first quick grouping to Tab > Path');
+    assert.deepStrictEqual(canonical(storedGroupingFor(['path', 'branch', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the old stored Path-first quick grouping to Path > Branch');
+    assert.deepStrictEqual(canonical(storedGroupingFor(['branch', 'path', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the removed stored branch-first quick grouping to Path > Branch');
+    assert.deepStrictEqual(canonical(storedGroupingFor(['ai', 'tab', 'path', 'branch'])), ['linear', 'pr'], 'YO!info migrates the removed stored AI-first quick grouping to Linear > PR');
+    api.setInfoGroupingForTest(['ai', 'tab', 'path', 'branch']);
+    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['ai', 'tab', 'path', 'branch'], 'YO!info manual grouping selectors still allow an AI-first four-level order');
+
+    const aiTree = api.infoGroupTree(records, ['ai', 'tab', 'path', 'branch']);
+    assert.ok(aiTree.children.some(group => group.dimension === 'ai' && group.label === '0:codex' && group.count === 3), 'grouping by AI is not secretly split by Tab when two tabs have the same agent label');
+    const html = api.infoTreeHtmlForTest(records, ['ai', 'tab', 'path', 'branch']);
+    assert.ok(html.includes('data-info-grouping="ai,tab,path,branch"') && html.includes('data-info-sort="date:desc"') && html.includes('data-info-dimension="ai"') && html.includes('0:claude') && html.includes('0:codex'), 'YO!info renders a tree for the selected grouping and sort order');
+    assert.ok(html.includes('info-tree-item-last'), 'YO!info marks the final child at each tree level so CSS can draw an angle connector instead of a tee');
+    const appPathGroup = api.infoGroupTree(records, ['path']).children.find(group => group.dimension === 'path' && group.key === '/repo/app');
+    const appPathGroupKey = api.infoTreeGroupCollapseKeyForTest(appPathGroup);
+    api.setInfoTreeGroupCollapsedForTest(appPathGroupKey, true);
+    const collapsedPathHtml = api.infoTreeHtmlForTest(records, ['path']);
+    const collapsedPathMarker = `data-info-group-key="${appPathGroupKey}"`;
+    const collapsedPathTag = collapsedPathHtml.slice(collapsedPathHtml.lastIndexOf('<details', collapsedPathHtml.indexOf(collapsedPathMarker)), collapsedPathHtml.indexOf('>', collapsedPathHtml.indexOf(collapsedPathMarker)) + 1);
+    assert.ok(collapsedPathTag.includes('data-info-dimension="path"') && !collapsedPathTag.includes(' open'), 'YO!info preserves a collapsed group when the tree HTML is regenerated');
+    api.setInfoTreeGroupCollapsedForTest(appPathGroupKey, false);
+    const prGroupHtml = api.infoTreeHtmlForTest(records, ['pr'], {key: 'name', dir: 'asc'});
+    assert.ok(/<span class="info-tree-group-dimension">PR:<\/span>[\s\S]*<span class="info-tree-group-label info-tree-group-label-pr">[\s\S]*>#10<\/a>[\s\S]*App main PR full description/.test(prGroupHtml), 'YO!info PR group headers render as PR: #number description');
+    assert.ok(/<span class="info-tree-group-dimension">PR:<\/span>[\s\S]*<span class="info-tree-group-label info-tree-group-label-pr">None<\/span>/.test(prGroupHtml), 'YO!info missing PR group headers render as PR: None');
+    const linearGroupHtml = api.infoTreeHtmlForTest(missingSortRecords, ['linear', 'pr'], {key: 'name', dir: 'asc'});
+    assert.ok(/<span class="info-tree-group-dimension">Linear:<\/span>[\s\S]*<span class="info-tree-group-label info-tree-group-label-linear">None<\/span>/.test(linearGroupHtml), 'YO!info missing Linear group headers render as Linear: None');
+    const pathOnlyHtml = api.infoTreeHtmlForTest(records, ['path']);
+    assert.equal((pathOnlyHtml.match(/info-tree-field-path/g) || []).length, 0, 'YO!info hides path rows when Path is already the parent group');
+    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">branch:</span>') && pathOnlyHtml.includes('feature/app') && pathOnlyHtml.includes('lib-main'), 'YO!info leaf rows show labeled Branch identities when Branch is not already supplied by an ancestor group');
+    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">PR:</span>') && pathOnlyHtml.includes('#11') && pathOnlyHtml.includes('App feature PR linked through path'), 'YO!info leaf rows show labeled PR descriptions when a PR exists');
+    assert.ok(/<span class="info-tree-field-label">PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path/.test(pathOnlyHtml), 'YO!info generated rows make the PR number clickable and render the PR description after it');
+    assert.ok(/<span class="info-tree-field-label">PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/10"[\s\S]*>#10<\/a>[\s\S]*App main PR full description[\s\S]*info-tree-status-badge pr-status-open[\s\S]*OPEN[\s\S]*info-tree-status-badge pr-status-failing[\s\S]*CI error/.test(pathOnlyHtml), 'YO!info PR rows show Open lifecycle and CI error badges beside the full description');
+    assert.ok(/<span class="info-tree-field-label">PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path[\s\S]*info-tree-status-badge pr-status-merged[\s\S]*MERGED/.test(pathOnlyHtml), 'YO!info PR rows reserve purple merged styling for merged PR badges');
+    assert.ok(/<span class="info-tree-field-label">Linear:<\/span>[\s\S]*<a href="https:\/\/linear\.test\/DYN-10"[\s\S]*>DYN-10<\/a>[\s\S]*Main Linear description/.test(pathOnlyHtml), 'YO!info generated rows make the Linear identifier clickable and render the Linear description after it');
+    assert.ok(pathOnlyHtml.includes('data-info-open-tab="tab-a"') && pathOnlyHtml.includes('data-info-open-ai-window="0"'), 'YO!info Tab and AI fields are actionable links to the owning tab/window');
+    assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && pathOnlyHtml.includes('ASK?'), 'YO!info AI rows show shared working/ASK? activity indicators');
+    assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
+    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">tmux sub-window:</span>'), 'YO!info leaf rows label Tab session and window actions');
+    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows show labeled branch recency');
+    const pathBranchHtml = api.infoTreeHtmlForTest(records, ['path', 'branch']);
+    assert.equal((pathBranchHtml.match(/info-tree-field-path|info-tree-field-branch/g) || []).length, 0, 'YO!info hides every identity row already supplied by ancestor groups');
+    assert.ok(/data-info-dimension="path"[\s\S]*\/repo\/app[\s\S]*info-tree-group-child-count">\(2 branches\)<\/span>/.test(pathBranchHtml), 'YO!info Path group headers show direct child branch counts inline after the path label');
+    assert.equal(pathBranchHtml.includes('(1 branch)'), false, 'YO!info group headers omit inline child counts when there is only one child group');
+    assert.equal(pathBranchHtml.includes('info-tree-group-count'), false, 'YO!info no longer renders detached right-side count bubbles');
+    const tabPathHtml = api.infoTreeHtmlForTest(records, ['tab', 'path']);
+    assert.ok(/data-info-dimension="tab"[\s\S]*<span class="info-tree-group-dimension">Tab\(tmux session\):<\/span>[\s\S]*tab-a/.test(tabPathHtml), 'YO!info Tab group headers render as Tab(tmux session): <value>');
+    assert.ok(tabPathHtml.includes('info-tree-tab-token') && tabPathHtml.includes('tmux-pane-tab-token') && tabPathHtml.includes('pane-tab-core') && tabPathHtml.includes('data-info-tab-state='), 'YO!info Tab group headers render through the shared compact tmux pane-tab token');
+    assert.equal((tabPathHtml.match(/info-tree-field-tab/g) || []).length, 0, 'YO!info hides Tab rows when Tab is already supplied by an ancestor group');
+    const numericTabRecord = {...appMainRecord, id: 'numeric-tab-record', tabKey: '1', tabLabel: '1', tabTitle: '1', tabSession: '1'};
+    api.setPinnedTabsForTest(['1']);
+    api.setAutoApproveStateForTest('1', {
+      enabled: true,
+      screen: {key: 'needs-input', text: 'waiting for input', signature: 'ask-1'},
+      agent_windows: [{kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude', current: true, window_active: true}],
+    });
+    const numericTabHtml = api.infoTreeHtmlForTest([numericTabRecord], ['tab']);
+    assert.ok(numericTabHtml.includes('pane-tab-pin-icon'), 'YO!info Tab(tmux session) token shows the shared pinned-tab icon when the session is pinned');
+    assert.ok(/session-yolo-marker[^"]*active[\s\S]*data-auto-session="1"/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the shared YO button state');
+    assert.ok(/session-button-number">1<\/span>/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the same numeric session label as the real tab');
+    assert.ok(/session-state-badge[\s\S]*ASK\?/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows ASK? when the session needs input');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-icon claude[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the shared colored working status ball');
+    api.setPinnedTabsForTest([]);
+    const statusPriorityRecords = [
+      {tabKey: 'red-tab', tabLabel: 'red-tab', tabSession: 'red-tab', aiKey: '0:codex', aiLabel: '0:codex', aiKind: 'codex', aiWindow: '0', aiState: 'working'},
+      {tabKey: 'red-tab', tabLabel: 'red-tab', tabSession: 'red-tab', aiKey: '1:claude', aiLabel: '1:claude', aiKind: 'claude', aiWindow: '1', aiState: 'needs-input'},
+      {tabKey: 'yellow-tab', tabLabel: 'yellow-tab', tabSession: 'yellow-tab', aiKey: '0:codex', aiLabel: '0:codex', aiKind: 'codex', aiWindow: '0', aiState: 'working'},
+      {tabKey: 'yellow-tab', tabLabel: 'yellow-tab', tabSession: 'yellow-tab', aiKey: '1:claude', aiLabel: '1:claude', aiKind: 'claude', aiWindow: '1', aiState: 'idle', aiWorkingStoppedTs: Math.floor(Date.now() / 1000)},
+      {tabKey: 'green-tab', tabLabel: 'green-tab', tabSession: 'green-tab', aiKey: '0:codex', aiLabel: '0:codex', aiKind: 'codex', aiWindow: '0', aiState: 'working'},
+    ];
+    const statusPriorityHtml = api.infoTreeHtmlForTest(statusPriorityRecords, ['tab'], {key: 'tab', dir: 'asc'});
+    const tabSummaryFor = label => {
+      const index = statusPriorityHtml.indexOf(`>${label}</`);
+      const start = statusPriorityHtml.lastIndexOf('<summary', index);
+      const end = statusPriorityHtml.indexOf('</summary>', index);
+      return start >= 0 && end >= 0 ? statusPriorityHtml.slice(start, end) : '';
+    };
+    const redTabSummary = tabSummaryFor('red-tab');
+    const yellowTabSummary = tabSummaryFor('yellow-tab');
+    const greenTabSummary = tabSummaryFor('green-tab');
+    assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--attention/.test(redTabSummary), 'YO!info Tab group aggregates red ASK? inside the shared tab token above other child tmux sub-window states');
+    assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--cooldown/.test(yellowTabSummary) && !yellowTabSummary.includes('status-indicator--working'), 'YO!info Tab group aggregates yellow cooldown inside the shared tab token above green working child states');
+    assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(greenTabSummary), 'YO!info Tab group shows green inside the shared tab token when all child tmux sub-windows are working');
+    assert.equal((greenTabSummary.match(/agent-window-status-dot/g) || []).length, 1, 'YO!info Tab group summaries do not render a duplicate standalone status dot next to the tab token');
+    const noOwnerRecord = {
+      id: 'orphan',
+      tabKey: '__no_tab__',
+      tabLabel: 'No tab',
+      tabTitle: 'No tab or AI associated with this branch',
+      aiKey: 'no-ai::No AI',
+      aiLabel: 'No AI',
+      aiTitle: 'No tab or AI associated with this branch',
+      pathKey: '/repo/orphan',
+      pathLabel: '/repo/orphan',
+      pathTitle: '/repo/orphan',
+      branchKey: 'orphan-branch',
+      branchLabel: 'orphan-branch',
+      branchTitle: 'orphan-branch',
+      branchHtml: 'orphan-branch',
+      prKey: '__no_pr__',
+      prLabel: 'No PR',
+      prTitle: 'No PR',
+      linearKey: '__no_linear__',
+      linearLabel: 'No Linear',
+      linearTitle: 'No Linear',
+      desc: '',
+      updated: '',
+      updatedTitle: '',
+      updatedTs: 0,
+    };
+    const noOwnerMain = api.infoRecordHtmlForTest(noOwnerRecord);
+    assert.ok(noOwnerMain.includes('/repo/orphan'), 'YO!info still shows a path in the record box when no ancestor group supplies it');
+    assert.ok(noOwnerMain.includes('orphan-branch'), 'YO!info shows the local branch identity for otherwise unowned path rows');
+    assert.equal(/No tab|No AI|No PR|No Linear/.test(noOwnerMain), false, 'YO!info leaf rows omit missing Tab, AI, PR, and Linear placeholders');
+    const describedRecord = {
+      id: 'described',
+      tabKey: 'tab-a',
+      tabSession: 'tab-a',
+      tabLabel: 'tab-a',
+      tabTitle: 'Open tab-a',
+      aiKey: 'claude:2:2:claude',
+      aiKind: 'claude',
+      aiWindow: '2',
+      aiLabel: '2:claude',
+      aiTitle: 'Open tab-a window 2',
+      pathKey: '/repo/app',
+      pathLabel: '/repo/app',
+      pathTitle: '/repo/app',
+      branchKey: 'main',
+      branchLabel: 'main',
+      branchTitle: 'main',
+      branchHtml: 'main',
+      prKey: '#12',
+      prLabel: '#12',
+      prTitle: '#12 PR title exists',
+      prUrl: 'https://example.test/pull/12',
+      linearKey: 'DYN-12',
+      linearLabel: 'DYN-12',
+      linearTitle: 'DYN-12 In Progress Linear title exists',
+      linearItems: [{identifier: 'DYN-12', title: 'Linear title exists', url: 'https://linear.test/DYN-12'}],
+      updated: '3 days ago',
+      updatedTitle: '3 days ago',
+      updatedTs: 12,
+    };
+    const describedMain = api.infoRecordHtmlForTest(describedRecord, {hiddenDimensions: ['path']});
+    assert.ok(!describedMain.includes('/repo/app') && describedMain.includes('<span class="info-tree-field-label">branch:</span>') && describedMain.includes('>main<') && describedMain.includes('<span class="info-tree-field-label">PR:</span>') && describedMain.includes('#12') && describedMain.includes('PR title exists') && describedMain.includes('<span class="info-tree-field-label">Linear:</span>') && describedMain.includes('DYN-12') && describedMain.includes('Linear title exists') && describedMain.includes('data-info-open-tab="tab-a"') && describedMain.includes('data-info-open-ai-window="2"') && describedMain.includes('3 days ago'), 'YO!info leaf rows contain only requested labeled fields, with ancestor path suppressed and visible branch identity');
+    assert.ok(describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>') < describedMain.indexOf('<span class="info-tree-field-label">PR:</span>'), 'YO!info leaf rows render Linear before PR');
+    const infoTreeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    const paneTabCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+    const longPath = '/home/test/dynamo/dynamo2/packages/frontend/src/really/deep/path/that/must/not/be/chopped/off';
+    const longBranch = 'keivenchang/DIS-1200__complete-visible-branch-identity-that-must-not-be-chopped-off';
+    const longPr = '#1200 This is the complete PR description and it must wrap instead of being truncated';
+    const longLinear = 'DYN-1200 This is the complete Linear title and it must wrap instead of being truncated';
+    const longRecord = {
+      id: 'long',
+      tabKey: 'tab-long',
+      tabSession: 'tab-long',
+      tabLabel: 'tab-long',
+      tabTitle: 'Open tab-long',
+      aiKey: 'codex:4:4:codex',
+      aiKind: 'codex',
+      aiWindow: '4',
+      aiLabel: '4:codex',
+      aiTitle: 'Open tab-long window 4',
+      pathKey: longPath,
+      pathLabel: '~/dynamo/dynamo2/packages/frontend/src/really/deep/path/that/must/not/be/chopped/off',
+      pathTitle: longPath,
+      branchKey: longBranch,
+      branchLabel: longBranch,
+      branchTitle: longBranch,
+      branchHtml: longBranch,
+      prKey: '#1200',
+      prLabel: '#1200',
+      prTitle: longPr,
+      prUrl: 'https://example.test/pull/1200',
+      linearKey: 'DYN-1200',
+      linearLabel: 'DYN-1200',
+      linearTitle: longLinear,
+      linearItems: [{identifier: 'DYN-1200', title: 'This is the complete Linear title and it must wrap instead of being truncated', url: 'https://linear.test/DYN-1200'}],
+      updated: '4 days ago',
+      updatedTitle: '4 days ago',
+      updatedTs: 12,
+    };
+    const longHtml = api.infoTreeHtmlForTest([longRecord], ['ai']);
+    assert.ok(longHtml.includes(longPath) && longHtml.includes(longBranch) && longHtml.includes(longPr) && longHtml.includes(longLinear), 'YO!info leaf rows render full path, Branch, and full PR/Linear descriptions');
+    assert.ok(longHtml.includes(`data-info-open-path="${longPath}"`), 'YO!info path rows are clickable Finder targets');
+    assert.ok(/data-info-dimension="path"[\s\S]*data-info-open-path="\/home\/test\/dynamo\/dynamo2\/packages\/frontend\/src\/really\/deep\/path\/that\/must\/not\/be\/chopped\/off"/.test(api.infoTreeHtmlForTest([longRecord], ['path', 'branch'])), 'YO!info Path group labels are clickable Finder targets');
+    assert.ok(/<span class="info-tree-field-label">PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/1200"[\s\S]*title="https:\/\/example\.test\/pull\/1200"[\s\S]*>#1200<\/a>[\s\S]*This is the complete PR description/.test(longHtml), 'YO!info PR rows make the PR number clickable and expose the full URL on hover');
+    assert.ok(/<span class="info-tree-field-label">Linear:<\/span>[\s\S]*<a href="https:\/\/linear\.test\/DYN-1200"[\s\S]*title="https:\/\/linear\.test\/DYN-1200"[\s\S]*>DYN-1200<\/a>[\s\S]*This is the complete Linear title/.test(longHtml), 'YO!info Linear rows make the Linear identifier clickable and expose the full URL on hover');
+    const longGroupTree = api.infoGroupTree([longRecord], ['path', 'pr', 'linear']);
+    assert.equal(longGroupTree.children[0]?.label, longPath, 'YO!info Path group labels use the full path because descendant boxes suppress parent path metadata');
+    assert.equal(longGroupTree.children[0]?.children[0]?.label, longPr, 'YO!info PR group labels use the full PR description because descendant boxes suppress parent PR metadata');
+    assert.equal(longGroupTree.children[0]?.children[0]?.children[0]?.label, longLinear, 'YO!info Linear group labels use the full Linear title because descendant boxes suppress parent Linear metadata');
+    assert.equal(api.infoGroupTree([longRecord], ['branch']).children[0]?.label, longBranch, 'YO!info Branch group labels use the full local branch name because descendant boxes suppress parent branch metadata');
+    assert.ok(/\.info-tree-record-main\s*\{[\s\S]*flex-direction:\s*column[\s\S]*padding-inline-start:\s*10px/.test(infoTreeCss), 'YO!info record fields stack as one left-indented labeled row per line');
+    assert.ok(/\.info-tree-record\s*\{[\s\S]*--info-tree-field-label-width:\s*18ch/.test(infoTreeCss), 'YO!info records define one shared label column width for aligned key/value rows');
+    assert.equal(infoTreeCss.includes('.info-tree-list::before'), false, 'YO!info does not reserve a fixed-height sticky mask that leaves blank space under a single sticky parent');
+    assert.ok(/\.info-tree-panel \.info-pane::before\s*\{[\s\S]*position:\s*absolute[\s\S]*z-index:\s*2[\s\S]*height:\s*var\(--info-tree-sticky-level-block,\s*27px\)[\s\S]*background:\s*var\(--info-pane-bg\)[\s\S]*pointer-events:\s*none/.test(infoTreeCss), 'YO!info masks clipped leaf rows at the top scroll edge without adding layout space');
+    assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-children-gap:\s*0px/.test(infoTreeCss), 'YO!info sibling leaf node boxes touch vertically without an inserted gap');
+    assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(tokenCss), 'YO!info leaf box outline uses the same visible color token as the left tree guides');
+    assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*8px[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf rows keep transparent fill with only a faint 1px rounded node outline and no card shadow');
+    assert.ok(/\.info-tree-field\s*\{[\s\S]*grid-template-columns:\s*var\(--info-tree-field-label-width\) minmax\(0, 1fr\)[\s\S]*width:\s*100%/.test(infoTreeCss), 'YO!info labeled rows keep aligned labels and wrapping values');
+    assert.ok(/\.info-tree-field-label\s*\{[\s\S]*justify-self:\s*start[\s\S]*text-align:\s*left/.test(infoTreeCss), 'YO!info field labels left-align while every value starts in the same column');
+    assert.ok(/\.info-tree-field,[\s\S]*\.info-tree-field-value,[\s\S]*\.info-tree-value-text\s*\{[\s\S]*overflow:\s*visible[\s\S]*text-overflow:\s*clip[\s\S]*white-space:\s*normal[\s\S]*overflow-wrap:\s*anywhere/.test(infoTreeCss), 'YO!info row values wrap instead of ellipsizing');
+    assert.ok(/\.info-tree-group\[data-info-dimension="path"\][\s\S]*\.info-tree-group\[data-info-dimension="branch"\][\s\S]*\.info-tree-group\[data-info-dimension="pr"\][\s\S]*\.info-tree-group\[data-info-dimension="linear"\][\s\S]*summary \.info-tree-group-label\s*\{[\s\S]*overflow:\s*visible[\s\S]*text-overflow:\s*clip[\s\S]*white-space:\s*normal[\s\S]*overflow-wrap:\s*anywhere/.test(infoTreeCss), 'YO!info Path/Branch/PR/Linear group labels wrap instead of ellipsizing when they own ancestor metadata');
+    assert.ok(/\.info-tree-group-children > \.info-tree-item::after\s*\{[\s\S]*inset-block-start:\s*calc\(\(var\(--info-tree-children-gap\) \/ -2\) - var\(--info-tree-connector-line-width\)\)[\s\S]*inset-block-end:\s*calc\(\(var\(--info-tree-children-gap\) \/ -2\) - var\(--info-tree-connector-line-width\)\)/.test(infoTreeCss), 'YO!info vertical tree guides overlap adjacent leaf boxes by one line width so the left guide stays continuous');
+    assert.ok(/\.info-tree-group-children > \.info-tree-item-last::after\s*\{[\s\S]*height:\s*calc\(var\(--info-tree-record-connector-y\) \+ \(var\(--info-tree-connector-line-width\) \* 2\) \+ \(var\(--info-tree-children-gap\) \/ 2\)\)/.test(infoTreeCss) && /\.info-tree-group-children > \.info-tree-group\.info-tree-item-last::after\s*\{[\s\S]*height:\s*calc\(var\(--info-tree-summary-connector-y\) \+ \(var\(--info-tree-connector-line-width\) \* 2\) \+ \(var\(--info-tree-children-gap\) \/ 2\)\)/.test(infoTreeCss), 'YO!info last-child connectors stop at the row-specific horizontal arm to form a 90-degree angle');
+    assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-sticky-level-block:\s*27px[\s\S]*--info-tree-connector-line-width:\s*1px[\s\S]*--info-tree-connector-arm-start:\s*calc\(var\(--info-tree-connector-x\) \+ var\(--info-tree-connector-line-width\)\)[\s\S]*--info-tree-summary-connector-y:\s*13px[\s\S]*--info-tree-record-connector-y:\s*13px/.test(infoTreeCss), 'YO!info defines compact sticky rows with connector arms aligned to the text midline and offset from the vertical stroke');
+    assert.ok(/\.info-tree-group summary\s*\{[\s\S]*position:\s*sticky[\s\S]*grid-template-columns:\s*max-content max-content minmax\(0, 1fr\)[\s\S]*align-items:\s*center[\s\S]*align-content:\s*center[\s\S]*padding:\s*2px 4px[\s\S]*background:\s*var\(--info-pane-bg\)[\s\S]*border:\s*0[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info sticky parent headers are compact vertically-centered text rows with inline labels instead of boxed cards or right count pills');
+    const dimensionSummaryBlocks = [...infoTreeCss.matchAll(/\.info-tree-group\[data-info-dimension="(?:path|branch|pr|linear)"\] > summary\s*\{[\s\S]*?\}/g)].map(match => match[0]).join('\n');
+    assert.equal(dimensionSummaryBlocks.includes('align-items: start'), false, 'YO!info dimension group summaries do not override vertical centering');
+    assert.ok(/\.info-tree-group\[data-info-depth="1"\] > summary::after,[\s\S]*\.info-tree-group\[data-info-depth="3"\] > summary::after\s*\{[\s\S]*inset-block-start:\s*var\(--info-tree-summary-connector-y\)[\s\S]*inset-inline-start:\s*var\(--info-tree-connector-arm-start\)[\s\S]*width:\s*var\(--info-tree-connector-arm-width\)[\s\S]*background:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info sticky parent summaries draw one horizontal connector arm aligned to the summary label row without overpainting the vertical stroke');
+    assert.ok(/\.info-tree-group-children > \.info-tree-group\.info-tree-item::before\s*\{[\s\S]*content:\s*none/.test(infoTreeCss), 'YO!info group rows do not draw a second child-row horizontal connector on top of the sticky summary connector');
+    assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-tab-color:\s*var\(--pane-tab-active-bg\)[\s\S]*--info-tree-ai-color:\s*var\(--icon-code\)[\s\S]*--info-tree-path-color:\s*#fbbf24[\s\S]*--info-tree-branch-color:\s*var\(--icon-archive\)[\s\S]*--info-tree-pr-color:\s*var\(--info-tree-pr-neutral\)[\s\S]*--info-tree-linear-color:\s*#5eead4/.test(infoTreeCss), 'YO!info owns a distinct non-red, non-purple dark-mode color for every relationship dimension while Tab stays tied to the theme color');
+    assert.ok(/body\.theme-light \.info-tree\s*\{[\s\S]*--info-tree-ai-color:\s*var\(--icon-code\)[\s\S]*--info-tree-path-color:\s*var\(--icon-doc\)[\s\S]*--info-tree-branch-color:\s*var\(--icon-archive\)[\s\S]*--info-tree-pr-color:\s*var\(--info-tree-pr-neutral\)[\s\S]*--info-tree-linear-color:\s*var\(--git-untracked-badge\)/.test(infoTreeCss), 'YO!info light mode darkens non-Tab dimension colors for white surfaces without using red or merged purple for PR/Branch');
+    assert.equal(/--info-tree-branch-color:\s*(?:var\(--code-keyword\)|#6d28d9|#5b21b6)/.test(infoTreeCss), false, 'YO!info Branch color does not use the purple reserved for merged PR status');
+    assert.equal(/--info-tree-pr-color:\s*(?:#fb7185|#fecdd3|#be123c|#9f1239)/.test(infoTreeCss), false, 'YO!info PR relationship color does not use the red reserved for status/attention');
+    assert.ok(/:root\s*\{[\s\S]*--info-tree-pr-neutral:\s*var\(--link-soft-hover\)[\s\S]*--info-tree-pr-neutral-hover:\s*var\(--text\)/.test(tokenCss), 'YO!info dark-mode PR relationship labels use readable link-toned text instead of muted neutral gray');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--info-tree-pr-neutral:\s*var\(--link-soft\)[\s\S]*--info-tree-pr-neutral-hover:\s*var\(--link-soft-hover\)/.test(tokenCss), 'YO!info light-mode PR relationship labels use readable link-toned text instead of muted neutral gray');
+    assert.ok(/\.info-tree-group\[data-info-dimension="tab"\] > summary\s*\{[\s\S]*--info-tree-dimension-color:\s*var\(--info-tree-tab-color\)/.test(infoTreeCss) && /\.info-tree-group\[data-info-dimension="linear"\] > summary\s*\{[\s\S]*--info-tree-dimension-color:\s*var\(--info-tree-linear-color\)/.test(infoTreeCss), 'YO!info group headers route each dimension through its own color token');
+    assert.ok(/\.info-tree-field-tab\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-tab-color\)[\s\S]*\.info-tree-field-linear\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-linear-color\)/.test(infoTreeCss), 'YO!info record rows route each dimension through its own color token');
+    assert.ok(/\.tmux-pane-tab-token\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)[\s\S]*border-radius:\s*6px 6px 0 0[\s\S]*font-size:\s*var\(--tab-label-size\)/.test(paneTabCss) && /\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(paneTabCss), 'shared compact tmux pane-tab tokens own inactive and active tab styling');
+    assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*showDetail:\s*false/.test(infoSource), 'YO!info Tab values route through the shared compact tmux pane-tab token helper instead of private active/inactive tab CSS');
+    assert.ok(/function infoGroupLabelHtml\(group = \{\}\)[\s\S]*leadingHtml:\s*infoTabGroupLeadingActivityHtml\(group\)/.test(infoSource), 'YO!info Tab group status is routed into the shared compact tmux pane-tab token instead of prepending a standalone dot');
+    assert.equal(infoSource.includes('infoTabGroupStatusHtml(group)}${tabHtml'), false, 'YO!info Tab group summaries do not prepend a duplicate standalone status dot before the tab token');
+    assert.equal(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showLeading:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showState:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showBadges:\s*false/.test(infoSource), false, 'YO!info Tab values do not suppress the real tab YO marker, ASK? badge, or status indicators');
+    assert.ok(/function tmuxPaneTabTokenHtml\(session, options = \{\}\)[\s\S]*tabIsPinned\(item\)[\s\S]*pinnedTabIconHtml\(item\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'shared compact tmux pane-tab tokens include the same pinned-tab icon helper as real tabs');
+    assert.ok(/function infoRecordAiWindowButtonHtml\(record,[\s\S]*data-info-open-ai-window[\s\S]*tmuxWindowButtonHtml\(\{[\s\S]*classes:\s*\['info-tree-ai-window-button'\]/.test(infoSource), 'YO!info AI values route tmux sub-window labels through the shared Info Bar button helper');
+    assert.ok(/\.info-tree-ai-value\.tmux-window-bar\s*\{[\s\S]*justify-content:\s*flex-start[\s\S]*\.info-tree-status-badge\s*\{[\s\S]*text-transform:\s*uppercase/.test(infoTreeCss), 'YO!info keeps the shared tmux sub-window button inline while preserving compact status badges');
+    assert.ok(/\.info-tree-group-child-count\s*\{[\s\S]*margin-inline-start:\s*6px[\s\S]*color:\s*var\(--muted\)/.test(infoTreeCss), 'YO!info child counts render inline beside group labels in a less prominent color');
+    assert.equal(infoTreeCss.includes('.info-tree-group-count'), false, 'YO!info CSS no longer defines the detached count bubble');
+    assert.ok(/\.info-tree-group\[data-info-depth="0"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*0[\s\S]*z-index:\s*4[\s\S]*\.info-tree-group\[data-info-depth="1"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*var\(--info-tree-sticky-level-block\)[\s\S]*z-index:\s*5[\s\S]*\.info-tree-group\[data-info-depth="3"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*calc\(var\(--info-tree-sticky-level-block\) \* 3\)/.test(infoTreeCss), 'YO!info sticky parent headers stack by tree depth instead of piling on top of each other');
+    assert.ok(/\.info-tree-group summary::before\s*\{[\s\S]*color:\s*var\(--info-tree-disclosure-color\)[\s\S]*font:\s*900 var\(--ui-font-size-2xl\)/.test(infoTreeCss), 'YO!info disclosure triangle is larger and uses a stronger neutral than compact metadata labels');
+    assert.ok(/\.info-actions-bar\s*\{[\s\S]*position:\s*relative[\s\S]*z-index:\s*var\(--z-layer-marker\)[\s\S]*background:\s*var\(--pane-bar-bg/.test(infoTreeCss), 'YO!info action bar paints as the opaque layer above sticky tree summaries');
+    assert.ok(/\.info-tree-actions-bar\s*\{[\s\S]*flex-wrap:\s*wrap[\s\S]*row-gap:\s*5px/.test(infoTreeCss), 'YO!info toolbar allows a two-line control layout');
+    assert.ok(/\.info-tree-primary-controls\s*\{[\s\S]*flex:\s*1 0 100%/.test(infoTreeCss), 'YO!info grouping presets and search occupy the first toolbar line above the order-by chain');
+    assert.ok(/\.info-tree-order-label,[\s\S]*\.info-tree-order-separator\s*\{[\s\S]*color:\s*var\(--muted\)[\s\S]*white-space:\s*nowrap/.test(infoTreeCss), 'YO!info order-by label and separators share compact muted toolbar styling');
+    assert.ok(/\.info-tree-search-control input\s*\{[\s\S]*height:\s*24px/.test(infoTreeCss), 'YO!info toolbar includes a compact search input');
+    assert.ok(/\.info-tree-search-match\s*\{[\s\S]*color:\s*var\(--info-tree-search-match-text\)[\s\S]*background:\s*var\(--info-tree-search-match-bg\)/.test(infoTreeCss), 'YO!info search matches have a dedicated non-red/non-purple highlight style');
+    assert.ok(/\.info-tree-sort-controls\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(infoTreeCss), 'YO!info Sort control is right-aligned on the selector toolbar line');
+    assert.ok(/delegate\(panel, 'click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
+    assert.ok(infoPanelSource.includes('data-info-search') && infoPanelSource.includes('setInfoSearch'), 'YO!info toolbar exposes a search box that filters relationship records');
+    assert.ok(infoPanelSource.includes('info-tree-order-label">Order by:</span>') && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render as Order by: select > select > select > select');
+    assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
+    assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');
+    assert.ok(/delegate\(panel, 'click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
+    assert.deepStrictEqual(canonical(api.infoSortFields().map(field => `${field.value}:${field.label}`)), ['name:asc:A-Z', 'name:desc:Z-A', 'date:desc:recent', 'date:asc:oldest'], 'YO!info exposes only A-Z, Z-A, recent, and oldest sort modes');
+    api.setInfoSortForTest('name:desc');
+    assert.deepStrictEqual(canonical(api.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'YO!info stores the selected sort mode');
+  });
+
+  test('t@info-pr-sort-numeric', () => {
+    const api = loadYolomux('', ['sort-pr']);
+    api.setTranscriptInfoForTest('sort-pr', {
+      project: {
+        git: {
+          root: '/repo/sort-pr',
+          branch: 'small-pr',
+          other_branches: {
+            branches: [
+              {name: 'large-pr', current: false, updated: 'today', updated_ts: 300, subject: 'large PR', pull_request: {number: 1111, title: 'large PR'}},
+              {name: 'small-pr', current: true, updated: 'today', updated_ts: 200, subject: 'small PR', pull_request: {number: 9, title: 'something'}},
+              {name: 'no-pr', current: false, updated: 'today', updated_ts: 100, subject: 'no PR'},
+            ],
+          },
+        },
+        pull_request: null,
+        linear: [],
+      },
+    });
+
+    const records = api.infoRelationshipRecords();
+    assert.deepStrictEqual(canonical(api.infoGroupTree(records, ['pr'], {key: 'name', dir: 'asc'}).children.map(group => group.label)), [
+      '#9 something',
+      '#1111 large PR',
+      'No PR',
+    ], 'YO!info PR sort asc compares PR numbers instead of lexical labels');
+
+    assert.deepStrictEqual(canonical(api.infoGroupTree(records, ['pr'], {key: 'name', dir: 'desc'}).children.map(group => group.label)), [
+      '#1111 large PR',
+      '#9 something',
+      'No PR',
+    ], 'YO!info PR sort desc compares PR numbers and keeps missing PRs last');
+  });
+
+  test('t@info-linear-sort-missing-after-z', () => {
+    const api = loadYolomux('', ['sort-linear']);
+    api.setTranscriptInfoForTest('sort-linear', {
+      project: {
+        git: {
+          root: '/repo/sort-linear',
+          branch: 'alpha-linear',
+          other_branches: {
+            branches: [
+              {name: 'zeta-linear', current: false, updated: 'today', updated_ts: 300, subject: 'zeta Linear', linear: [{identifier: 'ZZZ-200', title: 'zeta issue'}]},
+              {name: 'no-linear', current: false, updated: 'today', updated_ts: 200, subject: 'no Linear'},
+              {name: 'alpha-linear', current: true, updated: 'today', updated_ts: 100, subject: 'alpha Linear', linear: [{identifier: 'AAA-100', title: 'alpha issue'}]},
+            ],
+          },
+        },
+        pull_request: null,
+        linear: [],
+      },
+    });
+
+    const records = api.infoRelationshipRecords();
+    assert.deepStrictEqual(canonical(api.infoGroupTree(records, ['linear'], {key: 'name', dir: 'asc'}).children.map(group => group.label)), [
+      'AAA-100 alpha issue',
+      'ZZZ-200 zeta issue',
+      'No Linear',
+    ], 'YO!info Linear sort asc treats missing Linear as after z');
+
+    assert.deepStrictEqual(canonical(api.infoGroupTree(records, ['linear'], {key: 'name', dir: 'desc'}).children.map(group => group.label)), [
+      'ZZZ-200 zeta issue',
+      'AAA-100 alpha issue',
+      'No Linear',
+    ], 'YO!info Linear sort desc keeps missing Linear after real Linear issues');
   });
 
   test('t@6833', () => {
@@ -3138,7 +3842,7 @@ async function runEditorPreviewSuite() {
     assert.ok(enabledChatHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), 'YO!agent chat shows recent agents as an assistant-style response during startup');
     assert.ok(enabledChatHtml.includes('<ul class="yoagent-recent-agents-list">'), 'YO!agent chat shows recent agents as a bullet list');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-session">session 5'), 'YO!agent recent agents show the session in a fixed field');
-    assert.ok(enabledChatHtml.includes('yoagent-recent-agent-window">2:codex'), 'YO!agent recent agents show the tmux window name in a fixed field');
+    assert.ok(enabledChatHtml.includes('yoagent-recent-agent-window">2:codex'), 'YO!agent recent agents show the tmux sub-window name in a fixed field');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-paths">~/yolomux.dev'), 'YO!agent recent agents show touched paths from the backend agent payload');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">running'), 'YO!agent recent agents show running agents as running');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">3 min ago'), 'YO!agent recent agents show compact last-used time for idle agents');
@@ -3395,22 +4099,17 @@ async function runEditorPreviewSuite() {
       },
     });
 
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta', 'alpha']);
-    api.setInfoBranchSortForTest('session', 'asc');
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['alpha', 'beta']);
-    api.setInfoBranchSort('session');
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta', 'alpha']);
-    api.setInfoBranchSortForTest('branch', 'asc');
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.branch)), ['alpha', 'zeta']);
+    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['alpha / no AI', 'beta / no AI']);
+    api.setInfoGroupingForTest(['pr', 'tab', 'path', 'branch']);
+    api.setInfoSortForTest({key: 'name', dir: 'desc'});
+    api.setInfoSearchForTest('alpha pr', {publish: false});
     const shareInfoSnapshot = api.shareUiStateSnapshotForTest().info;
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.branchSort), {dir: 'asc', key: 'branch'}, 'YO!share snapshots the YO!info branch sort state');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['beta', 'alpha'], 'YO!share snapshots host-owned YO!info rows');
-    api.setInfoBranchColumnWidthForTest(520);
-    api.setInfoDescColumnWidthForTest(760);
-    const shareInfoWidthSnapshot = api.shareUiStateSnapshotForTest().info;
-    assert.deepStrictEqual(canonical(shareInfoWidthSnapshot.columnWidths), {branch: 520, desc: 760}, 'YO!share snapshots host YO!info column widths');
-    api.resetInfoBranchColumnWidthForTest();
-    api.resetInfoDescColumnWidthForTest();
+    assert.equal('branchSort' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table branch-sort state');
+    assert.deepStrictEqual(canonical(shareInfoSnapshot.grouping), ['pr', 'tab', 'path', 'branch'], 'YO!share snapshots the host YO!info grouping order');
+    assert.deepStrictEqual(canonical(shareInfoSnapshot.sort), {dir: 'desc', key: 'name'}, 'YO!share snapshots the host YO!info sort mode');
+    assert.equal(shareInfoSnapshot.search, 'alpha pr', 'YO!share snapshots the host YO!info search query');
+    assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'YO!share snapshots host-owned YO!info rows');
+    assert.equal('columnWidths' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table column widths');
     const shareApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
       share: {view: true, id: 'share-info', mode: 'ro', session: '1', sessions: ['1']},
     });
@@ -3430,12 +4129,14 @@ async function runEditorPreviewSuite() {
         },
       },
     });
-    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['1'], 'share client starts with local YO!info rows before a host snapshot arrives');
-    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
-    assert.deepStrictEqual(canonical(shareApi.shareUiStateSnapshotForTest().info.branchSort), {dir: 'desc', key: 'session'}, 'share viewers apply YO!info sort from the host UI snapshot');
-    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['beta', 'alpha'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
-    assert.equal(shareApi.infoBranchColumnWidthForTest(), 610, 'share viewers apply the host YO!info Branch column width');
-    assert.equal(shareApi.infoDescColumnWidthForTest(), 820, 'share viewers apply the host YO!info desc column width');
+    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['1 / no AI'], 'share client starts with local YO!info rows before a host snapshot arrives');
+    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, grouping: shareInfoSnapshot.grouping, sort: shareInfoSnapshot.sort, search: shareInfoSnapshot.search, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
+    assert.equal('branchSort' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table sort snapshots');
+    assert.deepStrictEqual(canonical(shareApi.currentInfoGroupingForTest()), ['pr', 'tab', 'path', 'branch'], 'share viewers apply host YO!info grouping state');
+    assert.deepStrictEqual(canonical(shareApi.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'share viewers apply host YO!info sort state');
+    assert.equal(shareApi.currentInfoSearchForTest(), 'alpha pr', 'share viewers apply host YO!info search state');
+    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
+    assert.equal('columnWidths' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table column widths');
     shareApi.applyShareScrollStateForTest({target: 'info', kind: 'info', top: 88, left: 144});
     assert.equal(shareInfoScroller.scrollTop, 88, 'share viewers apply YO!info vertical host scroll');
     assert.equal(shareInfoScroller.scrollLeft, 144, 'share viewers apply YO!info horizontal host scroll');
@@ -3444,66 +4145,22 @@ async function runEditorPreviewSuite() {
     shareApi.restoreShareReadonlyScrollTargetForTest(shareInfoScroller);
     assert.equal(shareInfoScroller.scrollTop, 88, 'readonly YO!info local vertical scroll restores to the host position');
     assert.equal(shareInfoScroller.scrollLeft, 144, 'readonly YO!info local horizontal scroll restores to the host position');
-    assert.equal(api.infoBranchColumnWidthForTest(), 320, 'YO!info Branch column defaults wider than the old 230px minimum');
-    assert.equal(api.setInfoBranchColumnWidthForTest(520), 520, 'YO!info Branch column accepts a wider user size');
-    assert.equal(api.storageValueForTest('yolomux.infoBranchColumnWidth.v1'), '520', 'YO!info Branch column width persists in browser storage');
-    assert.equal(api.setInfoBranchColumnWidthForTest(100), 230, 'YO!info Branch column width clamps to its minimum');
-    assert.equal(api.setInfoBranchColumnWidthForTest(5000), 900, 'YO!info Branch column width clamps to its maximum');
-    assert.equal(api.resetInfoBranchColumnWidthForTest(), 320, 'YO!info Branch column reset restores the default');
-    assert.equal(api.infoDescColumnWidthForTest(), 310, 'YO!info desc column defaults to the previous minimum width');
-    assert.equal(api.setInfoDescColumnWidthForTest(760), 760, 'YO!info desc column accepts a wider user size');
-    assert.equal(api.storageValueForTest('yolomux.infoDescColumnWidth.v1'), '760', 'YO!info desc column width persists in browser storage');
-    assert.equal(api.setInfoDescColumnWidthForTest(100), 310, 'YO!info desc column width clamps to its minimum');
-    assert.equal(api.setInfoDescColumnWidthForTest(5000), 1600, 'YO!info desc column width clamps to its maximum');
-    assert.equal(api.resetInfoDescColumnWidthForTest(), 310, 'YO!info desc column reset restores the default');
-    const runResizeDrag = (column, moveX) => {
-      let capturedPointer = null;
-      let releasedPointer = null;
-      const resizeNode = new TestElement(`resize-root-${column}`);
-      const resizeHandle = new TestElement(`resize-handle-${column}`, 'button');
-      resizeHandle.dataset.infoColumnResize = column;
-      resizeHandle.setPointerCapture = pointerId => { capturedPointer = pointerId; };
-      resizeHandle.releasePointerCapture = pointerId => { releasedPointer = pointerId; };
-      resizeNode.appendChild(resizeHandle);
-      api.bindInfoColumnResizersForTest(resizeNode);
-      api.bindInfoColumnResizersForTest(resizeNode);
-      assert.equal(resizeNode.listeners.get('pointerdown').length, 1, `YO!info ${column} resize root binds pointerdown once`);
-      assert.equal(resizeHandle.dataset.bound, undefined, `YO!info ${column} resize handle does not carry dead per-render bound state`);
-      resizeNode.listeners.get('pointerdown')[0]({
-        target: resizeHandle,
-        pointerId: 7,
-        clientX: 100,
-        preventDefault() {},
-        stopPropagation() {},
-      });
-      assert.equal(capturedPointer, 7, `YO!info ${column} resize drag captures the pointer`);
-      api.windowListenersForTest('pointermove')[0]({clientX: moveX});
-      api.windowListenersForTest('pointerup')[0]({});
-      assert.equal(releasedPointer, 7, `YO!info ${column} resize drag releases the pointer`);
-      assert.equal(api.windowListenersForTest('pointermove').length, 0, `YO!info ${column} resize drag removes pointermove listener on finish`);
-    };
-    runResizeDrag('branch', 180);
-    assert.equal(api.infoBranchColumnWidthForTest(), 400, 'YO!info Branch resize drag changes the column width');
-    assert.equal(api.storageValueForTest('yolomux.infoBranchColumnWidth.v1'), '400', 'YO!info Branch resize drag persists the final width');
-    runResizeDrag('desc', 250);
-    assert.equal(api.infoDescColumnWidthForTest(), 460, 'YO!info desc resize drag changes the column width');
-    assert.equal(api.storageValueForTest('yolomux.infoDescColumnWidth.v1'), '460', 'YO!info desc resize drag persists the final width');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-    const renderInfoPanelSource = terminalBootSource.slice(terminalBootSource.indexOf('function renderInfoPanel()'), terminalBootSource.indexOf('function infoColumnResizeConfig'));
-    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*delegate\(panel, 'click', '\[data-info-sort\]'[\s\S]*delegate\(panel, 'click', '\[data-info-session-drawer\]'[\s\S]*delegate\(panel, 'click', '\[data-watched-remove\]'/.test(infoPanelSource), 'YO!info click actions bind once on the persistent panel root');
-    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*bindInfoColumnResizers\(panel\)/.test(infoPanelSource), 'YO!info column resize actions bind once on the persistent panel root');
-    assert.ok(/function bindInfoColumnResizers\(node\)[\s\S]*__yolomuxInfoColumnResizersBound[\s\S]*delegate\(node, 'pointerdown', '\[data-info-column-resize\]'/.test(terminalBootSource), 'YO!info column resizers use one delegated pointerdown owner');
+    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*delegate\(panel, 'click', '\[data-info-refresh\]'[\s\S]*delegate\(panel, 'click', '\[data-info-preset\]'[\s\S]*delegate\(panel, 'click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
+    assert.ok(/panel\.addEventListener\('toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
+    assert.ok(/const infoCollapsedGroupKeys = new Set\(\)[\s\S]*function infoTreeGroupCollapseKey[\s\S]*data-info-group-key="\$\{esc\(groupKey\)\}"\$\{openAttr\}/.test(terminalBootSource), 'YO!info group renderer uses stable group keys instead of forcing every details node open');
+    assert.equal(/function bindInfoColumnResizers/.test(terminalBootSource), false, 'old YO!info table column resizer owner is removed');
     assert.equal(/dataset\.bound/.test(terminalBootSource), false, 'YO!info column resizers do not use the dead per-handle dataset.bound guard');
-    assert.equal(renderInfoPanelSource.includes('bindInfoColumnResizers'), false, 'renderInfoPanel does not re-bind column resizers after every repaint');
     assert.equal(/querySelectorAll\('\[data-info-sort\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach sort click listeners after every repaint');
     assert.equal(/querySelectorAll\('\[data-info-session-drawer\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach drawer click listeners after every repaint');
     assert.equal(/querySelectorAll\('\[data-watched-remove\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderWatchedPrs does not reattach remove click listeners after every repaint');
     assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(terminalBootSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
-    assert.ok(/function setInfoColumnWidth\(column, value, options = \{\}\)[\s\S]*const previous = infoColumnWidth\(column\)[\s\S]*scheduleShareUiStatePublish\(\)/.test(source), 'YO!info column width changes schedule a host share UI-state snapshot');
-    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*columnWidths:[\s\S]*branch:[\s\S]*infoBranchColumnWidthPx[\s\S]*desc:[\s\S]*infoDescColumnWidthPx[\s\S]*options\.includeRows !== false[\s\S]*branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows and column widths when full state is requested');
-    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*setInfoColumnWidth\('branch', widths\.branch, \{persist: false, publish: false\}\)[\s\S]*setInfoColumnWidth\('desc', widths\.desc, \{persist: false, publish: false\}\)/.test(source), 'share clients apply host YO!info rows and column widths without persisting or echo-publishing');
+    assert.equal(/function setInfoColumnWidth/.test(source), false, 'deleted YO!info table column width code is not retained');
+    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*options\.includeRows !== false[\s\S]*snapshot\.branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows when full state is requested');
+    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, and search state');
+    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info rows without persisting or echo-publishing');
   });
 
   await testAsync('YO!agent chat queue waits for pending target-agent waits before sending', async () => {
@@ -4226,7 +4883,7 @@ async function runEditorPreviewSuite() {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.equal(source.includes("resetRuntimeInterval('watched-prs', refreshWatchedPrs"), false, 'watched PRs no longer run a recurring browser poll');
     assert.ok(source.includes("apiFetchJson('/api/watched-prs')"), 'refreshWatchedPrs keeps the boot/manual watched-PR endpoint fetch');
-    assert.ok(source.includes('id="info-watched"'), 'YO!info renders a watched-PRs container');
+    assert.equal(source.includes('id="info-watched"'), false, 'old YO!info watched-PR table container is removed');
     assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'incoming snapshots diff statuses to fire transition notifications');
   });
 
@@ -4670,8 +5327,8 @@ async function runEditorPreviewSuite() {
     });
     const html = api.yoagentRecentAgentsHtmlForTest();
     assert.ok(html.includes('agent exited (status 9)'), 'recent agents surface dead tmux agent status');
-    assert.ok(html.indexOf('session 1') < html.indexOf('session 2'), 'tmux window_activity sorts recent agents ahead of stale backend order');
-    assert.ok(html.includes('yoagent-recent-agent tmux-idle'), 'old tmux window_activity dims idle recent-agent rows');
+    assert.ok(html.indexOf('session 1') < html.indexOf('session 2'), 'tmux sub-window activity sorts recent agents ahead of stale backend order');
+    assert.ok(html.includes('yoagent-recent-agent tmux-idle'), 'old tmux sub-window activity dims idle recent-agent rows');
     assert.ok(html.includes('signal-bell') && html.includes('signal-silence'), 'recent agents surface tmux bell and silence signal chips');
     assert.ok(html.includes('signal-presence') && html.includes('2 viewers'), 'recent agents surface tmux active-client presence');
     assert.ok(html.includes('signal-zoom') && html.includes('zoom'), 'recent agents surface tmux zoom state');

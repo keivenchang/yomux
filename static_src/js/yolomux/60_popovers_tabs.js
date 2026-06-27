@@ -409,10 +409,11 @@ function metaJoin(parts) {
   return parts.filter(Boolean).join('<span class="meta-sep"> · </span>');
 }
 
-function sessionNumberNameHtml(session) {
+function sessionNumberNameHtml(session, options = {}) {
   const label = sessionLabel(session);
   const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
-  return `<span class="${className}">${esc(label)}</span>`;
+  const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml) : esc(label);
+  return `<span class="${className}">${labelHtml}</span>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {

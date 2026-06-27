@@ -236,6 +236,13 @@ function installJsDebugEventCapture() {
   });
 }
 
+function enableDebugMode() {
+  debugModeEnabled = true;
+  installJsDebugEventCapture();
+  if (typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
+  scheduleJsDebugPanelRefresh();
+}
+
 installJsDebugEventCapture();
 
 let appViewportOverride = null;

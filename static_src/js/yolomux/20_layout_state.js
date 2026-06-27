@@ -854,7 +854,7 @@ function initialLayoutSlots() {
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return layoutWithDebugPaneActive(layoutFromUrl);
+  if (layoutFromUrl) return layoutFromUrl;
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -863,30 +863,8 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutWithDebugPaneActive(layoutFromSessionList(selected));
-  return layoutWithDebugPaneActive(defaultLayoutSlots());
-}
-
-function debugPanePreferredSlot(slots) {
-  const keys = layoutSlotKeys(slots);
-  return keys.find(slot => paneTabs(slot, slots).some(item => item === infoItemId || item === yoagentItemId || item === prefsItemId))
-    || keys.find(slot => {
-      const active = activeItemForSide(slot, slots);
-      return active && !isFileExplorerItem(active);
-    })
-    || keys[0]
-    || 'left';
-}
-
-function layoutWithDebugPaneActive(slots) {
-  if (!debugModeEnabled || !isLayoutItem(debugPaneItemId)) return slots;
-  const next = cloneLayoutSlots(slots);
-  const existingSlot = layoutSlotKeys(next).find(slot => paneTabs(slot, next).includes(debugPaneItemId));
-  const slot = existingSlot || debugPanePreferredSlot(next);
-  const tabs = paneTabs(slot, next).filter(item => item !== debugPaneItemId);
-  next[slot] = paneStateWithTabs([...tabs, debugPaneItemId], debugPaneItemId);
-  if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(slot);
-  return compactLayoutSlots(next);
+  if (selected.length) return layoutFromSessionList(selected);
+  return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
@@ -1589,7 +1567,7 @@ function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(s
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  // Spin the YO ball whenever any Claude/Codex window is working, even when that window is hidden.
+  // Spin the YO ball whenever any Claude/Codex tmux sub-window is working, even when that sub-window is hidden.
   return sessionHasWorkingAgentWindow(session, payload) || autoApproveScreenIsWorking(payload);
 }
 

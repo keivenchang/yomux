@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import threading
 import time
@@ -21,6 +22,7 @@ from .cache import TtlCache
 from .common import _CACHE_MISS
 from .common import git
 from .common import git_ahead_behind_counts
+from .filesystem.search import SEARCH_SKIP_DIRS
 from .github_client import extract_linear_ids
 from .github_client import github_checks_unknown
 from .github_client import github_pull_request_by_branch
@@ -194,7 +196,10 @@ def linked_worktree_branch_names(cwd: str, toplevel: str) -> set[str]:
     return branches
 
 
-def git_metadata_base(root_text: str) -> dict[str, Any] | None:
+def git_metadata_base(
+    root_text: str,
+    branch_limit: int | None = OTHER_BRANCH_LIMIT,
+) -> dict[str, Any] | None:
     def compute() -> dict[str, Any] | None:
         branch = git(["rev-parse", "--abbrev-ref", "HEAD"], root_text)
         head_sha = git(["rev-parse", "HEAD"], root_text)
@@ -222,11 +227,13 @@ def git_metadata_base(root_text: str) -> dict[str, Any] | None:
                 branch_name,
                 worktree=worktree,
                 linked_worktree_branches=linked_branches,
+                branch_limit=branch_limit,
             ),
             "worktree": worktree,
         }
 
-    return cached_build_value("git_metadata_by_root", root_text, compute, copy_value=True)
+    cache_key = f"{root_text}\0{branch_limit if branch_limit is not None else 'all'}"
+    return cached_build_value("git_metadata_by_root", cache_key, compute, copy_value=True)
 
 
 def git_inventory(cwd: str | None) -> dict[str, Any] | None:
@@ -264,15 +271,13 @@ def local_branch_inventory(
     current_branch: str | None,
     worktree: dict[str, str] | None = None,
     linked_worktree_branches: set[str] | None = None,
+    branch_limit: int | None = OTHER_BRANCH_LIMIT,
 ) -> dict[str, Any]:
     result = git(
         [
-            "for-each-ref",
-            "--sort=-committerdate",
+            "branch",
             "--format=%(refname)\t%(refname:short)\t%(objectname)\t%(committerdate:unix)"
             "\t%(committerdate:relative)\t%(subject)",
-            "refs/heads",
-            "refs/remotes/origin",
         ],
         cwd,
     )
@@ -280,7 +285,6 @@ def local_branch_inventory(
         return {"branches": [], "hidden_count": 0}
     pr_by_sha = local_pull_request_by_sha(cwd)
     entries: list[dict[str, Any]] = []
-    all_local_names: set[str] = set()
     for line in result.stdout.splitlines():
         full_ref, _, rest = line.partition("\t")
         short_ref, _, rest = rest.partition("\t")
@@ -290,8 +294,6 @@ def local_branch_inventory(
         source, name = branch_inventory_ref(full_ref, short_ref)
         if not source or not name:
             continue
-        if source == "local":
-            all_local_names.add(name)
         entries.append(
             {
                 "source": source,
@@ -306,12 +308,10 @@ def local_branch_inventory(
     hidden_count = 0
     seen_names: set[str] = set()
     local_entries = [entry for entry in entries if entry["source"] == "local"]
-    remote_entries = [entry for entry in entries if entry["source"] == "remote"]
     if worktree is not None:
         # Linked worktrees share refs/heads in the common git dir. Let the main checkout own the shared
         # branch inventory; each linked checkout only reports the branch it has checked out.
         local_entries = [entry for entry in local_entries if entry["name"] == current_branch]
-        remote_entries = []
     else:
         linked_worktree_branches = linked_worktree_branches or set()
         local_entries = [
@@ -319,24 +319,12 @@ def local_branch_inventory(
             for entry in local_entries
             if entry["name"] == current_branch or entry["name"] not in linked_worktree_branches
         ]
-    local_names = {entry["name"] for entry in local_entries}
-    local_namespaces = {
-        namespace
-        for namespace in (branch_namespace(name) for name in local_names)
-        if namespace
-    }
-    for entry in [*local_entries, *remote_entries]:
+    for entry in local_entries:
         name = entry["name"]
         sha = entry["sha"]
         if name in seen_names:
             continue
-        remote_only_pr = entry["source"] == "remote" and name not in all_local_names and sha in pr_by_sha
-        if entry["source"] == "remote":
-            # Remote refs are huge in shared repos; only promote PR branches from namespaces already present
-            # locally so stale or unrelated remote PR refs do not crowd out the checked-out work.
-            if not remote_only_pr or branch_namespace(name) not in local_namespaces:
-                continue
-        if len(branches) >= OTHER_BRANCH_LIMIT and name != current_branch:
+        if branch_limit is not None and len(branches) >= branch_limit and name != current_branch:
             if entry["source"] == "local":
                 hidden_count += 1
             continue
@@ -365,17 +353,7 @@ def local_branch_inventory(
 def branch_inventory_ref(full_ref: str, short_ref: str) -> tuple[str | None, str | None]:
     if full_ref.startswith("refs/heads/"):
         return "local", full_ref.removeprefix("refs/heads/")
-    if full_ref.startswith("refs/remotes/origin/"):
-        name = full_ref.removeprefix("refs/remotes/origin/")
-        if name == "HEAD" or name.startswith("pull-request/"):
-            return None, None
-        return "remote", name
     return None, short_ref or None
-
-
-def branch_namespace(name: str) -> str | None:
-    namespace, separator, _ = name.partition("/")
-    return namespace if separator and namespace else None
 
 
 def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
@@ -557,6 +535,7 @@ def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_netw
     if git_data is None:
         return empty_project_metadata()
     enrich_branch_pull_requests(git_data, cache, allow_network=allow_network)
+    enrich_branch_linear_metadata(git_data, cache, allow_network=allow_network)
 
     pull_request = project_pull_request(git_data, cache, allow_network=allow_network)
     linear_ids = extract_linear_ids(
@@ -612,6 +591,29 @@ def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, 
         if found:
             branch["pull_request"] = found
 
+def enrich_branch_linear_metadata(git_data: dict[str, Any], cache: MetadataCache, allow_network: bool = True) -> None:
+    inventory = git_data.get("other_branches")
+    branches = inventory.get("branches") if isinstance(inventory, dict) else None
+    if not isinstance(branches, list):
+        return
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        pr = branch.get("pull_request")
+        pr_linear_ids = pr.get("linear_ids") if isinstance(pr, dict) and isinstance(pr.get("linear_ids"), list) else []
+        linear_ids = extract_linear_ids(
+            branch.get("name") if isinstance(branch.get("name"), str) else None,
+            branch.get("subject") if isinstance(branch.get("subject"), str) else None,
+            pr.get("title") if isinstance(pr, dict) and isinstance(pr.get("title"), str) else None,
+            pr.get("description") if isinstance(pr, dict) and isinstance(pr.get("description"), str) else None,
+            " ".join(str(item) for item in pr_linear_ids),
+        )
+        if not linear_ids:
+            branch["linear"] = []
+            continue
+        branch["linear_ids"] = linear_ids
+        branch["linear"] = [linear_issue_metadata(identifier, cache, allow_network=allow_network) for identifier in linear_ids]
+
 def session_git_inventory(info: SessionInfo) -> dict[str, Any] | None:
     for summary in session_repo_summaries(info, None):
         cwd = summary.get("cwd") or summary.get("root")
@@ -659,13 +661,16 @@ def repo_commit_activity_ts(cwd: str) -> float:
         return 0.0
 
 
-def repo_summary(cwd: str | None) -> dict[str, Any] | None:
+def repo_summary(
+    cwd: str | None,
+    branch_limit: int | None = OTHER_BRANCH_LIMIT,
+) -> dict[str, Any] | None:
     # C9: a per-repo local summary. It stays network-free, but includes branch inventory so YO!info can
     # show every branch in every repo a session touches; only the primary repo's PRs are enriched eagerly.
     root_text = git_root_for_cwd(cwd)
     if root_text is None:
         return None
-    base = git_metadata_base(root_text)
+    base = git_metadata_base(root_text, branch_limit=branch_limit)
     if base is None:
         return None
     status_lines = base["status_lines"]
@@ -685,6 +690,62 @@ def repo_summary(cwd: str | None) -> dict[str, Any] | None:
         "other_branches": base["other_branches"],
         "worktree": base["worktree"],
     }
+
+
+def indexed_repo_roots(indexed_dirs: list[str] | None = None) -> list[str]:
+    raw_dirs = indexed_dirs
+    if raw_dirs is None:
+        raw_dirs = settings_payload().get("settings", {}).get("file_explorer", {}).get("indexed_dirs", [])
+    if not isinstance(raw_dirs, list):
+        return []
+    roots: list[str] = []
+    seen: set[str] = set()
+
+    def add_repo(path: Path) -> bool:
+        root = git_root_for_cwd(str(path))
+        if not root or root in seen:
+            return False
+        seen.add(root)
+        roots.append(root)
+        return True
+
+    for raw in raw_dirs:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            indexed_root = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if not indexed_root.is_dir():
+            continue
+        if add_repo(indexed_root):
+            continue
+        for current, dirs, files in os.walk(indexed_root, topdown=True, followlinks=False):
+            current_path = Path(current)
+            if ".git" in dirs or ".git" in files:
+                add_repo(current_path)
+                dirs[:] = []
+                continue
+            dirs[:] = sorted(name for name in dirs if name not in SEARCH_SKIP_DIRS)
+    return roots
+
+
+def indexed_repo_summaries(
+    indexed_dirs: list[str] | None = None,
+    cache: MetadataCache | None = None,
+    allow_network: bool = False,
+) -> list[dict[str, Any]]:
+    metadata_cache = cache or MetadataCache()
+    summaries: list[dict[str, Any]] = []
+    for root in indexed_repo_roots(indexed_dirs):
+        summary = repo_summary(root, branch_limit=None)
+        if not summary:
+            continue
+        summary["indexed"] = True
+        summary["primary"] = False
+        enrich_branch_pull_requests(summary, metadata_cache, allow_network=allow_network)
+        summaries.append(summary)
+    return summaries
 
 
 def agent_signature(agent: AgentInfo) -> tuple[Any, ...]:

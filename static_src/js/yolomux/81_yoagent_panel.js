@@ -1561,7 +1561,6 @@ function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
   activitySummaryPayload = payload;
   activitySummaryLastRefreshTs = Date.now();
   activitySummaryRefreshing = false;
-  clearInfoSessionDrawerCache();
   if (options.refreshStartupSnapshot === true) captureYoagentStartupActivitySummarySnapshot({replace: true});
   if (options.render === true || options.refreshStartupSnapshot === true) {
     renderInfoPanel();

@@ -37,9 +37,9 @@ async function runShareThemeSuite() {
   test('t@2560', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,debug,image-viewer,file-editor');
     assert.equal(api.debugModeEnabledForTest(), false, 'JS Debug pane is off without the debug=1 URL flag');
-    assert.equal(api.resolveLayoutItem('debug'), 'debug', 'debug layout item is ignored while the URL flag is off');
+    assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug layout item resolves to the normal YO!stats tab');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'follower', ready_elsewhere: true}), 'ready', 'follower-owned ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'building'}), 'building', 'building file indexes keep polling');
@@ -58,6 +58,8 @@ async function runShareThemeSuite() {
     assert.equal(api.resolveLayoutItem('search'), api.searchHistoryItemId, 'search alias resolves to the Search & Runs pane');
     assert.equal(api.resolveLayoutItem('history'), api.searchHistoryItemId, 'history alias resolves to the Search & Runs pane');
     assert.equal(api.resolveLayoutItem('run-history'), api.searchHistoryItemId, 'run-history alias resolves to the Search & Runs pane');
+    assert.equal(api.resolveLayoutItem('info2'), api.infoItemId, 'legacy info2 alias resolves to the one YO!info pane');
+    assert.equal(api.resolveLayoutItem('__info2__'), api.infoItemId, 'legacy info2 item id resolves to the one YO!info pane');
     assert.equal(api.itemParam(api.infoItemId), 'info', 'the YO!info pane uses the info param');
     assert.equal(api.itemParam(api.yoagentItemId), 'yoagent', 'the YO!agent pane uses the yoagent param');
     assert.equal(api.itemParam(api.searchHistoryItemId), 'search-history', 'the Search & Runs pane uses a stable URL param');
@@ -3001,7 +3003,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareGeometryDigestSnapshot\(\)[\s\S]*viewport[\s\S]*slots[\s\S]*tabStrips[\s\S]*terminalCells[\s\S]*editors[\s\S]*fonts[\s\S]*textWraps/.test(shareSource), 'M9: geometry digest measures mirror inputs, rendered outputs, and wrapped text/control layout');
       assert.ok(/function shareEditorDigest\(panel\)[\s\S]*rect[\s\S]*contentHash[\s\S]*errorHash/.test(shareSource), 'M9: editor digest uses stable editor identity/content/error state rather than client scrollHeight jitter');
       assert.equal(/scrollHeight:\s*Math\.round\(Number\(panel\._cmView/.test(shareSource), false, 'M9: editor digest does not compare CodeMirror scrollHeight across share clients');
-      assert.ok(/const shareWrappedTextDigestSelectors = \[[\s\S]*'textarea\[data-setting-path\]'[\s\S]*'\.app-menu-command-label'[\s\S]*'\.info-row'/.test(shareSource), 'M9: wrapped text digest covers native controls, menus, and YO!info-style rows');
+      assert.ok(/const shareWrappedTextDigestSelectors = \[[\s\S]*'textarea\[data-setting-path\]'[\s\S]*'\.app-menu-command-label'[\s\S]*'\.info-tree-record'/.test(shareSource), 'M9: wrapped text digest covers native controls, menus, and YO!info tree rows');
       assert.ok(/function shareGeometryFirstDifference\(host = \{\}, local = \{\}\)[\s\S]*'textWraps'/.test(shareSource), 'M9: digest comparison names wrapped text/control drift separately');
       assert.ok(/async function boot\(\)[\s\S]*waitForYolomuxFontsReady\(\{timeoutMs: 0\}\)\.catch\(\(\) => \{\}\)[\s\S]*paintInitialAppShell\(\)[\s\S]*installYolomuxFontMetricRefresh\(\)/.test(shareSource), 'M9: first app render starts bundled font loading and corrects wrapped widgets after metrics settle');
       assert.ok(/const shareAppliedTextWrapMetricsByKey = new Map\(\)/.test(shareSource), 'M9: share viewers retain host wrapped-text metrics for digest repair');
@@ -3825,6 +3827,7 @@ async function runShareThemeSuite() {
     const tabsMenuLabels = tabsMenu.items.map(item => item.label).filter(Boolean);
     assert.equal(tmuxMenu.items[0].label, 'YO off');
     assert.equal(tmuxMenu.items[0].keepOpen, true);
+    assert.ok(tmuxMenuLabels.includes('YO!info'), 'tmux menu exposes YO!info alongside session commands');
     assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
     // New-session items use an explicit "new" command label in Tabs; the detail shows the params passed.
     assert.equal(tmuxMenuLabels.includes('new Claude'), false);
@@ -3849,6 +3852,17 @@ async function runShareThemeSuite() {
       assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*newTmuxSessionItems\(\),[\s\S]*filteredOpenItems/.test(newSessionSrc), 'Tabs menu owns the new-session commands');
       assert.ok(menuCss.includes('.app-menu-ui-icon-shell') && menuCss.includes('--icon-shell'), 'shell menu icon CSS is generated');
       assert.ok(/capped \? t\('menu\.tmux\.limitReached'\) : agentLaunchParams\(agent\)/.test(newSessionSrc), 'a launchable new-session item shows the params passed as its detail');
+      const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
+      assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
+      assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
+      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-pane-bg:\s*#ffffff[\s\S]*--info-tree-group-bg:\s*#f6f9fd/.test(infoTreeCss), 'YO!info light mode uses an opaque light pane surface');
+      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-tree-border:\s*#8793a3[\s\S]*--info-tree-line:\s*rgb\(100 116 139 \/ 0\.16\)/.test(infoTreeCss), 'YO!info light mode keeps connector lines visible while parent connector lines stay subtle');
+      assert.ok(/\.info-pane\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss) && /\.info-list\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss), 'YO!info pane and list surfaces inherit the theme-aware pane background');
+      assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-connector-arm-start:\s*calc\(var\(--info-tree-connector-x\) \+ var\(--info-tree-connector-line-width\)\)[\s\S]*--info-tree-summary-connector-y:\s*13px[\s\S]*--info-tree-record-connector-y:\s*13px[\s\S]*\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*inset-inline-start:\s*var\(--info-tree-connector-arm-start\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item::after\s*\{[\s\S]*inset-block-start:\s*calc\(\(var\(--info-tree-children-gap\) \/ -2\) - var\(--info-tree-connector-line-width\)\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item-last::after\s*\{[\s\S]*height:\s*calc\(var\(--info-tree-record-connector-y\) \+ \(var\(--info-tree-connector-line-width\) \* 2\) \+ \(var\(--info-tree-children-gap\) \/ 2\)\)/.test(infoTreeCss), 'YO!info tree renders overlapping connector lines aligned to text midlines and stops the last item as a 90-degree angle');
+      assert.ok(/\.info-tree-group summary\s*\{[\s\S]*border:\s*0[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info group summaries are compact sticky text rows, not boxed cards');
+      assert.equal(infoTreeCss.includes('.info-tree-list::before'), false, 'YO!info does not reserve a fixed-height sticky mask that leaves blank space under a single sticky parent');
+      assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-children-gap:\s*0px/.test(infoTreeCss), 'YO!info sibling leaf node boxes touch vertically without an inserted gap');
+      assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*8px[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf records use a transparent fill with a faint 1px rounded node outline and no card shadow');
     }
     assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
     assert.ok(tmuxMenuLabels.includes("YO!summary for session '1'"));

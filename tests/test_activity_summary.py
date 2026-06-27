@@ -395,8 +395,8 @@ def test_yoagent_help_primer_and_deterministic_help_answers():
     assert "YOLOmux Pane" in pane_reply
     assert "tmux pane is different" in pane_reply
 
-    window_reply = deterministic_yoagent_reply("difference between a tmux window and a YOLOmux tab?", {}, {})
-    assert "tmux window" in window_reply
+    window_reply = deterministic_yoagent_reply("difference between a tmux sub-window and a YOLOmux tab?", {}, {})
+    assert "tmux sub-window" in window_reply
     assert "YOLOmux Tab" in window_reply
 
     context_reply = deterministic_yoagent_reply("where do your insights come from?", {}, {})

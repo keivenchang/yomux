@@ -106,6 +106,7 @@ from .metadata import candidate_session_cwds
 from .metadata import focus_root_for_session
 from .metadata import github_checks_unknown
 from .metadata import git_inventory
+from .metadata import indexed_repo_summaries
 from .metadata import metadata_build_cache
 from .metadata import project_inventory
 from .metadata import pull_request_number_from_subject
@@ -6073,6 +6074,7 @@ class TmuxWebtermApp:
                 name: session_to_json(info, self.metadata_cache, allow_network=False, include_metadata=not lightweight)
                 for name, info in sessions.items()
             }
+            indexed_repos = [] if lightweight else indexed_repo_summaries(cache=self.metadata_cache, allow_network=False)
         agent_payload = {"agentAuth": {}, "availableAgents": available_agent_commands()} if lightweight else self.agent_auth_payload()
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -6082,6 +6084,7 @@ class TmuxWebtermApp:
             "server_uptime_seconds": max(0.0, time.time() - SERVER_STARTED_AT),
             "session_order": self.sessions,
             "sessions": session_payloads,
+            "indexed_repos": indexed_repos,
             # refresh agent login status on the metadata poll (cached server-side) so the
             # new-session picker re-enables an agent within the cache TTL after the user logs in.
             "agentAuth": agent_payload["agentAuth"],

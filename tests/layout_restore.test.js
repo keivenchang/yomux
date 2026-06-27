@@ -64,14 +64,10 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.normalizeSessionFileLookbackHoursForTest('365', 336), 336);
   });
 
-  test('YO!info lookback control uses shared options and refreshes activity summary', () => {
+  test('YO!info activity-summary lookback state uses shared options and refreshes activity summary', () => {
     const requests = [];
     const api = loadYolomux('', ['1']);
-    const control = api.infoLookbackControlHtmlForTest();
-    assert.ok(control.includes('data-info-lookback'), 'Info renders a lookback select');
-    assert.ok(control.includes('>30 min</option>'), 'Info lookback includes the shared 30 minute label');
-    assert.ok(control.includes('>14 days</option>'), 'Info lookback includes the shared 14 day label');
-    assert.ok(/value="24" selected/.test(control), 'Info lookback defaults to 24 hours');
+    assert.equal(api.infoSessionFileLookbackHoursForTest(), 24, 'Info activity-summary lookback defaults to 24 hours');
     api.setTranscriptSessionOrderForTest(['external', '1']);
     api.setTranscriptInfoForTest('external', {
       project: {
@@ -82,7 +78,7 @@ async function runLayoutRestoreSuite() {
         },
       },
     });
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['external'], 'YO!info branch rows can render sessions outside the initial tab list');
+    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['external / no AI'], 'YO!info branch rows can render tabs outside the initial tab list');
     api.setFetchForTest(url => {
       requests.push(String(url));
       return Promise.resolve(jsonResponse({sessions: {}, global: {lines: []}, session_order: [], session_file_hours: 336}));
@@ -1245,7 +1241,8 @@ async function runLayoutRestoreSuite() {
     // YO!info and YO!agent are independent virtual tabs. YO!info owns repo metadata; YO!agent owns chat/activity.
     const createInfoPanelSource = source.slice(source.indexOf('function createInfoPanel()'), source.indexOf('function createYoagentPanel()'));
     const createYoagentPanelSource = source.slice(source.indexOf('function createYoagentPanel()'), source.indexOf('function bindYoagentPanel('));
-    assert.ok(/function createInfoPanel\(\)[\s\S]*?id="info-content"[\s\S]*?id="info-watched"/.test(source), 'YO!info panel hosts only metadata containers');
+    assert.ok(/function createInfoPanel\(\)[\s\S]*?id="info-content"[\s\S]*?info-tree-list/.test(source), 'YO!info panel hosts the relationship tree container');
+    assert.equal(createInfoPanelSource.includes('id="info-watched"'), false, 'YO!info no longer hosts the old watched-PR table container');
     assert.equal(createInfoPanelSource.includes('yoagent-content'), false, 'YO!info panel does not host YO!agent content');
     assert.ok(/function createYoagentPanel\(\)[\s\S]*?id="yoagent-content"/.test(source), 'YO!agent has its own standalone panel content container');
     assert.equal(source.includes('class="info-subtabs"'), false, 'YO!info/YO!agent no longer render an inner sub-tab toggle');
@@ -1291,21 +1288,13 @@ async function runLayoutRestoreSuite() {
     assert.equal(/\.info-subtabs\s*\{/.test(infoCss), false, 'old merged sub-tab bar CSS is removed');
     assert.ok(/\.info-actions-bar\s*\{[\s\S]*?background:\s*var\(--pane-bar-bg/.test(infoCss), 'virtual panel action bars use the shared pane bar background token');
     assert.ok(/\.info-subtab-actions\s*\{[\s\S]*?margin-inline-start:\s*auto/.test(infoCss), 'refresh actions sit at the right side of the action bar');
-    assert.ok(/body\.theme-light \.info-list,[\s\S]*?body\.theme-light \.info-watched\s*\{[\s\S]*?background:\s*#ffffff/.test(infoCss), '#40: the light-mode YO!info table uses a white surface');
+    assert.ok(/\.info-list\s*\{[\s\S]*?background:\s*var\(--info-pane-bg\)/.test(infoCss), '#40: the light-mode YO!info body uses the shared pane surface token');
     assert.equal(infoCss.includes('border-bottom: 1px solid #263044'), false, 'YO!info rows do not hardcode the old dark separator');
-    assert.ok(/\.info-row\s*\{[\s\S]*?border-bottom:\s*1px solid var\(--line\)/.test(infoCss), 'YO!info rows use the shared line token');
+    assert.equal(/\.info-row\s*\{/.test(infoCss), false, 'old YO!info table row CSS is removed');
     assert.ok(/\.info-server-role\s*\{[\s\S]*?border-bottom:\s*1px solid var\(--line\)/.test(infoCss), 'YO!info server-role rows use the shared line token');
-    assert.ok(infoCss.includes('--info-branch-column-width: 320px'), 'YO!info Branch column has a named default width token');
-    assert.ok(infoCss.includes('--info-desc-column-width: 310px'), 'YO!info desc column has a named default width token');
-    assert.ok(/grid-template-columns:[\s\S]*var\(--info-session-column-width\)[\s\S]*var\(--info-path-column-width\)[\s\S]*minmax\(var\(--info-branch-column-width\), var\(--info-branch-column-width\)\)[\s\S]*var\(--info-pr-column-width\)[\s\S]*var\(--info-linear-column-width\)[\s\S]*minmax\(var\(--info-desc-column-width\), 1fr\)[\s\S]*var\(--info-updated-column-width\)/.test(infoCss), 'YO!info table columns use named width tokens');
-    assert.ok(/min-width:\s*calc\([\s\S]*var\(--info-branch-column-width\)[\s\S]*var\(--info-desc-column-width\)[\s\S]*var\(--info-table-column-gap\) \* 6[\s\S]*var\(--info-table-inline-padding\) \* 2/.test(infoCss), 'YO!info table minimum width is derived from named column tokens');
-    assert.ok(infoCss.includes('--info-column-resizer-hit-width: 24px'), 'YO!info column resize target has a named hit-width token');
-    assert.ok(/\.info-resizable-header-cell\s*\{[\s\S]*?overflow:\s*visible/.test(infoCss), 'YO!info resize handles are not clipped by header cells');
-    assert.ok(/\.info-column-resizer\s*\{[\s\S]*?width:\s*var\(--info-column-resizer-hit-width\)[\s\S]*?cursor:\s*col-resize/.test(infoCss), 'YO!info headers expose full-width column-resize handles');
-    assert.ok(source.includes('data-info-column-resize="${esc(column)}"'), 'YO!info headers render resize handles through a shared helper');
-    assert.ok(source.includes("resizeHandle('branch', t('info.resizeBranchColumn'))"), 'YO!info Branch header renders the resize handle');
-    assert.ok(source.includes("resizeHandle('desc', t('info.resizeDescColumn'))"), 'YO!info desc header renders the resize handle');
-    assert.ok(/function infoColumnResizeTarget\(handle\)[\s\S]*dataset\?\.infoColumnResize[\s\S]*infoColumnResizeConfig\(column\)[\s\S]*function bindInfoColumnResizers\(node\)[\s\S]*delegate\(node, 'pointerdown', '\[data-info-column-resize\]'[\s\S]*setPointerCapture[\s\S]*storageSet\(target\.config\.storageKey/.test(source), 'YO!info column drag persists resized widths through shared delegated config');
+    assert.ok(/\.info-tree-record\s*\{[\s\S]*?border:\s*1px solid var\(--info-tree-record-border\)/.test(infoCss), 'YO!info tree records use the shared tree border token');
+    assert.ok(/\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*?background:\s*var\(--info-tree-line\)/.test(infoCss), 'YO!info tree connectors use the shared tree line token');
+    assert.equal(infoCss.includes('--info-column-resizer-hit-width'), false, 'old YO!info column resize tokens are removed');
     assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'info-style panels reserve a row for action controls');
     assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'action row survives a collapsed detail header');
     // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
@@ -1479,7 +1468,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(signalCounts.running, 2, 'server-wide tmux signals count a recent active window outside the current tab plus YO-active sessions');
     assert.equal(signalCounts.blocked, 1, 'attention counts still come from YO screen state');
     assert.equal(signalCounts.total, 4, 'signal windows and configured tmux sessions share one total without requiring every window in the tab URL');
-    assert.equal(signalCounts.idle, 1, 'an old tmux window outside the activity window remains idle');
+    assert.equal(signalCounts.idle, 1, 'an old tmux sub-window outside the activity window remains idle');
     assert.equal(signalApi.browserFaviconBadgeCount(signalCounts), 2, 'favicon badge counts server-wide active windows');
     signalApi.setTmuxSignalStateForTest({
       windows: [

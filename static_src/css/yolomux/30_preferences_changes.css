@@ -1735,8 +1735,7 @@ body.theme-light .preferences-inline-action {
 .popover-value a.pr-status-merged:hover,
 .meta a.pr-status-merged:hover,
 .summary-context a.pr-status-merged:hover,
-.branch-meta a.pr-status-merged:hover,
-.info-cell a.pr-status-merged:hover {
+.branch-meta a.pr-status-merged:hover {
   color: var(--pr-status-merged);
 }
 .branch-list {
@@ -1745,7 +1744,7 @@ body.theme-light .preferences-inline-action {
   border-top: 1px solid rgba(82, 95, 116, 0.42);
 }
 .branch-list-title {
-  color: #cbd5e1;
+  color: var(--neutral-text-cool);
   font-weight: 600;
   font-size: var(--ui-font-size-sm);
   margin-bottom: 6px;

@@ -1759,7 +1759,7 @@ function fileExplorerModeTitle() {
 function fileExplorerModeButtonTitle(mode) {
   // 'Tabber' tooltip is a brand-literal for now (no locale key) to avoid a 14-catalog change while the
   // co-agent is editing locales; the localized title lands with the B6 docs pass.
-  if (mode === 'tabber') return 'Tabber: open tabs, tmux windows, and the paths each agent touched';
+  if (mode === 'tabber') return 'Tabber: open tabs, tmux sub-windows, and the paths each agent touched';
   return mode === 'diff' ? t('changes.show') : t('changes.hide');
 }
 
