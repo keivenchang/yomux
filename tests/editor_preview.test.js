@@ -2716,7 +2716,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.jsDebugEventsForTest().length, 1, 'event capture remains available for later YO!stats inspection');
   });
 
-  await testAsync('YO!stats records disconnected client gaps without a bottom red baseline', async () => {
+  await testAsync('YO!stats records disconnected client gaps with full-height bad-connection overlays', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
     await flushAsyncWork();
@@ -2742,8 +2742,11 @@ async function runEditorPreviewSuite() {
     api.recordJsDebugDisconnectedSpanForTest(now - 4000, now - 1000);
     const html = api.debugPanelHtmlForTest();
 
+    assert.ok((html.match(/data-js-debug-disconnected-range="/g) || []).length >= 6, 'YO!stats renders outage overlays in every chart');
+    assert.ok(/class="js-debug-disconnected-range"[^>]* y="0"[^>]* height="120"/.test(html), 'bad-connection overlays cover the full SVG graph area');
+    assert.ok(html.includes('Bad connection: no data collected for'), 'bad-connection overlays explain the missing collection interval');
     assert.equal(html.includes('data-js-debug-disconnect-line='), false, 'YO!stats does not render disconnected-client bars in the chart SVG');
-    assert.equal(html.includes('class="js-debug-disconnect-line"') || html.includes('Client disconnected'), false, 'disconnected-client spans are not a visible red baseline overlay');
+    assert.equal(html.includes('class="js-debug-disconnect-line"') || html.includes('Client disconnected'), false, 'disconnected-client spans are not a bottom red baseline overlay');
     assert.ok(api.debugGraphBucketSummaryForTest(now).disconnectedBuckets > 0, 'disconnected spans are kept as graph bucket data');
 
     await api.flushJsDebugStatsHistoryForTest();
@@ -2754,9 +2757,26 @@ async function runEditorPreviewSuite() {
     assert.ok(body.records.some(record => Number(record.disconnected_ms || 0) > 0), 'disconnected span history includes disconnected_ms');
 
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.ok(/\.js-debug-disconnected-range\s*\{[\s\S]*fill:\s*rgb\(var\(--js-debug-bad-connection-rgb\) \/ 0\.5\)/.test(debugPaneCss), 'bad-connection overlays are 50% red');
     assert.equal(debugPaneCss.includes('.js-debug-disconnect-line'), false, 'disconnected-client baseline CSS is removed');
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     assert.ok(terminalBootSource.includes('recordJsDebugClientEventsConnectionState(false)') && terminalBootSource.includes('recordJsDebugClientEventsConnectionState(true)'), 'client-events SSE transitions feed YO!stats disconnected spans');
+    const terminalCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(/body\.bad-connection \.terminal \.xterm \.xterm-cursor\s*\{[\s\S]*background:\s*var\(--bad\) !important[\s\S]*animation:\s*none !important/.test(terminalCss), 'bad connection forces the terminal cursor to a static red cursor');
+    assert.ok(/body\.bad-connection \.terminal \.xterm \.xterm-cursor::before[\s\S]*body\.bad-connection \.terminal \.xterm \.xterm-cursor::after[\s\S]*rotate\(45deg\)[\s\S]*rotate\(-45deg\)/.test(terminalCss), 'bad connection draws an X over the terminal cursor when the xterm cursor DOM supports pseudo-elements');
+
+    const term = {options: {theme: {cursor: '#ffffff', cursorAccent: '#11151d'}, cursorBlink: true}};
+    api.registerTerminalForTest('1', term);
+    api.setFocusedPanelItem('1');
+    api.recordJsDebugClientEventsConnectionStateForTest(false);
+    assert.equal(api.testElementForId('body').classList.contains('bad-connection'), true, 'client-events disconnect marks the page as a bad connection');
+    assert.equal(term.options.cursorBlink, false, 'bad connection disables terminal cursor blinking');
+    assert.equal(term.options.theme.cursor, '#ff6673', 'bad connection uses the red dark-mode cursor override');
+    assert.equal(term.options.theme.cursorAccent, '#fff3f4', 'bad connection keeps the red cursor X/text readable');
+    api.recordJsDebugClientEventsConnectionStateForTest(true);
+    assert.equal(api.testElementForId('body').classList.contains('bad-connection'), false, 'client-events reconnect clears the bad-connection page state');
+    assert.equal(term.options.cursorBlink, true, 'reconnect restores terminal cursor blinking');
+    assert.equal(term.options.theme.cursor, '#ffea00', 'reconnect restores the focused terminal cursor preference');
   });
 
   test('session popover lists agent windows with working durations and idle recency', () => {
@@ -5322,9 +5342,10 @@ async function runEditorPreviewSuite() {
     // Active-terminal cursor: the focused pane's terminal shows the configured cursor color.
     assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(source), 'active-terminal cursor: yellow remains the default cursor color');
     assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*\{dark:\s*'#ffea00',\s*light:\s*'#9a6700'\}/.test(source), 'active-terminal cursor: bright yellow cursor color lives in the shared UI color parent with a light-mode variant');
-    assert.ok(/function terminalThemeForSession[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColorForTheme\(theme\)\}/.test(source), 'active-terminal cursor: the focused session gets the configured cursor color, others keep theme default');
-    assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the configured cursor color');
-    assert.ok(/theme: terminalThemeForSession\(session, baseTheme\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession');
+    assert.ok(/function terminalThemeForSession[\s\S]*?badConnectionCursorStateActive\(\)[\s\S]*?terminalThemeWithBadConnectionCursor\(theme\)[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColorForTheme\(theme\)\}/.test(source), 'active-terminal cursor: the focused session gets the configured cursor color unless bad connection owns the cursor');
+    assert.ok(/item\.term\.options\.cursorBlink = terminalCursorBlinkEnabled\(\)[\s\S]*?item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings updates blink state and themes the active terminal with the configured cursor color');
+    assert.ok(/cursorBlink: typeof terminalCursorBlinkEnabled === 'function' \? terminalCursorBlinkEnabled\(\) : true/.test(source) && /theme: terminalThemeForSession\(session, baseTheme\)/.test(source), 'active-terminal cursor: a newly-created terminal uses shared blink/theme cursor helpers');
+    assert.ok(/function refreshActiveTerminalCursor[\s\S]*?item\.term\.options\.cursorBlink = !badConnection/.test(source), 'active-terminal cursor: connection changes can disable cursor blinking without a full terminal rebuild');
     assert.ok(/function updatePanelInactiveOverlays[\s\S]*?refreshActiveTerminalCursor\(\)/.test(source), 'active-terminal cursor: focus changes refresh the cursor color (refreshActiveTerminalCursor)');
   });
 

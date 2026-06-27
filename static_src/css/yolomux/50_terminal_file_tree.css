@@ -82,6 +82,35 @@
 .terminal .xterm {
   height: 100%;
 }
+body.bad-connection .terminal .xterm .xterm-cursor {
+  position: relative;
+  color: var(--danger-text) !important;
+  background: var(--bad) !important;
+  animation: none !important;
+  box-shadow: inset 0 0 0 1px var(--danger-border), 0 0 0 1px rgb(0 0 0 / 0.35);
+}
+body.bad-connection .terminal .xterm .xterm-cursor.xterm-cursor-blink {
+  animation: none !important;
+}
+body.bad-connection .terminal .xterm .xterm-cursor::before,
+body.bad-connection .terminal .xterm .xterm-cursor::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: 50%;
+  width: 72%;
+  height: 1.5px;
+  border-radius: 999px;
+  background: var(--danger-text);
+  transform-origin: center;
+  pointer-events: none;
+}
+body.bad-connection .terminal .xterm .xterm-cursor::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+body.bad-connection .terminal .xterm .xterm-cursor::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
 .terminal .terminal-attention-question-overlay {
   position: absolute;
   z-index: var(--z-terminal-overlay-low);

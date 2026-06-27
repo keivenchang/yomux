@@ -2280,7 +2280,15 @@ async function runShareThemeSuite() {
     assert.ok(/\.preferences-radio\.has-swatches\s*\{[\s\S]*grid-template-columns:\s*18px 34px minmax\(0,\s*1fr\)/.test(preferencesCss), 'swatched Preferences radios align radio, color chips, and label in fixed columns');
     assert.ok(/\.preferences-radio-swatch\s*\{[\s\S]*border-radius:\s*2px/.test(preferencesCss), 'Preferences color swatches are boxed, not round dots');
     assert.ok(/\.preferences-radio-swatches\.joined\s*\{[\s\S]*gap:\s*0/.test(preferencesCss), 'Preferences active-color swatches are connected into one segmented box');
+    assert.ok(/\.keyboard-shortcuts-dialog\s*\{[\s\S]*width:\s*min\(1180px,\s*calc\(100vw - \(2 \* var\(--popover-edge-gap\)\)\)\)[\s\S]*max-height:\s*min\(92vh,\s*900px\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends uses a wide viewport-bounded panel');
+    assert.ok(/\.keyboard-shortcuts-body\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(260px,\s*100%\),\s*1fr\)\)[\s\S]*gap:\s*8px 10px[\s\S]*padding:\s*8px 10px 10px/.test(preferencesCss), 'Keyboard Shortcuts and Legends packs balanced columns into three or four compact tracks');
+    assert.ok(/\.keyboard-shortcuts-column\s*\{[\s\S]*display:\s*grid[\s\S]*align-content:\s*start[\s\S]*gap:\s*8px/.test(preferencesCss), 'Keyboard Shortcuts and Legends stacks sections inside each column instead of leaving sparse row holes');
     assert.ok(/\.keyboard-shortcuts-section h3\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(preferencesCss), 'Keyboard shortcuts section headers follow the active theme color');
+    assert.ok(/\.keyboard-legend-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(34px,\s*max-content\) minmax\(0,\s*1fr\)[\s\S]*padding:\s*2px 0/.test(preferencesCss), 'Keyboard legend rows use compact sample/detail columns');
+    assert.ok(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'YO buttons use the shared square control radius, not a circular pill');
+    assert.ok(/\.panel-session-label \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'Info Bar YO buttons use the same square control radius');
+    assert.ok(/\.pane-tab-core > \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'pane tab YO buttons keep the same square control radius');
+    assert.equal(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-pill\)/.test(preferencesCss), false, 'YO button base chrome must not use the circular pill radius');
     assert.ok(preferencesHtml.includes('>New Tab<'), 'hyphenated string radio labels are humanized');
     // "No agent" (deterministic) is no longer a selectable backend — Auto still falls back to it internally,
     // but it is never offered as a pick in Preferences or the composer pill.
@@ -4058,16 +4066,25 @@ async function runShareThemeSuite() {
     assert.equal(viewMenu.items.find(item => item.label === 'Refresh').detail, undefined);
     const helpMenu = menus.find(menu => menu.id === 'help');
     const helpMenuLabels = helpMenu.items.map(item => item.label).filter(Boolean);
-    assert.ok(helpMenuLabels.includes('Keyboard shortcuts'));
+    assert.ok(helpMenuLabels.includes('Keyboard Shortcuts and Legends'));
     assert.ok(helpMenuLabels.includes('Open README'));
-    const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard shortcuts');
+    const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard Shortcuts and Legends');
     assert.equal(shortcutsMenu.type, 'command');
     assert.equal(shortcutsMenu.detail, '?');
     assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
+    assert.ok(api.keyboardShortcutsHtml().includes('Open YO!agent in a right pane'), 'shortcut overlay documents the YO!agent pane shortcut');
     assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
     assert.ok(api.keyboardShortcutsHtml().includes('Previous / next tab') && api.keyboardShortcutsHtml().includes('Meta+← / Meta+→'), 'shortcut overlay documents Meta+Arrow pane-tab navigation');
     assert.ok(api.keyboardShortcutsHtml().includes('Drag a tab'), 'shortcut overlay is honest that tab/pane layout changes are pointer-driven');
+    assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+Backspace / Ctrl+Delete'), 'shortcut overlay documents both close-tab fallback keys');
+    assert.ok(api.keyboardShortcutsHtml().includes('Select all rows') && api.keyboardShortcutsHtml().includes('Ctrl+A'), 'shortcut overlay documents Finder/Differ select-all');
+    assert.ok(api.keyboardShortcutsHtml().includes('Open selected quick-open file in a split') && api.keyboardShortcutsHtml().includes('Ctrl+Enter'), 'shortcut overlay documents the quick-open split keybinding');
+    assert.ok(api.keyboardShortcutsHtml().includes('Run drop or paste action by number'), 'shortcut overlay documents drop-action number shortcuts');
+    assert.ok(api.keyboardShortcutsHtml().includes('Copy visible terminal selection'), 'shortcut overlay documents terminal selection copy');
+    assert.ok(api.keyboardShortcutsHtml().includes('Color meanings'), 'shortcut overlay includes the color legend');
+    assert.ok(api.keyboardShortcutsHtml().includes('YO button meanings'), 'shortcut overlay includes the YO button legend');
+    assert.ok(api.keyboardShortcutsHtml().includes('keyboard-shortcuts-column'), 'shortcut overlay renders balanced column wrappers to pack the help content vertically');
     assert.equal(/Move or split tab[\s\S]{0,120}(Ctrl|Cmd|Alt|Shift)\+/.test(api.keyboardShortcutsHtml()), false, 'shortcut overlay does not advertise keyboard tab/pane movement');
     assert.ok(api.keyboardShortcutsHtml().includes('outside text'), 'shortcut overlay scopes the Backspace close-tab fallback');
     assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(globalThis\.isSecureContext !== false && clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');

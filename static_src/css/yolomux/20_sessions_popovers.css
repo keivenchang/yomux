@@ -463,7 +463,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
   border: 2px solid var(--pane-tab-yolo-border);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-control);
   box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
@@ -487,7 +487,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   min-width: max(17px, calc(var(--ui-font-size) + 5px));
   height: max(16px, calc(var(--ui-font-size) + 5px));
   padding: 0;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-control);
   font-size: max(10px, var(--ui-font-size));
 }
 .session-yolo-marker.inactive {

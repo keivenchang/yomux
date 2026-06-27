@@ -722,6 +722,7 @@ function recordJsDebugClientEventsConnectionState(connected) {
   const nextConnected = connected === true;
   if (jsDebugStatsClientConnected === nextConnected) return;
   jsDebugStatsClientConnected = nextConnected;
+  if (typeof setBadConnectionCursorState === 'function') setBadConnectionCursorState(!nextConnected);
   const nowMs = Date.now();
   if (!nextConnected) {
     jsDebugStatsDisconnectStartedAtMs = nowMs;
@@ -1255,6 +1256,40 @@ function debugGraphXForTime(timeMs, domain) {
   return Math.max(0, Math.min(width, ((Number(timeMs) - startMs) / spanMs) * width));
 }
 
+function debugGraphDisconnectedRanges(buckets, domain) {
+  const domainStart = Number(domain?.startMs);
+  const domainEnd = Number(domain?.endMs);
+  if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
+  const ranges = [];
+  for (const bucket of buckets || []) {
+    const startMs = Number(bucket?.startMs);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+    const disconnectedMs = Math.min(durationMs, Math.max(0, Number(bucket?.disconnectedMs || 0)));
+    if (!Number.isFinite(startMs) || disconnectedMs <= 0) continue;
+    const rangeStart = Math.max(domainStart, startMs);
+    const rangeEnd = Math.min(domainEnd, startMs + disconnectedMs);
+    if (rangeEnd <= rangeStart) continue;
+    const previous = ranges.at(-1);
+    if (previous && rangeStart <= previous.endMs + 1) {
+      previous.endMs = Math.max(previous.endMs, rangeEnd);
+      previous.disconnectedMs += disconnectedMs;
+    } else {
+      ranges.push({startMs: rangeStart, endMs: rangeEnd, disconnectedMs});
+    }
+  }
+  return ranges;
+}
+
+function debugGraphDisconnectedRectsHtml(buckets, domain) {
+  return debugGraphDisconnectedRanges(buckets, domain).map((range, index) => {
+    const x1 = debugGraphXForTime(range.startMs, domain);
+    const x2 = debugGraphXForTime(range.endMs, domain);
+    const width = Math.max(1.5, x2 - x1);
+    const title = `Bad connection: no data collected for ${debugGraphTerseTimeText(range.disconnectedMs)}`;
+    return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(title)}</title></rect>`;
+  }).join('');
+}
+
 function debugGraphSeriesPlotValues(series) {
   return Array.isArray(series.plotValues) ? series.plotValues : (series.values || []);
 }
@@ -1500,6 +1535,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${debugGraphDisconnectedRectsHtml(buckets, domain)}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>

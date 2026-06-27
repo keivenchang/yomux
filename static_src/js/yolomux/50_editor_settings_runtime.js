@@ -552,6 +552,9 @@ function normalizeEditorCursorStyle(value) {
 
 const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
 const DEFAULT_CURSOR_COLOR = 'yellow';
+const BAD_CONNECTION_BODY_CLASS = 'bad-connection';
+const BAD_CONNECTION_CURSOR_COLORS = Object.freeze({dark: '#ff6673', light: '#b91c1c'});
+const BAD_CONNECTION_CURSOR_ACCENT = '#fff3f4';
 const SEPARATOR_COLOR_CHOICES = ['theme', ...UI_COLOR_CHOICES];
 const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
 const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
@@ -595,6 +598,27 @@ function editorCursorColorForScheme(scheme = activeEditorScheme()) {
 function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
   return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
+}
+
+function badConnectionCursorStateActive() {
+  return document.body?.classList?.contains(BAD_CONNECTION_BODY_CLASS) === true;
+}
+
+function badConnectionTerminalCursorColor() {
+  return resolvedTerminalThemeMode() === 'light' ? BAD_CONNECTION_CURSOR_COLORS.light : BAD_CONNECTION_CURSOR_COLORS.dark;
+}
+
+function terminalCursorBlinkEnabled() {
+  return !badConnectionCursorStateActive();
+}
+
+function terminalThemeWithBadConnectionCursor(theme) {
+  return {...theme, cursor: badConnectionTerminalCursorColor(), cursorAccent: BAD_CONNECTION_CURSOR_ACCENT};
+}
+
+function setBadConnectionCursorState(active) {
+  document.body?.classList?.toggle(BAD_CONNECTION_BODY_CLASS, active === true);
+  refreshActiveTerminalCursor();
 }
 
 function applyCursorColorSetting() {
@@ -764,6 +788,7 @@ function installGlobalThemeMediaListener() {
 
 function terminalThemeForSession(session, baseTheme) {
   const theme = baseTheme || terminalThemeForGlobalTheme();
+  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor(theme);
   return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
 }
 
@@ -784,6 +809,7 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.fontFamily = terminalFontFamily;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
+    item.term.options.cursorBlink = terminalCursorBlinkEnabled();
     item.term.options.theme = terminalThemeForSession(session, theme);
     item.term.options.minimumContrastRatio = minContrast;
     item.term.clearTextureAtlas?.();
@@ -797,11 +823,18 @@ function applyTerminalRuntimeSettings(options = {}) {
 // terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
 function refreshActiveTerminalCursor() {
   const base = terminalThemeForGlobalTheme();
+  const badConnection = badConnectionCursorStateActive();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term?.options) continue;
-    const cursor = session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor;
+    item.term.options.cursorBlink = !badConnection;
+    const cursor = badConnection
+      ? badConnectionTerminalCursorColor()
+      : (session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor);
+    const cursorAccent = badConnection ? BAD_CONNECTION_CURSOR_ACCENT : base.cursorAccent;
     const current = item.term.options.theme || base;
-    if (current.cursor !== cursor) item.term.options.theme = {...current, cursor};
+    if (current.cursor !== cursor || current.cursorAccent !== cursorAccent) {
+      item.term.options.theme = {...current, cursor, cursorAccent};
+    }
   }
 }
 

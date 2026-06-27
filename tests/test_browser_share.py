@@ -2474,7 +2474,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         host_phase("shortcuts")
         shortcuts = wait_viewer_phase("help-shortcuts")
         assert shortcuts["shortcutsOpen"] is True, shortcuts
-        assert "Keyboard shortcuts" in shortcuts["shortcutsText"], shortcuts
+        assert "Keyboard Shortcuts and Legends" in shortcuts["shortcutsText"], shortcuts
 
         host_phase("about")
         about = wait_viewer_phase("help-about")

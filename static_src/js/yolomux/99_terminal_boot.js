@@ -3470,7 +3470,7 @@ function startTerminal(session) {
   const term = new TerminalCtor({
     cols: size.cols,
     rows: size.rows,
-    cursorBlink: true,
+    cursorBlink: typeof terminalCursorBlinkEnabled === 'function' ? terminalCursorBlinkEnabled() : true,
     convertEol: false,
     fontFamily: terminalFontFamily,
     fontSize: terminalFontSize,

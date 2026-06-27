@@ -2466,7 +2466,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
   border: 2px solid var(--pane-tab-yolo-border);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-control);
   box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
@@ -2490,7 +2490,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   min-width: max(17px, calc(var(--ui-font-size) + 5px));
   height: max(16px, calc(var(--ui-font-size) + 5px));
   padding: 0;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-control);
   font-size: max(10px, var(--ui-font-size));
 }
 .session-yolo-marker.inactive {
@@ -3171,6 +3171,7 @@ body.theme-light .branch-link {
   --js-debug-idle-agent-status: #3f4754;
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
+  --js-debug-bad-connection-rgb: 220 38 38;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
 }
@@ -3472,6 +3473,10 @@ body.theme-light .js-debug-graph-view {
   fill: color-mix(in srgb, var(--active-accent-bright) 35%, transparent);
   stroke: color-mix(in srgb, var(--active-accent-bright) 72%, transparent);
   stroke-width: 1;
+  pointer-events: none;
+}
+.js-debug-disconnected-range {
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.5);
   pointer-events: none;
 }
 .js-debug-graph--hovering .js-debug-hover-line {
@@ -4524,14 +4529,14 @@ body.theme-light .command-palette-view-chip {
   z-index: var(--z-file-conflict-dialog);
   align-items: start;
   justify-items: center;
-  padding: min(10vh, 82px) var(--popover-edge-gap) var(--popover-edge-gap);
+  padding: min(4vh, 34px) var(--popover-edge-gap) var(--popover-edge-gap);
 }
 .keyboard-shortcuts-overlay[hidden] {
   display: none;
 }
 .keyboard-shortcuts-dialog {
-  width: min(760px, var(--popover-max-inline-size));
-  max-height: min(76vh, 820px);
+  width: min(1180px, calc(100vw - (2 * var(--popover-edge-gap))));
+  max-height: min(92vh, 900px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
@@ -4546,7 +4551,7 @@ body.theme-light .command-palette-view-chip {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 11px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--line);
 }
 .keyboard-shortcuts-head h2 {
@@ -4573,36 +4578,106 @@ body.theme-light .command-palette-view-chip {
   overflow: auto;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
-  gap: 12px;
-  padding: 12px;
+  align-items: start;
+  gap: 8px 10px;
+  padding: 8px 10px 10px;
+}
+.keyboard-shortcuts-column {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+.keyboard-shortcuts-section {
+  min-width: 0;
 }
 .keyboard-shortcuts-section h3 {
-  margin: 0 0 6px;
+  margin: 0 0 4px;
   color: var(--active-accent-bright);
   font: 800 var(--ui-font-size-xs)/1.1 var(--mono-font);
   text-transform: uppercase;
 }
 .keyboard-shortcuts-list {
   display: grid;
-  gap: 3px;
+  gap: 1px;
 }
 .keyboard-shortcut-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 6px;
   align-items: center;
-  padding: 4px 0;
+  padding: 2px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .keyboard-shortcut-row kbd {
-  padding: 2px 5px;
+  padding: 1px 4px;
   color: var(--pane-tab-text);
   background: #0b1017;
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
   white-space: nowrap;
+}
+.keyboard-legend-row {
+  display: grid;
+  grid-template-columns: minmax(34px, max-content) minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font: var(--ui-font-size-sm)/1.25 var(--ui-font);
+}
+.keyboard-legend-sample {
+  min-width: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  color: var(--text);
+}
+.keyboard-legend-text {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+.keyboard-legend-label {
+  color: var(--text);
+  font-weight: 800;
+}
+.keyboard-legend-detail {
+  color: var(--muted);
+  font-size: var(--ui-font-size-2xs);
+}
+.keyboard-legend-swatch {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  border-radius: 999px;
+  border: 1px solid rgb(255 255 255 / 0.28);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.34);
+}
+.keyboard-legend-swatch-merged {
+  background: var(--pr-status-merged);
+}
+.keyboard-legend-swatch-closed {
+  background: var(--pr-status-closed);
+}
+.keyboard-legend-meta {
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font: 800 var(--ui-font-size-3xs)/1.15 var(--mono-font);
+  white-space: nowrap;
+}
+.keyboard-legend-meta-branch {
+  color: var(--pane-meta-branch);
+}
+.keyboard-legend-pin {
+  color: var(--text);
+}
+.keyboard-legend-sample .session-yolo-marker {
+  transform: none;
 }
 .preferences-setting-control {
   --preferences-control-left-indent: 14px;
@@ -4923,10 +4998,17 @@ body.theme-light .keyboard-shortcuts-close:focus-visible {
 body.theme-light .keyboard-shortcut-row {
   border-bottom-color: rgb(var(--overlay-slate-rgb) / 0.08);
 }
+body.theme-light .keyboard-legend-row {
+  border-bottom-color: rgb(var(--overlay-slate-rgb) / 0.08);
+}
 body.theme-light .keyboard-shortcut-row kbd {
   color: var(--pc-control-fg);
   background: var(--panel2);
   border-color: rgb(var(--overlay-slate-rgb) / 0.18);
+}
+body.theme-light .keyboard-legend-swatch {
+  border-color: rgb(var(--overlay-slate-rgb) / 0.24);
+  box-shadow: 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.08);
 }
 body.theme-light .preferences-global-reset {
   color: var(--danger-light-text);
@@ -6543,7 +6625,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 18px;
   height: 18px;
   padding: 1px 0;
-  border-radius: 2px;
+  border-radius: var(--radius-control);
   font-size: var(--ui-font-size-2xs);
 }
 .pane-tab-core .session-button-text {
@@ -7115,6 +7197,35 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .terminal .xterm {
   height: 100%;
+}
+body.bad-connection .terminal .xterm .xterm-cursor {
+  position: relative;
+  color: var(--danger-text) !important;
+  background: var(--bad) !important;
+  animation: none !important;
+  box-shadow: inset 0 0 0 1px var(--danger-border), 0 0 0 1px rgb(0 0 0 / 0.35);
+}
+body.bad-connection .terminal .xterm .xterm-cursor.xterm-cursor-blink {
+  animation: none !important;
+}
+body.bad-connection .terminal .xterm .xterm-cursor::before,
+body.bad-connection .terminal .xterm .xterm-cursor::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: 50%;
+  width: 72%;
+  height: 1.5px;
+  border-radius: 999px;
+  background: var(--danger-text);
+  transform-origin: center;
+  pointer-events: none;
+}
+body.bad-connection .terminal .xterm .xterm-cursor::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+body.bad-connection .terminal .xterm .xterm-cursor::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 .terminal .terminal-attention-question-overlay {
   position: absolute;

@@ -1563,7 +1563,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 18px;
   height: 18px;
   padding: 1px 0;
-  border-radius: 2px;
+  border-radius: var(--radius-control);
   font-size: var(--ui-font-size-2xs);
 }
 .pane-tab-core .session-button-text {

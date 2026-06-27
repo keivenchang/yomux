@@ -195,6 +195,44 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["apiSseDistance"] >= 120, (theme, item)
 
 
+def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
+    page = tmp_path / "debug-graph-bad-connection-overlay.html"
+    page.write_text(page_html("""
+      <section class="js-debug-graph-view" id="debug-graph">
+        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
+          <line class="js-debug-grid-line" x1="0" y1="60" x2="600" y2="60" vector-effect="non-scaling-stroke"></line>
+          <polyline class="js-debug-line js-debug-line--bandwidth" points="0,100 600,20" fill="none"></polyline>
+          <rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="0" x="120" y="0" width="180" height="120"></rect>
+        </svg>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
+      #debug-graph { width: 600px; height: 160px; }
+      .js-debug-line-chart { height: 120px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const svg = document.querySelector('.js-debug-line-chart');
+        const overlay = document.querySelector('.js-debug-disconnected-range');
+        const svgRect = svg.getBoundingClientRect();
+        const overlayRect = overlay.getBoundingClientRect();
+        const style = getComputedStyle(overlay);
+        return {
+          svgHeight: svgRect.height,
+          overlayTopDelta: Math.abs(overlayRect.top - svgRect.top),
+          overlayHeightDelta: Math.abs(overlayRect.height - svgRect.height),
+          fill: style.fill,
+          pointerEvents: style.pointerEvents,
+        };
+        """
+    )
+    assert metrics["overlayTopDelta"] <= 0.5, metrics
+    assert metrics["overlayHeightDelta"] <= 1.1, metrics
+    assert metrics["fill"] == "rgba(220, 38, 38, 0.5)", metrics
+    assert metrics["pointerEvents"] == "none", metrics
+
+
 def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
@@ -3140,6 +3178,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           cmHeadingColor: getComputedStyle(cmProbe.querySelector('.md-heading')).color,
           yoloBg: getComputedStyle(yoloProbe).backgroundColor,
           yoloBorder: getComputedStyle(yoloProbe).borderTopColor,
+          yoloRadius: getComputedStyle(yoloProbe).borderRadius,
           shortcutHeadingColor: getComputedStyle(shortcutProbe.querySelector('h3')).color,
           swatchDisplay: getComputedStyle(activeSwatchLabel).display,
           swatchRadius: getComputedStyle(activeSwatch).borderRadius,
@@ -3175,6 +3214,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           cmHeadingColor: metrics.cmHeadingColor,
           yoloBg: metrics.yoloBg,
           yoloBorder: metrics.yoloBorder,
+          yoloRadius: metrics.yoloRadius,
           shortcutHeadingColor: metrics.shortcutHeadingColor,
           swatchDisplay: metrics.swatchDisplay,
           swatchRadius: metrics.swatchRadius,
@@ -3207,6 +3247,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     assert metrics["cmHeadingColor"] == "rgb(59, 130, 246)", metrics
     assert metrics["yoloBg"] == "rgb(59, 130, 246)", metrics
     assert metrics["yoloBorder"] == "rgb(59, 130, 246)", metrics
+    assert metrics["yoloRadius"] == "4px", metrics
     assert metrics["shortcutHeadingColor"] == "rgb(59, 130, 246)", metrics
     assert metrics["swatchDisplay"] == "grid", metrics
     assert metrics["swatchRadius"] == "2px 0px 0px 2px", metrics

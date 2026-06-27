@@ -2412,11 +2412,14 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
       {label: t('share.title'), keys: appShortcutText('K')},
+      {label: 'Open YO!agent in a right pane', keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
+      {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
     {section: t('shortcuts.section.terminal'), items: [
+      {label: 'Copy visible terminal selection', keys: appShortcutText('C')},
       {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
     ]},
@@ -2436,17 +2439,80 @@ function keyboardShortcutCatalog() {
     ]},
     {section: t('shortcuts.section.tabsPanes'), items: [
       {label: t('shortcuts.pinTab'), keys: t('shortcuts.keys.pinTab', {k: appShortcutText('K', {shift: true})})},
-      {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: appShortcutText('Backspace')})},
+      {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}`})},
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
-      {label: t('shortcuts.closeMenu'), keys: 'Esc'},
+    ]},
+    {section: `${fileExplorerLabel()} / Differ`, items: [
+      {label: 'Move selection', keys: '↑ / ↓ / Home / End'},
+      {label: 'Extend selection', keys: 'Shift+↑ / ↓ / Home / End'},
+      {label: 'Expand / collapse folders', keys: '→ / ←'},
+      {label: 'Rename selected file', keys: 'Return'},
+      {label: 'Open selected file or folder', keys: appShortcutText('↓')},
+      {label: 'Open enclosing folder', keys: appShortcutText('↑')},
+      {label: 'Quick preview', keys: 'Space'},
+      {label: 'Select all rows', keys: appShortcutText('A')},
+      {label: 'Delete selected rows', keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
+    ]},
+    {section: 'Menus, palettes, and pickers', items: [
+      {label: 'Move through menus or results', keys: '↑ / ↓'},
+      {label: 'Open submenu or move across menu bar', keys: '← / →'},
+      {label: 'Run focused command', keys: 'Enter / Space'},
+      {label: 'Open selected quick-open file in a split', keys: appShortcutText('Enter')},
+      {label: 'Close menu, palette, or picker', keys: 'Esc'},
+      {label: 'Open Tabber sessions by number', keys: '1-9'},
+      {label: 'Run drop or paste action by number', keys: '1-9'},
     ]},
   ];
 }
 
-function keyboardShortcutsHtml() {
-  return keyboardShortcutCatalog().map(section => `
-    <section class="keyboard-shortcuts-section">
+function keyboardLegendStatusSample(kind, text = '●') {
+  if (kind === 'working') return `<span class="status-indicator status-indicator--dot status-indicator--working">${esc(text)}</span>`;
+  if (kind === 'cooldown') return `<span class="status-indicator status-indicator--dot status-indicator--cooldown">${esc(text)}</span>`;
+  if (kind === 'attention') return `<span class="status-indicator status-indicator--dot status-indicator--attention">${esc(text)}</span>`;
+  if (kind === 'idle') return `<span class="status-indicator status-indicator--dot status-indicator--idle">${esc(text)}</span>`;
+  return `<span class="keyboard-legend-swatch keyboard-legend-swatch-${esc(kind)}" aria-hidden="true"></span>`;
+}
+
+function keyboardLegendCatalog() {
+  return [
+    {section: 'Color meanings', items: [
+      {sampleHtml: keyboardLegendStatusSample('working'), label: 'Green', detail: 'Working, passing, healthy, or active. Agent balls use green for active work.'},
+      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: 'Yellow', detail: 'Recent attention transition or cooldown glow. It is less urgent than red.'},
+      {sampleHtml: keyboardLegendStatusSample('attention'), label: 'Red', detail: 'Needs input, needs approval, blocked, disconnected, failing CI, or another user-visible problem.'},
+      {sampleHtml: keyboardLegendStatusSample('merged'), label: 'Purple', detail: 'Merged GitHub PR. Purple is reserved for merged state.'},
+      {sampleHtml: keyboardLegendStatusSample('closed'), label: 'Gray', detail: 'Closed, done, idle, inactive, or unavailable state.'},
+      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: 'Metadata colors', detail: 'YO!info and Info Bars tint Path, Git BRANCH, Linear, GitHub PR, Tab, and AI fields so repeated rows scan by type.'},
+    ]},
+    {section: 'Status labels and balls', items: [
+      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-needs-input session-state-reminder">ASK?</span>', label: 'ASK?', detail: 'The AI is waiting for your answer or a permission/approval decision.'},
+      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-working">RUN</span>', label: 'RUN / TEST', detail: 'A session is working, or a test command is currently detected.'},
+      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-done">DONE</span>', label: 'DONE / IDLE', detail: 'The agent is finished or no active agent work is detected.'},
+      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-blocked">Blocked</span>', label: 'Blocked / OFF', detail: 'The agent hit a blocking error, or the browser terminal is disconnected.'},
+    ]},
+    {section: 'Icon meanings', items: [
+      {sampleHtml: appMenuUiIcon('finder'), label: fileExplorerLabel(), detail: 'Finder/File Explorer or Differ tree.'},
+      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: 'YO!info branch, PR, Linear, Tab, AI, and path map.'},
+      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: 'YO!agent chat, skills, jobs, waits, and handoffs.'},
+      {sampleHtml: appMenuUiIcon('document'), label: 'Document', detail: 'File editor, preview, image viewer, transcript, summary, or event document.'},
+      {sampleHtml: appMenuUiIcon('gear'), label: 'Gear', detail: 'Preferences and configurable settings.'},
+      {sampleHtml: appMenuUiIcon('tab-meta'), label: 'Tab metadata', detail: 'Metadata/debug surfaces and the tab metadata toggle.'},
+      {sampleHtml: appMenuUiIcon('share'), label: 'Share', detail: 'YO!share link and viewer controls.'},
+      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: 'Pin', detail: 'Pinned tabs stay at the front and are protected from tab eviction.'},
+    ]},
+    {section: 'YO button meanings', items: [
+      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: 'Inactive YO', detail: 'YOLO auto-approval is off for this tmux session, or not owned here.'},
+      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: 'Active YO', detail: 'YOLO auto-approval is enabled for this session.'},
+      {sampleHtml: '<span class="session-yolo-marker active working">YO</span>', label: 'Working YO', detail: 'YOLO is enabled while an agent window is working.'},
+      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: 'Locked YO', detail: 'Another YOLOmux process owns the auto-approval lock for that target.'},
+    ]},
+  ];
+}
+
+function keyboardHelpSectionHtml(section, className = '') {
+  const extraClass = className ? ` ${className}` : '';
+  return `
+    <section class="keyboard-shortcuts-section${extraClass}">
       <h3>${esc(section.section)}</h3>
       <div class="keyboard-shortcuts-list">
         ${section.items.map(item => `
@@ -2455,7 +2521,52 @@ function keyboardShortcutsHtml() {
             <kbd>${esc(item.keys)}</kbd>
           </div>`).join('')}
       </div>
-    </section>`).join('');
+    </section>`;
+}
+
+function keyboardLegendSectionHtml(section) {
+  return `
+    <section class="keyboard-shortcuts-section keyboard-legends-section">
+      <h3>${esc(section.section)}</h3>
+      <div class="keyboard-shortcuts-list keyboard-legends-list">
+        ${section.items.map(item => `
+          <div class="keyboard-legend-row">
+            <span class="keyboard-legend-sample">${item.sampleHtml || ''}</span>
+            <span class="keyboard-legend-text">
+              <span class="keyboard-legend-label">${esc(item.label)}</span>
+              <span class="keyboard-legend-detail">${esc(item.detail)}</span>
+            </span>
+          </div>`).join('')}
+      </div>
+    </section>`;
+}
+
+function keyboardShortcutsSectionWeight(section, isLegend = false) {
+  const itemWeight = isLegend ? 1.35 : 1;
+  return 1 + (Array.isArray(section?.items) ? section.items.length * itemWeight : 0);
+}
+
+function keyboardShortcutsHtml() {
+  const sections = [
+    ...keyboardShortcutCatalog().map(section => ({
+      html: keyboardHelpSectionHtml(section),
+      weight: keyboardShortcutsSectionWeight(section, false),
+    })),
+    ...keyboardLegendCatalog().map(section => ({
+      html: keyboardLegendSectionHtml(section),
+      weight: keyboardShortcutsSectionWeight(section, true),
+    })),
+  ];
+  const columns = Array.from({length: 4}, () => ({html: [], weight: 0}));
+  for (const section of sections) {
+    const column = columns.reduce((best, current) => current.weight < best.weight ? current : best);
+    column.html.push(section.html);
+    column.weight += section.weight;
+  }
+  return columns.map(column => `
+    <div class="keyboard-shortcuts-column">
+      ${column.html.join('')}
+    </div>`).join('');
 }
 
 function ensureKeyboardShortcutsOverlay() {
