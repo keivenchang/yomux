@@ -34276,6 +34276,25 @@ function emptySessionFilesPayload(session = '', loaded = true) {
   return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: diffRefFrom, to_ref: diffRefTo, loaded};
 }
 
+function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
+  return {
+    session: payload.session || defaults.session || '',
+    files: Array.isArray(payload.files) ? payload.files : [],
+    repos: Array.isArray(payload.repos) ? payload.repos : [],
+    refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
+    errors: Array.isArray(payload.errors) ? payload.errors : [],
+    warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+    from_ref: payload.from_ref || defaults.from_ref || diffRefFrom,
+    to_ref: payload.to_ref || defaults.to_ref || diffRefTo,
+    refreshing_elsewhere: payload.refreshing_elsewhere === true,
+    loaded: defaults.loaded === false ? false : true,
+  };
+}
+
+function sessionFilesPayloadIsRefreshingElsewhere(payload) {
+  return payload?.refreshing_elsewhere === true;
+}
+
 function sessionFilesPayloadIsFinderWorktree(payload, session = '') {
   if (!payload || payload.loaded !== true) return false;
   if (session && String(payload.session || '') !== String(session)) return false;
@@ -34298,8 +34317,10 @@ function sessionFilesPayloadIsRootlessEmpty(payload) {
 function sessionFilesPayloadShouldPreserveCurrent(nextPayload) {
   const session = String(nextPayload?.session || '');
   const current = sessionFilesPayloadForDestination('finder');
-  if (!session || !sessionFilesPayloadIsRootlessEmpty(nextPayload)) return false;
+  if (!session) return false;
   if (!sessionFilesPayloadIsLoadedForSession(current, session)) return false;
+  if (sessionFilesPayloadIsRefreshingElsewhere(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
+  if (!sessionFilesPayloadIsRootlessEmpty(nextPayload)) return false;
   return sessionFilesRepoRoots(current).length > 0;
 }
 
@@ -34381,9 +34402,11 @@ function sessionFilesPayloadSignatureForPayload(payload) {
   return JSON.stringify({
     session: payload?.session || '',
     loaded: payload?.loaded === true,
+    refreshing_elsewhere: sessionFilesPayloadIsRefreshingElsewhere(payload),
     from: payload?.from_ref || '',
     to: payload?.to_ref || '',
     errors: Array.isArray(payload?.errors) ? payload.errors : [],
+    warnings: Array.isArray(payload?.warnings) ? payload.warnings : [],
     repos,
     files,
   });
@@ -34446,16 +34469,7 @@ async function fetchSessionFiles(options = {}) {
     const response = await apiFetch(`/api/session-files?${params.toString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
-    const nextPayload = {
-      session: payload.session || session,
-      files: Array.isArray(payload.files) ? payload.files : [],
-      repos: Array.isArray(payload.repos) ? payload.repos : [],
-      refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
-      errors: Array.isArray(payload.errors) ? payload.errors : [],
-      from_ref: payload.from_ref || diffRefFrom,
-      to_ref: payload.to_ref || diffRefTo,
-      loaded: true,
-    };
+    const nextPayload = normalizedSessionFilesPayload(payload, {session});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return;
@@ -34491,16 +34505,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
   if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
   if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
-  const nextPayload = {
-    session,
-    files: Array.isArray(payload.files) ? payload.files : [],
-    repos: Array.isArray(payload.repos) ? payload.repos : [],
-    refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
-    errors: Array.isArray(payload.errors) ? payload.errors : [],
-    from_ref: payload.from_ref || request.from_ref || diffRefFrom,
-    to_ref: payload.to_ref || request.to_ref || diffRefTo,
-    loaded: true,
-  };
+  const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   const shouldRender = signature !== sessionFilesSignatureForDestination(destination);
@@ -35145,14 +35150,14 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <div class="changes-groups"></div>`;
   }
   const payload = fileExplorerSessionFilesPayload;
-  const loading = fileExplorerSessionFilesLoading;
+  const loading = fileExplorerSessionFilesLoading || sessionFilesPayloadIsRefreshingElsewhere(payload);
   const files = fileExplorerDifferFiles(payload);
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(warning)}</div>`).join('');
   const full = options.full === true || fileExplorerMode === 'diff';
-  const showEmptyRepoSections = full && !files.length && payloadHasRenderableRepoSections(payload);
+  const showEmptyRepoSections = full && !loading && !files.length && payloadHasRenderableRepoSections(payload);
   const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
     return `
@@ -35241,10 +35246,11 @@ function changesGroupsSnapshotHtml(files, options = {}) {
 
 function fileExplorerChangesPanelHtml() {
   const staticHtml = fileExplorerChangesPanelStaticHtml();
+  const loading = fileExplorerSessionFilesLoading || sessionFilesPayloadIsRefreshingElsewhere(fileExplorerSessionFilesPayload);
   const groupsHtml = changesGroupsSnapshotHtml(fileExplorerDifferFiles(), {
     payload: fileExplorerSessionFilesPayload,
     compact: fileExplorerMode !== 'diff',
-    includeEmptyRepoSections: fileExplorerMode === 'diff',
+    includeEmptyRepoSections: fileExplorerMode === 'diff' && !loading,
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
