@@ -1,14 +1,17 @@
 import gzip
 import io
 from http import HTTPStatus
+from types import SimpleNamespace
 
 from yolomux_lib import server as server_module
 from yolomux_lib.server import Handler
 
 
-def static_handler(path: str, accept_encoding: str | None = None) -> Handler:
+def static_handler(path: str, accept_encoding: str | None = None, app=None, command: str = "GET") -> Handler:
     handler = object.__new__(Handler)
     handler.path = path
+    handler.command = command
+    handler.server = SimpleNamespace(app=app) if app is not None else SimpleNamespace(app=SimpleNamespace())
     handler.headers = {}
     if accept_encoding is not None:
         handler.headers["Accept-Encoding"] = accept_encoding
@@ -99,3 +102,25 @@ def test_html_and_json_responses_remain_no_store():
     assert "content-encoding" not in json_headers
     assert "content-encoding" not in html_headers
     assert json_handler.wfile.getvalue() == b'{"ok":true}'
+
+
+def test_response_writers_record_endpoint_response_bytes():
+    records = []
+    app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)))
+    handler = static_handler("/api/session-files?session=8002", app=app)
+
+    handler.write_json({"ok": True, "files": ["a.py"]})
+
+    assert handler.wfile.getvalue() == b'{"ok":true,"files":["a.py"]}'
+    assert len(records) == 1
+    args, kwargs = records[0]
+    assert args == ("http-endpoint", "GET /api/session-files")
+    assert kwargs["trigger"] == "GET /api/session-files"
+    assert kwargs["payload_bytes"] == len(handler.wfile.getvalue())
+    assert kwargs["cache_key"] == {"kind": "GET /api/session-files"}
+    assert kwargs["cache_status"] == "200"
+    assert kwargs["owner_role"] == "server"
+    assert kwargs["details"]["status"] == 200
+    assert kwargs["details"]["method"] == "GET"
+    assert kwargs["details"]["path"] == "/api/session-files"
+    assert kwargs["details"]["content_type"] == "application/json"

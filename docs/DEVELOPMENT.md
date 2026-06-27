@@ -293,6 +293,14 @@ Inspect transcript mapping without starting the server:
 python3 yolomux.py --print-transcripts
 ```
 
+Inspect live performance/runtime state without starting another HTTP listener:
+
+```bash
+python3 yolomux.py --print-runtime-report
+```
+
+The JSON report includes the current background owner, refresh coalescing counters, shared cache directory sizes, top response-byte endpoints from the owner performance ring, recent event-type counts, and largest active transcript files.
+
 ## Wall API
 
 The read-only wall (`tmux_wall.py`) exposes:

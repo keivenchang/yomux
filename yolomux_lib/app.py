@@ -5883,12 +5883,174 @@ class TmuxWebtermApp:
                 "cache": item["cache"],
             })
         summary_rows.sort(key=lambda item: (-float(item["compute_ms_max"]), item["role"], item["surface"]))
+        top_payload_rows = sorted(
+            summary_rows,
+            key=lambda item: (-int(item["payload_bytes_total"]), -int(item["count"]), item["role"], item["surface"]),
+        )
         return {
             "window_seconds": max(1.0, float(window_seconds or PERFORMANCE_SUMMARY_WINDOW_SECONDS)),
             "record_limit": PERFORMANCE_RECORD_LIMIT,
             "record_count": len(records),
             "summary": summary_rows,
+            "top_payload_bytes": top_payload_rows,
             "recent": records[-PERFORMANCE_RECENT_LIMIT:],
+        }
+
+    def runtime_cache_dir_stats(self, path: Path) -> dict[str, Any]:
+        root = Path(path)
+        stats = {"path": str(root), "exists": root.exists(), "files": 0, "dirs": 0, "bytes": 0, "errors": 0}
+        if not stats["exists"]:
+            return stats
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                stats["dirs"] += 1
+                                stack.append(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=False):
+                                stats["files"] += 1
+                                stats["bytes"] += entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            stats["errors"] += 1
+            except OSError:
+                stats["errors"] += 1
+        return stats
+
+    def runtime_top_event_types(self, limit: int = 500) -> list[dict[str, Any]]:
+        counts: dict[str, int] = {}
+        events = self.event_log.tail(limit=max(1, min(int(limit or 500), MAX_EVENT_TAIL_LINES)))
+        for event in events:
+            event_type = str(event.get("type") or "event")
+            counts[event_type] = counts.get(event_type, 0) + 1
+        return [
+            {"type": event_type, "count": count}
+            for event_type, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:12]
+        ]
+
+    def runtime_largest_transcripts(self, transcript_payload: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        sessions = transcript_payload.get("sessions") if isinstance(transcript_payload, dict) else {}
+        if not isinstance(sessions, dict):
+            return rows
+        for session, info in sessions.items():
+            if not isinstance(info, dict):
+                continue
+            agents = info.get("agents")
+            if not isinstance(agents, list):
+                continue
+            for agent in agents:
+                if not isinstance(agent, dict):
+                    continue
+                transcript = str(agent.get("transcript") or "")
+                if not transcript:
+                    continue
+                path = Path(transcript)
+                try:
+                    stat = path.stat()
+                    size = stat.st_size
+                    mtime = stat.st_mtime
+                    exists = True
+                except OSError:
+                    size = 0
+                    mtime = 0.0
+                    exists = False
+                rows.append({
+                    "session": str(session),
+                    "kind": str(agent.get("kind") or ""),
+                    "pid": agent.get("pid") if isinstance(agent.get("pid"), int) else 0,
+                    "path": transcript,
+                    "bytes": size,
+                    "mtime": mtime,
+                    "exists": exists,
+                })
+        rows.sort(key=lambda item: (-int(item["bytes"]), item["session"], item["path"]))
+        return rows[:max(1, int(limit or 8))]
+
+    def runtime_top_endpoints(self, background_status: dict[str, Any]) -> list[dict[str, Any]]:
+        perf = background_status.get("perf") if isinstance(background_status, dict) else {}
+        if not isinstance(perf, dict):
+            return []
+        rows = perf.get("top_payload_bytes")
+        if not isinstance(rows, list):
+            rows = perf.get("summary")
+        if not isinstance(rows, list):
+            return []
+        endpoints = [dict(row) for row in rows if isinstance(row, dict) and row.get("role") == "http-endpoint"]
+        endpoints.sort(key=lambda item: (-int(item.get("payload_bytes_total") or 0), -int(item.get("count") or 0), str(item.get("surface") or "")))
+        return endpoints[:8]
+
+    def runtime_refresh_state(self, background_status: dict[str, Any]) -> dict[str, Any]:
+        with self.session_files_cache_lock:
+            session_files_refreshing_count = len(self.session_files_refreshing_cache_keys)
+        with self.tabber_activity_cache_lock:
+            tabber_activity_refreshing = self.tabber_activity_cache_refreshing
+            tabber_warmer_running = self.tabber_activity_cache_warmer_running
+        with self.transcripts_payload_cache_lock:
+            transcripts_payload_refreshing = self.transcripts_payload_refreshing
+        return {
+            "roles": background_status.get("roles", {}) if isinstance(background_status, dict) else {},
+            "counters": background_status.get("counters", {}) if isinstance(background_status, dict) else {},
+            "coalescing": background_status.get("refresh_queue", {}) if isinstance(background_status, dict) else {},
+            "local_refreshing": {
+                "session_files": session_files_refreshing_count,
+                "tabber_activity": tabber_activity_refreshing,
+                "tabber_warmer": tabber_warmer_running,
+                "transcripts_payload": transcripts_payload_refreshing,
+            },
+        }
+
+    def runtime_owner_debug_summary(self, owner_debug: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(owner_debug, dict):
+            return {}
+        generations = owner_debug.get("generations")
+        return {
+            "owner_dir": str(owner_debug.get("owner_dir") or ""),
+            "generation_count": len(generations) if isinstance(generations, list) else 0,
+        }
+
+    def runtime_owner_control_summary(self, owner_control_response: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(owner_control_response, dict):
+            return {}
+        summary = {"ok": bool(owner_control_response.get("ok"))}
+        error = str(owner_control_response.get("error") or "")
+        if error:
+            summary["error"] = error
+        return summary
+
+    def runtime_report_payload(
+        self,
+        *,
+        background_status: dict[str, Any] | None = None,
+        owner_debug: dict[str, Any] | None = None,
+        owner_control_response: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
+        transcript_payload = self.transcripts_payload(force=True)
+        return {
+            "ok": True,
+            "state_dir": str(common.STATE_DIR),
+            "owner": {
+                "current_owner": status.get("current_owner"),
+                "status": status.get("status"),
+                "owner": bool(status.get("owner")),
+                "search_index": status.get("search_index"),
+                "debug": self.runtime_owner_debug_summary(owner_debug),
+                "control": self.runtime_owner_control_summary(owner_control_response),
+            },
+            "refresh": self.runtime_refresh_state(status),
+            "caches": {
+                "session_files": self.runtime_cache_dir_stats(SESSION_FILES_CACHE_DIR),
+                "activity": self.runtime_cache_dir_stats(TABBER_ACTIVITY_CACHE_DIR),
+                "search_index": self.runtime_cache_dir_stats(file_index.INDEX_DIR),
+            },
+            "top_endpoints": self.runtime_top_endpoints(status),
+            "top_event_types": self.runtime_top_event_types(),
+            "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
+            "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
         }
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:

@@ -266,6 +266,78 @@ def test_background_status_includes_performance_summary():
     assert control_response["status"]["perf"]["record_count"] == 1
 
 
+def test_performance_metrics_payload_ranks_response_bytes():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        webapp.record_performance_sample("http-endpoint", "GET /api/small", payload_bytes=50, cache_status="200", owner_role="server")
+        webapp.record_performance_sample("http-endpoint", "GET /api/large", payload_bytes=400, cache_status="200", owner_role="server")
+        webapp.record_performance_sample("http-endpoint", "GET /api/large", payload_bytes=200, cache_status="200", owner_role="server")
+        payload = webapp.performance_metrics_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert [row["surface"] for row in payload["top_payload_bytes"][:2]] == ["GET /api/large", "GET /api/small"]
+    assert payload["top_payload_bytes"][0]["payload_bytes_total"] == 600
+    assert payload["top_payload_bytes"][0]["count"] == 2
+
+
+def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcripts(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "TABBER_ACTIVITY_CACHE_DIR", tmp_path / "activity-cache")
+    monkeypatch.setattr(app_module.file_index, "INDEX_DIR", tmp_path / "search-index")
+    for dirname in ("session-files-cache", "activity-cache", "search-index"):
+        (tmp_path / dirname).mkdir()
+    (tmp_path / "session-files-cache" / "a.json").write_text("abc", encoding="utf-8")
+    (tmp_path / "activity-cache" / "b.json").write_text("12345", encoding="utf-8")
+    (tmp_path / "search-index" / "c.sqlite3").write_text("index", encoding="utf-8")
+    small = tmp_path / "small.jsonl"
+    large = tmp_path / "large.jsonl"
+    small.write_text("small", encoding="utf-8")
+    large.write_text("large transcript payload", encoding="utf-8")
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.event_log = app_module.EventLog(tmp_path / "events.jsonl")
+    webapp.event_log.append(None, "background_refresh_done", "done", {})
+    webapp.event_log.append(None, "background_refresh_done", "done again", {})
+    webapp.event_log.append("8002", "stats_history_error", "stats failed", {})
+    webapp.transcripts_payload = lambda force=False: {
+        "sessions": {
+            "8002": {"agents": [{"kind": "codex", "pid": 123, "transcript": str(large)}]},
+            "8003": {"agents": [{"kind": "claude", "pid": 456, "transcript": str(small)}]},
+        },
+        "cache": {"hit": False},
+    }
+    background_status = {
+        "owner": True,
+        "status": "owner",
+        "current_owner": {"port": 8002},
+        "search_index": {"mode": "indexing-server"},
+        "roles": {"session-files": {"status": "owner"}},
+        "counters": {"coalesced_refresh_requests": 3},
+        "refresh_queue": {"recent_pending_count": 2, "recent_pending_by_role": {"session-files": 2}},
+        "perf": {
+            "top_payload_bytes": [
+                {"role": "http-endpoint", "surface": "GET /api/session-files", "count": 2, "payload_bytes_total": 900},
+                {"role": "session-files", "surface": "cache-read", "count": 4, "payload_bytes_total": 1000},
+            ],
+        },
+    }
+
+    try:
+        payload = webapp.runtime_report_payload(background_status=background_status, owner_debug={"generations": []}, owner_control_response={"ok": True})
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["owner"]["current_owner"] == {"port": 8002}
+    assert payload["refresh"]["coalescing"]["recent_pending_count"] == 2
+    assert payload["caches"]["session_files"]["files"] == 1
+    assert payload["caches"]["session_files"]["bytes"] == 3
+    assert payload["caches"]["activity"]["bytes"] == 5
+    assert payload["top_endpoints"][0]["surface"] == "GET /api/session-files"
+    assert payload["top_event_types"][0] == {"type": "background_refresh_done", "count": 2}
+    assert payload["largest_active_transcripts"][0]["path"] == str(large)
+    assert payload["largest_active_transcripts"][0]["bytes"] == len("large transcript payload")
+
+
 def test_background_refresh_control_uses_nested_payload(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     calls = []

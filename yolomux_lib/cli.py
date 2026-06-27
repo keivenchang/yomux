@@ -9,6 +9,7 @@ import ssl
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from .app import TmuxWebtermApp
 from .background_owner import read_background_owner_debug_status
@@ -20,6 +21,7 @@ from .common import default_session_names
 from .common import split_csv
 from .common import unique_session_names
 from .common import warn_unavailable_agent_commands_once
+from .control import send_yolomux_control_request
 from .server import TmuxWebtermHTTPServer
 
 
@@ -57,6 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--key", type=Path, default=None, help="TLS private key PEM path")
     parser.add_argument("--print-transcripts", action="store_true")
     parser.add_argument("--print-background-owner", action="store_true", help="print the shared background-owner status JSON and exit")
+    parser.add_argument("--print-runtime-report", action="store_true", help="print runtime owner/cache/endpoint/event/transcript diagnostics JSON and exit")
     parser.add_argument(
         "--dev",
         action="store_true",
@@ -212,6 +215,42 @@ def print_background_owner_status() -> int:
     return 0
 
 
+def runtime_report_background_status() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    owner_debug = read_background_owner_debug_status()
+    owner_control_response = send_yolomux_control_request(
+        owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None,
+        {"action": "background_status"},
+    )
+    status = owner_control_response.get("status") if owner_control_response.get("ok") else None
+    if not isinstance(status, dict):
+        status = {
+            "owner": False,
+            "status": "unreachable",
+            "current_owner": owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None,
+            "roles": {},
+            "counters": {},
+            "refresh_queue": {},
+            "perf": {},
+        }
+    return owner_debug, owner_control_response, status
+
+
+def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) -> int:
+    app = TmuxWebtermApp(sessions, dangerously_yolo=dangerously_yolo)
+    try:
+        owner_debug, owner_control_response, background_status = runtime_report_background_status()
+        payload = app.runtime_report_payload(
+            background_status=background_status,
+            owner_debug=owner_debug,
+            owner_control_response=owner_control_response,
+        )
+        print(json.dumps(payload, sort_keys=True, indent=2))
+        return 0
+    finally:
+        app.stop_auto_approve_all()
+        app.control_server.stop()
+
+
 def print_auth_setup_error() -> None:
     print(
         f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.",
@@ -232,13 +271,15 @@ def main() -> int:
     warn_unavailable_agent_commands_once()
     if args.print_background_owner:
         return print_background_owner_status()
+    sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
+    if args.print_runtime_report:
+        return print_runtime_report(sessions, dangerously_yolo=args.dangerously_yolo)
     try:
         tls_context, tls_message = tls_context_for_args(args)
     except (OSError, RuntimeError, ValueError, ssl.SSLError) as error:
         print(f"TLS setup failed: {error}", file=sys.stderr)
         return 2
 
-    sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
     app = TmuxWebtermApp(sessions, dangerously_yolo=args.dangerously_yolo)
 
     if args.print_transcripts:

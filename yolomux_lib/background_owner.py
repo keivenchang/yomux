@@ -421,6 +421,28 @@ class BackgroundOwnerRegistry:
             self.recent_refresh_requests[key] = now + BACKGROUND_REFRESH_COALESCE_SECONDS
         return False
 
+    def refresh_queue_payload(self) -> dict[str, Any]:
+        now = self.monotonic()
+        role_counts: dict[str, int] = {}
+        next_expires_seconds = 0.0
+        with self.lock:
+            self.recent_refresh_requests = {
+                key: expires_at
+                for key, expires_at in self.recent_refresh_requests.items()
+                if expires_at > now
+            }
+            for key, expires_at in self.recent_refresh_requests.items():
+                role, _separator, _payload = key.partition("\0")
+                role_counts[role] = role_counts.get(role, 0) + 1
+                remaining = max(0.0, expires_at - now)
+                next_expires_seconds = remaining if not next_expires_seconds else min(next_expires_seconds, remaining)
+        return {
+            "coalesce_window_seconds": BACKGROUND_REFRESH_COALESCE_SECONDS,
+            "recent_pending_count": sum(role_counts.values()),
+            "recent_pending_by_role": role_counts,
+            "next_expires_seconds": round(next_expires_seconds, 3),
+        }
+
     def record_fallback(self, role: str) -> None:
         with self.lock:
             self.fallback_counts[role] = self.fallback_counts.get(role, 0) + 1
@@ -490,6 +512,7 @@ class BackgroundOwnerRegistry:
                 "current_owner": owner_record,
                 "roles": {role: self.role_state(role).__dict__ for role in self.roles},
                 "counters": dict(self.counters),
+                "refresh_queue": self.refresh_queue_payload(),
                 "last_transition": self.last_transition,
                 "last_transition_details": dict(self.last_transition_details),
                 "last_error": self.last_error,
@@ -541,6 +564,14 @@ class DisabledBackgroundOwner:
     def record_search_index_bytes_written(self, byte_count: int) -> None:
         return None
 
+    def refresh_queue_payload(self) -> dict[str, Any]:
+        return {
+            "coalesce_window_seconds": BACKGROUND_REFRESH_COALESCE_SECONDS,
+            "recent_pending_count": 0,
+            "recent_pending_by_role": {},
+            "next_expires_seconds": 0.0,
+        }
+
     def request_owner_refresh(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False}
 
@@ -549,6 +580,7 @@ class DisabledBackgroundOwner:
             "owner": True,
             "status": "disabled",
             "roles": {},
+            "refresh_queue": self.refresh_queue_payload(),
             "search_index": {
                 "role": BACKGROUND_ROLE_SEARCH_INDEX,
                 "owner": True,

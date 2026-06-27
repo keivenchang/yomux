@@ -902,6 +902,38 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         message = TOKEN_LOG_RE.sub(r"\1[redacted]", fmt % args)
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), message))
 
+    def http_endpoint_metric_key(self) -> str:
+        method = str(getattr(self, "command", "") or "GET").upper()
+        try:
+            path = urlparse(str(getattr(self, "path", "") or "/")).path or "/"
+        except ValueError:
+            path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
+        return f"{method} {path}"[:120]
+
+    def record_http_response_bytes(self, status: HTTPStatus | int, body_bytes: int, content_type: str = "") -> None:
+        app = getattr(getattr(self, "server", None), "app", None)
+        recorder = getattr(app, "record_performance_sample", None)
+        if not callable(recorder):
+            return
+        status_code = int(status)
+        endpoint = self.http_endpoint_metric_key()
+        recorder(
+            "http-endpoint",
+            endpoint,
+            trigger=endpoint,
+            payload_bytes=max(0, int(body_bytes or 0)),
+            cache_key={"kind": endpoint},
+            cache_status=str(status_code),
+            owner_role="server",
+            count=1,
+            details={
+                "status": status_code,
+                "method": endpoint.split(" ", 1)[0],
+                "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
+                "content_type": content_type_base(content_type),
+            },
+        )
+
     def plaintext_share_scope_allowed(self, parsed: Any) -> bool:
         if not getattr(self.server, "tls_context", None) or self.request_is_https():
             return True
@@ -951,6 +983,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, len(body), "text/plain; charset=utf-8")
+        else:
+            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, 0, "text/plain; charset=utf-8")
         self.close_connection = True
         return True
 
@@ -1138,6 +1173,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(HTTPStatus.OK, len(data), mime)
 
     def handle_fs_html_preview(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1480,9 +1516,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_auth_cookie_if_needed()
             self.end_headers()
+            self.record_http_response_bytes(HTTPStatus.OK, 0, "text/html; charset=utf-8")
             return
         self.send_response(HTTPStatus.NOT_FOUND)
         self.end_headers()
+        self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0)
 
     def dev_bundle_signature(self) -> str:
         # mtime_ns of the served bundle + css; changes the instant static_build.py rewrites them.
@@ -1795,6 +1833,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "text/html; charset=utf-8")
 
     def write_redirect(self, location: str, status: HTTPStatus = HTTPStatus.SEE_OTHER, clear_auth: bool = False) -> None:
         self.send_response(status)
@@ -1810,6 +1849,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
+        self.record_http_response_bytes(status, 0)
 
     def write_static_asset(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
@@ -1835,12 +1875,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+        self.record_http_response_bytes(HTTPStatus.OK, len(body), content_type)
 
     def write_static_head(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
         if path is None:
             self.send_response(HTTPStatus.NOT_FOUND)
             self.end_headers()
+            self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0, content_type)
             return
         try:
             data = path.read_bytes()
@@ -1858,6 +1900,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
         self.end_headers()
+        self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1870,6 +1913,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "application/json; charset=utf-8")
 
     def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
         # Every app method returns a (payload, HTTPStatus) pair; the unpack-then-write_json dance was
@@ -1911,6 +1955,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "text/plain; charset=utf-8")
 
     def websocket(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
