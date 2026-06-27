@@ -27,24 +27,21 @@ def test_pane_spacing_default_is_3px():
     assert default_settings()["appearance"]["pane_spacing"] == 3
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
-    assert default_settings()["appearance"]["red_reminder_ms"] == 0
-    assert default_settings()["performance"]["agent_window_cooldown_seconds"] == 60
+    assert "red_reminder_ms" not in default_settings()["appearance"]
+    assert default_settings()["performance"]["workflow_transition_glow_seconds"] == 60
+    assert "agent_window_cooldown_seconds" not in default_settings()["performance"]
 
 
-def test_stale_status_pulse_and_yellow_visibility_defaults_migrate():
+def test_stale_agent_window_cooldown_default_migrates_to_workflow_transition_glow():
     defaults = default_settings()
 
-    pulse_migrated = sanitize_settings({"appearance": {"red_reminder_ms": 1550}})
-    assert pulse_migrated["appearance"]["red_reminder_ms"] == defaults["appearance"]["red_reminder_ms"]
-
-    pulse_custom = sanitize_settings({"appearance": {"red_reminder_ms": 1600}})
-    assert pulse_custom["appearance"]["red_reminder_ms"] == 1600
-
     migrated = sanitize_settings({"performance": {"agent_window_cooldown_seconds": 0}})
-    assert migrated["performance"]["agent_window_cooldown_seconds"] == defaults["performance"]["agent_window_cooldown_seconds"]
+    assert migrated["performance"]["workflow_transition_glow_seconds"] == defaults["performance"]["workflow_transition_glow_seconds"]
+    assert "agent_window_cooldown_seconds" not in migrated["performance"]
 
     custom = sanitize_settings({"performance": {"agent_window_cooldown_seconds": 45}})
-    assert custom["performance"]["agent_window_cooldown_seconds"] == 45
+    assert custom["performance"]["workflow_transition_glow_seconds"] == 45
+    assert "agent_window_cooldown_seconds" not in custom["performance"]
 
 
 def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp_path):
@@ -111,7 +108,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "updates": {"notify_level": "bogus"},
-            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000, "agent_window_cooldown_seconds": 999},
+            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000, "workflow_transition_glow_seconds": 999},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100, "trim_trailing_whitespace_on_save": "yes", "ensure_final_newline_on_save": "no"},
             "uploads": {"max_bytes": 999999999},
@@ -162,7 +159,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["file_explorer"]["dir_cache_ms"] == 5000
     assert settings["performance"]["latency_refresh_ms"] == 1000
     assert settings["performance"]["event_log_refresh_ms"] == 60000
-    assert settings["performance"]["agent_window_cooldown_seconds"] == 300
+    assert settings["performance"]["workflow_transition_glow_seconds"] == 300
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
     assert settings["yoagent"]["backend"] == "auto"
@@ -293,8 +290,8 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
 
     assert catalog["appearance.tab_width"]["limits"] == {"min": 120, "max": 420}
     assert catalog["appearance.tab_width"]["units"] == "pixels"
-    assert catalog["performance.agent_window_cooldown_seconds"]["default"] == 60
-    assert catalog["performance.agent_window_cooldown_seconds"]["limits"] == {"min": 0, "max": 300}
+    assert catalog["performance.workflow_transition_glow_seconds"]["default"] == 60
+    assert catalog["performance.workflow_transition_glow_seconds"]["limits"] == {"min": 0, "max": 300}
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
     assert catalog["uploads.subdir"]["empty_allowed"] is True
     assert catalog["uploads.image_action_order"]["list_limit"] == 9

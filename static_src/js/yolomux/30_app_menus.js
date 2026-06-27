@@ -376,14 +376,6 @@ async function refreshYoloRulesStatus(options = {}) {
 
 function tmuxYoloMenuItems() {
   return [
-    menuNumberSetting('appearance.red_reminder_ms', t('pref.appearance.red_reminder_ms.label'), {
-      min: 0,
-      max: 10000,
-      step: 50,
-      suffix: 'ms',
-      fallback: 0,
-      detail: t('pref.appearance.red_reminder_ms.help'),
-    }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
       detail: compactHomePath(yoloRulePath()),
@@ -1139,10 +1131,8 @@ function clampAppMenuNumberSetting(item, rawValue) {
 }
 
 function applyAppMenuNumberSettingPreview(path, value) {
-  if (path === 'appearance.red_reminder_ms') {
-    redReminderMs = Math.max(0, Number(value) || 0);
-    applyCssSettings();
-  }
+  void path;
+  void value;
 }
 
 function createAppMenuNumberSetting(item) {

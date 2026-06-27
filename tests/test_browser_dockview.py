@@ -902,6 +902,12 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
             """
         )
     )
+    initial_size = browser.execute_script(
+        """
+        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
+        """
+    )
     click_started = time.monotonic()
     browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown').click()
     immediate = browser.execute_script(
@@ -937,11 +943,25 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+            const tabDot = document.querySelector('.pane-tab[data-pane-tab="1"] .session-agent-activity-marker .agent-window-status-dot');
+            return !!dot
+              && dot.classList.contains('agent-window-status-dot--acknowledged')
+              && !!tabDot
+              && tabDot.classList.contains('status-indicator--working')
+              && !tabDot.classList.contains('status-indicator--cooldown');
             """
         )
     )
+    acknowledged_size = browser.execute_script(
+        """
+        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
+        """
+    )
     assert time.monotonic() - click_started >= 0.8
+    assert acknowledged_size > 0
+    assert acknowledged_size <= initial_size * 0.35
 
 
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
@@ -996,6 +1016,12 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
             """
         )
     )
+    initial_size = browser.execute_script(
+        """
+        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
+        """
+    )
     click_started = time.monotonic()
     browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention').click()
     immediate = browser.execute_script(
@@ -1026,10 +1052,18 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention')
+            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+            return !!dot
+              && dot.classList.contains('agent-window-status-dot--acknowledged')
               && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
             """
         )
+    )
+    acknowledged_size = browser.execute_script(
+        """
+        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
+        """
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1046,6 +1080,8 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
         )
     )
     assert time.monotonic() - click_started >= 0.8
+    assert acknowledged_size > 0
+    assert acknowledged_size <= initial_size * 0.35
     ack_bodies = browser.execute_script(
         """
         return window.__bootFetches
@@ -1115,7 +1151,9 @@ def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention')
+            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+            return !!dot
+              && dot.classList.contains('agent-window-status-dot--acknowledged')
               && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
             """
         )
@@ -1191,7 +1229,9 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return !document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention')
+            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+            return !!dot
+              && dot.classList.contains('agent-window-status-dot--acknowledged')
               && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
             """
         )
@@ -1281,6 +1321,7 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
           workingOpacity: workingStyle.opacity,
           workingDotExists: !!workingDot,
           workingDotIsWorkingTone: workingDot?.classList.contains('status-indicator--working') || false,
+          workingDotTransitionPulse: workingDot?.classList.contains('agent-window-status-dot--transition-pulse') || false,
           workingDotAnimationName: workingDotStyle ? workingDotStyle.animationName : null,
           statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
           idleDotCount: idleButton?.querySelectorAll('.agent-window-status-dot').length || 0,
@@ -1300,14 +1341,14 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
     assert metrics["idleHasState"] is False, metrics
     assert metrics["idleDotCount"] == 0, metrics
     # Working = static AI symbol + a SEPARATE green ball (side by side, not alternating).
-    # With the default static status-pulse setting, the symbol and green dot stay visible without
-    # running glow/flash animations.
+    # With continuous status pulsing disabled, the default workflow transition pulse still runs.
     assert metrics["workingAnimationName"] == "none", metrics
     assert float(metrics["workingOpacity"]) == 1, metrics
     assert metrics["workingDotExists"] is True, metrics
     assert metrics["workingDotIsWorkingTone"] is True, metrics
+    assert metrics["workingDotTransitionPulse"] is True, metrics
     assert metrics["statusPulseDisabled"] is True, metrics
-    assert metrics["workingDotAnimationName"] == "none", metrics
+    assert metrics["workingDotAnimationName"] == "agent-status-transition-pulse", metrics
 
 
 def test_dockview_window_bar_active_agent_glyph_is_static_by_default(browser, tmp_path):
@@ -1373,7 +1414,7 @@ def test_dockview_window_bar_active_agent_glyph_is_static_by_default(browser, tm
 def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_default(browser, tmp_path):
     # Working = a STATIC agent symbol followed by a SEPARATE green ball (side by side, not alternating,
     # not a symbol pulse). Assert the symbol does not animate, the wrapper lays them out inline, and the
-    # default status-pulse setting keeps the green working-tone dot static.
+    # default workflow transition pulse runs on the green working-tone dot.
     transcript_sessions = {
         "1": {
             "panes": [
@@ -1422,6 +1463,7 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
           statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
           dotPresent: !!dot,
           dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
+          dotTransitionPulse: dot ? dot.classList.contains('agent-window-status-dot--transition-pulse') : false,
           dotAnimationName: ds ? ds.animationName : null,
           dotIterationCount: ds ? ds.animationIterationCount : null,
           dotPlayState: ds ? ds.animationPlayState : null,
@@ -1433,11 +1475,12 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
     assert float(data["symOpacity"]) == 1, data
     # Laid out side by side (base inline-flex), not the attention/cooldown grid stack.
     assert data["wrapDisplay"] == "flex", data
-    # A separate green ball is present and static.
+    # A separate green ball is present and runs the workflow transition pulse.
     assert data["dotPresent"] is True, data
     assert data["dotWorkingTone"] is True, data
     assert data["statusPulseDisabled"] is True, data
-    assert data["dotAnimationName"] == "none", data
+    assert data["dotTransitionPulse"] is True, data
+    assert data["dotAnimationName"] == "agent-status-transition-pulse", data
 
 
 def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp_path):

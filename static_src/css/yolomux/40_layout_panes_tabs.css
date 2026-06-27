@@ -1823,6 +1823,9 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   color: var(--accent-gold);
   text-shadow: 0 0 0 var(--accent-gold), 0 0 6px rgb(var(--attention-ring-rgb, 245 197 66) / 0.72);
 }
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.agent-window-status-dot--acknowledged {
+  text-shadow: 0 0 0 currentColor;
+}
 .terminal-tab {
   flex: 0 1 auto;
   max-width: 72px;

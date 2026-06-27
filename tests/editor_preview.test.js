@@ -168,7 +168,7 @@ async function runEditorPreviewSuite() {
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
     const dotBlock = sessionsCss.match(/\.status-indicator--dot\s*\{[^}]*\}/)?.[0] || '';
-    assert.ok(/function statusPulseAnimationEnabled\(durationMs = redReminderMs\)[\s\S]*Number\(durationMs\) > 0/.test(layoutSource), 'status pulse has one shared on/off helper');
+    assert.ok(/function statusPulseAnimationEnabled\(\)\s*\{\s*return false;\s*\}/.test(layoutSource), 'continuous status pulse is disabled through one shared helper');
     assert.ok(/function statusIndicatorToneClasses\(tone, options = \{\}\)[\s\S]*const pulseEnabled = options\.pulse !== false && statusPulseAnimationEnabled\(\)[\s\S]*tone === STATE_KEY\.working[\s\S]*status-indicator--working', pulseEnabled \? 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', pulseEnabled \? 'heartbeat-pulse'[\s\S]*pulseEnabled \? 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', pulseEnabled \? 'heartbeat-pulse'[\s\S]*pulseEnabled \? 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === STATE_KEY\.idle[\s\S]*status-indicator--idle/.test(layoutSource), 'attention/activity-dot status tones are centralized and can omit pulse classes per rendered item');
     assert.ok(/function updateTopbarActivityStatus\(\)[\s\S]*node\.innerHTML = html[\s\S]*scheduleAgentWindowActivityAnimationSync\(node\)/.test(layoutSource), 'topbar attention rerenders explicitly resync the shared attention animation phase');
     assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar attention count inherits shared inline status behavior');
@@ -209,10 +209,12 @@ async function runEditorPreviewSuite() {
     assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*agentWindowStatusToneOrder\(options\.statusTones \|\| \[tone\]\)[\s\S]*agent-window-status-dot--segmented[\s\S]*agent-window-status-dot--tone-/.test(activitySource), 'the shared status dot renderer owns segmented multi-tone tab balls');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared tmux-window compact override');
+    assert.ok(/\.agent-window-activity \.agent-window-status-dot--acknowledged\s*\{[\s\S]*font-size:\s*calc\(var\(--agent-status-ball-size\) \/ 4\)/.test(sessionsCss), 'acknowledged red/yellow sub-window balls shrink to one quarter through the shared ball-size token');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(sessionsCss), false, 'status balls do not size themselves from the surface-specific agent icon token');
     assert.equal(/agent-symbol-status-alternate|agent-status-dot-alternate|--agent-alternate-animation-delay|--agent-alternate-pulse-duration/.test(sessionsCss + activitySource + layoutSource), false, 'agent status indicators no longer alternate symbol and ball');
-    assert.equal(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid/.test(sessionsCss), false, 'ASK/cooldown agent glyphs and dots are not grid-stacked overlays');
-    assert.ok(/agent-window-status-dot--transition-glow/.test(activitySource) && /\.agent-window-status-dot--transition-glow\.status-indicator--attention,[\s\S]*\.agent-window-status-dot--transition-glow\.status-indicator--cooldown\s*\{[\s\S]*box-shadow:/.test(sessionsCss), 'fresh red/yellow transition dots get a non-animated static glow even when status pulsing is disabled');
+    assert.equal(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid/.test(sessionsCss), false, 'attention/cooldown agent glyphs and dots are not grid-stacked overlays');
+    assert.ok(/agent-window-status-dot--transition-glow/.test(activitySource) && /\.agent-window-status-dot--transition-glow\.status-indicator--working,[\s\S]*\.agent-window-status-dot--transition-glow\.status-indicator--attention,[\s\S]*\.agent-window-status-dot--transition-glow\.status-indicator--cooldown\s*\{[\s\S]*box-shadow:/.test(sessionsCss), 'fresh green/red/yellow transition dots get a static glow even when continuous pulsing is disabled');
+    assert.ok(/function agentWindowTransitionPulseActive\(startedAt, nowSeconds = Date\.now\(\) \/ 1000\)[\s\S]*agentWindowTransitionGlowActive\(startedAt, nowSeconds\)/.test(activitySource) && /agent-status-transition-pulse/.test(activitySource) && /agent-window-status-dot--transition-pulse/.test(activitySource) && /@keyframes agent-status-transition-pulse/.test(sessionsCss), 'new and color-changing status balls pulse for the configured workflow transition glow duration');
     assert.ok(/\.status-indicator--dot\.status-indicator--attention\.heartbeat-pulse,[\s\S]*\.status-indicator--dot\.status-indicator--cooldown\.heartbeat-pulse\s*\{[\s\S]*animation-name:\s*attention-ring-fade/.test(sessionsCss), 'attention/cooldown status balls glow with the shared attention-ring-fade pulse when pulsing is enabled');
     assert.ok(layoutSource.includes("status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse'") && layoutSource.includes("pulseEnabled ? 'attention-pulse'"), 'cooldown tone opts into the shared pulse classes only when status pulse is enabled');
     assert.ok(/\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb:\s*245 197 66/.test(sessionsCss), 'cooldown markers use the yellow glow channel');
@@ -270,7 +272,7 @@ async function runEditorPreviewSuite() {
     const firstSyncedDelay = api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay');
     api.syncAgentWindowActivityAnimationDelaysForTest(syncRoot);
     assert.equal(api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay'), firstSyncedDelay, 'a second sync keeps the same root animation delay instead of restarting the CSS animation');
-    assert.ok(/root\.setProperty\('--pulse-duration', `\$\{Math\.max\(0, redReminderMs\) \/ 1000\}s`\)/.test(settingsRuntimeSource), 'renamed red/yellow/green status pulse setting drives the actual shared pulse duration');
+    assert.ok(/root\.setProperty\('--pulse-duration', `\$\{Math\.max\(1, agentStatusPulsePeriodMs\) \/ 1000\}s`\)/.test(settingsRuntimeSource), 'status balls use the fixed shared transition pulse cadence');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
     assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation-name:\s*metadata-badge-pulse;[^}]*animation-duration:\s*var\(--pulse-duration\);[^}]*animation-timing-function:\s*var\(--pulse-easing\);[^}]*animation-iteration-count:\s*infinite;/.test(sessionsCss), 'metadata pulse repeats until the server-window class is removed');
     assert.equal(/metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), false, 'metadata pulse no longer has a fixed iteration count');
@@ -847,38 +849,55 @@ async function runEditorPreviewSuite() {
     assert.equal(api.agentWindowActivityIconForTest('claude', 'idle', 10), null, 'recent idle AI windows do not show an idle icon yet');
     assert.equal(api.agentWindowActivityIconForTest('shell', 'working', 300), null, 'non-AI windows do not show working or idle icons');
     const transitionKey = '1:3:codex';
-    api.setAgentWindowCooldownSecondsForTest(60);
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey, nowSeconds: 1000, scheduleRefresh: false}).state, 'working', 'working transition state is recorded');
+    api.setWorkflowTransitionGlowSecondsForTest(60);
+    const freshWorking = api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey, nowSeconds: 1000, scheduleRefresh: false});
+    assert.equal(freshWorking.state, 'working', 'working transition state is recorded');
+    assert.equal(freshWorking.transitionPulseActive, true, 'a newly visible working ball pulses during the workflow transition glow duration');
     const freshStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1005, scheduleRefresh: false});
     assert.equal(freshStopped.state, 'cooldown', 'a window that just stopped working shows yellow');
     assert.equal(freshStopped.pulseActive, true, 'a fresh stopped marker glows during the configured glow window');
+    assert.equal(freshStopped.transitionPulseActive, true, 'a green-to-yellow transition pulses during the workflow transition glow duration');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 20, {transitionKey, nowSeconds: 1020, scheduleRefresh: false}).state, 'cooldown', 'the stopped marker stays yellow during the dedicated cooldown instead of using file-recency timing');
     const staleStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1065, scheduleRefresh: false});
     assert.equal(staleStopped.state, 'cooldown', 'after the glow duration the stopped marker stays yellow until acknowledgement');
     assert.equal(staleStopped.pulseActive, false, 'after the glow duration the stopped marker becomes static');
-    api.setAgentWindowCooldownSecondsForTest(0);
+    assert.equal(staleStopped.transitionPulseActive, false, 'after the workflow transition glow duration the yellow transition pulse stops');
+    api.setWorkflowTransitionGlowSecondsForTest(0);
     const stickyTransitionKey = '1:4::codex';
     assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: stickyTransitionKey, nowSeconds: 3000, scheduleRefresh: false}).state, 'working', 'working clears an earlier yellow acknowledgement');
     const noGlowStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 3005, scheduleRefresh: false});
     assert.equal(noGlowStopped.state, 'cooldown', '0-second glow duration keeps the stopped marker visible instead of disabling it');
     assert.equal(noGlowStopped.pulseActive, false, '0-second glow duration renders the stopped marker static from the start');
+    assert.equal(noGlowStopped.transitionPulseActive, false, '0-second workflow transition glow duration keeps the yellow marker static from the start');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 9999, scheduleRefresh: false}).state, 'cooldown', '0-second glow duration stays visible forever until acknowledgement');
     assert.equal(api.acknowledgeAgentWindowStoppedTransitionForTest(stickyTransitionKey, null, {refresh: false}), true, 'acknowledging the matching stopped window clears the sticky yellow notification');
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 10000, scheduleRefresh: false}), null, 'acknowledged sticky yellow markers disappear while the same stopped run stays idle');
+    const acknowledgedStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 10000, scheduleRefresh: false});
+    assert.equal(acknowledgedStopped.state, 'cooldown', 'acknowledged sticky yellow markers stay visible on the sub-window button');
+    assert.equal(acknowledgedStopped.acknowledged, true, 'acknowledged sticky yellow markers are tagged for the one-quarter visual size');
+    assert.equal(acknowledgedStopped.pulseActive, false, 'acknowledged sticky yellow markers do not keep glowing');
+    assert.equal(acknowledgedStopped.transitionPulseActive, false, 'acknowledged sticky yellow markers do not keep transition-pulsing');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: stickyTransitionKey, nowSeconds: 10010, scheduleRefresh: false}).state, 'working', 'a later working run re-arms the sticky yellow notification');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 10012, scheduleRefresh: false}).state, 'cooldown', 'a later stopped run shows yellow again after the earlier acknowledgement');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'codex', state: 'idle', window_index: 7, window_label: '7:codex', working_stopped_ts: 4000},
     ]});
     assert.equal(api.acknowledgeAgentWindowActivityForTest('1', 7, {refresh: false}), true, 'clicking the matching tmux sub-window acknowledges its sticky yellow marker');
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {session: '1', window_index: 7, working_stopped_ts: 4000, nowSeconds: 4500, scheduleRefresh: false}), null, 'the acknowledged tmux sub-window no longer renders the sticky yellow marker');
-    api.setAgentWindowCooldownSecondsForTest(60);
+    const acknowledgedWindowStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {session: '1', window_index: 7, working_stopped_ts: 4000, nowSeconds: 4500, scheduleRefresh: false});
+    assert.equal(acknowledgedWindowStopped.state, 'cooldown', 'the acknowledged tmux sub-window keeps a yellow marker');
+    assert.equal(acknowledgedWindowStopped.acknowledged, true, 'the acknowledged tmux sub-window marker is tagged for the one-quarter visual size');
+    api.setWorkflowTransitionGlowSecondsForTest(60);
     const freshAttention = api.agentWindowActivityIconForTest('codex', 'needs-input', 0, {transitionKey, nowSeconds: 1061, scheduleRefresh: false});
     assert.equal(freshAttention.state, 'attention', 'needs-input outranks cooldown and stays on the persistent red attention state');
     assert.equal(freshAttention.pulseActive, true, 'a fresh red attention marker glows during the configured glow window');
+    assert.equal(freshAttention.transitionPulseActive, true, 'a yellow-to-red transition pulses during the workflow transition glow duration');
     const staleAttention = api.agentWindowActivityIconForTest('codex', 'needs-input', 0, {transitionKey, nowSeconds: 1125, scheduleRefresh: false});
     assert.equal(staleAttention.state, 'attention', 'red attention stays visible after its glow duration');
     assert.equal(staleAttention.pulseActive, false, 'red attention becomes static after its glow duration');
+    const acknowledgedAttention = api.agentWindowActivityIconForTest('codex', 'needs-input', 0, {transitionKey: 'ack-red', attention_key: 'ack-red-key', attention_acknowledged: true, nowSeconds: 2000, scheduleRefresh: false});
+    assert.equal(acknowledgedAttention.state, 'attention', 'acknowledged red attention still renders on the sub-window button');
+    assert.equal(acknowledgedAttention.acknowledged, true, 'acknowledged red attention is tagged for the one-quarter visual size');
+    assert.equal(acknowledgedAttention.pulseActive, false, 'acknowledged red attention does not keep glowing');
+    assert.equal(acknowledgedAttention.transitionPulseActive, false, 'acknowledged red attention does not transition-pulse');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'approval', 0, {transitionKey, nowSeconds: 1062, scheduleRefresh: false}).state, 'attention', 'approval prompts use the same persistent red attention state');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 120, {transitionKey: 'cold-idle', nowSeconds: 2000, scheduleRefresh: false}), null, 'an AI window never observed working stays glyph-only instead of showing a black idle dot');
     api.setAutoApproveStateForTest('1', {agent_windows: [
@@ -981,8 +1000,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*color:\s*var\(--bad\)[\s\S]*text-shadow:\s*0 0 0 var\(--bad\), 0 0 6px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\.85\)/.test(yoloCss), 'active attention window dots keep the saturated red attention color instead of the active-control white halo');
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(yoloCss), 'active tmux sub-window activity dots inherit the shared brightness pulse in the built CSS');
     assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux sub-window buttons have no per-agent tint CSS');
-    assert.ok(source.includes("agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown initializes from the persisted setting');
-    assert.ok(source.includes("agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown live-updates from settings changes');
+    assert.ok(source.includes("workflowTransitionGlowSeconds = initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow initializes from the persisted setting');
+    assert.ok(source.includes("workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow live-updates from settings changes');
     assert.ok(source.includes("if (key === 'cooldown') return 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
     assert.ok(yoloCss.includes('.status-indicator--cooldown') && yoloCss.includes('var(--accent-gold)'), 'cooldown dot uses the shared theme-aware yellow/gold token');
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(yoloCss), 'the --active current agent glyph uses the glow-cadence; working renders a static symbol + glowing green ball');
@@ -1756,7 +1775,7 @@ async function runEditorPreviewSuite() {
     assert.ok(branchList.includes('<div class="branch-subject">feat: add InternLM tool parser parity</div>'), 'popover branch list keeps non-current branch subjects because they add detail');
 
     const blockedHtml = api.tmuxPaneTabHtml('4', info, {key: 'blocked', short: 'Blocked', label: 'Blocked', reason: 'blocked command'}, false);
-    assert.ok(blockedHtml.includes('--attention-animation-delay:'), 'red attention badges carry a synchronized animation delay');
+    assert.equal(blockedHtml.includes('--attention-animation-delay:'), false, 'generic red attention badges stay static when continuous status pulsing is disabled');
 
     const genericWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'working'}, true);
     assert.equal(/session-yolo-marker[^"]*active[^"]*working/.test(genericWorkingHtml), false, 'generic working state does not pulse YO marker');
@@ -1847,10 +1866,12 @@ async function runEditorPreviewSuite() {
     ]});
     const agentPopover = api.sessionPopoverHtml('4', {panes: []}, 'claude', false);
     assert.ok(/session-agent-kind[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*agent-window-status-dot[^"]*status-indicator--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows a static Claude symbol plus green ball before the tmux sub-window label');
-    assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot[^"]*status-indicator--attention[^"]*attention-pulse[\s\S]*1:codex/.test(agentPopover), 'attention popover row shows a static Codex symbol plus red attention ball before the label');
-    assert.ok(/agent-window-activity agent-window-activity--attention[^"]*"[^>]*style="--attention-animation-delay:[^"]*"[\s\S]*agent-window-status-dot/.test(agentPopover), 'attention agent glyph and status ball inherit one shared animation phase from their wrapper');
+    assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot(?=[^"]*agent-window-status-dot--transition-pulse)(?=[^"]*status-indicator--attention)[^"]*[\s\S]*1:codex/.test(agentPopover), 'attention popover row shows a static Codex symbol plus transition-pulsing red attention ball before the label');
+    assert.ok(/agent-window-activity agent-window-activity--attention[^"]*"[^>]*style="[^"]*--attention-animation-delay:[^"]*"[\s\S]*agent-window-status-dot/.test(agentPopover), 'attention agent glyph and status ball inherit one shared animation phase from their wrapper');
     assert.equal(/agent-window-status-dot[^>]*style="--attention-animation-delay:/.test(agentPopover), false, 'attention status dot does not carry its own independent animation phase');
-    assert.ok(/class="[^"]*session-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(agentPopover), 'attention popover status text inherits the shared red attention pulse and phase');
+    assert.equal(/class="[^"]*session-agent-status[^"]*attention-pulse/.test(agentPopover), false, 'attention popover status text stays static when continuous status pulsing is disabled');
+    assert.equal(/class="[^"]*session-agent-status[^"]*" style="--attention-animation-delay:/.test(agentPopover), false, 'attention popover status text does not carry an animation delay');
+    assert.equal(agentPopover.includes('[object Object]'), false, 'attention popover status text does not leak option objects into class names');
     assert.ok(agentPopover.includes('&lt;15 sec ago'), 'attention popover status text shows recency instead of approval/needs-input subtype words');
     assert.equal(agentPopover.includes('needs input') || agentPopover.includes('approval'), false, 'attention popover status text drops subtype words');
     assert.ok(agentPopover.includes('tmux sub-window 0:claude'), 'working agent row labels the tmux sub-window explicitly');
@@ -3720,7 +3741,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--attention/.test(redTabSummary), 'YO!info Tab group aggregates red attention inside the shared tab token above other child tmux sub-window states');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--cooldown/.test(yellowTabSummary) && !yellowTabSummary.includes('status-indicator--working'), 'YO!info Tab group aggregates yellow cooldown inside the shared tab token above green working child states');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(greenTabSummary), 'YO!info Tab group shows green inside the shared tab token when all child tmux sub-windows are working');
-    assert.equal((greenTabSummary.match(/agent-window-status-dot/g) || []).length, 1, 'YO!info Tab group summaries do not render a duplicate standalone status dot next to the tab token');
+    assert.equal((greenTabSummary.match(/\bagent-window-status-dot(?=\s|")/g) || []).length, 1, 'YO!info Tab group summaries do not render a duplicate standalone status dot next to the tab token');
     const noOwnerRecord = {
       id: 'orphan',
       tabKey: '__no_tab__',
@@ -6126,7 +6147,7 @@ async function runEditorPreviewSuite() {
       'pref.performance.latency_refresh_ms.label', 'pref.performance.event_log_refresh_ms.label',
       'pref.performance.server_event_poll_ms.label', 'pref.performance.server_background_file_event_poll_ms.label',
       'pref.performance.server_directory_event_poll_ms.label',
-      'pref.performance.tabber_activity_refresh_ms.label', 'pref.performance.agent_window_cooldown_seconds.label',
+      'pref.performance.tabber_activity_refresh_ms.label', 'pref.performance.workflow_transition_glow_seconds.label',
       'pref.editorScheme.group.dark',
       'pref.notifications.throttle_seconds.label',
       'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',

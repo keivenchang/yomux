@@ -1874,7 +1874,7 @@ class TmuxWebtermApp:
         return state in STATS_AGENT_ACTIVE_STATES
 
     def stats_agent_transition_seconds(self) -> float:
-        return self.performance_setting_seconds("agent_window_cooldown_seconds", 0.0, 300.0)
+        return self.performance_setting_seconds("workflow_transition_glow_seconds", 0.0, 300.0)
 
     def stats_agent_cooldown_visible(self, row: dict[str, Any], sample_time: float, transition_seconds: float) -> bool:
         if row.get("cooldown_acknowledged") is True:

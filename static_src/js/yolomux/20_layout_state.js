@@ -2161,38 +2161,38 @@ function updateTopbarOwnerStatus() {
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
 
-function attentionAnimationDurationMs(durationMs = redReminderMs) {
-  const duration = Math.max(1, Number(durationMs) || Number(redReminderMs) || 1);
+function attentionAnimationDurationMs(durationMs = agentStatusPulsePeriodMs) {
+  const duration = Math.max(1, Number(durationMs) || Number(agentStatusPulsePeriodMs) || 1);
   return duration;
 }
 
-function statusPulseAnimationEnabled(durationMs = redReminderMs) {
-  return Number(durationMs) > 0;
+function statusPulseAnimationEnabled() {
+  return false;
 }
 
-function attentionAnimationPhaseMs(now = Date.now(), durationMs = redReminderMs) {
+function attentionAnimationPhaseMs(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
   const duration = attentionAnimationDurationMs(durationMs);
   return ((Number(now) || 0) % duration + duration) % duration;
 }
 
-function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
+function attentionAnimationDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
   const duration = attentionAnimationDurationMs(durationMs);
   return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
-function attentionAnimationClockDelay(now = Date.now(), durationMs = redReminderMs) {
+function attentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
   const current = document?.documentElement?.style?.getPropertyValue?.(attentionAnimationDelayProperty)?.trim();
   return current || setAttentionAnimationClockDelay(now, durationMs);
 }
 
-function attentionAnimationStyle(now = Date.now(), durationMs = redReminderMs, property = attentionAnimationDelayProperty) {
+function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulsePeriodMs, property = attentionAnimationDelayProperty) {
   const value = property === attentionAnimationDelayProperty
     ? attentionAnimationClockDelay(now, durationMs)
     : attentionAnimationDelay(now, durationMs);
   return `${property}: ${value}`;
 }
 
-function setAttentionAnimationClockDelay(now = Date.now(), durationMs = redReminderMs) {
+function setAttentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
   const delay = attentionAnimationDelay(now, durationMs);
   document?.documentElement?.style?.setProperty?.(attentionAnimationDelayProperty, delay);
   return delay;
@@ -2281,7 +2281,8 @@ function statusIndicatorLabelHtml(text, tone, ...classes) {
   if (!value) return '';
   const options = statusIndicatorExtractOptions(classes);
   const style = statusIndicatorToneStyle(tone, options);
-  return `<span class="${esc(statusIndicatorLabelClasses(tone, ...classes, options))}"${style}>${esc(value)}</span>`;
+  const optionArgs = Object.keys(options).length ? [options] : [];
+  return `<span class="${esc(statusIndicatorLabelClasses(tone, ...classes, ...optionArgs))}"${style}>${esc(value)}</span>`;
 }
 
 function stateBadgeHtml(key, short, title, options = {}) {

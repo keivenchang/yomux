@@ -185,14 +185,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "active_color": "green",
         "separator_color": "theme",
         "max_tabs_per_pane": 10,
-        "red_reminder_ms": 0,
         "metadata_badge_pulse_seconds": 20,
     },
     "performance": {
         "latency_refresh_ms": 3000,
         "event_log_refresh_ms": 5000,
         "tabber_activity_refresh_ms": 15000,
-        "agent_window_cooldown_seconds": 60,
+        "workflow_transition_glow_seconds": 60,
         "server_event_poll_ms": 850,
         "server_background_file_event_poll_ms": 5000,
         "server_directory_event_poll_ms": 3000,
@@ -342,7 +341,6 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
     ("performance", "auto_approve_interval_seconds"): 0.5,
     ("share", "max_viewers"): 5,
-    ("appearance", "red_reminder_ms"): 1550,
     ("performance", "agent_window_cooldown_seconds"): 0,
 }
 
@@ -357,12 +355,11 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "pane_ring_opacity"): (5, 100),
     ("appearance", "inactive_pane_opacity"): (0, 100),
     ("appearance", "max_tabs_per_pane"): (2, 30),
-    ("appearance", "red_reminder_ms"): (0, 10000),
     ("appearance", "metadata_badge_pulse_seconds"): (0, 120),
     ("performance", "latency_refresh_ms"): (1000, 30000),
     ("performance", "event_log_refresh_ms"): (1000, 60000),
     ("performance", "tabber_activity_refresh_ms"): (1000, 60000),
-    ("performance", "agent_window_cooldown_seconds"): (0, 300),
+    ("performance", "workflow_transition_glow_seconds"): (0, 300),
     ("performance", "server_event_poll_ms"): (250, 60000),
     ("performance", "server_background_file_event_poll_ms"): (250, 60000),
     ("performance", "server_directory_event_poll_ms"): (250, 60000),
@@ -513,12 +510,11 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "pane_ring_opacity"): "Percent, 5-100. Opacity of the green/red pane ring drawn over the content edge.",
     ("appearance", "inactive_pane_opacity"): "Percent, 0-100. Strength of inactive pane gray-out.",
     ("appearance", "max_tabs_per_pane"): "Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).",
-    ("appearance", "red_reminder_ms"): "Milliseconds, 0 disables the red/yellow/green status progress pulse cycle for agent status balls.",
     ("appearance", "metadata_badge_pulse_seconds"): "Seconds, 0-120. Duration for PR/branch metadata badge pulses.",
     ("performance", "latency_refresh_ms"): "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
     ("performance", "event_log_refresh_ms"): "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
     ("performance", "tabber_activity_refresh_ms"): "Server-side refresh interval for cached Tabber activity; clients read the latest cached snapshot. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
-    ("performance", "agent_window_cooldown_seconds"): "Seconds, 0-300. Red/yellow Claude/Codex tmux sub-window status balls stay visible until acknowledgement; this controls how long a new red/yellow transition keeps glowing. 0 keeps the status visible but static.",
+    ("performance", "workflow_transition_glow_seconds"): "Seconds, 0-300. A green/red/yellow Claude/Codex status ball glows for this long after it appears or changes color. 0 keeps transition balls visible but static.",
     ("performance", "server_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for open editor file signatures in visible panes before pushing files_changed events to browsers.",
     ("performance", "server_background_file_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for background editor file signatures before pushing files_changed events to browsers.",
     ("performance", "server_directory_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for Finder/Differ directory signatures before pushing fs_changed events to browsers.",
@@ -617,7 +613,6 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("notifications", "notify_transitions"): "Notifications",
     ("notifications", "toast_duration_ms"): "Notifications",
     ("notifications", "throttle_seconds"): "Notifications",
-    ("appearance", "red_reminder_ms"): "Notifications",
     ("appearance", "metadata_badge_pulse_seconds"): "Notifications",
     ("file_explorer", "root_mode"): "Finder",
     ("file_explorer", "image_open_mode"): "Finder",
@@ -645,7 +640,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("performance", "latency_refresh_ms"): "Performance",
     ("performance", "event_log_refresh_ms"): "Performance",
     ("performance", "tabber_activity_refresh_ms"): "Performance",
-    ("performance", "agent_window_cooldown_seconds"): "Notifications",
+    ("performance", "workflow_transition_glow_seconds"): "Notifications",
     ("performance", "popover_show_delay_ms"): "Performance",
     ("performance", "popover_hide_delay_ms"): "Performance",
     ("performance", "menu_hover_open_delay_ms"): "Performance",
@@ -845,6 +840,10 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
         if section == "general" and "startup_tips" not in incoming and "startup_helpers" in incoming:
             incoming = dict(incoming)
             incoming["startup_tips"] = incoming["startup_helpers"]
+        if section == "performance" and "workflow_transition_glow_seconds" not in incoming and "agent_window_cooldown_seconds" in incoming:
+            incoming = dict(incoming)
+            old_value = incoming.get("agent_window_cooldown_seconds")
+            incoming["workflow_transition_glow_seconds"] = defaults["performance"]["workflow_transition_glow_seconds"] if old_value == 0 else old_value
         for key, default in values.items():
             present = key in incoming
             value = incoming.get(key, default)

@@ -3792,12 +3792,14 @@ function tabberWindowButtonHtml(data, label) {
   }
   const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;
   const pid = Number(data?.pid);
-  const visibleNameWithPid = Number.isFinite(pid) && pid > 0 ? tmuxWindowDisplayLabel(visibleName, Math.floor(pid)) : visibleName;
+  // Keep the button itself identical to the Info Bar / YO!info window button: agent symbol + status
+  // ball + "<index>:<name>", no pid baked into the label. The pid is printed as a separate suffix after
+  // the button so the icon matches everywhere it appears.
   const buttonHtml = tmuxWindowButtonHtml({
     tag: 'span',
     classes: ['tabber-window-button'],
     session: data?.session,
-    visibleName: visibleNameWithPid,
+    visibleName,
     numberLabel: windowIndex,
     showNumberLabel: false,
     active: data?.active === true,
@@ -3806,7 +3808,8 @@ function tabberWindowButtonHtml(data, label) {
     attrs: ['data-tabber-window-button="shared"'],
     ariaPressed: false,
   });
-  return `<span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${stripTitleAttrs(buttonHtml)}</span>`;
+  const pidHtml = Number.isFinite(pid) && pid > 0 ? `<span class="tabber-window-pid"> (pid=${esc(String(Math.floor(pid)))})</span>` : '';
+  return `<span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${stripTitleAttrs(buttonHtml)}${pidHtml}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {

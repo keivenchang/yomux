@@ -2186,11 +2186,20 @@ body.theme-light .latency-meter {
   border: 1px solid transparent;
   animation-name: attention-ring-fade;
 }
+.agent-window-status-dot--transition-glow.status-indicator--working,
 .agent-window-status-dot--transition-glow.status-indicator--attention,
 .agent-window-status-dot--transition-glow.status-indicator--cooldown {
   border: 1px solid rgb(var(--attention-ring-rgb, 255 51 71) / 0.42);
   box-shadow: 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.24), 0 0 8px rgb(var(--attention-ring-rgb, 255 51 71) / 0.28);
   filter: saturate(1.06) brightness(1.08);
+}
+.agent-window-status-dot--transition-pulse:not(.heartbeat-pulse) {
+  border: 1px solid transparent;
+  animation-name: agent-status-transition-pulse;
+  animation-duration: var(--agent-status-transition-pulse-duration, 1.55s);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
 }
 .status-indicator--settled {
   color: var(--agent-inactive-marker-bg);
@@ -2292,6 +2301,13 @@ body.theme-light .latency-meter {
   font-size: var(--agent-status-ball-size);
   line-height: 1;
 }
+.agent-window-activity .agent-window-status-dot--acknowledged {
+  font-size: calc(var(--agent-status-ball-size) / 4);
+  border-color: transparent;
+  box-shadow: none;
+  filter: saturate(0.9) brightness(0.95);
+  opacity: 0.82;
+}
 .agent-window-agent-icon--active {
   --agent-working-glow-rgb: 226 238 248;
   border-radius: 5px;
@@ -2384,6 +2400,20 @@ body.theme-light .latency-meter {
     color: #4be878;
   }
 }
+@keyframes agent-status-transition-pulse {
+  0%, 100% {
+    opacity: 0.52;
+    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.18);
+    box-shadow: 0 0 0 0 rgb(var(--attention-ring-rgb, 255 51 71) / 0), 0 0 2px rgb(var(--attention-ring-rgb, 255 51 71) / 0.08);
+    filter: saturate(0.94) brightness(0.9);
+  }
+  45%, 55% {
+    opacity: 1;
+    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.72);
+    box-shadow: 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.32), 0 0 9px rgb(var(--attention-ring-rgb, 255 51 71) / 0.38);
+    filter: saturate(1.2) brightness(1.18);
+  }
+}
 .attention-pulse {
   --attention-ring-border: 1px;
   animation-name: attention-ring-fade;
@@ -2418,6 +2448,7 @@ body.theme-light .latency-meter {
 @media (prefers-reduced-motion: reduce) {
   .heartbeat-pulse,
   .attention-pulse,
+  .agent-window-status-dot--transition-pulse,
   .session-state-needs-approval,
   .session-state-needs-input,
   .session-state-blocked,
@@ -6884,6 +6915,9 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--cooldown {
   color: var(--accent-gold);
   text-shadow: 0 0 0 var(--accent-gold), 0 0 6px rgb(var(--attention-ring-rgb, 245 197 66) / 0.72);
+}
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.agent-window-status-dot--acknowledged {
+  text-shadow: 0 0 0 currentColor;
 }
 .terminal-tab {
   flex: 0 1 auto;
@@ -14742,6 +14776,14 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
 }
 .file-tree-row.tabber-row .tabber-window-button {
   max-width: 100%;
+}
+/* pid is printed as a muted suffix AFTER the window button so the button icon stays identical to the
+   Info Bar / YO!info window button. */
+.file-tree-row.tabber-row .tabber-window-pid {
+  flex: 0 0 auto;
+  color: var(--text-muted-cool);
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
+  white-space: nowrap;
 }
 .file-tree-row.tabber-row .tabber-window-button .tmux-window-name-label {
   justify-content: flex-start;

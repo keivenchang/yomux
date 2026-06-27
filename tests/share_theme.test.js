@@ -2135,7 +2135,7 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*?value="5\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE background editor file-change poll defaults to 5 seconds');
     assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
     assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber server poll interval defaults to 15 seconds in Preferences');
-    assert.ok(/data-setting-path="performance\.agent_window_cooldown_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'red/yellow glow duration defaults to 60 seconds in Preferences');
+    assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'workflow transition glow duration defaults to 60 seconds in Preferences');
     assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
@@ -2149,9 +2149,9 @@ async function runShareThemeSuite() {
     assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
     assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
     assert.ok(performanceHtml.includes('Tabber server poll interval'), 'Performance labels the Tabber activity refresh as a server poll interval');
-    assert.equal(performanceHtml.includes('Red/yellow glow duration'), false, 'Performance does not own the red/yellow glow duration');
-    assert.ok(notificationsHtml.includes('Red/yellow glow duration'), 'Notifications labels the red/yellow glow duration');
-    assert.ok(notificationsHtml.includes('The ball stays visible until acknowledgement') && notificationsHtml.includes('0 keeps it visible but static.'), 'Notifications explains that acknowledgement controls visibility and 0 disables glow');
+    assert.equal(performanceHtml.includes('Workflow transition glow duration'), false, 'Performance does not own the workflow transition glow duration');
+    assert.ok(notificationsHtml.includes('Workflow transition glow duration'), 'Notifications labels the workflow transition glow duration');
+    assert.ok(notificationsHtml.includes('green, red, or yellow') && notificationsHtml.includes('0 keeps transition balls visible but static.'), 'Notifications explains that transition glow applies to green/red/yellow and 0 disables glow');
     assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
     for (const removedPath of [
       'file_explorer.refresh_seconds',
@@ -2164,7 +2164,7 @@ async function runShareThemeSuite() {
     ]) {
       assert.equal(preferencesHtml.includes(`data-setting-path="${removedPath}"`), false, `${removedPath} is no longer exposed in Preferences`);
     }
-    assert.ok(/data-setting-path="appearance\.red_reminder_ms"[\s\S]*data-setting-path="performance\.agent_window_cooldown_seconds"[\s\S]*data-setting-path="appearance\.metadata_badge_pulse_seconds"/.test(notificationsHtml), 'Notifications order keeps the red/yellow glow duration after the red/yellow/green pulse setting');
+    assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*data-setting-path="appearance\.metadata_badge_pulse_seconds"/.test(notificationsHtml), 'Notifications order keeps workflow transition glow before badge pulse duration');
     assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"[\s\S]*data-setting-path="performance\.tabber_activity_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers');
     assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
     assert.equal(diffBundle.includes('fileExplorerRefreshMsFromSettings'), false, 'Finder client-pull refresh setting helper is removed');
@@ -2177,7 +2177,7 @@ async function runShareThemeSuite() {
     assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
     assert.equal(diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default in bootstrap JS');
     assert.equal(diffBundle.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default on settings reload');
-    assert.ok(diffBundle.includes("path: 'performance.agent_window_cooldown_seconds'") && diffBundle.includes("initialSetting('performance.agent_window_cooldown_seconds')"), 'agent cooldown duration is backed by the Performance preference through settings defaults');
+    assert.ok(diffBundle.includes("path: 'performance.workflow_transition_glow_seconds'") && diffBundle.includes("initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow duration is backed by the Performance preference through settings defaults');
     assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
     api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
     const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
@@ -3928,10 +3928,7 @@ async function runShareThemeSuite() {
     assert.ok(tmuxMenuLabels.indexOf('YOLO') > tmuxMenuLabels.indexOf('Resume session'), 'YOLO submenu stays at the bottom after session actions');
     const yoloMenu = tmuxMenu.items.find(item => item.label === 'YOLO');
     assert.equal(yoloMenu.type, 'submenu');
-    const yoloPulseItem = yoloMenu.items.find(item => item.path === 'appearance.red_reminder_ms');
-    assert.equal(yoloPulseItem.type, 'number-setting');
-    assert.equal(yoloPulseItem.label, 'Red/yellow/green status pulse period');
-    assert.equal(yoloPulseItem.suffix, 'ms');
+    assert.equal(yoloMenu.items.some(item => item.path === 'appearance.red_reminder_ms'), false, 'YOLO submenu no longer exposes removed status pulse timing');
     assert.equal(yoloMenu.items.some(item => item.path === 'appearance.yolo_rotate_ms'), false);
     assert.ok(yoloMenu.items.some(item => item.label === 'Open rule file'));
     assert.ok(yoloMenu.items.some(item => item.label === 'Reload rules'));
@@ -3972,9 +3969,9 @@ async function runShareThemeSuite() {
     assert.equal(api.currentSessionActionTarget(), '2');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(source.includes("menuNumberSetting('appearance.red_reminder_ms'"), 'YOLO submenu exposes the renamed status pulse setting');
+    assert.equal(source.includes("menuNumberSetting('appearance.red_reminder_ms'"), false, 'YOLO submenu no longer exposes removed status pulse timing');
     assert.ok(/function createAppMenuNumberSetting[\s\S]*saveSettingsPatch\(settingPatch\(item\.path, next\)\)/.test(source), 'menu number-setting rows save through the shared settings API');
-    assert.ok(/function applyAppMenuNumberSettingPreview[\s\S]*path === 'appearance\.red_reminder_ms'[\s\S]*applyCssSettings\(\)/.test(source), 'YOLO menu status pulse control live-applies the shared pulse timing');
+    assert.equal(/function applyAppMenuNumberSettingPreview[\s\S]*path === 'appearance\.red_reminder_ms'[\s\S]*applyCssSettings\(\)/.test(source), false, 'YOLO menu has no removed status pulse live-preview branch');
     assert.ok(css.includes('.app-menu-setting-control input[type="number"]'), 'menu number-setting rows have dedicated input styling');
     assert.ok(source.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated JS has a do-not-edit header');
     assert.ok(source.includes('const mod = appModifier(event);'), 'global app shortcuts use one platform modifier');

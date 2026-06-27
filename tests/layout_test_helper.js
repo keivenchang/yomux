@@ -4,9 +4,7 @@ const UI_PINS = JSON.parse(fs.readFileSync('tests/ui_pins.json', 'utf8'));  // s
 const vm = require('vm');
 const FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST = 'yolomux.fileExplorerOpen.v1';
 const DEFAULT_TEST_SETTINGS = Object.freeze({
-  appearance: Object.freeze({
-    red_reminder_ms: 1550,
-  }),
+  appearance: Object.freeze({}),
   editor: Object.freeze({
     trim_trailing_whitespace_on_save: false,
     ensure_final_newline_on_save: false,
@@ -22,7 +20,7 @@ const DEFAULT_TEST_SETTINGS = Object.freeze({
     latency_refresh_ms: 3000,
     event_log_refresh_ms: 5000,
     tabber_activity_refresh_ms: 15000,
-    agent_window_cooldown_seconds: 60,
+    workflow_transition_glow_seconds: 60,
     popover_show_delay_ms: 1000,
     popover_hide_delay_ms: 300,
     menu_hover_open_delay_ms: 800,
@@ -1433,7 +1431,7 @@ globalThis.__layoutTestApi = {
   updatePanelInfoBarMetaForTest: updatePanelInfoBarMeta,
   updatePanelWindowStepButtonsForTest: updatePanelWindowStepButtons,
   agentWindowActivityIconForTest: agentWindowActivityIcon,
-  setAgentWindowCooldownSecondsForTest(value) { agentWindowCooldownSeconds = Math.max(0, Number(value) || 0); },
+  setWorkflowTransitionGlowSecondsForTest(value) { workflowTransitionGlowSeconds = Math.max(0, Number(value) || 0); },
   acknowledgeAgentWindowActivityForTest(session, windowIndex = null, options = {}) { return acknowledgeAgentWindowActivity(session, windowIndex, {...options, localOnly: options.localOnly !== false}); },
   acknowledgeAgentWindowStoppedTransitionForTest: acknowledgeAgentWindowStoppedTransition,
   agentWindowActivityIconHtmlForStatusForTest: agentWindowActivityIconHtmlForStatus,

@@ -710,7 +710,7 @@ function applySeparatorColor(value) {
 }
 
 function applyStatusPulseModeClass() {
-  const enabled = typeof statusPulseAnimationEnabled === 'function' ? statusPulseAnimationEnabled() : Number(redReminderMs) > 0;
+  const enabled = typeof statusPulseAnimationEnabled === 'function' ? statusPulseAnimationEnabled() : false;
   document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
 }
 
@@ -740,8 +740,8 @@ function applyCssSettings() {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
-  root.setProperty('--pulse-duration', `${Math.max(0, redReminderMs) / 1000}s`);
-  root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
+  root.setProperty('--pulse-duration', `${Math.max(1, agentStatusPulsePeriodMs) / 1000}s`);
+  root.setProperty('--red-reminder-duration', `${Math.max(1, agentStatusPulsePeriodMs) / 1000}s`);
   if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
@@ -858,8 +858,7 @@ function applySettingsPayload(payload, options = {}) {
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
-  agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds');
-  redReminderMs = numberSetting('appearance.red_reminder_ms');
+  workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
   hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms');

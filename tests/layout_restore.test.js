@@ -1618,8 +1618,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/1 RUN/.test(html) && /topbar-activity-run active/.test(html), 'status line shows running count');
     assert.ok(/1 attention/.test(html) && /topbar-activity-ask topbar-activity-attn/.test(html), 'status line shows attention count');
     assert.ok(/1 blocked/.test(html) && /topbar-activity-blocked topbar-activity-attn/.test(html), 'status line shows blocked count');
-    assert.ok(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), 'topbar attention count inherits the shared status indicator pulse parent');
-    assert.ok(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), 'topbar blocked inherits the shared status indicator pulse parent');
+    assert.equal(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), false, 'topbar attention count stays static when continuous status pulsing is disabled');
+    assert.equal(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), false, 'topbar blocked count stays static when continuous status pulsing is disabled');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
     assert.ok(/\.topbar-owner-status\s*\{/.test(css), 'the top-bar ownership indicator is styled');

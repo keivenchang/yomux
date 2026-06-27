@@ -3602,6 +3602,14 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
 .file-tree-row.tabber-row .tabber-window-button {
   max-width: 100%;
 }
+/* pid is printed as a muted suffix AFTER the window button so the button icon stays identical to the
+   Info Bar / YO!info window button. */
+.file-tree-row.tabber-row .tabber-window-pid {
+  flex: 0 0 auto;
+  color: var(--text-muted-cool);
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
+  white-space: nowrap;
+}
 .file-tree-row.tabber-row .tabber-window-button .tmux-window-name-label {
   justify-content: flex-start;
 }

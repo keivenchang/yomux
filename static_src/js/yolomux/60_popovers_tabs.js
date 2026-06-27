@@ -450,7 +450,7 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
     const item = typeof agentWindowActivityIconForStatusItem === 'function'
       ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
       : null;
-    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(item.state)) continue;
+    if (!item || item.acknowledged === true || !['attention', 'cooldown', STATE_KEY.working].includes(item.state)) continue;
     const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
     if (screenWorking && !hasWorkingWindow && item.state === 'cooldown' && !explicitStopped) continue;
     const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
