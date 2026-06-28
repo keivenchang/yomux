@@ -433,6 +433,9 @@
   --neutral-text-cool: var(--lt-muted-strong);
   --tab-line-height: 1;
   --pane-tab-width: 180px;
+  /* Top-corner rounding shared by dockview tabs and pane-strip tabs, scaled off the tab font. */
+  --pane-tab-top-radius-scale: 0.5;
+  --pane-tab-top-radius: calc(var(--tab-label-size) * var(--pane-tab-top-radius-scale));
   --dockview-tab-min-inline-size: 64px;
   --pc-control-bg: #1b2432;
   --pc-control-fg: #dfe6ef;
@@ -2975,6 +2978,23 @@ body.theme-light .branch-link {
   overflow: hidden;
   opacity: 0.86 !important;
 }
+.tabber-drag-image.drag-image {
+  max-height: min(56vh, 520px);
+  padding: 4px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 94%, black 6%);
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 12px 30px rgb(var(--shadow-rgb) / 0.42);
+  overflow: hidden;
+  opacity: 0.88 !important;
+}
+.tabber-drag-image .file-tree-row {
+  width: 100%;
+}
+.tabber-drag-image .session-popover {
+  display: none !important;
+}
 .pane-drag-image-frame {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -5338,7 +5358,7 @@ button:disabled:hover { border-color: var(--line); }
   margin: 0 1px 0 0;
   overflow: visible;
   background: transparent;
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
 }
 .yolomux-dockview .dv-tabs-and-actions-container.dv-single-tab.dv-full-width-single-tab .dv-tabs-container .dv-tab {
   flex-grow: 0;
@@ -5348,7 +5368,7 @@ button:disabled:hover { border-color: var(--line); }
   width: 100%;
   max-width: 100%;
   height: var(--pane-tab-height);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
 }
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab {
   color: var(--pane-tab-active-text);
@@ -6339,7 +6359,7 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg);
   border: 1px solid var(--pane-inactive-tab-border);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
   border-bottom-color: var(--pane-inactive-tab-border);
   line-height: var(--tab-line-height);
   white-space: nowrap;
@@ -6369,7 +6389,7 @@ body.theme-light .drop-slot.drag-over {
   background: var(--pane-inactive-tab-bg);
   border: 1px solid var(--pane-inactive-tab-border);
   border-bottom-color: var(--pane-inactive-tab-border);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
   font-stretch: condensed;

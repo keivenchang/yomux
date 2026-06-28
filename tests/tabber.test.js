@@ -736,9 +736,10 @@ async function runTabberSuite() {
 
   test('Tabber tab rows share the normal pane-tab drag source', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/function bindPaneTabNativeDragSource\([\s\S]*startSessionDrag\(event, item, paneTabDragSourceSlot/.test(source), 'normal pane tabs have one shared native drag-source binder');
+    assert.ok(/function bindPaneTabNativeDragSource\([\s\S]*startSessionDrag\(event, item, paneTabDragSourceSlot[\s\S]*dragImage: options\.dragImage/.test(source), 'normal pane tabs have one shared native drag-source binder with an optional drag image override');
     assert.ok(source.includes('bindPaneTabNativeDragSource(tab, item, () => side);'), 'createPaneTab uses the shared native tab drag binder');
     assert.ok(/function bindTabberRowDragSource\(row\)[\s\S]*bindPaneTabNativeDragSource\(row, \(\) => tabberRowDragItem\(row\)/.test(source), 'Tabber rows reuse the shared native tab drag binder');
+    assert.ok(source.includes('dragImage: () => tabberNativeDragImageForRow(row)'), 'Tabber rows and inner session tabs preview only the dragged subtree');
     assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*const tabPayload = dragPayload\(event\)[\s\S]*dropIntentAllowsSession\(tabPayload\.session, intent\)[\s\S]*showDropPreview\(intent\)/.test(source), 'Dockview accepts external shared tab drags from Tabber rows');
     assert.ok(/function dockviewHandleFileDrop\(event\)[\s\S]*const tabPayload = dragPayload\(event\)[\s\S]*dropSessionWithIntent\(tabPayload\.session, intent/.test(source), 'Dockview drops external shared tab drags through the normal session intent path');
 
@@ -776,10 +777,17 @@ async function runTabberSuite() {
     assert.equal(event.dataTransfer.effectAllowed, 'move');
     assert.equal(event.dataTransfer['application/x-yolomux-session'], JSON.stringify({session: '1', sourceSlot: 'left'}));
     assert.equal(event.dataTransfer['text/plain'], '1');
-    assert.equal(event.dataTransfer.dragImage.node, sessionRow, 'Tabber rows use the same native drag image path as pane tabs');
+    const preview = event.dataTransfer.dragImage.node;
+    assert.equal(preview.className, 'tabber-drag-image drag-image', 'Tabber drags use a compact native drag image instead of the whole Tabber tree');
+    assert.equal(preview.dataset.tabberDragRoot, sessionRow.dataset.path, 'Tabber drag preview is rooted at the dragged row');
+    const previewRows = Array.from(preview.querySelectorAll('.file-tree-row[data-tabber-type]'));
+    assert.equal(previewRows.some(row => row.dataset.tabberSession === '1' && row.dataset.tabberType === 'session'), true, 'preview includes the dragged session tab row');
+    assert.equal(previewRows.some(row => row.dataset.tabberSession === '1' && row.dataset.tabberType === 'window'), true, 'preview includes visible child rows under the dragged tab');
+    assert.equal(previewRows.some(row => row.dataset.tabberSession === '2'), false, 'preview excludes sibling Tabber rows');
     assert.equal(event.dataTransfer.dragImage.x, 13);
     assert.equal(event.dataTransfer.dragImage.y, 7);
     api.endSessionDrag(event);
+    assert.equal(preview.removed, true, 'Tabber drag image preview is cleaned up at drag end');
   });
 
   test('t@8485', () => {
@@ -1209,7 +1217,7 @@ async function runTabberSuite() {
     assert.ok(/height:\s*var\(--pane-tab-height\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use the shared pane-tab height');
     assert.ok(/padding:\s*1px 5px 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab padding');
     assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use the shared pane-tab border token');
-    assert.ok(/border-radius:\s*6px 6px 0 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
+    assert.ok(/border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
     assert.ok(/font-family:\s*var\(--tab-font\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab font');
     assert.ok(/line-height:\s*var\(--tab-line-height\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab line height');
     assert.ok(/\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: compact tmux tab tokens inherit active pane-tab tokens');

@@ -21,8 +21,10 @@ def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
     assert inactive["rect"]["height"] == active["rect"]["height"]
     assert active["rect"]["width"] >= 150
     assert inactive["rect"]["width"] == active["rect"]["width"]
-    assert active["borderTopLeftRadius"] == "6px"
-    assert active["borderTopRightRadius"] == "6px"
+    # Top corners use the font-scaled --pane-tab-top-radius token. Assert a tab-shaped value
+    # and matching corners rather than an exact px, so tuning the scale does not churn this test.
+    assert active["borderTopLeftRadius"] == active["borderTopRightRadius"]
+    assert float(active["borderTopLeftRadius"].rstrip("px")) >= 5
     assert metrics["header"]["tabsScrollbarWidth"] == "none"
     assert metrics["header"]["tabsWebkitScrollbarDisplay"] == "none"
     assert metrics["header"]["tabsWebkitScrollbarHeight"] == "0px"

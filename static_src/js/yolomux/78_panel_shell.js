@@ -573,7 +573,9 @@ function bindPaneTabNativeDragSource(tab, itemOrGetter, sourceSlotOrGetter = nul
       return;
     }
     event.stopPropagation();
-    startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event));
+    startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event), {
+      dragImage: options.dragImage,
+    });
   });
   tab.addEventListener('dragend', endSessionDrag);
 }

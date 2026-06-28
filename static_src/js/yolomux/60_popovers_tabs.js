@@ -1352,6 +1352,11 @@ function transparentNativeDragImage() {
   return node;
 }
 
+function clearNativeDragImagePreview() {
+  nativeDragImagePreview?.remove?.();
+  nativeDragImagePreview = null;
+}
+
 function moveCustomDragPreview(event) {
   if (!customDragPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
   customDragPreview.style.left = `${Math.round(event.clientX - customDragPreviewOffset.x)}px`;
@@ -1557,8 +1562,9 @@ function showDragTimingOverlay(rows) {
     ...rows.map(row => `${row.mark.padEnd(width)}  +${String(row.deltaMs).padStart(7)}  total ${String(row.sinceStartMs).padStart(7)}`)].join('\n');
 }
 
-function startSessionDrag(event, session, sourceSlot = null) {
+function startSessionDrag(event, session, sourceSlot = null, options = {}) {
   dragTimingMark('startSessionDrag:begin');
+  clearNativeDragImagePreview();
   dragSession = session;
   dragSourceSlot = sourceSlot;
   dragPaneSlot = null;
@@ -1573,10 +1579,13 @@ function startSessionDrag(event, session, sourceSlot = null) {
   // getBoundingClientRect(), which forced a synchronous layout reflow inside the handler — coldest on the
   // first drag after load — before the browser could start the drag.
   const source = event.currentTarget;
-  if (source && event.dataTransfer?.setDragImage) {
+  const dragImageSource = typeof options.dragImage === 'function'
+    ? (options.dragImage(event, source) || source)
+    : (options.dragImage || source);
+  if (dragImageSource && event.dataTransfer?.setDragImage) {
     const offsetX = Math.max(0, Number(event.offsetX) || 0);
     const offsetY = Math.max(0, Number(event.offsetY) || 0);
-    event.dataTransfer.setDragImage(source, offsetX, offsetY);
+    event.dataTransfer.setDragImage(dragImageSource, offsetX, offsetY);
   }
   resetDragTabRectCache();
   dragTimingMark('startSessionDrag:end');
@@ -1609,6 +1618,7 @@ function endSessionDrag(event) {
   dragSourceSlot = null;
   dragPaneSlot = null;
   resetDragTabRectCache();
+  clearNativeDragImagePreview();
   stopCustomDragPreview();
   sessionButtons.classList.remove(CLS.dragOver);
   clearDropPreview();

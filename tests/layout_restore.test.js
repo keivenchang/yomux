@@ -1306,7 +1306,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function topbarVersionTitle\(\)[\s\S]*SHA: \$\{sha\}[\s\S]*Commits: \$\{commitCount\}/.test(source), 'top-left version title includes the SHA and commit count');
     // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
     // cached tab rects during a drag instead of forcing sync layout (getBoundingClientRect) per move.
-    assert.ok(/function startSessionDrag[\s\S]*?setDragImage\(source/.test(source), '#47: tab drags install the native drag image (the tab itself)');
+    assert.ok(/function startSessionDrag[\s\S]*?options\.dragImage \|\| source[\s\S]*?setDragImage\(dragImageSource/.test(source), '#47: tab drags default to the native tab drag image while allowing shared callers to override it');
     // C12 F2: dragstart must NOT force a layout reflow with getBoundingClientRect (it stalled the cold first drag).
     const startDragBody = source.slice(source.indexOf('function startSessionDrag'), source.indexOf('function endSessionDrag'));
     assert.equal(/\.getBoundingClientRect\(/.test(startDragBody), false, 'C12 F2: dragstart computes the grab offset without a getBoundingClientRect reflow');

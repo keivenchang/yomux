@@ -245,7 +245,7 @@
   margin: 0 1px 0 0;
   overflow: visible;
   background: transparent;
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
 }
 .yolomux-dockview .dv-tabs-and-actions-container.dv-single-tab.dv-full-width-single-tab .dv-tabs-container .dv-tab {
   flex-grow: 0;
@@ -255,7 +255,7 @@
   width: 100%;
   max-width: 100%;
   height: var(--pane-tab-height);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
 }
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab {
   color: var(--pane-tab-active-text);
@@ -1246,7 +1246,7 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg);
   border: 1px solid var(--pane-inactive-tab-border);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
   border-bottom-color: var(--pane-inactive-tab-border);
   line-height: var(--tab-line-height);
   white-space: nowrap;
@@ -1276,7 +1276,7 @@ body.theme-light .drop-slot.drag-over {
   background: var(--pane-inactive-tab-bg);
   border: 1px solid var(--pane-inactive-tab-border);
   border-bottom-color: var(--pane-inactive-tab-border);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
   font-stretch: condensed;

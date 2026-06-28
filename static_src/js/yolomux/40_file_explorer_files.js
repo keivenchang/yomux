@@ -3832,6 +3832,58 @@ function tabberSessionChromeHtml(data) {
   });
 }
 
+function tabberDragPreviewRows(row) {
+  if (!row) return [];
+  const path = String(row.dataset?.path || '');
+  const parent = row.parentElement;
+  const candidates = Array.from(parent?.querySelectorAll?.('.file-tree-row[data-tabber-type]') || [row]);
+  if (!path) return [row];
+  const childPrefix = `${path.replace(/\/+$/, '')}/`;
+  return candidates.filter(candidate => {
+    if (candidate === row) return true;
+    const candidatePath = String(candidate.dataset?.path || '');
+    return candidatePath.startsWith(childPrefix);
+  });
+}
+
+function cloneTabberDragPreviewRow(row) {
+  const clone = row.cloneNode?.(true) || row;
+  clone.id = '';
+  clone.className = row.className || clone.className || '';
+  clone.draggable = false;
+  clone.removeAttribute?.('title');
+  clone.removeAttribute?.('draggable');
+  clone.querySelectorAll?.('.session-popover, [role="tooltip"]').forEach(node => node.remove?.());
+  const paddingLeft = row.style?.getPropertyValue?.('padding-left') || row.style?.paddingLeft || '';
+  if (paddingLeft) {
+    if (typeof clone.style?.setProperty === 'function') clone.style.setProperty('padding-left', paddingLeft);
+    else if (clone.style) clone.style.paddingLeft = paddingLeft;
+  }
+  return clone;
+}
+
+function tabberNativeDragImageForRow(row) {
+  const sourceRow = row?.closest?.('.file-tree-row[data-tabber-type]') || row;
+  const rows = tabberDragPreviewRows(sourceRow);
+  if (!rows.length) return sourceRow;
+  const preview = document.createElement('div');
+  preview.className = 'tabber-drag-image drag-image';
+  preview.dataset.tabberDragPreview = 'subtree';
+  preview.dataset.tabberDragRoot = String(sourceRow.dataset?.path || '');
+  preview.style.position = 'fixed';
+  preview.style.left = '-10000px';
+  preview.style.top = '-10000px';
+  preview.style.pointerEvents = 'none';
+  const rect = sourceRow.getBoundingClientRect?.();
+  const width = Math.max(220, Math.min(620, Math.round(Number(rect?.width) || 360)));
+  if (typeof preview.style?.setProperty === 'function') preview.style.setProperty('width', `${width}px`);
+  else preview.style.width = `${width}px`;
+  for (const item of rows) preview.appendChild(cloneTabberDragPreviewRow(item));
+  document.body.appendChild(preview);
+  nativeDragImagePreview = preview;
+  return preview;
+}
+
 function bindTabberSessionChrome(row, session) {
   const tab = row?.querySelector?.('.tabber-session-tab');
   if (!tab || tab.dataset.tabberChromeBound === 'true') return;
@@ -3843,6 +3895,7 @@ function bindTabberSessionChrome(row, session) {
   bindPaneTabPopover(tab, session);
   bindPaneTabNativeDragSource(tab, session, () => slotForItem(session), {
     ignore: event => Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a')),
+    dragImage: () => tabberNativeDragImageForRow(row),
   });
   tab.addEventListener('pointerdown', event => {
     const autoTarget = event.target.closest?.('[data-auto-session]');
@@ -3878,6 +3931,7 @@ function tabberRowDragIgnore(event) {
 function bindTabberRowDragSource(row) {
   bindPaneTabNativeDragSource(row, () => tabberRowDragItem(row), item => slotForItem(item), {
     ignore: tabberRowDragIgnore,
+    dragImage: () => tabberNativeDragImageForRow(row),
   });
 }
 

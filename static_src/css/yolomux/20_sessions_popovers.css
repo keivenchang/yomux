@@ -972,6 +972,23 @@ body.theme-light .branch-link {
   overflow: hidden;
   opacity: 0.86 !important;
 }
+.tabber-drag-image.drag-image {
+  max-height: min(56vh, 520px);
+  padding: 4px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 94%, black 6%);
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 12px 30px rgb(var(--shadow-rgb) / 0.42);
+  overflow: hidden;
+  opacity: 0.88 !important;
+}
+.tabber-drag-image .file-tree-row {
+  width: 100%;
+}
+.tabber-drag-image .session-popover {
+  display: none !important;
+}
 .pane-drag-image-frame {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
