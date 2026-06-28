@@ -14712,7 +14712,7 @@ body.theme-light .file-tree-row.tabber-row {
   color: var(--tabber-detail-color);
   background: var(--pane-bar-bg, var(--panel2));
   border: 1px solid var(--pane-inactive-tab-border);
-  border-radius: 6px;
+  border-radius: 6px 6px 0 0;
   cursor: pointer;
 }
 .file-tree-row.tabber-row .tabber-session-tab > .pane-tab-core {

@@ -2348,7 +2348,8 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                 tabColor: style?.color || '',
                 descriptionColor: descriptionStyle?.color || '',
                 tabHeight: style?.height || '',
-                tabRadius: style?.borderTopLeftRadius || '',
+                tabTopRadius: style?.borderTopLeftRadius || '',
+                tabBottomRadius: style?.borderBottomLeftRadius || '',
                 tabBorderTop: style?.borderTopColor || '',
                 expectedActiveBg: tab ? resolvedColor(tab.parentElement, 'var(--pane-tab-active-bg)') : '',
                 expectedInactiveBg: tab ? resolvedColor(tab.parentElement, 'var(--pane-bar-bg, var(--panel2))') : '',
@@ -2406,7 +2407,10 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
             assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
         assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)
-        assert metrics["active"]["tabRadius"] == "6px", (label, metrics)
+        assert metrics["active"]["tabTopRadius"] == "6px", (label, metrics)
+        assert metrics["active"]["tabBottomRadius"] == "0px", (label, metrics)
+        assert metrics["inactive"]["tabTopRadius"] == "6px", (label, metrics)
+        assert metrics["inactive"]["tabBottomRadius"] == "0px", (label, metrics)
         assert metrics["active"]["dateDisplay"] != "none", (label, metrics)
         assert metrics["active"]["dateWidth"] > 0, (label, metrics)
         assert metrics["active"]["dateText"], (label, metrics)
