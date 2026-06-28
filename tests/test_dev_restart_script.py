@@ -57,3 +57,13 @@ def test_boot_restart_waits_for_stable_listener_after_ready():
     assert "verify_port_stable()" in source
     assert "became unstable after readiness" in source
     assert "wait_for_port \"$port\"\n  verify_port_stable \"$port\"" in source
+
+
+def test_boot_restart_requires_old_listener_to_stop_before_launch():
+    source = (ROOT / "boot.sh").read_text(encoding="utf-8")
+
+    assert "wait_for_port_free()" in source
+    assert "listener still alive after SIGTERM; sending SIGKILL" in source
+    assert "stop_port_listener \"$port\"\n\n  printf" in source
+    assert "boot.sh launching port" in source
+    assert " >> %q 2>&1 < /dev/null" in source

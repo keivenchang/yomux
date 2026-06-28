@@ -127,7 +127,7 @@ python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang --dev
 
 After every YOLOmux change in a dev worktree, restart that active dev server and verify it before reporting the change ready for testing. Restart prod only when explicitly requested.
 
-Use `boot.sh` from the checkout you want to serve. It restarts only the requested port listener, sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible, and writes logs under `/tmp` by default. On Linux it finds listeners with `ss`; on macOS it falls back to `lsof`, and it uses plain `nohup` when `setsid -f` is unavailable.
+Use `boot.sh` from the checkout you want to serve. It restarts only the requested port listener, waits for that old listener to leave the port before launching the replacement, sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible, and appends logs under `/tmp` by default. On Linux it finds listeners with `ss`; on macOS it falls back to `lsof`, and it uses plain `nohup` when `setsid -f` is unavailable.
 
 ```bash
 ./boot.sh
@@ -147,7 +147,7 @@ To restart a dev worktree in no-auth test mode:
 YOLOMUX_TEST_AUTH_BYPASS=1 ./boot.sh <dev-port>
 ```
 
-Three footguns: (1) never `pkill -f` broad YOLOmux patterns; kill only the listener for the selected port; (2) run `boot.sh` from the checkout you intend to serve so a dev port does not accidentally serve another worktree; (3) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code.
+Three footguns: (1) never `pkill -f` broad YOLOmux patterns; kill only the listener for the selected port; (2) run `boot.sh` from the checkout you intend to serve so a dev port does not accidentally serve another worktree; (3) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code. If a restarted server appears ready and then disappears, check whether readiness was served by the old listener; `boot.sh` must fail instead of launching over a still-bound old PID.
 
 Verify after restart:
 
@@ -158,7 +158,7 @@ curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost
 curl -skL -u <user>:<pass> https://localhost:<port>/ | grep -oE 'YOLOmux [0-9.]+' | head -1
 ```
 
-Expected: one `yolomux.py` process, `LISTEN` on the intended port, `ping: 401` in under roughly 100ms, and the rendered version matches `YOLOMUX_VERSION`. If verification fails, inspect the `/tmp/yolomux-<role>-<port>.log` log for the launch error.
+Expected: one `yolomux.py` process, `LISTEN` on the intended port, `ping: 401` in under roughly 100ms, and the rendered version matches `YOLOMUX_VERSION`. If verification fails, inspect the appended `/tmp/yolomux-<port>.log` log for the previous launch error and the latest `boot.sh launching port ...` marker.
 
 If you intentionally started with `YOLOMUX_TEST_AUTH_BYPASS=1`, `/api/ping` and `/api/settings` should return `200` without cookies. If a normal login-gated server returns `200` for those unauthenticated routes, auth is accidentally bypassed.
 

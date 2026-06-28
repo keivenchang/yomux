@@ -167,7 +167,7 @@ shell_command_for() {
   for item in "${server_args[@]}"; do
     printf ' %q' "$item"
   done
-  printf ' > %q 2>&1 < /dev/null' "$log_path"
+  printf ' >> %q 2>&1 < /dev/null' "$log_path"
 }
 
 python_detach_code='
@@ -255,13 +255,28 @@ port_listener_pids() {
 
 wait_for_pid_exit() {
   local pid="$1"
+  local max_attempts="${2:-8}"
   local attempt
-  for ((attempt = 0; attempt < 8; attempt++)); do
+  for ((attempt = 0; attempt < max_attempts; attempt++)); do
     if ! kill -0 "$pid" 2>/dev/null; then
-      return
+      return 0
     fi
     sleep 1
   done
+  return 1
+}
+
+wait_for_port_free() {
+  local port="$1"
+  local max_attempts="${2:-8}"
+  local attempt
+  for ((attempt = 0; attempt < max_attempts; attempt++)); do
+    if [[ -z "$(port_listener_pids "$port")" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 stop_port_listener() {
@@ -277,9 +292,24 @@ stop_port_listener() {
     return
   fi
   kill "${existing_pids[@]}"
-  for pid in "${existing_pids[@]}"; do
-    wait_for_pid_exit "$pid"
-  done
+  if wait_for_port_free "$port" 8; then
+    return
+  fi
+
+  existing_pids=()
+  while IFS= read -r pid; do
+    if [[ -n "$pid" ]]; then
+      existing_pids+=("$pid")
+    fi
+  done < <(port_listener_pids "$port")
+  if [[ "${#existing_pids[@]}" -gt 0 ]]; then
+    printf 'port %s listener still alive after SIGTERM; sending SIGKILL to pid(s): %s\n' "$port" "${existing_pids[*]}" >&2
+    kill -KILL "${existing_pids[@]}" 2>/dev/null || true
+  fi
+  if ! wait_for_port_free "$port" 4; then
+    printf 'port %s still has listener pid(s) after stop: %s\n' "$port" "$(port_listener_pids "$port" | tr '\n' ' ')" >&2
+    return 1
+  fi
 }
 
 wait_for_port() {
@@ -335,6 +365,7 @@ restart_port() {
 
   stop_port_listener "$port"
 
+  printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
   (
     cd "$repo_root"
     launch_server "$log_path"
