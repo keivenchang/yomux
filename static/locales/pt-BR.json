@@ -584,7 +584,7 @@
   "pref.path.copySettings": "Copiar caminho das configurações",
   "pref.path.rules": "regras YOLO",
   "pref.path.settings": "configurações",
-  "pref.performance.agent_status_pulse_period_ms.help": "Período de cada pulso das bolas de status vermelhas, amarelas e verdes do Claude/Codex. A animação usa quatro etapas discretas de brilho para reduzir repintura contínua.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Periodo dos pulsos das bolas de status vermelhas, amarelas e verdes do Claude/Codex. A animacao usa uma etapa visual discreta a cada cerca de 250 ms do periodo para reduzir repintura continua.",
   "pref.performance.agent_status_pulse_period_ms.label": "Período de pulso da bola de status",
   "pref.performance.auto_approve_interval_seconds.help": "Com que frequência os workers YOLO recém-ativados inspecionam prompts visíveis do tmux.",
   "pref.performance.auto_approve_interval_seconds.label": "Intervalo de polling do worker YOLO",

@@ -740,8 +740,10 @@ function applyCssSettings() {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
-  root.setProperty('--pulse-duration', `${Math.max(1, agentStatusPulsePeriodMs) / 1000}s`);
-  root.setProperty('--red-reminder-duration', `${Math.max(1, agentStatusPulsePeriodMs) / 1000}s`);
+  const statusPulsePeriodMs = Math.max(1, agentStatusPulsePeriodMs);
+  root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
+  root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
+  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 250))));
   if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);

@@ -435,6 +435,13 @@ function yoloMarkerHtml(session, auto, options = {}) {
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
+function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null) {
+  if (auto) return true;
+  if (autoApproveEnabledElsewhere(payload)) return true;
+  const tabState = state || sessionState(session, info);
+  return [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(tabState?.key) && tabState?.promptAttentionCleared !== true;
+}
+
 function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
   // The tab's AI status indicator summarizes every visible agent-window ball as one segmented ball.
   // Its symbol and glow follow the most urgent state: red attention, then yellow stopped cooldown, then
@@ -491,7 +498,11 @@ function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStat
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
-  const yoloHtml = yoloMarkerHtml(session, auto, {...options, yoloWorking: false, payload});
+  const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
+  const offerYolo = sessionShouldOfferYoloMarker(session, info, payload, auto, state);
+  const yoloHtml = offerYolo
+    ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
+    : '';
   const statusSummary = sessionStatusAgentWindowSummaryForTab(session, info, payload);
   if (statusSummary?.agent) {
     const statusAgent = statusSummary.agent;
@@ -506,9 +517,10 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
   }
+  if (!offerYolo) return '';
   return yoloMarkerHtml(session, auto, {
     ...options,
-    enabledOnly: options.enabledOnly,
+    enabledOnly: false,
     yoloWorking: sessionYoloIsWorking(session, payload),
     payload,
   });

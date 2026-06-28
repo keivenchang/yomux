@@ -470,9 +470,10 @@
   --editor-preview-bg: #342f22;
   --topbar-height: 38px;
   /* Default for --pulse-duration; Preferences -> Notifications -> performance.agent_status_pulse_period_ms overrides this at runtime. */
-  --pulse-duration: 2.5s;
+  --pulse-duration: 1.55s;
   --pulse-easing: ease-in-out;
-  --status-pulse-timing: steps(4, end);
+  --status-pulse-step-count: 6;
+  --status-pulse-timing: steps(var(--status-pulse-step-count), end);
   --red-reminder-duration: var(--pulse-duration);
   --red-reminder-easing: var(--pulse-easing);
   --yolo-reminder-duration: 2.8s;
@@ -2213,7 +2214,7 @@ body.theme-light .latency-meter {
 .agent-window-status-dot--transition-pulse:not(.heartbeat-pulse) {
   border: 1px solid transparent;
   animation-name: agent-status-transition-pulse;
-  animation-duration: var(--agent-status-transition-pulse-duration, 2.5s);
+  animation-duration: var(--agent-status-transition-pulse-duration, var(--pulse-duration, 1.55s));
   animation-delay: var(--attention-animation-delay, 0s);
   animation-timing-function: var(--status-pulse-timing);
   animation-iteration-count: infinite;
@@ -2316,7 +2317,7 @@ body.theme-light .latency-meter {
   line-height: 1;
 }
 .agent-window-activity .agent-window-status-dot--acknowledged {
-  font-size: calc(var(--agent-status-ball-size-base) / 2);
+  font-size: calc(var(--agent-status-ball-size-base) * 2 / 5);
   border-color: transparent;
   box-shadow: none;
   filter: saturate(0.9) brightness(0.95);
@@ -2561,7 +2562,7 @@ body.theme-light .session-yolo-marker.inactive {
 .session-yolo-marker.yoagent-chat-spinner {
   transform-origin: center;
   animation-name: yolo-marker-rotate;
-  animation-duration: var(--pulse-duration, 2.5s);
+  animation-duration: var(--pulse-duration, 1.55s);
   animation-timing-function: linear;
   animation-iteration-count: infinite;
 }
@@ -3539,7 +3540,7 @@ body.theme-light .js-debug-graph-view {
   pointer-events: none;
 }
 .js-debug-disconnected-range {
-  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.8);
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.28);
   pointer-events: none;
 }
 .js-debug-graph--hovering .js-debug-hover-line {
@@ -6907,8 +6908,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   --agent-window-icon-size: 14px;
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-  /* Sub-window (per-window) status ball is 75% of the Tab's aggregate ball. */
-  --agent-status-ball-size: calc(var(--agent-status-ball-size-base) * 3 / 4);
+  /* Sub-window (per-window) status ball is 80% of the Tab's aggregate ball. */
+  --agent-status-ball-size: calc(var(--agent-status-ball-size-base) * 4 / 5);
   margin-inline-start: 0;
   margin-inline-end: 1px;
 }

@@ -1206,6 +1206,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
-  "pref.performance.agent_status_pulse_period_ms.help": "Period for red, yellow, and green Claude/Codex status ball pulses. The animation uses four discrete brightness steps to reduce continuous repaint work.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Chu ky nhap nhay cua cac bong trang thai Claude/Codex mau do, vang va xanh. Hoat anh dung mot buoc hinh anh rieng cho moi khoang 250 ms cua chu ky de giam viec ve lai lien tuc.",
   "pref.performance.agent_status_pulse_period_ms.label": "Status ball pulse period"
 }

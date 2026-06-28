@@ -584,7 +584,7 @@
   "pref.path.copySettings": "Скопировать путь к настройкам",
   "pref.path.rules": "правила YOLO",
   "pref.path.settings": "настройки",
-  "pref.performance.agent_status_pulse_period_ms.help": "Период одного импульса для красных, желтых и зеленых индикаторов состояния Claude/Codex. Анимация использует четыре дискретных уровня яркости, чтобы уменьшить непрерывную перерисовку.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Период импульса для красных, желтых и зеленых индикаторов состояния Claude/Codex. Анимация использует один дискретный визуальный шаг примерно на каждые 250 мс периода, чтобы уменьшить непрерывную перерисовку.",
   "pref.performance.agent_status_pulse_period_ms.label": "Период пульсации индикатора состояния",
   "pref.performance.auto_approve_interval_seconds.help": "Как часто вновь включённые рабочие YOLO проверяют видимые запросы tmux.",
   "pref.performance.auto_approve_interval_seconds.label": "Интервал опроса рабочего YOLO",

@@ -1800,8 +1800,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   --agent-window-icon-size: 14px;
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-  /* Sub-window (per-window) status ball is 75% of the Tab's aggregate ball. */
-  --agent-status-ball-size: calc(var(--agent-status-ball-size-base) * 3 / 4);
+  /* Sub-window (per-window) status ball is 80% of the Tab's aggregate ball. */
+  --agent-status-ball-size: calc(var(--agent-status-ball-size-base) * 4 / 5);
   margin-inline-start: 0;
   margin-inline-end: 1px;
 }

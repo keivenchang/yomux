@@ -20,7 +20,7 @@ const DEFAULT_TEST_SETTINGS = Object.freeze({
     latency_refresh_ms: 3000,
     event_log_refresh_ms: 5000,
     tabber_activity_refresh_ms: 15000,
-    agent_status_pulse_period_ms: 2500,
+    agent_status_pulse_period_ms: 1550,
     workflow_transition_glow_seconds: 60,
     popover_show_delay_ms: 1000,
     popover_hide_delay_ms: 300,

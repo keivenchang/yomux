@@ -469,9 +469,10 @@
   --editor-preview-bg: #342f22;
   --topbar-height: 38px;
   /* Default for --pulse-duration; Preferences -> Notifications -> performance.agent_status_pulse_period_ms overrides this at runtime. */
-  --pulse-duration: 2.5s;
+  --pulse-duration: 1.55s;
   --pulse-easing: ease-in-out;
-  --status-pulse-timing: steps(4, end);
+  --status-pulse-step-count: 6;
+  --status-pulse-timing: steps(var(--status-pulse-step-count), end);
   --red-reminder-duration: var(--pulse-duration);
   --red-reminder-easing: var(--pulse-easing);
   --yolo-reminder-duration: 2.8s;

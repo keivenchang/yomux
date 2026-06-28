@@ -1206,6 +1206,6 @@
   "yolo.title": "优乐 {state}",
   "yolo.titleForSession": "优乐 {session} {state}",
   "yolo.titleReadonly": "优乐 {session} {state}；只读访问",
-  "pref.performance.agent_status_pulse_period_ms.help": "红色、黄色和绿色 Claude/Codex 状态球每次脉冲循环的时长。动画使用四个离散亮度阶段，以减少持续重绘。",
+  "pref.performance.agent_status_pulse_period_ms.help": "红色、黄色和绿色 Claude/Codex 状态球的脉冲周期。动画在周期内大约每 250 ms 使用一个离散视觉步骤，以减少持续重绘。",
   "pref.performance.agent_status_pulse_period_ms.label": "状态球脉冲周期"
 }

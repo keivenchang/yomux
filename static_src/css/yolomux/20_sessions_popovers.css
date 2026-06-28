@@ -193,7 +193,7 @@
 .agent-window-status-dot--transition-pulse:not(.heartbeat-pulse) {
   border: 1px solid transparent;
   animation-name: agent-status-transition-pulse;
-  animation-duration: var(--agent-status-transition-pulse-duration, 2.5s);
+  animation-duration: var(--agent-status-transition-pulse-duration, var(--pulse-duration, 1.55s));
   animation-delay: var(--attention-animation-delay, 0s);
   animation-timing-function: var(--status-pulse-timing);
   animation-iteration-count: infinite;
@@ -296,7 +296,7 @@
   line-height: 1;
 }
 .agent-window-activity .agent-window-status-dot--acknowledged {
-  font-size: calc(var(--agent-status-ball-size-base) / 2);
+  font-size: calc(var(--agent-status-ball-size-base) * 2 / 5);
   border-color: transparent;
   box-shadow: none;
   filter: saturate(0.9) brightness(0.95);
@@ -541,7 +541,7 @@ body.theme-light .session-yolo-marker.inactive {
 .session-yolo-marker.yoagent-chat-spinner {
   transform-origin: center;
   animation-name: yolo-marker-rotate;
-  animation-duration: var(--pulse-duration, 2.5s);
+  animation-duration: var(--pulse-duration, 1.55s);
   animation-timing-function: linear;
   animation-iteration-count: infinite;
 }

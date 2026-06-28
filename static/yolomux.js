@@ -6899,6 +6899,8 @@ function updateDocumentTitle() {
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
 // ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 working/attention/blocked.
 function globalActivityCounts() {
+  const agentWindowCounts = globalActivityCountsFromAgentWindows();
+  if (agentWindowCounts) return agentWindowCounts;
   const signalWindows = tmuxSignalWindows();
   let running = 0;
   let ask = 0;
@@ -6955,6 +6957,52 @@ function globalActivityCounts() {
   const total = countedSignalWindows.size
     ? countedSignalWindows.size + [...countedSessions].filter(session => isTmuxSession(session) && !countedSignalSessions.has(session)).length
     : fallbackTotal;
+  const attention = ask + blocked;
+  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+}
+
+function globalActivityCountSessions() {
+  if (typeof tabberOrderedSessions === 'function') return tabberOrderedSessions();
+  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
+  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const seen = new Set();
+  const sessions = [];
+  for (const value of [...order, ...all]) {
+    const session = String(value || '').trim();
+    if (!session || seen.has(session) || !isTmuxSession(session)) continue;
+    seen.add(session);
+    sessions.push(session);
+  }
+  return sessions;
+}
+
+function globalActivityCountsFromAgentWindows() {
+  if (
+    typeof sessionAgentWindowStatusPayloads !== 'function'
+    || typeof agentWindowActivityIconForStatusItem !== 'function'
+    || typeof agentWindowActivityOptionsForStatus !== 'function'
+    || typeof agentWindowKind !== 'function'
+  ) return null;
+  let running = 0;
+  let ask = 0;
+  let blocked = 0;
+  let total = 0;
+  for (const session of globalActivityCountSessions()) {
+    const info = transcriptMeta.sessions?.[session] || {};
+    const autoPayload = autoApproveStates.get(session) || {};
+    const rows = sessionAgentWindowStatusPayloads(session, info, autoPayload);
+    for (const agent of rows) {
+      if (!agentWindowKind(agent?.kind)) continue;
+      const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
+      const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
+      total += 1;
+      if (!item || item.acknowledged === true) continue;
+      if (item.state === STATE_KEY.working) running += 1;
+      else if (item.state === 'attention') ask += 1;
+      else if (item.state === 'cooldown') blocked += 1;
+    }
+  }
+  if (!total) return null;
   const attention = ask + blocked;
   return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
 }
@@ -9556,7 +9604,7 @@ function menuTabRowHtml(item, options = {}) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
 }
 
@@ -20392,8 +20440,10 @@ function applyCssSettings() {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
-  root.setProperty('--pulse-duration', `${Math.max(1, agentStatusPulsePeriodMs) / 1000}s`);
-  root.setProperty('--red-reminder-duration', `${Math.max(1, agentStatusPulsePeriodMs) / 1000}s`);
+  const statusPulsePeriodMs = Math.max(1, agentStatusPulsePeriodMs);
+  root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
+  root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
+  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 250))));
   if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
@@ -21112,6 +21162,13 @@ function yoloMarkerHtml(session, auto, options = {}) {
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
+function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null) {
+  if (auto) return true;
+  if (autoApproveEnabledElsewhere(payload)) return true;
+  const tabState = state || sessionState(session, info);
+  return [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(tabState?.key) && tabState?.promptAttentionCleared !== true;
+}
+
 function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
   // The tab's AI status indicator summarizes every visible agent-window ball as one segmented ball.
   // Its symbol and glow follow the most urgent state: red attention, then yellow stopped cooldown, then
@@ -21168,7 +21225,11 @@ function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStat
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
-  const yoloHtml = yoloMarkerHtml(session, auto, {...options, yoloWorking: false, payload});
+  const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
+  const offerYolo = sessionShouldOfferYoloMarker(session, info, payload, auto, state);
+  const yoloHtml = offerYolo
+    ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
+    : '';
   const statusSummary = sessionStatusAgentWindowSummaryForTab(session, info, payload);
   if (statusSummary?.agent) {
     const statusAgent = statusSummary.agent;
@@ -21183,9 +21244,10 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
   }
+  if (!offerYolo) return '';
   return yoloMarkerHtml(session, auto, {
     ...options,
-    enabledOnly: options.enabledOnly,
+    enabledOnly: false,
     yoloWorking: sessionYoloIsWorking(session, payload),
     payload,
   });
@@ -28171,7 +28233,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     ? String(options.leadingHtml || '')
     : options.showLeading === false
     ? ''
-    : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false});
+    : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
   return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>

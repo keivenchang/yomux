@@ -1347,6 +1347,7 @@ async function runTabberSuite() {
     api.setTranscriptInfoForTest('2', {
       panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', process_label_pid: 24680, command: 'codex', current_path: '/home/u/two'}],
     });
+    api.setAutoApproveStateForTest('2', {enabled: true});
     // L3 paths for the claude window come from the backend agent_windows record, not a client session-files parse.
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude', pid: 12345, active: true, path_entries: [{path: '/home/u/proj', mtime: 5000, git: {root: '/home/u/proj', branch: 'devbranch'}}]},
@@ -1445,7 +1446,8 @@ async function runTabberSuite() {
         && r.nameHtml.includes('session-button-prefix')
         && r.nameHtml.includes('tab-inline-detail');
     }), 'A1/A2/TR1: working Claude session rows render the real tab chrome with the shared status-only ball');
-    assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('data-action="pane-tab-auto-approve"')), 'TR2: Tabber session rows expose the same YO auto-approve action as real tabs');
+    assert.ok(rows.some(r => r.type === 'session' && r.title.split('\n')[0] === '2' && r.nameHtml.includes('data-action="pane-tab-auto-approve"')), 'TR2: Tabber enabled session rows expose the same YO auto-approve action as real tabs');
+    assert.equal(rows.some(r => r.type === 'session' && r.title.split('\n')[0] === '1' && r.nameHtml.includes('data-action="pane-tab-auto-approve"')), false, 'TR2: Tabber auto-off working session rows hide the inactive YO action when there is no prompt');
     assert.equal(rows.some(r => r.type !== 'session' && r.nameHtml.includes('tabber-session-tab')), false, 'A1: window/repo/loading/non-tmux Tabber rows do not get the session tab treatment');
     const activeSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '1');
     const inactiveSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '2');

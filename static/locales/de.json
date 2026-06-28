@@ -584,7 +584,7 @@
   "pref.path.copySettings": "Einstellungspfad kopieren",
   "pref.path.rules": "YOLO-Regeln",
   "pref.path.settings": "Einstellungen",
-  "pref.performance.agent_status_pulse_period_ms.help": "Dauer eines Pulszyklus für rote, gelbe und grüne Claude/Codex-Statuspunkte. Die Animation nutzt vier diskrete Helligkeitsstufen, um kontinuierliches Neuzeichnen zu reduzieren.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Periode der roten, gelben und gruenen Claude/Codex-Statuspunkte. Die Animation nutzt etwa alle 250 ms der Periode einen diskreten visuellen Schritt, um kontinuierliches Neuzeichnen zu reduzieren.",
   "pref.performance.agent_status_pulse_period_ms.label": "Statuspunkt-Pulsdauer",
   "pref.performance.auto_approve_interval_seconds.help": "Wie oft neu aktivierte YOLO-Worker sichtbare tmux-Aufforderungen prüfen.",
   "pref.performance.auto_approve_interval_seconds.label": "Polling-Intervall des YOLO-Workers",

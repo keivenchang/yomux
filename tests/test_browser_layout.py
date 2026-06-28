@@ -229,7 +229,7 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
     )
     assert metrics["overlayTopDelta"] <= 0.5, metrics
     assert metrics["overlayHeightDelta"] <= 1.1, metrics
-    assert metrics["fill"] == "rgba(220, 38, 38, 0.8)", metrics
+    assert metrics["fill"] == "rgba(220, 38, 38, 0.28)", metrics
     assert metrics["pointerEvents"] == "none", metrics
 
 
@@ -413,8 +413,14 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert metrics["sliderLeftSpacer"] >= 40, metrics
     assert metrics["resetZoomed"] is False, metrics
 
-    slider = browser.find_element("css selector", "[data-js-debug-range-slider]")
-    slider_rect = slider.rect
+    slider = WebDriverWait(browser, 5).until(lambda driver: driver.find_element("css selector", "[data-js-debug-range-slider]"))
+    slider_rect = browser.execute_script(
+        """
+        const rect = arguments[0].getBoundingClientRect();
+        return {width: rect.width, height: rect.height};
+        """,
+        slider,
+    )
     ActionChains(browser).move_to_element(slider).click_and_hold().move_by_offset(
         max(60, int(slider_rect["width"] * 0.35)),
         0,
@@ -757,7 +763,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     assert aggregate_dot_font_sizes == {"14px"}, metrics
     for name in subwindow_names:
         assert "calc(" in metrics[name]["agentStatusBallSize"], (name, metrics)
-        assert 10.0 <= float(metrics[name]["dotFontSize"].replace("px", "")) <= 11.0, (name, metrics)
+        assert 11.0 <= float(metrics[name]["dotFontSize"].replace("px", "")) <= 11.5, (name, metrics)
         assert metrics[name]["dotWidth"] < min(aggregate_peak_widths), (name, metrics)
         assert metrics[name]["dotHeight"] < min(aggregate_peak_heights), (name, metrics)
     assert max(aggregate_peak_widths) - min(aggregate_peak_widths) <= 0.5, metrics
@@ -843,7 +849,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
     assert metrics["parent"]["agentStatusBallSize"] == "14px", metrics
     assert metrics["parent"]["dotFontSize"] == "14px", metrics
     assert "calc(" in metrics["child"]["agentStatusBallSize"], metrics
-    assert 10.0 <= float(metrics["child"]["dotFontSize"].replace("px", "")) <= 11.0, metrics
+    assert 11.0 <= float(metrics["child"]["dotFontSize"].replace("px", "")) <= 11.5, metrics
     assert metrics["child"]["width"] < metrics["parent"]["width"], metrics
     assert metrics["child"]["height"] < metrics["parent"]["height"], metrics
     for side in ("parent", "child"):
@@ -1015,7 +1021,7 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
     """, extra_css="""
-      :root { --pulse-duration: 2.5s; --pulse-easing: ease-in-out; --status-pulse-timing: steps(4, end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
+      :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 6; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
     """), encoding="utf-8")
     browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
@@ -1053,8 +1059,8 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
         assert metrics["reduced"] is True, metrics
         attention = metrics["attention"]
         assert attention["primaryAnimationName"] == "attention-ring-fade", metrics
-        assert attention["primaryAnimationDuration"] == "2.5s", metrics
-        assert attention["primaryAnimationTimingFunction"].startswith("steps(4"), metrics
+        assert attention["primaryAnimationDuration"] == "1.55s", metrics
+        assert attention["primaryAnimationTimingFunction"].startswith("steps(6"), metrics
         assert attention["primaryAnimationDelay"] == "-0.42s", metrics
         assert attention["primaryEffectDuration"] > 0, metrics
         for key in ("working", "cooldown"):
@@ -2609,9 +2615,7 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
         """
     )
     assert live_sync_metrics["visibleChromeTitles"] == [], live_sync_metrics
-    assert live_sync_metrics["tabberYoloControls"], live_sync_metrics
-    assert all(item["title"] == "" for item in live_sync_metrics["tabberYoloControls"]), live_sync_metrics
-    assert all(item["ariaLabel"] for item in live_sync_metrics["tabberYoloControls"]), live_sync_metrics
+    assert live_sync_metrics["tabberYoloControls"] == [], live_sync_metrics
     browser.execute_script(
         """
         popoverHideDelayMs = 120;

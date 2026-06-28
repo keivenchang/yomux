@@ -584,7 +584,7 @@
   "pref.path.copySettings": "Copy settings path",
   "pref.path.rules": "YOLO rules",
   "pref.path.settings": "settings",
-  "pref.performance.agent_status_pulse_period_ms.help": "Period for red, yellow, and green Claude/Codex status ball pulses. The animation uses four discrete brightness steps to reduce continuous repaint work.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Okres impulsow czerwonych, zoltych i zielonych kulek stanu Claude/Codex. Animacja uzywa jednego dyskretnego kroku wizualnego na okolo 250 ms okresu, aby ograniczyc ciagle odrysowywanie.",
   "pref.performance.agent_status_pulse_period_ms.label": "Status ball pulse period",
   "pref.performance.auto_approve_interval_seconds.help": "How often newly enabled YOLO workers inspect visible tmux prompts.",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO worker poll interval",

@@ -1206,6 +1206,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
-  "pref.performance.agent_status_pulse_period_ms.help": "赤、黄、緑の Claude/Codex ステータスボールが 1 回パルスする周期です。アニメーションは 4 段階の明るさで表示し、継続的な再描画を減らします。",
+  "pref.performance.agent_status_pulse_period_ms.help": "赤、黄、緑の Claude/Codex ステータスボールのパルス周期です。継続的な再描画を減らすため、アニメーションは周期内のおよそ 250 ms ごとに 1 つの離散的な表示ステップを使います。",
   "pref.performance.agent_status_pulse_period_ms.label": "ステータスボールのパルス周期"
 }

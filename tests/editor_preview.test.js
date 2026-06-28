@@ -203,14 +203,14 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'the --active agent glyph keeps the glow-cadence; status states use a static symbol plus a glowing ball');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*display:\s*inline-flex[\s\S]*gap:\s*2px/.test(sessionsCss), 'agent status symbols and balls render side by side through the shared inline-flex activity wrapper');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)/.test(sessionsCss), 'the shared activity wrapper owns the base agent status-ball size token');
-    assert.ok(/\.tmux-window-button \.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*calc\(var\(--agent-status-ball-size-base\) \* 3 \/ 4\)/.test(paneTabsCss), 'tmux sub-window buttons use 75% of the base agent status-ball size');
+    assert.ok(/\.tmux-window-button \.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*calc\(var\(--agent-status-ball-size-base\) \* 4 \/ 5\)/.test(paneTabsCss), 'tmux sub-window buttons use 80% of the base agent status-ball size');
     assert.ok(/\.agent-window-status-dot\s*\{[\s\S]*font-family:\s*var\(--ui-font\)[\s\S]*font-stretch:\s*normal/.test(sessionsCss), 'agent status dots reset inherited condensed tab text so Tabber session-tab balls do not shrink');
     assert.ok(/\.status-indicator--dot\.agent-window-status-dot--segmented\s*\{[\s\S]*background:\s*var\(--agent-status-segment-bg, currentColor\)/.test(sessionsCss), 'multi-state session tabs render one segmented status ball inside the shared dot footprint');
     assert.ok(/\.agent-window-status-dot--attention-cooldown-working\s*\{[\s\S]*conic-gradient\([\s\S]*var\(--agent-status-segment-attention\)[\s\S]*var\(--agent-status-segment-cooldown\)[\s\S]*var\(--agent-status-segment-working\)/.test(sessionsCss), 'tri-color session tab status balls divide red, yellow, and green through one conic gradient');
     assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*agentWindowStatusToneOrder\(options\.statusTones \|\| \[tone\]\)[\s\S]*agent-window-status-dot--segmented[\s\S]*agent-window-status-dot--tone-/.test(activitySource), 'the shared status dot renderer owns segmented multi-tone tab balls');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared tmux-window compact override');
-    assert.ok(/\.agent-window-activity \.agent-window-status-dot--acknowledged\s*\{[\s\S]*font-size:\s*calc\(var\(--agent-status-ball-size-base\) \/ 2\)/.test(sessionsCss), 'acknowledged red/yellow sub-window balls use 50% of the base agent status-ball size');
+    assert.ok(/\.agent-window-activity \.agent-window-status-dot--acknowledged\s*\{[\s\S]*font-size:\s*calc\(var\(--agent-status-ball-size-base\) \* 2 \/ 5\)/.test(sessionsCss), 'acknowledged red/yellow sub-window balls use 40% of the base agent status-ball size');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(sessionsCss), false, 'status balls do not size themselves from the surface-specific agent icon token');
     assert.equal(/agent-symbol-status-alternate|agent-status-dot-alternate|--agent-alternate-animation-delay|--agent-alternate-pulse-duration/.test(sessionsCss + activitySource + layoutSource), false, 'agent status indicators no longer alternate symbol and ball');
     assert.equal(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid/.test(sessionsCss), false, 'attention/cooldown agent glyphs and dots are not grid-stacked overlays');
@@ -243,7 +243,7 @@ async function runEditorPreviewSuite() {
     let syncDotCurrentTime = -1;
     const syncDotAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 2500})},
+      effect: {getTiming: () => ({duration: 1550})},
       set currentTime(value) { syncDotCurrentTime = value; },
       get currentTime() { return syncDotCurrentTime; },
     };
@@ -255,7 +255,7 @@ async function runEditorPreviewSuite() {
     let syncAttentionLabelCurrentTime = -2;
     const syncAttentionLabelAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 2500})},
+      effect: {getTiming: () => ({duration: 1550})},
       set currentTime(value) { syncAttentionLabelCurrentTime = value; },
       get currentTime() { return syncAttentionLabelCurrentTime; },
     };
@@ -275,9 +275,10 @@ async function runEditorPreviewSuite() {
     assert.equal(api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay'), firstSyncedDelay, 'a second sync keeps the same root animation delay instead of restarting the CSS animation');
     assert.ok(/let agentStatusPulsePeriodMs = initialSetting\('performance\.agent_status_pulse_period_ms'\)/.test(bootstrapSource), 'status ball pulse period initializes from the persisted setting');
     assert.ok(/agentStatusPulsePeriodMs = numberSetting\('performance\.agent_status_pulse_period_ms'\)/.test(settingsRuntimeSource), 'status ball pulse period live-updates from settings changes');
-    assert.ok(/root\.setProperty\('--pulse-duration', `\$\{Math\.max\(1, agentStatusPulsePeriodMs\) \/ 1000\}s`\)/.test(settingsRuntimeSource), 'status balls use the shared setting-backed transition pulse cadence');
-    assert.ok(/--pulse-duration:\s*2\.5s/.test(tokensCss), 'status pulse duration fallback matches the 2500ms default');
-    assert.ok(/--status-pulse-timing:\s*steps\(4,\s*end\)/.test(tokensCss), 'status pulse timing has four discrete visual states per period');
+    assert.ok(/const statusPulsePeriodMs = Math\.max\(1, agentStatusPulsePeriodMs\)/.test(settingsRuntimeSource) && /root\.setProperty\('--pulse-duration', `\$\{statusPulsePeriodMs \/ 1000\}s`\)/.test(settingsRuntimeSource), 'status balls use the shared setting-backed transition pulse cadence');
+    assert.ok(/root\.setProperty\('--status-pulse-step-count', String\(Math\.max\(1, Math\.round\(statusPulsePeriodMs \/ 250\)\)\)\)/.test(settingsRuntimeSource), 'status ball transition pulse uses one discrete step per roughly 250ms');
+    assert.ok(/--pulse-duration:\s*1\.55s/.test(tokensCss), 'status pulse duration fallback matches the 1550ms default');
+    assert.ok(/--status-pulse-step-count:\s*6/.test(tokensCss) && /--status-pulse-timing:\s*steps\(var\(--status-pulse-step-count\),\s*end\)/.test(tokensCss), 'status pulse timing defaults to six roughly-250ms visual steps per 1550ms period');
     assert.ok(/\.agent-window-status-dot--transition-pulse:not\(\.heartbeat-pulse\)\s*\{[\s\S]*animation-timing-function:\s*var\(--status-pulse-timing\)/.test(sessionsCss), 'transition status balls use the stepped timing token');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
     assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation-name:\s*metadata-badge-pulse;[^}]*animation-duration:\s*var\(--pulse-duration\);[^}]*animation-timing-function:\s*var\(--pulse-easing\);[^}]*animation-iteration-count:\s*infinite;/.test(sessionsCss), 'metadata pulse repeats until the server-window class is removed');
@@ -1812,9 +1813,14 @@ async function runEditorPreviewSuite() {
     ]});
     const autoOffWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
     const autoOffWorkingMarkerHtml = tabActivityMarkerHtml(autoOffWorkingHtml);
-    assert.ok(/session-yolo-marker[^"]*inactive/.test(autoOffWorkingHtml), 'auto-off working Claude tabs still show the YO button state');
+    assert.equal(/session-yolo-marker/.test(autoOffWorkingHtml), false, 'auto-off working Claude tabs hide the inactive YO button when there is no prompt');
     assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(autoOffWorkingMarkerHtml), 'working Claude session tabs keep the green status ball even when auto-approve is off');
     assert.equal(autoOffWorkingMarkerHtml.includes('agent-icon claude'), false, 'auto-off working Claude session tabs still omit the Claude icon');
+
+    api.setAutoApproveStateForTest('4', {enabled: false, screen: {key: 'needs-input', text: 'waiting for input', signature: 'ask-4'}});
+    const autoOffPromptHtml = api.tmuxPaneTabHtml('4', info, api.sessionState('4', info), false);
+    assert.ok(/session-yolo-marker[^"]*inactive/.test(autoOffPromptHtml), 'auto-off prompted tabs offer the inactive YO button');
+    assert.ok(/data-auto-session="4"/.test(autoOffPromptHtml), 'auto-off prompted YO button is clickable from the tab');
     const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
     // The working YO marker no longer spins — the glowing green ball beside the agent symbol is the
     // working indicator now. Loading/thinking spinners use the shared status pulse duration instead.
@@ -2809,7 +2815,7 @@ async function runEditorPreviewSuite() {
     assert.ok(body.records.some(record => Number(record.disconnected_ms || 0) > 0), 'disconnected span history includes disconnected_ms');
 
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
-    assert.ok(/\.js-debug-disconnected-range\s*\{[\s\S]*fill:\s*rgb\(var\(--js-debug-bad-connection-rgb\) \/ 0\.8\)/.test(debugPaneCss), 'bad-connection overlays are 80% red');
+    assert.ok(/\.js-debug-disconnected-range\s*\{[\s\S]*fill:\s*rgb\(var\(--js-debug-bad-connection-rgb\) \/ 0\.28\)/.test(debugPaneCss), 'bad-connection overlays use subtle translucent red');
     assert.equal(debugPaneCss.includes('.js-debug-disconnect-line'), false, 'disconnected-client baseline CSS is removed');
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     assert.ok(terminalBootSource.includes('recordJsDebugClientEventsConnectionState(false)') && terminalBootSource.includes('recordJsDebugClientEventsConnectionState(true)'), 'client-events SSE transitions feed YO!stats disconnected spans');
@@ -3919,6 +3925,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.info-tree-field-tab\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-tab-color\)[\s\S]*\.info-tree-field-linear\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-linear-color\)/.test(infoTreeCss), 'YO!info record rows route each dimension through its own color token');
     assert.ok(/\.info-tree-field-ai\s*\{[\s\S]*--info-tree-field-color:\s*var\(--pane-tab-active-bg\)[\s\S]*--info-tree-field-hover:\s*var\(--pane-tab-active-border\)/.test(infoTreeCss), 'YO!info tmux sub-window leaf rows follow the active theme color');
     assert.ok(/\.tmux-pane-tab-token\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)[\s\S]*border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0[\s\S]*font-size:\s*var\(--tab-label-size\)/.test(paneTabCss) && /\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(paneTabCss), 'shared compact tmux pane-tab tokens own inactive and active tab styling');
+    assert.ok(/function sessionShouldOfferYoloMarker\(session, info, payload, auto, state = null\)[\s\S]*autoApproveEnabledElsewhere\(payload\)[\s\S]*STATE_KEY\.needsApproval[\s\S]*STATE_KEY\.needsInput/.test(fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')), 'tmux session tabs offer the YO button only for enabled, externally locked, or prompted sessions');
+    assert.ok(/function tmuxPaneTabHtml\(session, info, state, auto, options = \{\}\)[\s\S]*sessionTabLeadingActivityHtml\(session, info, auto,[\s\S]*state/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'real tabs, Tabber, and YO!info pass the shared tab state into the shared YO marker offer rule');
     assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*showDetail:\s*false/.test(infoSource), 'YO!info Tab values route through the shared compact tmux pane-tab token helper instead of private active/inactive tab CSS');
     assert.ok(/function infoGroupLabelHtml\(group = \{\}\)[\s\S]*leadingHtml:\s*infoTabGroupLeadingActivityHtml\(group\)/.test(infoSource), 'YO!info Tab group status is routed into the shared compact tmux pane-tab token instead of prepending a standalone dot');
     assert.equal(infoSource.includes('infoTabGroupStatusHtml(group)}${tabHtml'), false, 'YO!info Tab group summaries do not prepend a duplicate standalone status dot before the tab token');

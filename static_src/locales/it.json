@@ -1206,6 +1206,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
-  "pref.performance.agent_status_pulse_period_ms.help": "Period for red, yellow, and green Claude/Codex status ball pulses. The animation uses four discrete brightness steps to reduce continuous repaint work.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Periodo degli impulsi delle sfere di stato rosse, gialle e verdi di Claude/Codex. L'animazione usa un passo visivo discreto ogni circa 250 ms del periodo per ridurre il ridisegno continuo.",
   "pref.performance.agent_status_pulse_period_ms.label": "Status ball pulse period"
 }

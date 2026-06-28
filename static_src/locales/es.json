@@ -1206,6 +1206,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
-  "pref.performance.agent_status_pulse_period_ms.help": "Periodo de cada pulso para las bolas de estado rojas, amarillas y verdes de Claude/Codex. La animación usa cuatro pasos discretos de brillo para reducir el repintado continuo.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Periodo de los pulsos de las bolas de estado rojas, amarillas y verdes de Claude/Codex. La animacion usa un paso visual discreto por cada 250 ms aproximados del periodo para reducir el repintado continuo.",
   "pref.performance.agent_status_pulse_period_ms.label": "Periodo de pulso de la bola de estado"
 }

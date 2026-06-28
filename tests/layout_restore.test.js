@@ -1456,6 +1456,31 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.browserFaviconBadgeCount({running: 0, attention: 0}), 0, 'favicon badge renders 0 when all sessions are idle');
     assert.equal(api.browserFaviconBadgeLabel(0), '0', 'favicon badge explicitly shows 0 when idle');
     assert.equal(api.browserFaviconBadgeLabel(107), '99+', 'favicon badge clamps large counts to a short label');
+    const tabberCountsApi = loadYolomux('', ['1', '2', '3', '4']);
+    tabberCountsApi.setTranscriptSessionOrderForTest(['1', '2', '3', '4']);
+    for (const [session, kind] of [['1', 'claude'], ['2', 'codex'], ['3', 'claude'], ['4', 'codex']]) {
+      tabberCountsApi.setAutoApproveStateForTest(session, {enabled: true, screen: {key: 'idle'}});
+      tabberCountsApi.setTranscriptInfoForTest(session, {
+        panes: [{window: '0', window_index: 0, window_name: kind, active: true, window_active: true}],
+        agents: [],
+      });
+    }
+    tabberCountsApi.setTabberActivityForTest({
+      activity: {},
+      agents: [],
+      agent_windows: {
+        '1': [{kind: 'claude', state: 'working', window: '0', window_index: 0, window_label: '0:claude'}],
+        '2': [{kind: 'codex', state: 'needs-input', window: '0', window_index: 0, window_label: '0:codex'}],
+        '3': [{kind: 'claude', state: 'idle', window: '0', window_index: 0, window_label: '0:claude', working_stopped_ts: 100}],
+        '4': [{kind: 'codex', state: 'idle', window: '0', window_index: 0, window_label: '0:codex'}],
+      },
+    });
+    const tabberCounts = tabberCountsApi.globalActivityCounts();
+    assert.deepStrictEqual(
+      {running: tabberCounts.running, ask: tabberCounts.ask, blocked: tabberCounts.blocked, idle: tabberCounts.idle, total: tabberCounts.total},
+      {running: 1, ask: 1, blocked: 1, idle: 1, total: 4},
+      'topbar counts reflect the same per-window states displayed by Tabber instead of stale session-level screen keys',
+    );
     const signalApi = loadYolomux('', ['1', '2']);
     signalApi.setDocumentTitleNowForTest(200000);
     signalApi.setTmuxSignalStateForTest({

@@ -191,7 +191,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "latency_refresh_ms": 3000,
         "event_log_refresh_ms": 5000,
         "tabber_activity_refresh_ms": 15000,
-        "agent_status_pulse_period_ms": 2500,
+        "agent_status_pulse_period_ms": 1550,
         "workflow_transition_glow_seconds": 60,
         "server_event_poll_ms": 850,
         "server_background_file_event_poll_ms": 5000,

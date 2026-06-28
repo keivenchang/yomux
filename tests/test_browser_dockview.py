@@ -963,7 +963,7 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
     )
     assert time.monotonic() - click_started >= 0.8
     assert acknowledged_size > 0
-    assert initial_size * 0.60 <= acknowledged_size <= initial_size * 0.70
+    assert initial_size * 0.45 <= acknowledged_size <= initial_size * 0.55
 
 
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
@@ -1083,7 +1083,7 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
     )
     assert time.monotonic() - click_started >= 0.8
     assert acknowledged_size > 0
-    assert initial_size * 0.60 <= acknowledged_size <= initial_size * 0.70
+    assert initial_size * 0.45 <= acknowledged_size <= initial_size * 0.55
     ack_bodies = browser.execute_script(
         """
         return window.__bootFetches

@@ -1993,6 +1993,8 @@ function updateDocumentTitle() {
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
 // ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 working/attention/blocked.
 function globalActivityCounts() {
+  const agentWindowCounts = globalActivityCountsFromAgentWindows();
+  if (agentWindowCounts) return agentWindowCounts;
   const signalWindows = tmuxSignalWindows();
   let running = 0;
   let ask = 0;
@@ -2049,6 +2051,52 @@ function globalActivityCounts() {
   const total = countedSignalWindows.size
     ? countedSignalWindows.size + [...countedSessions].filter(session => isTmuxSession(session) && !countedSignalSessions.has(session)).length
     : fallbackTotal;
+  const attention = ask + blocked;
+  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+}
+
+function globalActivityCountSessions() {
+  if (typeof tabberOrderedSessions === 'function') return tabberOrderedSessions();
+  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
+  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const seen = new Set();
+  const sessions = [];
+  for (const value of [...order, ...all]) {
+    const session = String(value || '').trim();
+    if (!session || seen.has(session) || !isTmuxSession(session)) continue;
+    seen.add(session);
+    sessions.push(session);
+  }
+  return sessions;
+}
+
+function globalActivityCountsFromAgentWindows() {
+  if (
+    typeof sessionAgentWindowStatusPayloads !== 'function'
+    || typeof agentWindowActivityIconForStatusItem !== 'function'
+    || typeof agentWindowActivityOptionsForStatus !== 'function'
+    || typeof agentWindowKind !== 'function'
+  ) return null;
+  let running = 0;
+  let ask = 0;
+  let blocked = 0;
+  let total = 0;
+  for (const session of globalActivityCountSessions()) {
+    const info = transcriptMeta.sessions?.[session] || {};
+    const autoPayload = autoApproveStates.get(session) || {};
+    const rows = sessionAgentWindowStatusPayloads(session, info, autoPayload);
+    for (const agent of rows) {
+      if (!agentWindowKind(agent?.kind)) continue;
+      const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
+      const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
+      total += 1;
+      if (!item || item.acknowledged === true) continue;
+      if (item.state === STATE_KEY.working) running += 1;
+      else if (item.state === 'attention') ask += 1;
+      else if (item.state === 'cooldown') blocked += 1;
+    }
+  }
+  if (!total) return null;
   const attention = ask + blocked;
   return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
 }

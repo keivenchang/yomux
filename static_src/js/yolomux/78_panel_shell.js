@@ -872,7 +872,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     ? String(options.leadingHtml || '')
     : options.showLeading === false
     ? ''
-    : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false});
+    : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
   return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>

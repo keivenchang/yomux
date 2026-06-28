@@ -1206,6 +1206,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
-  "pref.performance.agent_status_pulse_period_ms.help": "Период одного импульса для красных, желтых и зеленых индикаторов состояния Claude/Codex. Анимация использует четыре дискретных уровня яркости, чтобы уменьшить непрерывную перерисовку.",
+  "pref.performance.agent_status_pulse_period_ms.help": "Период импульса для красных, желтых и зеленых индикаторов состояния Claude/Codex. Анимация использует один дискретный визуальный шаг примерно на каждые 250 мс периода, чтобы уменьшить непрерывную перерисовку.",
   "pref.performance.agent_status_pulse_period_ms.label": "Период пульсации индикатора состояния"
 }
