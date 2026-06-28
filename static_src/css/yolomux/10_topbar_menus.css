@@ -599,7 +599,7 @@ body.app-vw-lte-1100 .topbar-search {
   border-color: var(--accent);
   color: var(--text);
 }
-.topbar-owner-status.has-reader {
+.topbar-owner-status.has-follower {
   border-color: color-mix(in srgb, var(--accent-gold) 56%, var(--line));
 }
 .topbar-owner-status.has-error {
@@ -609,11 +609,11 @@ body.app-vw-lte-1100 .topbar-search {
   color: var(--text-muted-cool);
   font-weight: 700;
 }
-.topbar-owner-status-part[data-owner-role="owner"] .topbar-owner-status-value {
+.topbar-owner-status-part[data-owner-role="leader"] .topbar-owner-status-value {
   color: var(--brand-green);
   font-weight: 700;
 }
-.topbar-owner-status-part[data-owner-role="reader"] .topbar-owner-status-value,
+.topbar-owner-status-part[data-owner-role="follower"] .topbar-owner-status-value,
 .topbar-owner-status-part[data-owner-role="loading"] .topbar-owner-status-value,
 .topbar-owner-status-part[data-owner-role="error"] .topbar-owner-status-value {
   color: var(--accent-gold);
@@ -646,13 +646,21 @@ body.app-vw-lte-1100 .topbar-search {
 .topbar-activity.has-attention {
   border-color: var(--brand-green);
 }
-.topbar-activity-run.active {
-  color: var(--brand-green);
+.topbar-activity-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-weight: 600;
 }
-.topbar-activity-attn {
-  color: var(--accent-gold);
-  font-weight: 600;
+.topbar-activity-count-number {
+  min-width: 1ch;
+  text-align: right;
+}
+.topbar-activity-ball.agent-window-activity {
+  --agent-window-icon-size: var(--agent-status-ball-size-base);
+  min-width: var(--agent-status-ball-size-base);
+  min-height: var(--agent-status-ball-size-base);
+  margin-inline-start: 0;
 }
 .topbar-activity-sep {
   opacity: 0.5;

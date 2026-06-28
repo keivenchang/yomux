@@ -213,8 +213,8 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPay
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
   return {
     ownsRole,
-    mode: ownsRole ? (options.ownerMode || 'owner') : (options.readerMode || 'follower'),
-    state: ownsRole ? 'owner' : 'reader',
+    mode: ownsRole ? (options.ownerMode || 'leader') : (options.followerMode || 'follower'),
+    state: ownsRole ? 'leader' : 'follower',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner ? backgroundServerLabel(owner) : '',
     status: String(role.status || data.status || ''),
@@ -225,7 +225,7 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPay
 function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
-  const summary = backgroundOwnerRoleSummary('search-index', payload, {ownerMode: 'indexing server', readerMode: 'read server'});
+  const summary = backgroundOwnerRoleSummary('search-index', payload);
   const ownsIndex = searchIndex.owner === true || summary.ownsRole === true;
   const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
   const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
@@ -233,8 +233,8 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayloa
     ...summary,
     ownsIndex,
     ownsRole: ownsIndex,
-    mode: ownsIndex ? 'indexing server' : 'read server',
-    state: ownsIndex ? 'owner' : 'reader',
+    mode: ownsIndex ? 'leader' : 'follower',
+    state: ownsIndex ? 'leader' : 'follower',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
     status: String(searchIndex.status || summary.status || data.status || ''),
@@ -242,7 +242,11 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayloa
 }
 
 function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusPayload) {
-  return backgroundOwnerRoleSummary('stats-sampler', payload, {ownerMode: 'stats owner', readerMode: 'stats follower'});
+  return backgroundOwnerRoleSummary('stats-sampler', payload);
+}
+
+function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusPayload) {
+  return backgroundOwnerRoleSummary('session-files', payload);
 }
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {

@@ -105,7 +105,7 @@ raw_capture: |
   gpt-5.5 xhigh · ~                                      Goal achieved (21m)
 ready_text: []
 send_lines: []
-source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 8001:0.0; `Goal achieved` footer must not classify as RUN without a visible current Working row
+source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 8001:0.0; `Goal achieved` footer must not classify as working without a visible current Working row
 styled_capture: |
   • Confirmed and fixed.
 

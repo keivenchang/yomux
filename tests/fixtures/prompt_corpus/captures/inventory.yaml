@@ -232,7 +232,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: working
-    attention_label: RUN
+    attention_label: Working
     composer_key: empty
     reason_code: busy
     screen_key: working
@@ -252,7 +252,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: working
-    attention_label: RUN
+    attention_label: Working
     composer_key: empty
     reason_code: busy
     screen_key: working
@@ -272,7 +272,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: working
-    attention_label: RUN
+    attention_label: Working
     composer_key: empty
     reason_code: busy
     screen_key: working
@@ -472,7 +472,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: working
-    attention_label: RUN
+    attention_label: Working
     composer_key: ghost
     reason_code: busy
     screen_key: working
@@ -492,7 +492,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: working
-    attention_label: RUN
+    attention_label: Working
     composer_key: draft
     reason_code: busy
     screen_key: working
@@ -519,7 +519,7 @@ fixtures:
   file: goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
   id: goal_achieved_idle_draft__codex-cli-0.141.0_20260624
   scenario: goal_achieved_idle_draft
-  source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 8001:0.0; `Goal achieved` footer must not classify as RUN without a visible current Working row
+  source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 8001:0.0; `Goal achieved` footer must not classify as working without a visible current Working row
 - agent: codex
   capture_date: '2026-06-20'
   case_name: working_command_counter
@@ -532,7 +532,7 @@ fixtures:
     approval_type: ''
     approval_visible: false
     attention_kind: working
-    attention_label: RUN
+    attention_label: Working
     composer_key: ghost
     reason_code: busy
     screen_key: working

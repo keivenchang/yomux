@@ -480,7 +480,7 @@ def _attention_for_state(prompt_state: dict[str, Any], screen_state: dict[str, A
     if screen_state.get("key") == "needs-input":
         return "question", "Question"
     if screen_state.get("key") == "working":
-        return "working", "RUN"
+        return "working", "Working"
     return "", ""
 
 

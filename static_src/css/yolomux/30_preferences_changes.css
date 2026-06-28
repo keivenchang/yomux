@@ -408,7 +408,7 @@ body.theme-light .js-debug-graph-view {
   pointer-events: none;
 }
 .js-debug-disconnected-range {
-  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.5);
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.8);
   pointer-events: none;
 }
 .js-debug-graph--hovering .js-debug-hover-line {
@@ -443,7 +443,7 @@ body.theme-light .js-debug-graph-view {
 .js-debug-line--askAgents {
   stroke: var(--bad);
 }
-.js-debug-line--runAgents {
+.js-debug-line--workingAgents {
   stroke: var(--good);
 }
 .js-debug-line--transitionAgents {
@@ -462,7 +462,7 @@ body.theme-light .js-debug-graph-view {
   fill: var(--bad);
   opacity: 0.7;
 }
-.js-debug-area--runAgents {
+.js-debug-area--workingAgents {
   fill: var(--good);
   opacity: 0.7;
 }
@@ -523,7 +523,7 @@ body.theme-light .js-debug-graph-view {
 .js-debug-legend-swatch--askAgents {
   color: var(--bad);
 }
-.js-debug-legend-swatch--runAgents {
+.js-debug-legend-swatch--workingAgents {
   color: var(--good);
 }
 .js-debug-legend-swatch--transitionAgents {
@@ -1441,9 +1441,9 @@ body.theme-light .command-palette-view-chip {
 }
 .keyboard-shortcuts-overlay {
   z-index: var(--z-file-conflict-dialog);
-  align-items: start;
+  align-items: center;
   justify-items: center;
-  padding: min(4vh, 34px) var(--popover-edge-gap) var(--popover-edge-gap);
+  padding: var(--popover-edge-gap);
 }
 .keyboard-shortcuts-overlay[hidden] {
   display: none;

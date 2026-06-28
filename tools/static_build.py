@@ -241,7 +241,6 @@ LIGHT_LINT_ALLOWLIST: dict[str, str] = {
     # Fixed state-badge / marker / warning colors — theme-independent (light text sits on the colored
     # badge in both themes; red attention banners are red in both).
     ".session-state-disconnected": "fixed state-badge color",
-    ".session-state-working": "fixed state-badge color",
     ".session-state-needs-approval": "fixed red attention-badge color",
     ".session-state-needs-input": "fixed red attention-badge color",
     ".session-state-blocked": "fixed red attention-badge color",

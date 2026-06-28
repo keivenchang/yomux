@@ -229,7 +229,7 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
     )
     assert metrics["overlayTopDelta"] <= 0.5, metrics
     assert metrics["overlayHeightDelta"] <= 1.1, metrics
-    assert metrics["fill"] == "rgba(220, 38, 38, 0.5)", metrics
+    assert metrics["fill"] == "rgba(220, 38, 38, 0.8)", metrics
     assert metrics["pointerEvents"] == "none", metrics
 
 
@@ -1340,7 +1340,8 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
                 """
                 const session = arguments[0];
                 return document.getElementById(`panel-${session}`)
-                  && document.getElementById('topbarActivity')?.textContent?.includes('attention');
+                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '1'
+                  && document.querySelector('#topbarActivity .topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention');
                 """,
                 session,
             )
@@ -1360,9 +1361,10 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
               tabAttention: tab?.classList.contains('needs-attention') || false,
               panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
               topbarText: topbar?.textContent || '',
-              topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('status-indicator') || false,
-              topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('status-indicator--attention') || false,
-              topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask')?.classList.contains('attention-pulse') || false,
+              topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
+              topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator') || false,
+              topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention') || false,
+              topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('attention-pulse') || false,
             };
             clearPromptAttentionForSession(session, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
@@ -1371,6 +1373,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
               tabAttention: tab?.classList.contains('needs-attention') || false,
               panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
               topbarText: topbar?.textContent || '',
+              topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
               newInputFrames: afterSocketFrames.slice(beforeSocketFrames.length).filter(frame => String(frame).includes('"type":"input"')).length,
             };
             return {before, immediate};
@@ -1382,14 +1385,14 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
         assert metrics["before"]["badgePresent"] is False
         assert metrics["before"]["tabAttention"] is True
         assert metrics["before"]["panelNeedsApproval"] is True
-        assert "1 attention" in metrics["before"]["topbarText"]
+        assert metrics["before"]["topbarAskCount"] == "1"
         assert metrics["before"]["topbarAskHasSharedParent"] is True
         assert metrics["before"]["topbarAskHasAttentionModifier"] is True
         assert metrics["before"]["topbarAskHasPulse"] is False
         assert metrics["immediate"]["badgeText"] == ""
         assert metrics["immediate"]["tabAttention"] is True
         assert metrics["immediate"]["panelNeedsApproval"] is True
-        assert "1 attention" in metrics["immediate"]["topbarText"]
+        assert metrics["immediate"]["topbarAskCount"] == "1"
         assert metrics["immediate"]["newInputFrames"] == 0
         WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
@@ -1400,7 +1403,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
                 return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
                   && !tab?.classList.contains('needs-attention')
                   && !panel?.classList.contains('needs-exec-pane')
-                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 attention');
+                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '0';
                 """,
                 session,
             )
@@ -1433,6 +1436,7 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
         "roles": {
             "search-index": {"role": "search-index", "owner": True, "status": "owner"},
             "stats-sampler": {"role": "stats-sampler", "owner": False, "status": "follower"},
+            "session-files": {"role": "session-files", "owner": False, "status": "follower"},
         },
         "search_index": {
             "role": "search-index",
@@ -1453,7 +1457,7 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
         lambda driver: driver.execute_script(
             """
             const owner = document.getElementById('topbarOwnerStatus');
-            return owner && owner.textContent.includes('IDX') && owner.textContent.includes('STATS');
+            return owner && owner.textContent.includes('IDX|STATS|SESS');
             """
         )
     )
@@ -1470,8 +1474,7 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
         return {
           text: owner.textContent.replace(/\\s+/g, ' ').trim(),
           title: owner.title,
-          idxRole: owner.querySelector('.topbar-owner-status-idx')?.dataset.ownerRole || '',
-          statsRole: owner.querySelector('.topbar-owner-status-stats')?.dataset.ownerRole || '',
+          sharedRole: owner.querySelector('.topbar-owner-status-shared')?.dataset.ownerRole || '',
           languageBeforeOwner: position(language, owner),
           ownerBeforeActivity: position(owner, activity),
           ownerRect: rect(owner),
@@ -1479,14 +1482,13 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
         };
         """
     )
-    assert "IDX owner" in metrics["text"], metrics
-    assert "STATS follower" in metrics["text"], metrics
-    assert metrics["idxRole"] == "owner"
-    assert metrics["statsRole"] == "reader"
+    assert "IDX|STATS|SESS: follower" in metrics["text"], metrics
+    assert metrics["sharedRole"] == "follower"
     assert metrics["languageBeforeOwner"] is True
     assert metrics["ownerBeforeActivity"] is True
     assert metrics["ownerRect"]["right"] <= metrics["activityRect"]["left"] + 1
-    assert "YO!stats owner: devhost:8002" in metrics["title"]
+    assert "STATS leader: devhost:8002" in metrics["title"]
+    assert "SESS leader: devhost:8002" in metrics["title"]
 
 
 @pytest.mark.e2e
@@ -1610,6 +1612,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
               ask: globalActivityCounts().ask,
               badges: sessions.map(session => document.getElementById(`panel-tab-${session}`)?.querySelector('[data-prompt-attention-clear]')?.textContent || ''),
               topbar: document.getElementById('topbarActivity')?.textContent || '',
+              topbarAskCount: document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
             };
             """,
             list(sessions.values()),
@@ -1654,6 +1657,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                     ok: counts.ask === sessions.length,
                     counts,
                     topbar: document.getElementById('topbarActivity')?.textContent || '',
+                    topbarAskCount: document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
                     states: sessions.map(session => {
                       const payload = autoApproveStates.get(session) || {};
                       const state = sessionState(session);
@@ -1704,6 +1708,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
               return {
                 ask: globalActivityCounts().ask,
                 topbar: document.getElementById('topbarActivity')?.textContent || '',
+                topbarAskCount: document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
                 sessions: sessions.map(session => {
                   const tab = document.getElementById(`panel-tab-${session}`);
                   const panel = document.getElementById(`panel-${session}`);
@@ -1727,12 +1732,12 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             list(sessions.values()),
         )
         assert metrics["before"]["ask"] == 2, metrics
-        assert "2 attention" in metrics["before"]["topbar"], metrics
+        assert metrics["before"]["topbarAskCount"] == "2", metrics
         assert [item["badge"] for item in metrics["before"]["sessions"]] == ["", ""], metrics
         assert [item["tabAttention"] for item in metrics["before"]["sessions"]] == [True, True], metrics
         assert [item["panelNeedsApproval"] for item in metrics["before"]["sessions"]] == [True, True], metrics
         assert metrics["immediate"]["ask"] == 2, metrics
-        assert "2 attention" in metrics["immediate"]["topbar"], metrics
+        assert metrics["immediate"]["topbarAskCount"] == "2", metrics
         assert [item["badge"] for item in metrics["immediate"]["sessions"]] == ["", ""], metrics
         assert [item["tabAttention"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
         assert [item["panelNeedsApproval"] for item in metrics["immediate"]["sessions"]] == [True, True], metrics
@@ -1742,7 +1747,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                 """
                 const sessions = arguments[0];
                 return globalActivityCounts().ask === 0
-                  && (document.getElementById('topbarActivity')?.textContent || '').includes('0 attention')
+                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '0'
                   && sessions.every(session => {
                     const tab = document.getElementById(`panel-tab-${session}`);
                     const panel = document.getElementById(`panel-${session}`);
@@ -6313,8 +6318,6 @@ LIGHT_MODE_SURFACES = """
 </div>
 <span class="agent-icon codex" id="agent-ico">A</span>
 <span class="session-state-badge" id="badge-neutral">run</span>
-<span class="session-state-badge session-state-working" id="badge-working">working</span>
-<span class="session-state-badge session-state-done" id="badge-done">done</span>
 <span class="session-yolo-marker inactive" id="ym-inactive">YO</span>
 <button class="pane-tab file-missing" id="fm-tab">
   <span class="session-button-dir" id="fm-dir">gone</span>
@@ -6414,7 +6417,7 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     text_checks = {
         "cp-row": "cp-dlg", "cp-grp": "cp-dlg", "cp-det": "cp-dlg", "cp-kb": "cp-dlg",
         "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "agent-ico": None,
-        "badge-neutral": "badge-neutral", "badge-working": "badge-working", "badge-done": "badge-done", "ym-inactive": "ym-inactive",
+        "badge-neutral": "badge-neutral", "ym-inactive": "ym-inactive",
         "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
         "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
         # the YO!info table — rows/header/current/links must read on the light pane.

@@ -1366,9 +1366,9 @@ const stateDefs = {
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
   'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
-  [STATE_KEY.working]: {label: 'Working', short: 'RUN', priority: 6, attention: false},
-  [STATE_KEY.idle]: {label: 'Idle', short: 'IDLE', priority: 7, attention: false},
-  done: {label: 'Done', short: 'DONE', priority: 8, attention: false},
+  [STATE_KEY.working]: {label: 'Working', short: '', priority: 6, attention: false},
+  [STATE_KEY.idle]: {label: 'Idle', short: '', priority: 7, attention: false},
+  done: {label: 'Done', short: '', priority: 8, attention: false},
 };
 const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
@@ -1382,7 +1382,8 @@ function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
   const resolvedKey = stateDefs[key] ? key : STATE_KEY.idle;
-  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
+  const base = stateDefs[resolvedKey];
+  return {...base, label: t(`state.${resolvedKey}`), short: base.short ? t(`state.short.${resolvedKey}`) : ''};
 }
 
 function attentionAcknowledgementKey(parts = []) {
@@ -1990,7 +1991,7 @@ function updateDocumentTitle() {
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
-// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/attention/blocked.
+// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 working/attention/blocked.
 function globalActivityCounts() {
   const signalWindows = tmuxSignalWindows();
   let running = 0;
@@ -2056,14 +2057,23 @@ function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
   const parts = [];
-  const runTone = counts.running ? 'positive' : '';
-  const askTone = counts.ask ? 'attention' : '';
-  const blockedTone = counts.blocked ? 'attention' : '';
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses(runTone, 'topbar-activity-run', counts.running ? 'active' : ''))}">${counts.running} RUN</span>`);
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses(askTone, 'topbar-activity-ask', counts.ask ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(askTone)}>${counts.ask} attention</span>`);
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses(blockedTone, 'topbar-activity-blocked', counts.blocked ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(blockedTone)}>${counts.blocked} blocked</span>`);
+  parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
+  parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
+}
+
+function topbarActivityCountBallHtml(count, tone, extraClass = '') {
+  const activityToneClass = tone === STATE_KEY.working ? 'agent-window-activity--working' : tone === 'attention' ? 'agent-window-activity--attention' : 'agent-window-activity--cooldown';
+  return `
+    <span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-count', extraClass, count ? 'active' : ''))}">
+      <span class="topbar-activity-count-number">${esc(String(count))}</span>
+      <span class="${esc(['agent-window-activity', 'agent-window-activity--status-only', activityToneClass, 'topbar-activity-ball'].join(' '))}" aria-hidden="true">
+        <span class="${esc(statusIndicatorDotClasses(tone, 'agent-window-status-dot', {pulse: false}))}">●</span>
+      </span>
+    </span>
+  `;
 }
 
 function createTopbarActivityStatus() {
@@ -2088,21 +2098,24 @@ function updateTopbarActivityStatus() {
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
-function topbarOwnerStatusPartHtml(key, label, summary = {}) {
-  const owns = summary.ownsRole === true || summary.ownsIndex === true;
-  const state = owns ? 'owner' : 'reader';
-  const value = owns ? 'owner' : key === 'idx' ? 'reader' : 'follower';
-  return `<span class="topbar-owner-status-part ${esc(`topbar-owner-status-${key}`)}" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(label)}</span> <span class="topbar-owner-status-value">${esc(value)}</span></span>`;
+function topbarOwnerStatusCombinedHtml(summaries = []) {
+  const activeSummaries = summaries.filter(item => item && typeof item === 'object');
+  if (!activeSummaries.length) return '';
+  const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
+  const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
+  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(state)}</span></span>`;
 }
 
-function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}) {
+function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
   const lines = [
-    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || 'this server'}`,
-    indexSummary.ownerLabel ? `Index owner: ${indexSummary.ownerLabel}` : '',
-    statsSummary.ownerLabel ? `YO!stats owner: ${statsSummary.ownerLabel}` : '',
+    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || 'this server'}`,
+    indexSummary.ownerLabel ? `IDX leader: ${indexSummary.ownerLabel}` : '',
+    statsSummary.ownerLabel ? `STATS leader: ${statsSummary.ownerLabel}` : '',
+    sessionSummary.ownerLabel ? `SESS leader: ${sessionSummary.ownerLabel}` : '',
     indexSummary.status ? `Index status: ${indexSummary.status}` : '',
     statsSummary.status ? `YO!stats status: ${statsSummary.status}` : '',
-    indexSummary.error || statsSummary.error || '',
+    sessionSummary.status ? `Session files status: ${sessionSummary.status}` : '',
+    indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');
 }
@@ -2110,19 +2123,20 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}) {
 function topbarOwnerStatusHtml() {
   if (shareViewMode) return '';
   if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
-    return '<span class="topbar-owner-status-part" data-owner-role="loading"><span class="topbar-owner-status-key">IDX</span> <span class="topbar-owner-status-value">...</span></span><span class="topbar-activity-sep" aria-hidden="true">·</span><span class="topbar-owner-status-part" data-owner-role="loading"><span class="topbar-owner-status-key">STATS</span> <span class="topbar-owner-status-value">...</span></span>';
+    return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="loading"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">...</span></span>';
   }
   if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
-    return '<span class="topbar-owner-status-part" data-owner-role="error"><span class="topbar-owner-status-key">IDX</span> <span class="topbar-owner-status-value">?</span></span><span class="topbar-activity-sep" aria-hidden="true">·</span><span class="topbar-owner-status-part" data-owner-role="error"><span class="topbar-owner-status-key">STATS</span> <span class="topbar-owner-status-value">?</span></span>';
+    return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
   }
-  if (!backgroundOwnerStatusPayload || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function') return '';
+  if (!backgroundOwnerStatusPayload || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return '';
   const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
   const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
-  return [
-    topbarOwnerStatusPartHtml('idx', 'IDX', indexSummary),
-    '<span class="topbar-activity-sep" aria-hidden="true">·</span>',
-    topbarOwnerStatusPartHtml('stats', 'STATS', statsSummary),
-  ].join('');
+  const sessionSummary = backgroundOwnerSessionFilesSummary(backgroundOwnerStatusPayload);
+  return topbarOwnerStatusCombinedHtml([
+    {...indexSummary, label: 'IDX'},
+    {...statsSummary, label: 'STATS'},
+    {...sessionSummary, label: 'SESS'},
+  ]);
 }
 
 function createTopbarOwnerStatus() {
@@ -2146,12 +2160,13 @@ function updateTopbarOwnerStatus() {
   const html = topbarOwnerStatusHtml();
   node.innerHTML = html;
   node.hidden = !html;
-  node.classList.toggle('has-reader', /\bdata-owner-role="reader"/.test(html));
+  node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
   node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
-  if (backgroundOwnerStatusPayload && typeof backgroundOwnerSearchIndexSummary === 'function' && typeof backgroundOwnerStatsSummary === 'function') {
+  if (backgroundOwnerStatusPayload && typeof backgroundOwnerSearchIndexSummary === 'function' && typeof backgroundOwnerStatsSummary === 'function' && typeof backgroundOwnerSessionFilesSummary === 'function') {
     const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
     const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
-    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary) || 'Refresh connected server ownership status';
+    const sessionSummary = backgroundOwnerSessionFilesSummary(backgroundOwnerStatusPayload);
+    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || 'Refresh connected server ownership status';
   } else if (backgroundOwnerStatusError) {
     node.title = backgroundOwnerStatusError;
   } else {
@@ -2303,7 +2318,7 @@ function sessionStateHtml(state) {
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
   if ([STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state?.key)) return '';
-  if (!state || (!state.showBadge && [STATE_KEY.working, 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
+  if (!state || [STATE_KEY.working, 'done'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
     clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
     session: state.session,
@@ -2461,8 +2476,7 @@ function keyboardShortcutCatalog() {
       {label: 'Run focused command', keys: 'Enter / Space'},
       {label: 'Open selected quick-open file in a split', keys: appShortcutText('Enter')},
       {label: 'Close menu, palette, or picker', keys: 'Esc'},
-      {label: 'Open Tabber sessions by number', keys: '1-9'},
-      {label: 'Run drop or paste action by number', keys: '1-9'},
+      {label: 'Choose numbered Tabber, drop, or paste item', keys: '1-9'},
     ]},
   ];
 }
@@ -2485,17 +2499,9 @@ function keyboardLegendCatalog() {
       {sampleHtml: keyboardLegendStatusSample('closed'), label: 'Gray', detail: 'Closed, done, idle, inactive, or unavailable state.'},
       {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: 'Metadata colors', detail: 'YO!info and Info Bars tint Path, Git BRANCH, Linear, GitHub PR, Tab, and AI fields so repeated rows scan by type.'},
     ]},
-    {section: 'Status labels and balls', items: [
-      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-needs-input session-state-reminder">ASK?</span>', label: 'ASK?', detail: 'The AI is waiting for your answer or a permission/approval decision.'},
-      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-working">RUN</span>', label: 'RUN / TEST', detail: 'A session is working, or a test command is currently detected.'},
-      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-done">DONE</span>', label: 'DONE / IDLE', detail: 'The agent is finished or no active agent work is detected.'},
-      {sampleHtml: '<span class="status-indicator status-indicator--text session-state-blocked">Blocked</span>', label: 'Blocked / OFF', detail: 'The agent hit a blocking error, or the browser terminal is disconnected.'},
-    ]},
     {section: 'Icon meanings', items: [
-      {sampleHtml: appMenuUiIcon('finder'), label: fileExplorerLabel(), detail: 'Finder/File Explorer or Differ tree.'},
       {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: 'YO!info branch, PR, Linear, Tab, AI, and path map.'},
       {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: 'YO!agent chat, skills, jobs, waits, and handoffs.'},
-      {sampleHtml: appMenuUiIcon('document'), label: 'Document', detail: 'File editor, preview, image viewer, transcript, summary, or event document.'},
       {sampleHtml: appMenuUiIcon('gear'), label: 'Gear', detail: 'Preferences and configurable settings.'},
       {sampleHtml: appMenuUiIcon('tab-meta'), label: 'Tab metadata', detail: 'Metadata/debug surfaces and the tab metadata toggle.'},
       {sampleHtml: appMenuUiIcon('share'), label: 'Share', detail: 'YO!share link and viewer controls.'},
@@ -2504,7 +2510,7 @@ function keyboardLegendCatalog() {
     {section: 'YO button meanings', items: [
       {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: 'Inactive YO', detail: 'YOLO auto-approval is off for this tmux session, or not owned here.'},
       {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: 'Active YO', detail: 'YOLO auto-approval is enabled for this session.'},
-      {sampleHtml: '<span class="session-yolo-marker active working">YO</span>', label: 'Working YO', detail: 'YOLO is enabled while an agent window is working.'},
+      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: 'Working YO', detail: 'YOLO is enabled while an agent window is working.'},
       {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: 'Locked YO', detail: 'Another YOLOmux process owns the auto-approval lock for that target.'},
     ]},
   ];

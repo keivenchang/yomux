@@ -212,9 +212,6 @@
   color: var(--accent-gold);
   border: 1px solid transparent;
 }
-.topbar-activity .topbar-activity-attn.status-indicator--attention {
-  color: var(--accent-gold);
-}
 .agent-window-activity {
   --agent-window-icon-size: 18px;
   /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
@@ -366,16 +363,6 @@
   color: #082014;
   background: var(--pr-status-passing);
   border-color: #9befad;
-}
-.session-state-working {
-  color: #dce9ff;
-  background: #1c355f;
-  border-color: #4d7ed8;
-}
-.session-state-done {
-  color: #d9e5f5;
-  background: #273244;
-  border-color: #58667b;
 }
 @keyframes attention-ring-fade {
   0%, 100% {
@@ -538,16 +525,6 @@ body.theme-light .session-state-badge {
   color: var(--neutral-text-strong);
   background: #eef1f5;
   border-color: #cdd5e0;
-}
-body.theme-light .session-state-done {
-  color: #3a4659;
-  background: #e2e8f1;
-  border-color: #b8c2d2;
-}
-body.theme-light .session-state-working {
-  color: #214f89;
-  background: #e5f0ff;
-  border-color: #8fb5eb;
 }
 body.theme-light .session-yolo-marker.inactive {
   color: var(--agent-inactive-marker-text);

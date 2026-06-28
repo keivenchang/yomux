@@ -69,7 +69,7 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'latency', label: 'Client latency', unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond'},
   {key: 'askAgents', label: 'Attention', unit: 'count'},
-  {key: 'runAgents', label: 'RUN', unit: 'count'},
+  {key: 'workingAgents', label: 'Working', unit: 'count'},
   {key: 'transitionAgents', label: 'Transition', unit: 'count'},
   {key: 'idleAgents', label: 'Idle', unit: 'count'},
   {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
@@ -77,11 +77,11 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms'},
-  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond'},
-  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond'},
+  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true},
+  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true},
+  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true},
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
-  {key: 'activity', label: 'Agent status', series: ['askAgents', 'runAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
+  {key: 'activity', label: 'Agent status', series: ['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'], legendSeries: ['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
   {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, legendPlacement: 'footer', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
 
@@ -503,21 +503,21 @@ function debugGraphAddBucketData(bucket, data = {}) {
   const activeAgents = Number(data.activeAgents);
   const inactiveAgents = Number(data.inactiveAgents);
   const askAgents = Number(data.askAgents);
-  const runAgents = Number(data.runAgents);
+  const workingAgentsFromPayload = Number(data.runAgents);
   const transitionAgents = Number(data.transitionAgents);
   const idleAgents = Number(data.idleAgents);
-  if (Number.isFinite(askAgents) || Number.isFinite(runAgents) || Number.isFinite(transitionAgents) || Number.isFinite(idleAgents)) {
+  if (Number.isFinite(askAgents) || Number.isFinite(workingAgentsFromPayload) || Number.isFinite(transitionAgents) || Number.isFinite(idleAgents)) {
     const normalizedAskAgents = Number.isFinite(askAgents) ? askAgents : 0;
-    const normalizedRunAgents = Number.isFinite(runAgents) ? runAgents : 0;
+    const normalizedWorkingAgents = Number.isFinite(workingAgentsFromPayload) ? workingAgentsFromPayload : 0;
     const normalizedIdleAgents = Number.isFinite(idleAgents) ? idleAgents : (Number.isFinite(inactiveAgents) ? inactiveAgents : 0);
     const normalizedTransitionAgents = Number.isFinite(transitionAgents)
       ? Math.max(0, transitionAgents - (Number.isFinite(idleAgents) ? 0 : normalizedIdleAgents))
       : 0;
     bucket.askAgentTotal += Math.max(0, Number.isFinite(askAgents) ? askAgents : 0);
-    bucket.runAgentTotal += Math.max(0, normalizedRunAgents);
+    bucket.runAgentTotal += Math.max(0, normalizedWorkingAgents);
     bucket.transitionAgentTotal += Math.max(0, normalizedTransitionAgents);
     bucket.idleAgentTotal += Math.max(0, normalizedIdleAgents);
-    bucket.activeAgentTotal += Math.max(0, Number.isFinite(activeAgents) ? activeAgents : normalizedAskAgents + normalizedRunAgents + normalizedTransitionAgents);
+    bucket.activeAgentTotal += Math.max(0, Number.isFinite(activeAgents) ? activeAgents : normalizedAskAgents + normalizedWorkingAgents + normalizedTransitionAgents);
     bucket.inactiveAgentTotal += Math.max(0, Number.isFinite(inactiveAgents) ? inactiveAgents : 0);
     bucket.agentActivitySamples += 1;
   } else if (Number.isFinite(activeAgents) && Number.isFinite(inactiveAgents)) {
@@ -936,7 +936,7 @@ function debugGraphBucketValue(bucket, key) {
   if (key === 'latency') return bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0;
   if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
   if (key === 'askAgents') return bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0;
-  if (key === 'runAgents') return bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0;
+  if (key === 'workingAgents') return bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0;
   if (key === 'transitionAgents') return bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0;
   if (key === 'idleAgents') return bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0;
   if (key === 'tokensPerAgent') return bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0;
@@ -953,7 +953,7 @@ function debugGraphBucketValue(bucket, key) {
 function debugGraphBucketHasSeriesData(bucket, key) {
   if (!bucket) return false;
   if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
-  if (key === 'askAgents' || key === 'runAgents' || key === 'transitionAgents' || key === 'idleAgents') return Number(bucket.agentActivitySamples || 0) > 0;
+  if (key === 'askAgents' || key === 'workingAgents' || key === 'transitionAgents' || key === 'idleAgents') return Number(bucket.agentActivitySamples || 0) > 0;
   if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
@@ -1466,6 +1466,13 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   return group.series.map(key => seriesByKey.get(key)).filter(Boolean);
 }
 
+function debugGraphLegendSeriesItems(group, groupSeries) {
+  const legendKeys = Array.isArray(group?.legendSeries) ? group.legendSeries : null;
+  if (!legendKeys) return groupSeries;
+  const seriesByKey = new Map(groupSeries.map(series => [series.key, series]));
+  return legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
+}
+
 function debugGraphVisibleChartGroups(seriesItems) {
   return jsDebugGraphChartGroups.filter(group => {
     if (group.optional !== true) return true;
@@ -1511,6 +1518,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
+  const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plotSeries = group.stacked === true ? debugGraphStackedSeries(groupSeries) : groupSeries;
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0));
   const max = debugGraphChartAxisMax(group, rawMax);
@@ -1524,7 +1532,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <span class="js-debug-chart-title">${esc(group.label)}</span>
-      ${legendPlacement === 'head' ? debugGraphLegendHtml(groupSeries) : ''}
+      ${legendPlacement === 'head' ? debugGraphLegendHtml(legendSeries) : ''}
     </div>
     <div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
@@ -1535,13 +1543,13 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${debugGraphDisconnectedRectsHtml(buckets, domain)}
+          ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
       ${debugGraphXAxisHtml(domain)}
     </div>
-    ${legendPlacement === 'footer' ? `<div class="js-debug-chart-legend-footer">${debugGraphLegendHtml(groupSeries)}</div>` : ''}
+    ${legendPlacement === 'footer' ? `<div class="js-debug-chart-legend-footer">${debugGraphLegendHtml(legendSeries)}</div>` : ''}
   </section>`;
 }
 

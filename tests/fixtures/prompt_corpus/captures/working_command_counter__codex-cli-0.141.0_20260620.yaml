@@ -12,7 +12,7 @@ actual:
     selected_option: 0
     source: ''
   attention_kind: working
-  attention_label: RUN
+  attention_label: Working
   composer:
     accepting: true
     detected_text: ''
@@ -28,7 +28,7 @@ actual:
     y: 37
   display:
     attention_kind: working
-    attention_label: RUN
+    attention_label: Working
     evidence_lines: []
     options: []
     prompt_hash: ''
@@ -87,7 +87,7 @@ expected_promoted:
   approval_type: ''
   approval_visible: false
   attention_kind: working
-  attention_label: RUN
+  attention_label: Working
   composer_key: ghost
   reason_code: busy
   screen_key: working

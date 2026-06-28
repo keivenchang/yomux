@@ -496,7 +496,7 @@ def test_mock_list_defaults_to_current_agent_and_list_all_includes_shared_cases(
     assert "claude_idle_case [idle] claude_case.yaml" in all_output
     assert "claude_approval_case [YOLO?] claude_approval_case.yaml" in all_output
     assert "unknown_case [Question] unknown_case.yaml" in all_output
-    assert "generic_case [RUN] generic_case.yaml" in all_output
+    assert "generic_case [Working] generic_case.yaml" in all_output
     assert "codex_question_case" not in all_output
 
     mock_agent_common.handle_command("mock list idle", {})
@@ -516,7 +516,7 @@ def test_claude_default_mock_list_has_no_unknown_or_generic_cases(monkeypatch):
     assert all(mock_agent_common.mock_fixture_outcome_label(case) != "idle" for case in rows)
     assert any(mock_agent_common.mock_fixture_outcome_label(case) == "Question" for case in rows)
     assert any(mock_agent_common.mock_fixture_outcome_label(case) == "YOLO?" for case in rows)
-    assert any(mock_agent_common.mock_fixture_outcome_label(case) == "RUN" for case in rows)
+    assert any(mock_agent_common.mock_fixture_outcome_label(case) == "Working" for case in rows)
     idle_rows = mock_agent_common.mock_fixture_list_cases(include_idle=True, only_idle=True)
     assert idle_rows
     for case in idle_rows:
@@ -602,7 +602,7 @@ def test_mock_fixture_outcome_labels_come_from_expected_metadata():
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"attention_label": "Question"}}) == "Question"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"approval_visible": True}}) == "YOLO?"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "needs-input"}}) == "Question"
-    assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "working"}}) == "RUN"
+    assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "working"}}) == "Working"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "input-draft"}}) == "draft"
     assert mock_agent_common.mock_fixture_outcome_label({"expected": {"screen_key": "idle"}}) == "idle"
 
@@ -2435,7 +2435,7 @@ def test_tmux_claude_startup_cwd_survives_first_mock_submit(visual_tmux):
     visual_tmux.send_keys(session, "mock", "Enter")
     listed, pane = visual_tmux.wait_until(
         session,
-        lambda text: cwd_row in text and "❯ mock" in text and "working_visible_counter [RUN]" in text,
+        lambda text: cwd_row in text and "❯ mock" in text and "working_visible_counter [Working]" in text,
     )
     assert listed, pane
     assert pane.index(cwd_row) < pane.index("❯ mock") < pane.index("● Mock fixture cases")

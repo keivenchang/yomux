@@ -20,7 +20,7 @@ expected_promoted:
   approval_type: ''
   approval_visible: false
   attention_kind: working
-  attention_label: RUN
+  attention_label: Working
   composer_key: empty
   reason_code: busy
   screen_key: working

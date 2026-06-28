@@ -2286,6 +2286,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.preferences-radio\.has-swatches\s*\{[\s\S]*grid-template-columns:\s*18px 34px minmax\(0,\s*1fr\)/.test(preferencesCss), 'swatched Preferences radios align radio, color chips, and label in fixed columns');
     assert.ok(/\.preferences-radio-swatch\s*\{[\s\S]*border-radius:\s*2px/.test(preferencesCss), 'Preferences color swatches are boxed, not round dots');
     assert.ok(/\.preferences-radio-swatches\.joined\s*\{[\s\S]*gap:\s*0/.test(preferencesCss), 'Preferences active-color swatches are connected into one segmented box');
+    assert.ok(/\.keyboard-shortcuts-overlay\s*\{[\s\S]*align-items:\s*center[\s\S]*justify-items:\s*center[\s\S]*padding:\s*var\(--popover-edge-gap\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends dialog is centered in the modal overlay');
     assert.ok(/\.keyboard-shortcuts-dialog\s*\{[\s\S]*width:\s*min\(1180px,\s*calc\(100vw - \(2 \* var\(--popover-edge-gap\)\)\)\)[\s\S]*max-height:\s*min\(92vh,\s*900px\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends uses a wide viewport-bounded panel');
     assert.ok(/\.keyboard-shortcuts-body\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(260px,\s*100%\),\s*1fr\)\)[\s\S]*gap:\s*8px 10px[\s\S]*padding:\s*8px 10px 10px/.test(preferencesCss), 'Keyboard Shortcuts and Legends packs balanced columns into three or four compact tracks');
     assert.ok(/\.keyboard-shortcuts-column\s*\{[\s\S]*display:\s*grid[\s\S]*align-content:\s*start[\s\S]*gap:\s*8px/.test(preferencesCss), 'Keyboard Shortcuts and Legends stacks sections inside each column instead of leaving sparse row holes');
@@ -4083,10 +4084,14 @@ async function runShareThemeSuite() {
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+Backspace / Ctrl+Delete'), 'shortcut overlay documents both close-tab fallback keys');
     assert.ok(api.keyboardShortcutsHtml().includes('Select all rows') && api.keyboardShortcutsHtml().includes('Ctrl+A'), 'shortcut overlay documents Finder/Differ select-all');
     assert.ok(api.keyboardShortcutsHtml().includes('Open selected quick-open file in a split') && api.keyboardShortcutsHtml().includes('Ctrl+Enter'), 'shortcut overlay documents the quick-open split keybinding');
-    assert.ok(api.keyboardShortcutsHtml().includes('Run drop or paste action by number'), 'shortcut overlay documents drop-action number shortcuts');
+    assert.ok(api.keyboardShortcutsHtml().includes('Choose numbered Tabber, drop, or paste item'), 'shortcut overlay documents numbered Tabber and drop-action shortcuts without duplicate key rows');
     assert.ok(api.keyboardShortcutsHtml().includes('Copy visible terminal selection'), 'shortcut overlay documents terminal selection copy');
     assert.ok(api.keyboardShortcutsHtml().includes('Color meanings'), 'shortcut overlay includes the color legend');
+    assert.equal(api.keyboardShortcutsHtml().includes('Status labels and balls'), false, 'shortcut overlay omits stale text-badge status legend rows');
     assert.ok(api.keyboardShortcutsHtml().includes('YO button meanings'), 'shortcut overlay includes the YO button legend');
+    assert.ok(/Working YO[\s\S]*YOLO is enabled while an agent window is working|session-yolo-marker active working[\s\S]*status-indicator--working[\s\S]*Working YO/.test(api.keyboardShortcutsHtml()), 'Working YO legend sample includes the green working status ball so it is distinct from Active YO');
+    assert.equal(api.keyboardShortcutsHtml().includes('Finder/File Explorer or Differ tree.'), false, 'shortcut overlay omits self-explanatory Finder icon legend row');
+    assert.equal(api.keyboardShortcutsHtml().includes('File editor, preview, image viewer, transcript, summary, or event document.'), false, 'shortcut overlay omits self-explanatory Document icon legend row');
     assert.ok(api.keyboardShortcutsHtml().includes('keyboard-shortcuts-column'), 'shortcut overlay renders balanced column wrappers to pack the help content vertically');
     assert.equal(/Move or split tab[\s\S]{0,120}(Ctrl|Cmd|Alt|Shift)\+/.test(api.keyboardShortcutsHtml()), false, 'shortcut overlay does not advertise keyboard tab/pane movement');
     assert.ok(api.keyboardShortcutsHtml().includes('outside text'), 'shortcut overlay scopes the Backspace close-tab fallback');

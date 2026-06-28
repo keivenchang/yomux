@@ -585,6 +585,7 @@ globalThis.__layoutTestApi = {
   normalizeSessionFileLookbackHoursForTest: normalizeSessionFileLookbackHours,
   backgroundOwnerSearchIndexSummaryForTest: backgroundOwnerSearchIndexSummary,
   backgroundOwnerStatsSummaryForTest: backgroundOwnerStatsSummary,
+  backgroundOwnerSessionFilesSummaryForTest: backgroundOwnerSessionFilesSummary,
   topbarOwnerStatusHtmlForTest: topbarOwnerStatusHtml,
   topbarOwnerStatusTitleForTest: topbarOwnerStatusTitle,
   setBackgroundOwnerStatusPayloadForTest(payload) {

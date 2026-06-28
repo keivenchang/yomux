@@ -13,10 +13,10 @@ class FakeAgentPaneState:
         return {
             "target": "project1:0.0",
             "screen": {"key": "working", "text": "agent is working"},
-            "display": {"screen_key": "working", "attention_kind": "working", "attention_label": "RUN"},
+            "display": {"screen_key": "working", "attention_kind": "working", "attention_label": "Working"},
             "approval": {"approval_visible": False},
             "attention_kind": "working",
-            "attention_label": "RUN",
+            "attention_label": "Working",
             "agent_kind": "claude",
             "reason_code": "busy",
         }
@@ -77,7 +77,7 @@ def test_capture_pane_state_uses_agent_tui_shared_classification(monkeypatch):
     assert text == "raw"
     assert error is None
     assert state["screen"]["key"] == "working"
-    assert state["display"]["attention_label"] == "RUN"
+    assert state["display"]["attention_label"] == "Working"
     assert state["reason_code"] == "busy"
     assert calls == [
         ("capture", "project1:0.0", False, False, False),

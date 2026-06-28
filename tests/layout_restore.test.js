@@ -1426,7 +1426,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('t@2114', () => {
-    // GLOBAL activity status line: cross-session YOLO-screen RUN / attention / blocked / idle rollup.
+    // GLOBAL activity status line: cross-session YOLO-screen working / attention / blocked / idle rollup.
     const api = loadYolomux('', ['1', '2', '3', '4']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle'}});
@@ -1437,7 +1437,9 @@ async function runLayoutRestoreSuite() {
     assert.equal(idleEnabledCounts.blocked, 0, 'YOLO enabled but idle does not count as blocked');
     assert.equal(api.browserFaviconBadgeCount(idleEnabledCounts), 0, 'favicon badge is 0 when enabled sessions are idle');
     const idleHtml = api.globalActivityStatusLineHtml();
-    assert.ok(/0 RUN/.test(idleHtml) && /0 attention/.test(idleHtml) && /0 blocked/.test(idleHtml), 'status line shows explicit zero RUN / attention / blocked counts');
+    assert.ok(/topbar-activity-working[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--working/.test(idleHtml), 'status line shows explicit zero working count with a green ball');
+    assert.ok(/topbar-activity-ask[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--attention/.test(idleHtml), 'status line shows explicit zero attention count with a red ball');
+    assert.ok(/topbar-activity-blocked[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--cooldown/.test(idleHtml), 'status line shows explicit zero blocked count with a yellow ball');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     api.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'needs-input'}});
     api.setAutoApproveStateForTest('3', {enabled: true, screen: {key: 'blocked'}});
@@ -1615,16 +1617,17 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes("ctx.font = '900 86px Arial, sans-serif'") && source.includes('ctx.scale(1.22, 1)') && source.includes("ctx.fillText('Y', 0, 0)"), 'favicon fills the tile with a large Y');
     assert.ok(source.includes("ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif'") && source.includes("ctx.strokeText(label, 62, 50)") && source.includes("ctx.fillText(label, 62, 50)"), 'favicon overlays a prominent active count at the bottom-right');
     const html = api.globalActivityStatusLineHtml();
-    assert.ok(/1 RUN/.test(html) && /topbar-activity-run active/.test(html), 'status line shows running count');
-    assert.ok(/1 attention/.test(html) && /topbar-activity-ask topbar-activity-attn/.test(html), 'status line shows attention count');
-    assert.ok(/1 blocked/.test(html) && /topbar-activity-blocked topbar-activity-attn/.test(html), 'status line shows blocked count');
+    assert.ok(/topbar-activity-working active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--working/.test(html), 'status line shows running count with the shared green ball');
+    assert.ok(/topbar-activity-ask active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--attention/.test(html), 'status line shows attention count with the shared red ball');
+    assert.ok(/topbar-activity-blocked active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--cooldown/.test(html), 'status line shows blocked count with the shared yellow ball');
     assert.equal(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), false, 'topbar attention count stays static when continuous status pulsing is disabled');
     assert.equal(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), false, 'topbar blocked count stays static when continuous status pulsing is disabled');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
     assert.ok(/\.topbar-owner-status\s*\{/.test(css), 'the top-bar ownership indicator is styled');
-    assert.ok(/\.topbar-owner-status-part\[data-owner-role="owner"\]/.test(css), 'topbar ownership indicator highlights owner state');
-    assert.ok(/\.topbar-activity-run\.active/.test(css), 'RUN only turns green when nonzero');
+    assert.ok(/\.topbar-owner-status-part\[data-owner-role="leader"\]/.test(css), 'topbar ownership indicator highlights leader state');
+    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*display:\s*inline-flex/.test(css), 'activity counts align their number and shared status ball');
+    assert.ok(/\.topbar-activity-ball\.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*var\(--agent-status-ball-size-base\)/.test(css), 'topbar activity balls reuse the tab ball size variable');
     assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
   });
 
