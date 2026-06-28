@@ -3833,7 +3833,7 @@ function tabberSessionChromeHtml(data) {
     state,
     auto,
     attrs: ['data-tabber-session-chrome="shared"', 'draggable="true"'],
-    contentHtml: stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto)),
+    stripContentTitles: true,
     afterHtml: sessionPopoverHtml(session, info, agentKind, auto, state),
   });
 }

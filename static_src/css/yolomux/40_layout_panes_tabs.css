@@ -1286,22 +1286,53 @@ body.theme-light .drop-slot.drag-over {
   white-space: nowrap;
   overflow: hidden;
 }
-button.tmux-pane-tab-token {
+.tmux-pane-tab-token-action {
   cursor: pointer;
 }
-button.tmux-pane-tab-token:hover,
-button.tmux-pane-tab-token:focus-visible {
+.tmux-pane-tab-token-action:hover,
+.tmux-pane-tab-token-action:focus-visible {
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg-hover);
   border-color: rgba(255, 255, 255, 0.92);
   text-decoration: none;
   outline: 0;
 }
+.tmux-pane-tab-token > .pane-tab-core {
+  flex: 1 1 auto;
+  min-width: 0;
+  inline-size: 100%;
+}
+.tmux-pane-tab-token .session-button-prefix {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: visible;
+  gap: 2px;
+}
+.tmux-pane-tab-token .session-button-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 3px;
+}
+.tmux-pane-tab-token .tab-inline-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
 .tmux-pane-tab-token.active {
   color: var(--pane-tab-active-text);
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);
   border-bottom-color: var(--pane-tab-active-bg);
+}
+.tmux-pane-tab-token.active .session-button-name,
+.tmux-pane-tab-token.active .session-button-dir,
+.tmux-pane-tab-token.active .session-button-detail {
+  color: var(--pane-tab-active-text);
+}
+body.theme-light .tmux-pane-tab-token:not(.active) .session-button-name,
+body.theme-light .tmux-pane-tab-token:not(.active) .session-button-dir,
+body.theme-light .tmux-pane-tab-token:not(.active) .session-button-detail {
+  color: currentColor;
 }
 .pane-tab.active {
   color: var(--pane-tab-unfocused-active-text);

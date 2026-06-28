@@ -6406,22 +6406,53 @@ body.theme-light .drop-slot.drag-over {
   white-space: nowrap;
   overflow: hidden;
 }
-button.tmux-pane-tab-token {
+.tmux-pane-tab-token-action {
   cursor: pointer;
 }
-button.tmux-pane-tab-token:hover,
-button.tmux-pane-tab-token:focus-visible {
+.tmux-pane-tab-token-action:hover,
+.tmux-pane-tab-token-action:focus-visible {
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg-hover);
   border-color: rgba(255, 255, 255, 0.92);
   text-decoration: none;
   outline: 0;
 }
+.tmux-pane-tab-token > .pane-tab-core {
+  flex: 1 1 auto;
+  min-width: 0;
+  inline-size: 100%;
+}
+.tmux-pane-tab-token .session-button-prefix {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: visible;
+  gap: 2px;
+}
+.tmux-pane-tab-token .session-button-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 3px;
+}
+.tmux-pane-tab-token .tab-inline-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
 .tmux-pane-tab-token.active {
   color: var(--pane-tab-active-text);
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);
   border-bottom-color: var(--pane-tab-active-bg);
+}
+.tmux-pane-tab-token.active .session-button-name,
+.tmux-pane-tab-token.active .session-button-dir,
+.tmux-pane-tab-token.active .session-button-detail {
+  color: var(--pane-tab-active-text);
+}
+body.theme-light .tmux-pane-tab-token:not(.active) .session-button-name,
+body.theme-light .tmux-pane-tab-token:not(.active) .session-button-dir,
+body.theme-light .tmux-pane-tab-token:not(.active) .session-button-detail {
+  color: currentColor;
 }
 .pane-tab.active {
   color: var(--pane-tab-unfocused-active-text);
@@ -9368,11 +9399,6 @@ body.theme-light .info-tree {
 }
 body.theme-light .info-tree-tab-token:not(.active) {
   color: var(--pc-control-fg);
-}
-.info-tree-tab-token > .pane-tab-core {
-  flex: 1 1 auto;
-  min-width: 0;
-  inline-size: 100%;
 }
 button.info-tree-tab-token.active:hover,
 button.info-tree-tab-token.active:focus-visible {
@@ -14726,57 +14752,11 @@ body.theme-light .file-tree-row.tabber-row {
   flex: 1 1 auto;
   inline-size: 100%;
   max-inline-size: 100%;
-  color: var(--tabber-detail-color);
-  background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-radius: 6px 6px 0 0;
-  cursor: pointer;
-}
-.file-tree-row.tabber-row .tabber-session-tab > .pane-tab-core {
-  flex: 1 1 auto;
-  min-width: 0;
-  inline-size: 100%;
-}
-.file-tree-row.tabber-row .tabber-session-tab .session-button-prefix {
-  flex: 0 0 auto;
-  min-width: 0;
-}
-.file-tree-row.tabber-row .tabber-session-tab .session-button-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  gap: 3px;
-}
-.file-tree-row.tabber-row .tabber-session-tab .tab-inline-detail {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-name,
-body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-dir,
-body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-detail {
-  color: currentColor;
 }
 .file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
   --agent-window-icon-size: var(--tabber-agent-icon-size);
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-}
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
-  color: var(--pane-tab-text);
-  background: var(--pane-inactive-tab-bg-hover);
-  border-color: rgba(255, 255, 255, 0.92);
-}
-body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
-  border-color: rgb(var(--overlay-slate-rgb) / 0.5);
-}
-.file-tree-row.tabber-row.tabber-active-session .tabber-session-tab,
-.file-tree-row.tabber-row .tabber-session-tab.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
 }
 .file-tree-row.tabber-row.selected .tabber-session-tab {
   box-shadow: 0 0 0 1px var(--active-control-focus-ring);

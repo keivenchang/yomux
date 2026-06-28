@@ -1202,6 +1202,7 @@ async function runTabberSuite() {
   test('t@tabber', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
+    const tabberSessionChromeSource = source.match(/function tabberSessionChromeHtml\(data\) \{[\s\S]*?\n\}/)?.[0] || '';
     // B1/B3 source guards: routes through the shared pipeline, no forked builder, finder refreshes skip tabber rows.
     assert.ok(/mode === 'diff' \|\| mode === 'tabber' \? mode : 'files'/.test(source), 'B1: normalizeFileExplorerMode accepts files|diff|tabber');
     assert.ok(/if \(options\.mode === 'tabber'\) return updateTabberRow\(/.test(source), 'B3: updateFileTreeRow dispatches tabber rows to updateTabberRow');
@@ -1220,25 +1221,28 @@ async function runTabberSuite() {
     assert.ok(/border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
     assert.ok(/font-family:\s*var\(--tab-font\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab font');
     assert.ok(/line-height:\s*var\(--tab-line-height\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab line height');
+    assert.ok(/\.tmux-pane-tab-token-action\s*\{[\s\S]*cursor:\s*pointer/.test(css), 'A2: shared compact tmux tab tokens own the interactive cursor');
+    assert.ok(/\.tmux-pane-tab-token-action:hover,[\s\S]*\.tmux-pane-tab-token-action:focus-visible\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)[\s\S]*border-color:\s*rgba\(255, 255, 255, 0\.92\)/.test(css), 'A2: shared compact tmux tab tokens own inactive hover styling');
     assert.ok(/\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: compact tmux tab tokens inherit active pane-tab tokens');
     const tabberSessionTabCss = css.match(/\.file-tree-row\.tabber-row \.tabber-session-tab\s*\{([\s\S]*?)\}/)?.[1] || '';
     assert.ok(/inline-size:\s*100%/.test(tabberSessionTabCss) && /max-inline-size:\s*100%/.test(tabberSessionTabCss), 'A2/A4: Tabber session label stretches to the row instead of the pane tab width cap');
     assert.equal(/max-inline-size:\s*min\(var\(--pane-tab-width\), 100%\)/.test(tabberSessionTabCss), false, 'A2/A4: Tabber session label has no shared pane-tab-width max cap');
-    assert.ok(/color:\s*var\(--tabber-detail-color\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session text uses the dim Tabber detail color');
-    assert.ok(/background:\s*var\(--pane-bar-bg, var\(--panel2\)\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session background matches dockview inactive tabs');
-    assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session labels keep a visible pane-tab outline');
-    assert.ok(/border-radius:\s*6px 6px 0 0/.test(tabberSessionTabCss), 'A2: Tabber session labels use real tab corners with square bottom edges');
-    assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\]:not\(\.tabber-active-session\):not\(\.selected\):hover \.tabber-session-tab\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)/.test(css), 'A2: inactive Tabber session hover uses the shared inactive-tab hover token');
-    assert.ok(/\.file-tree-row\.tabber-row\.tabber-active-session \.tabber-session-tab,[\s\S]*\.tabber-session-tab\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: active Tabber session labels use active pane-tab tokens');
+    assert.equal(/(?:^|\n)\s*(?:color|background|border|border-radius|cursor)\s*:/.test(tabberSessionTabCss), false, 'A2: Tabber session labels do not duplicate visual tab shell styling');
+    assert.equal(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\][\s\S]*:hover \.tabber-session-tab/.test(css), false, 'A2: Tabber session hover styling stays on the shared tmux tab token');
+    assert.equal(/\.file-tree-row\.tabber-row\.tabber-active-session \.tabber-session-tab/.test(css), false, 'A5: Tabber active styling stays on the shared tmux tab token');
     assert.ok(/\.file-tree-row\.tabber-row\.selected \.tabber-session-tab\s*\{[\s\S]*box-shadow:\s*0 0 0 1px var\(--active-control-focus-ring\)/.test(css), 'A2/A3: selected tree rows keep a visible focus ring on the tab-shaped label');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.pane-tab-core\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*inline-size:\s*100%/.test(css), 'TR3: shared tab chrome stretches inside the Tabber row wrapper');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto/.test(css), 'A4/TR1: the shared session number prefix stays visible before detail truncation');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*text-overflow:\s*ellipsis/.test(css), 'A4/TR1: the shared tab detail truncates inside the stretched Tabber label');
-    assert.ok(/body\.theme-light \.file-tree-row\.tabber-row \.tabber-session-tab \.session-button-name,[\s\S]*body\.theme-light \.file-tree-row\.tabber-row \.tabber-session-tab \.session-button-detail\s*\{[\s\S]*color:\s*currentColor/.test(css), 'Tabber light mode lets shared tab labels inherit the dark session-chip text color');
+    assert.ok(/\.tmux-pane-tab-token > \.pane-tab-core\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*inline-size:\s*100%/.test(css), 'TR3: shared compact tmux tab chrome stretches its pane-tab core');
+    assert.ok(/\.tmux-pane-tab-token \.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*min-width:\s*0/.test(css), 'A4/TR1: the shared compact tmux tab token keeps the session number prefix visible before detail truncation');
+    assert.ok(/\.tmux-pane-tab-token \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*max-width:\s*none/.test(css), 'A4/TR1: the shared compact tmux tab token stretches tab detail text');
+    assert.ok(/body\.theme-light \.tmux-pane-tab-token:not\(\.active\) \.session-button-name,[\s\S]*body\.theme-light \.tmux-pane-tab-token:not\(\.active\) \.session-button-detail\s*\{[\s\S]*color:\s*currentColor/.test(css), 'compact tmux tab tokens own light-mode child label inheritance');
+    assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.pane-tab-core/.test(css), false, 'TR3: Tabber no longer owns the compact tab core flex rule');
+    assert.equal(/\.info-tree-tab-token > \.pane-tab-core/.test(css), false, 'TR3: YO!info no longer owns a duplicate compact tab core flex rule');
     assert.ok(/\.session-popover-host > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-pane-modal\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover surface as real tabs');
     assert.ok(/\.session-popover-host\.popover-open > \.session-popover,\s*\.pane-tab-detached-popover\.popover-open\s*\{[\s\S]*visibility:\s*visible[\s\S]*opacity:\s*1/.test(css), 'TR2: Tabber session popovers open through the same visibility selector as real tabs');
     assert.ok(source.includes("'tabber-session-tab', 'session-popover-host'"), 'TR2: Tabber session tabs opt into the shared popover host class');
-    assert.ok(/function tabberSessionChromeHtml\(data\)[\s\S]*tmuxPaneTabTokenHtml\(session,[\s\S]*contentHtml:\s*stripTitleAttrs\(tmuxPaneTabHtml\(session/.test(source), 'TR1: Tabber session rows use the shared compact tmux pane-tab token helper');
+    assert.ok(/function tmuxPaneTabTokenHtml\(session, options = \{\}\)[\s\S]*tmux-pane-tab-token-action[\s\S]*stripContentTitles === true/.test(source), 'TR1: the shared compact tmux pane-tab token helper owns action/static classes and optional title stripping');
+    assert.ok(tabberSessionChromeSource.includes('tmuxPaneTabTokenHtml(session,') && /stripContentTitles:\s*true/.test(tabberSessionChromeSource), 'TR1: Tabber session rows use the shared compact tmux pane-tab token helper');
+    assert.equal(tabberSessionChromeSource.includes('tmuxPaneTabHtml('), false, 'TR1: Tabber does not rebuild shared tmux pane-tab inner HTML');
     assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*width:\s*min\(420px/.test(css), false, 'TR2: Tabber does not keep a divergent one-off popover width');
     assert.equal(source.includes("tabber: {type: 'loading'"), false, 'Tabber no longer renders a client-side touched-path loading row');
     assert.ok(source.includes('function tabberLookbackControlHtml()') && source.includes('data-tabber-lookback'), 'Tabber renders a dedicated touched-path lookback control');
@@ -1306,7 +1310,7 @@ async function runTabberSuite() {
     assert.equal(api.readStoredFileExplorerModeForTest('tabber'), 'files', 'Tabber is an explicit mode choice, not the default restored left Finder pane');
     assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(api.fileExplorerModeSwitcherHtml()), 'B1: Finder / Differ / Tabber order');
     assert.equal(source.includes('data-tabber-expand'), false, 'Tabber session descriptions are not separate expand-only targets');
-    assert.ok(source.includes('function tabberSessionChromeHtml(data)') && /function tabberSessionChromeHtml\(data\)[\s\S]*tmuxPaneTabHtml\(session, info, state, auto\)[\s\S]*sessionPopoverHtml\(session, info, agentKind, auto, state\)/.test(source), 'A1/A2/TR1: session rows render the shared tmux pane tab chrome and popover');
+    assert.ok(tabberSessionChromeSource.includes('tmuxPaneTabTokenHtml(session,') && tabberSessionChromeSource.includes('sessionPopoverHtml(session, info, agentKind, auto, state)'), 'A1/A2/TR1: session rows render the shared tmux pane tab chrome and popover');
     assert.equal(source.includes('tabber-session-name') || source.includes('tabber-session-description'), false, 'TR5: Tabber does not keep bespoke session name/description chrome');
     assert.ok(/function bindTabberSessionChrome\(row, session\)[\s\S]*applySessionStateClasses\(tab, state\)[\s\S]*bindPaneTabPopover\(tab, session\)[\s\S]*toggleAutoApprove/.test(source), 'TR2: Tabber session rows reuse the shared state classes, popover binding, and YO toggle action');
     assert.ok(/function fileExplorerTreeSortSelectHtml\(extraClass = ''\)[\s\S]*data-file-explorer-tree-sort[\s\S]*finder\.sort\.az[\s\S]*finder\.sort\.oldest/.test(source), 'TS1/TS4: Finder and Tabber share one tree sort select component and locale keys');
@@ -1644,6 +1648,8 @@ async function runTabberSuite() {
     contextSessionRow.dataset.tabberSession = '1';
     const contextSessionTab = new TestElement('tabber-context-session-tab');
     contextSessionTab.classList.add('tabber-session-tab');
+    contextSessionTab.classList.add('tmux-pane-tab-token');
+    contextSessionTab.classList.add('tmux-pane-tab-token-action');
     contextSessionRow.appendChild(contextSessionTab);
     contextPanel.appendChild(contextSessionRow);
     api.bindTabberPanelForTest(contextPanel);

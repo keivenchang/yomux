@@ -2192,11 +2192,6 @@ body.theme-light .info-tree {
 body.theme-light .info-tree-tab-token:not(.active) {
   color: var(--pc-control-fg);
 }
-.info-tree-tab-token > .pane-tab-core {
-  flex: 1 1 auto;
-  min-width: 0;
-  inline-size: 100%;
-}
 button.info-tree-tab-token.active:hover,
 button.info-tree-tab-token.active:focus-visible {
   color: var(--pane-tab-active-text);

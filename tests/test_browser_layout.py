@@ -636,7 +636,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         </button>
         <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            <span class="tabber-session-tab active" data-tabber-session-chrome="shared">
+            <span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared">
               <span class="pane-tab-core">
                 <span class="session-yolo-marker">YO</span>
                 <span class="session-agent-activity-marker">{_agent_status_glyph_html("codex", "working", "tabber-session-working")}</span>
@@ -773,7 +773,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
       <section class="tabber-ball-parity-fixture">
         <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 16px;">
           <span class="file-tree-name">
-            <span class="tabber-session-tab active" data-tabber-session-chrome="shared">
+            <span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared">
               <span class="pane-tab-core">
                 <span class="session-yolo-marker">YO</span>
                 <span class="session-agent-activity-marker">{_working_agent_glyph_html("codex", "tabber-session-working")}</span>
@@ -2252,7 +2252,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                   <div class="file-tree" role="tree">
                     <div class="file-tree-row tabber-row kind-dir expanded tabber-active-session" data-tabber-type="session" data-tabber-session="1" role="treeitem" aria-expanded="true" aria-selected="false" aria-current="true" style="padding-left: 8px;">
                       <span class="file-tree-icon tabber-icon">▾</span>
-                      <span class="file-tree-name"><span class="tabber-session-tab active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">8801</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">tabber session tab styling keeps the date column visible for a deliberately long work description</span></span></span></span></span>
+                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">8801</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">tabber session tab styling keeps the date column visible for a deliberately long work description</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -2270,7 +2270,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                     </div>
                     <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
                       <span class="file-tree-icon tabber-icon">▾</span>
-                      <span class="file-tree-name"><span class="tabber-session-tab" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
+                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -2321,6 +2321,16 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
               probe.remove();
               return color;
             };
+            const resolvedRadius = (scope, value) => {
+              const probe = document.createElement('span');
+              probe.style.position = 'absolute';
+              probe.style.pointerEvents = 'none';
+              probe.style.borderRadius = value;
+              (scope || document.body).appendChild(probe);
+              const radius = getComputedStyle(probe).borderTopLeftRadius;
+              probe.remove();
+              return radius;
+            };
             const rowMetrics = row => {
               const tab = row?.querySelector('.tabber-session-tab');
               const name = row?.querySelector('.session-button-prefix');
@@ -2352,7 +2362,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                 tabBottomRadius: style?.borderBottomLeftRadius || '',
                 tabBorderTop: style?.borderTopColor || '',
                 expectedActiveBg: tab ? resolvedColor(tab.parentElement, 'var(--pane-tab-active-bg)') : '',
-                expectedInactiveBg: tab ? resolvedColor(tab.parentElement, 'var(--pane-bar-bg, var(--panel2))') : '',
+                expectedInactiveBg: tab ? resolvedColor(tab.parentElement, 'var(--pane-inactive-tab-bg)') : '',
                 descriptionScrollWidth: description?.scrollWidth || 0,
                 descriptionClientWidth: description?.clientWidth || 0,
               };
@@ -2373,8 +2383,9 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
               expectedText: resolvedColor(document.body, 'var(--text)'),
               expectedWindowButtonText: resolvedColor(document.body, 'var(--pane-ctl-fg, var(--pc-control-fg))'),
               expectedActiveText: resolvedColor(document.body, 'var(--pane-tab-active-text)'),
+              expectedInactiveText: resolvedColor(document.body, 'var(--pane-tab-text)'),
               expectedInactiveBorder: resolvedColor(document.body, 'var(--pane-inactive-tab-border)'),
-              expectedMutedText: resolvedColor(document.body, 'var(--muted)'),
+              expectedTopRadius: resolvedRadius(document.body, 'var(--pane-tab-top-radius)'),
               windowIcons,
               nonSessionWithSessionTab,
               sessionCount: sessionRows.length,
@@ -2389,11 +2400,15 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["nonSessionWithSessionTab"] == 0, (label, metrics)
         assert "tabber-active-session" in metrics["active"]["rowClass"], (label, metrics)
         assert "active" in metrics["active"]["tabClass"], (label, metrics)
+        assert "tmux-pane-tab-token" in metrics["active"]["tabClass"], (label, metrics)
+        assert "tmux-pane-tab-token-action" in metrics["active"]["tabClass"], (label, metrics)
         assert metrics["active"]["ariaCurrent"] == "true", (label, metrics)
         assert metrics["active"]["ariaExpanded"] == "true", (label, metrics)
         assert metrics["active"]["iconText"] == "▾", (label, metrics)
         assert "tabber-active-session" not in metrics["inactive"]["rowClass"], (label, metrics)
         assert "active" not in metrics["inactive"]["tabClass"], (label, metrics)
+        assert "tmux-pane-tab-token" in metrics["inactive"]["tabClass"], (label, metrics)
+        assert "tmux-pane-tab-token-action" in metrics["inactive"]["tabClass"], (label, metrics)
         assert metrics["inactive"]["ariaCurrent"] == "", (label, metrics)
         assert metrics["active"]["tabBg"] == metrics["active"]["expectedActiveBg"], (label, metrics)
         assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedInactiveBg"], (label, metrics)
@@ -2403,13 +2418,13 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         if theme_class == "theme-light":
             assert metrics["active"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
             assert metrics["active"]["descriptionColor"] == metrics["active"]["tabColor"], (label, metrics)
-            assert metrics["inactive"]["tabColor"] == metrics["expectedMutedText"], (label, metrics)
+            assert metrics["inactive"]["tabColor"] == metrics["expectedInactiveText"], (label, metrics)
             assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
-            assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
+        assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
         assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)
-        assert metrics["active"]["tabTopRadius"] == "6px", (label, metrics)
+        assert metrics["active"]["tabTopRadius"] == metrics["expectedTopRadius"], (label, metrics)
         assert metrics["active"]["tabBottomRadius"] == "0px", (label, metrics)
-        assert metrics["inactive"]["tabTopRadius"] == "6px", (label, metrics)
+        assert metrics["inactive"]["tabTopRadius"] == metrics["expectedTopRadius"], (label, metrics)
         assert metrics["inactive"]["tabBottomRadius"] == "0px", (label, metrics)
         assert metrics["active"]["dateDisplay"] != "none", (label, metrics)
         assert metrics["active"]["dateWidth"] > 0, (label, metrics)
@@ -2443,7 +2458,7 @@ def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
                 <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="8001" role="treeitem" aria-expanded="true" style="padding-left: 8px;">
                   <span class="file-tree-icon tabber-icon">▾</span>
                   <span class="file-tree-name">
-                    <span id="tabber-tab" class="tabber-session-tab session-popover-host popover-open" data-tabber-session-chrome="shared" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 180px;">
+                    <span id="tabber-tab" class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host popover-open" data-tabber-session-chrome="shared" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 180px;">
                       <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
                       <div id="tabber-popover" class="session-popover" role="tooltip"><div class="popover-title">Tabber</div></div>
                     </span>

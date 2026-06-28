@@ -3534,57 +3534,11 @@ body.theme-light .file-tree-row.tabber-row {
   flex: 1 1 auto;
   inline-size: 100%;
   max-inline-size: 100%;
-  color: var(--tabber-detail-color);
-  background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-radius: 6px 6px 0 0;
-  cursor: pointer;
-}
-.file-tree-row.tabber-row .tabber-session-tab > .pane-tab-core {
-  flex: 1 1 auto;
-  min-width: 0;
-  inline-size: 100%;
-}
-.file-tree-row.tabber-row .tabber-session-tab .session-button-prefix {
-  flex: 0 0 auto;
-  min-width: 0;
-}
-.file-tree-row.tabber-row .tabber-session-tab .session-button-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  gap: 3px;
-}
-.file-tree-row.tabber-row .tabber-session-tab .tab-inline-detail {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-name,
-body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-dir,
-body.theme-light .file-tree-row.tabber-row .tabber-session-tab .session-button-detail {
-  color: currentColor;
 }
 .file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
   --agent-window-icon-size: var(--tabber-agent-icon-size);
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-}
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
-  color: var(--pane-tab-text);
-  background: var(--pane-inactive-tab-bg-hover);
-  border-color: rgba(255, 255, 255, 0.92);
-}
-body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
-  border-color: rgb(var(--overlay-slate-rgb) / 0.5);
-}
-.file-tree-row.tabber-row.tabber-active-session .tabber-session-tab,
-.file-tree-row.tabber-row .tabber-session-tab.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
 }
 .file-tree-row.tabber-row.selected .tabber-session-tab {
   box-shadow: 0 0 0 1px var(--active-control-focus-ring);

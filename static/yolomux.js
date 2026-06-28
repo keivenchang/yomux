@@ -14651,7 +14651,7 @@ function tabberSessionChromeHtml(data) {
     state,
     auto,
     attrs: ['data-tabber-session-chrome="shared"', 'draggable="true"'],
-    contentHtml: stripTitleAttrs(tmuxPaneTabHtml(session, info, state, auto)),
+    stripContentTitles: true,
     afterHtml: sessionPopoverHtml(session, info, agentKind, auto, state),
   });
 }
@@ -28179,8 +28179,10 @@ function tmuxPaneTabTokenHtml(session, options = {}) {
   const auto = Object.prototype.hasOwnProperty.call(options, 'auto') ? options.auto : autoApproveStates.get(item)?.enabled === true;
   const active = Object.prototype.hasOwnProperty.call(options, 'active') ? options.active === true : itemIsActivePaneTab(item);
   const tag = options.tag || (options.action === false ? 'span' : 'button');
+  const actionClass = options.action === false ? 'tmux-pane-tab-token-static' : 'tmux-pane-tab-token-action';
   const classes = [
     'tmux-pane-tab-token',
+    actionClass,
     ...(Array.isArray(options.classes) ? options.classes : []),
     tabIsPinned(item) ? 'pinned-tab' : '',
     active ? 'active' : '',
@@ -28189,7 +28191,8 @@ function tmuxPaneTabTokenHtml(session, options = {}) {
   if (tag === 'button') attrs.unshift('type="button"');
   if (options.title) attrs.push(`title="${esc(options.title)}"`);
   if (Array.isArray(options.attrs)) attrs.push(...options.attrs.filter(Boolean));
-  const contentHtml = options.contentHtml || tmuxPaneTabHtml(item, info, state, auto, options);
+  const rawContentHtml = options.contentHtml || tmuxPaneTabHtml(item, info, state, auto, options);
+  const contentHtml = options.stripContentTitles === true ? stripTitleAttrs(rawContentHtml) : rawContentHtml;
   const pinHtml = options.showPin === false ? '' : pinnedTabIconHtml(item);
   return `<${tag} ${attrs.join(' ')}>${pinHtml}${contentHtml}${options.afterHtml || ''}</${tag}>`;
 }
