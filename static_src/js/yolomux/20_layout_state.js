@@ -2313,7 +2313,7 @@ function attentionAnimationDurationMs(durationMs = agentStatusPulsePeriodMs) {
 }
 
 function statusPulseAnimationEnabled() {
-  return false;
+  return typeof globalThis !== 'undefined' && globalThis.yolomuxEnableBroadStatusPulse === true;
 }
 
 function attentionAnimationPhaseMs(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {

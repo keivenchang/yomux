@@ -2448,7 +2448,7 @@ function showUploadRsyncRecommendation(options = {}) {
     t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}),
     command,
   ], {
-    container: displayToastContainer(options.session || prefsItemId),
+    container: fileTransferToastContainer(options),
     actions: [action],
     countdownMs: 20000,
   });

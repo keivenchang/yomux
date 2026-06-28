@@ -177,16 +177,43 @@ function saveBlobDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function triggerFileDownload(path) {
+function fileTransferToastContainer(options = {}) {
+  return displayToastContainer(options.session || options.item || focusedPanelItem || fileExplorerItemId);
+}
+
+function showFileTransferError(message, options = {}) {
+  const text = String(message || t('fileTransfer.failed')).trim();
+  statusErr(esc(text));
+  showToast(t('fileTransfer.failedTitle'), [text], {
+    container: fileTransferToastContainer(options),
+    countdownMs: 20000,
+  });
+}
+
+async function transferErrorMessageFromResponse(response, fallback = '') {
+  const payload = await response.json().catch(() => ({}));
+  return payload?.error || response.statusText || fallback || `HTTP ${response.status}`;
+}
+
+async function triggerFileDownload(path) {
   if (!path) return;
-  const link = document.createElement('a');
-  link.href = rawFileDownloadUrl(path);
-  link.download = basenameOf(path) || 'download';
-  link.hidden = true;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  statusEl.textContent = `download started: ${basenameOf(path) || path}`;
+  const label = basenameOf(path) || path;
+  statusEl.textContent = `downloading ${label}...`;
+  let response;
+  try {
+    response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+  } catch (error) {
+    showFileTransferError(error?.message || String(error));
+    return;
+  }
+  if (!response.ok) {
+    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
+    return;
+  }
+  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
+  const blob = await response.blob();
+  saveBlobDownload(blob, filename);
+  statusEl.textContent = `download started: ${filename}`;
 }
 
 async function triggerFolderZipDownload(path) {
@@ -197,13 +224,11 @@ async function triggerFolderZipDownload(path) {
   try {
     response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
   } catch (error) {
-    statusErr(esc(error?.message || String(error)));
+    showFileTransferError(error?.message || String(error));
     return;
   }
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    const message = payload?.error || response.statusText || `HTTP ${response.status}`;
-    statusErr(esc(message));
+    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
     return;
   }
   const fallbackName = `${basenameOf(path) || 'folder'}.zip`;

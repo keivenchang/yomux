@@ -71,7 +71,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "uploads.suggestion_autorun": ("upload autorun", "drop autorun", "shell autorun"),
     "uploads.image_action_order": ("image action", "image actions", "image action order", "image paste actions", "image drop actions"),
     "uploads.custom_actions": ("custom upload actions", "custom drop actions", "file drop actions"),
-    "uploads.max_bytes": ("upload max bytes", "upload limit", "max upload size"),
+    "uploads.max_bytes": ("file transfer size cap", "transfer size cap", "upload max bytes", "upload limit", "download limit", "max upload size", "max download size"),
     "share.ttl_seconds": ("share ttl", "share expiry", "share duration"),
     "share.max_viewers": ("share max viewers", "max viewers"),
     "share.read_only": ("share read only", "share write access"),

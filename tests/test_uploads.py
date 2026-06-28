@@ -32,17 +32,16 @@ def test_unique_upload_path_increments_template_sequence(tmp_path):
     assert path.name == "20260531-002.png"
 
 
-def test_upload_default_size_cap_is_low_enough_for_buffered_parser():
-    # The whole multipart body is buffered in memory, so the default cap must stay modest.
-    assert UPLOAD_MAX_BYTES == 20 * 1024 * 1024
+def test_upload_default_size_cap_matches_file_transfer_preference_default():
+    assert UPLOAD_MAX_BYTES == 300 * 1024 * 1024
 
 
 def test_upload_request_limit_comes_from_live_settings():
     # Scoped to handle_upload (inspect, not full-file string slicing): the per-request cap comes from
-    # the LIVE settings (app.upload_max_bytes()), not the static module constant, and feeds the parser.
+    # the LIVE settings (app.file_transfer_max_bytes()), not the static module constant, and feeds the parser.
     body = inspect.getsource(Handler.handle_upload)
 
-    assert "self.server.app.upload_max_bytes()" in body
+    assert "self.file_transfer_max_bytes()" in body
     assert "content_length > UPLOAD_MAX_BYTES" not in body
     assert 'parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)' in body
 

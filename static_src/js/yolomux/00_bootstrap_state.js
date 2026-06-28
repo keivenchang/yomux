@@ -699,7 +699,7 @@ const SETTING_FALLBACKS = Object.freeze({
   'general.auto_focus': false,
   'general.startup_tips': true,
   'terminal_editor.scrollback': 5000,
-  'uploads.max_bytes': 20 * 1024 * 1024,
+  'uploads.max_bytes': 300 * 1024 * 1024,
 });
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 let shareResolvedGlobalThemeMode = '';

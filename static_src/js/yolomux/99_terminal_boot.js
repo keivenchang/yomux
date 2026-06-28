@@ -2652,7 +2652,9 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
-    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
+    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
+    statusErr(esc(message));
+    showFileTransferError(message, {session});
   }
 }
 
@@ -2666,6 +2668,7 @@ async function uploadEditorFiles(editorTarget, fileList) {
   const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
   if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
     statusErr(localizedHtml('status.uploadTooLarge', {selected: formatFileSize(totalBytes), limit: formatFileSize(uploadMaxBytes)}));
+    showUploadRsyncRecommendation({item: focusedPanelItem, sizeBytes: totalBytes});
     return;
   }
   const formData = new FormData();
@@ -2681,7 +2684,9 @@ async function uploadEditorFiles(editorTarget, fileList) {
     syncPasteCountersFromPayload(payload);
     insertEditorPasteUploadReferences(editorTarget, payload.files || []);
   } catch (error) {
-    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
+    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
+    statusErr(esc(message));
+    showFileTransferError(message, {item: focusedPanelItem});
   }
 }
 

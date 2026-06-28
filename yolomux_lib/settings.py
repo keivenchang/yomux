@@ -547,7 +547,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "dir_cache_ms"): "Milliseconds, 0-10000. Reuse a directory listing for this long so a busy live diff/tree does not re-list every directory on every render. 0 disables the cache.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
-    ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
+    ("uploads", "max_bytes"): "Bytes, 1048576-536870912. File transfer size cap for browser uploads, raw file downloads, and folder zip downloads. Prefer rsync for large files.",
     ("uploads", "subdir"): "Subdirectory under the session working directory where uploads are written (default .uploads, created on demand). Leave empty to write straight into the working directory.",
     ("uploads", "show_suggestions"): "When a file is dropped onto a terminal, show a brief suggestion overlay of actions (analyze, find errors, summarize, …) with 1..9 shortcuts. Keep typing to dismiss it.",
     ("uploads", "suggestion_autorun"): "true/false. Default false. When true, read-only shell drop actions send Enter after inserting the generated command. Agent prompts and write-capable actions never autorun.",
@@ -627,13 +627,13 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("file_explorer", "companion_dirs"): "Finder",
     ("file_explorer", "dir_cache_ms"): "Finder",
     ("file_explorer", "new_entry_highlight_ms"): "Finder",
-    ("uploads", "filename_template"): "Uploads",
-    ("uploads", "subdir"): "Uploads",
-    ("uploads", "show_suggestions"): "Uploads",
-    ("uploads", "suggestion_autorun"): "Uploads",
-    ("uploads", "image_action_order"): "Uploads",
-    ("uploads", "custom_actions"): "Uploads",
-    ("uploads", "max_bytes"): "Uploads",
+    ("uploads", "filename_template"): "Uploads/Downloads",
+    ("uploads", "subdir"): "Uploads/Downloads",
+    ("uploads", "show_suggestions"): "Uploads/Downloads",
+    ("uploads", "suggestion_autorun"): "Uploads/Downloads",
+    ("uploads", "image_action_order"): "Uploads/Downloads",
+    ("uploads", "custom_actions"): "Uploads/Downloads",
+    ("uploads", "max_bytes"): "Uploads/Downloads",
     ("share", "ttl_seconds"): "YO!share",
     ("share", "max_viewers"): "YO!share",
     ("share", "read_only"): "YO!share",
@@ -1094,6 +1094,8 @@ def setting_choice_metadata_for_catalog(section: str, key: str) -> dict[str, dic
 
 
 def setting_catalog_label(section: str, key: str) -> str:
+    if (section, key) == ("uploads", "max_bytes"):
+        return "File transfer size cap"
     return key.replace("_", " ").strip().capitalize()
 
 

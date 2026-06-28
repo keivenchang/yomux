@@ -91,8 +91,8 @@ IMAGE_EXTENSIONS = {
     ".rar": "application/vnd.rar",
 }
 
-MAX_RAW_BYTES = 100 * 1024 * 1024  # 100 MB cap on raw image/file download reads.
-FS_ZIP_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB cap on server-side folder zip downloads
+MAX_RAW_BYTES = 100 * 1024 * 1024  # Fallback raw file download cap when no app transfer cap is supplied.
+FS_ZIP_MAX_BYTES = 100 * 1024 * 1024  # Fallback folder zip cap when no app transfer cap is supplied.
 
 
 def _sniff_raw_mime(data: bytes) -> str:
@@ -329,7 +329,7 @@ def is_text_path(raw_path: str) -> bool:
     )
 
 
-def read_raw(raw_path: str) -> tuple[bytes, str]:
+def read_raw(raw_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
     """Return (bytes, mime_type) for binary previews. Caller decides whether to serve by extension."""
     path = paths._validated_path(raw_path)
     if not path.exists():
@@ -340,11 +340,12 @@ def read_raw(raw_path: str) -> tuple[bytes, str]:
         size = path.stat().st_size
     except OSError as exc:
         raise paths.FilesystemError(str(exc), status=500) from exc
-    if size > MAX_RAW_BYTES:
-        raise paths.FilesystemError(f"file too large ({size} bytes; max {MAX_RAW_BYTES})", status=413)
+    byte_cap = int(max_bytes) if isinstance(max_bytes, (int, float)) and max_bytes > 0 else MAX_RAW_BYTES
+    if size > byte_cap:
+        raise paths.FilesystemError(f"file too large ({size} bytes; {byte_cap} byte file transfer size cap)", status=413)
     with _fs_io_errors():
         with path.open("rb") as fh:
-            data = fh.read(MAX_RAW_BYTES + 1)
+            data = fh.read(byte_cap + 1)
     mime = _sniff_raw_mime(data) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
     return data, mime
 
@@ -354,8 +355,8 @@ def _format_zip_size(size: int) -> str:
     return f"{mib:.1f} MB ({size} bytes)"
 
 
-def _zip_limit_message(path: Path, size: int) -> str:
-    return f"Folder is {_format_zip_size(size)}; over the 100MB limit. Please zip it yourself (e.g. `zip -r {path.name}.zip {path.name}`)."
+def _zip_limit_message(path: Path, size: int, size_limit: int) -> str:
+    return f"Folder is {_format_zip_size(size)}; over the {_format_zip_size(size_limit)} file transfer size cap. Please zip it yourself (e.g. `zip -r {path.name}.zip {path.name}`)."
 
 
 def _walk_directory_sources(path: Path, size_limit: int | None = None) -> tuple[list[Path], list[Path], int]:
@@ -394,13 +395,14 @@ def _walk_directory_sources(path: Path, size_limit: int | None = None) -> tuple[
                 continue
             total_size += child_stat.st_size
             if size_limit is not None and total_size > size_limit:
-                raise paths.FilesystemError(_zip_limit_message(path, total_size), status=413)
+                raise paths.FilesystemError(_zip_limit_message(path, total_size, size_limit), status=413)
             files.append(child)
     return directories, files, total_size
 
 
-def _walk_zip_sources(path: Path) -> tuple[list[Path], list[Path], int]:
-    return _walk_directory_sources(path, FS_ZIP_MAX_BYTES)
+def _walk_zip_sources(path: Path, max_bytes: int | None = None) -> tuple[list[Path], list[Path], int]:
+    byte_cap = int(max_bytes) if isinstance(max_bytes, (int, float)) and max_bytes > 0 else FS_ZIP_MAX_BYTES
+    return _walk_directory_sources(path, byte_cap)
 
 
 def count_directory_files(raw_path: str) -> dict[str, Any]:
@@ -413,13 +415,13 @@ def count_directory_files(raw_path: str) -> dict[str, Any]:
     return {"path": str(path), "kind": "dir", "files": len(files), "recursive": True}
 
 
-def zip_directory(raw_path: str) -> tuple[Any, int]:
+def zip_directory(raw_path: str, max_bytes: int | None = None) -> tuple[Any, int]:
     path = paths._validated_path(raw_path)
     if not path.exists():
         raise paths.FilesystemError(f"path not found: {path}", status=404)
     if not path.is_dir():
         raise paths.FilesystemError(f"is not a directory: {path}", status=400)
-    directories, files, _total_size = _walk_zip_sources(path)
+    directories, files, _total_size = _walk_zip_sources(path, max_bytes)
     base_parent = path.parent
     data = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
     try:

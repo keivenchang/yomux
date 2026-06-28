@@ -282,7 +282,7 @@ const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
 const agentWindowTransitionPulseTimers = new Map();
 const agentWindowAcknowledgedStops = new Map();
-const agentWindowActivityAcknowledgeDelayMs = 1000;
+const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
 const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
@@ -551,16 +551,29 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
   const target = agentWindowActivityAcknowledgementTarget(session, windowIndex, options);
   if (!target) return false;
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
+  const acknowledgeStoppedTransition = () => (
+    target.state === 'cooldown'
+      ? acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0})
+      : false
+  );
   if (target.ackKey && typeof acknowledgeAttentionKeys === 'function') {
-    return acknowledgeAttentionKeys([target.ackKey], options);
+    const posted = acknowledgeAttentionKeys([target.ackKey], options);
+    if (target.state === 'cooldown' && target.transitionKey && Number(target.stoppedAt || 0) > 0) {
+      if (delayMs > 0) {
+        setTimeout(acknowledgeStoppedTransition, delayMs);
+      } else {
+        acknowledgeStoppedTransition();
+      }
+    }
+    return posted || target.state === 'cooldown';
   }
   if (delayMs > 0) {
     setTimeout(() => {
-      acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0});
+      acknowledgeStoppedTransition();
     }, delayMs);
     return true;
   }
-  return acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, options);
+  return acknowledgeStoppedTransition();
 }
 
 function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
@@ -615,8 +628,8 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       state: STATE_KEY.working,
       icon: '●',
       label: `${agentLabel(kind)} ${t('state.working')}`,
-      pulseActive: agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
-      transitionPulseActive: agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
+      pulseActive: true,
+      transitionPulseActive: true,
     };
   }
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
@@ -683,6 +696,11 @@ function agentWindowStatusToneClass(tone) {
   return tone === STATE_KEY.working ? 'working' : String(tone || '');
 }
 
+function agentWindowStatusToneForItem(item) {
+  const tone = item?.state ? agentWindowActivityTone(item.state) : '';
+  return ['attention', 'cooldown', STATE_KEY.working].includes(tone) ? tone : '';
+}
+
 function agentWindowActivityToneWrapperClass(tone) {
   const normalizedTone = agentWindowActivityTone(tone);
   return ['attention', 'cooldown', STATE_KEY.working].includes(normalizedTone)
@@ -692,15 +710,17 @@ function agentWindowActivityToneWrapperClass(tone) {
 
 function agentWindowStatusDotHtml(item, options = {}) {
   if (!item) return '';
-  if (!['attention', 'cooldown', STATE_KEY.working].includes(item.state)) return '';
-  const tone = agentWindowActivityTone(item.state);
+  const tone = agentWindowStatusToneForItem(item);
+  if (!tone) return '';
   const statusTones = agentWindowStatusToneOrder(options.statusTones || [tone]);
   const segmented = statusTones.length > 1;
   const segmentKey = statusTones.map(agentWindowStatusToneClass).join('-');
   const animate = options.animate !== false;
   const pulse = animate && item.pulseActive !== false;
+  const subwindowPulse = pulse;
   const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && !segmented && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -709,6 +729,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     item.acknowledged === true ? 'agent-window-status-dot--acknowledged' : '',
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
+    subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     segmented ? 'agent-window-status-dot--segmented' : '',
     segmented ? `agent-window-status-dot--${segmentKey}` : '',
     segmented ? `agent-window-status-dot--segments-${statusTones.length}` : '',
@@ -718,15 +739,18 @@ function agentWindowStatusDotHtml(item, options = {}) {
   return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
 }
 
-function agentWindowActivityStyleAttribute(tone, item = {}) {
+function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
   if (![STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone)) return '';
   const styles = [];
   const pulseEnabled = item?.pulseActive !== false && typeof statusPulseAnimationEnabled === 'function' && statusPulseAnimationEnabled();
-  if (pulseEnabled && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
+  const subwindowPulse = item?.pulseActive !== false;
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse;
+  if (hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
   if (item?.transitionPulseActive === true && item?.acknowledged !== true) {
     const durationMs = Math.max(1, Number(agentStatusPulsePeriodMs) || 1);
     styles.push(`--agent-status-transition-pulse-duration: ${durationMs / 1000}s`);
-    if (!pulseEnabled && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle(Date.now(), durationMs));
+    if (!hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle(Date.now(), durationMs));
   }
   return styles.length ? ` style="${esc(styles.join('; '))}"` : '';
 }
@@ -738,6 +762,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const stateKey = item?.state || 'idle-recent';
   const label = options.label || item?.label || agentLabel(kind);
   const statusOnly = options.statusOnly === true || options.hideAgentIcon === true;
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true || (options.subwindowGlyphPulse !== false && statusOnly !== true);
   const agentClasses = [
     'agent-window-activity-icon',
     'agent-window-agent-icon',
@@ -745,10 +770,10 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     `agent-window-agent-icon--${stateKey}`,
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
-  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false});
+  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false, subwindowGlyphPulse});
   if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = agentWindowActivityStyleAttribute(tone, item);
+  const style = agentWindowActivityStyleAttribute(tone, item, {subwindowGlyphPulse});
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
   const wrapperClasses = [
     'agent-window-activity',

@@ -2184,15 +2184,20 @@ async function runShareThemeSuite() {
     assert.equal(diffBundle.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default on settings reload');
     assert.ok(diffBundle.includes("path: 'performance.agent_status_pulse_period_ms'") && diffBundle.includes("initialSetting('performance.agent_status_pulse_period_ms')"), 'status ball pulse period is backed by settings defaults');
     assert.ok(diffBundle.includes("path: 'performance.workflow_transition_glow_seconds'") && diffBundle.includes("initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow duration is backed by the Performance preference through settings defaults');
-    assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
+    assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the file transfer size cap');
+    assert.ok(preferencesHtml.includes('Uploads/Downloads'), 'preferences rename Uploads to Uploads/Downloads');
+    assert.ok(
+      preferencesHtml.indexOf('data-setting-path="uploads.max_bytes"') < preferencesHtml.indexOf('data-setting-path="uploads.filename_template"'),
+      'file transfer size cap is the first Uploads/Downloads item',
+    );
     api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
     const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
     assert.ok(largeUploadPreferencesHtml.includes('preferences-setting-advisory'), 'large upload cap shows an rsync recommendation');
     assert.ok(largeUploadPreferencesHtml.includes('rsync -avz'), 'large upload recommendation includes a copyable rsync command');
-    assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?value="64"/.test(largeUploadPreferencesHtml), 'upload size cap displays in MB (64), not raw bytes');
-    assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?max="512"/.test(largeUploadPreferencesHtml), 'upload size cap min/max are expressed in MB');
-    assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">MB</.test(largeUploadPreferencesHtml), 'upload size cap labels its unit as MB');
-    assert.equal(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">bytes</.test(largeUploadPreferencesHtml), false, 'upload size cap no longer shows a raw bytes suffix');
+    assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?value="64"/.test(largeUploadPreferencesHtml), 'file transfer size cap displays in MB (64), not raw bytes');
+    assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?max="512"/.test(largeUploadPreferencesHtml), 'file transfer size cap min/max are expressed in MB');
+    assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">MB</.test(largeUploadPreferencesHtml), 'file transfer size cap labels its unit as MB');
+    assert.equal(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">bytes</.test(largeUploadPreferencesHtml), false, 'file transfer size cap no longer shows a raw bytes suffix');
     assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
     assert.ok(preferencesHtml.includes('enable hover-open menus'), 'auto-focus help covers menu hover behavior');
     assert.ok(preferencesHtml.includes('Off by default'), 'auto-focus help explains the default');

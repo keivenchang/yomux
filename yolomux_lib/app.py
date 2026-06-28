@@ -8571,9 +8571,12 @@ class TmuxWebtermApp:
         result, status = run_drop_action(payload)
         return result, HTTPStatus(status)
 
-    def upload_max_bytes(self) -> int:
+    def file_transfer_max_bytes(self) -> int:
         value = settings_payload().get("settings", {}).get("uploads", {}).get("max_bytes", UPLOAD_MAX_BYTES)
         return int(value) if isinstance(value, (int, float)) and value > 0 else UPLOAD_MAX_BYTES
+
+    def upload_max_bytes(self) -> int:
+        return self.file_transfer_max_bytes()
 
     def upload_target_dir(self, session: str) -> tuple[Path | None, str]:
         base, source = self._resolve_upload_base_dir(session)

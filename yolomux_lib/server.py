@@ -40,6 +40,7 @@ from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import PROJECT_ROOT
 from .common import PACIFIC_TIME
+from .common import UPLOAD_MAX_BYTES
 from .common import WEBSOCKET_GUID
 from .common import codex_event_kind
 from .common import codex_exec_argv
@@ -1173,7 +1174,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         raw_path = str(query_one(qs, "path", "") or "")
         download = query_bool(qs, "download")
         try:
-            data, mime = filesystem.read_raw(raw_path)
+            data, mime = filesystem.read_raw(raw_path, max_bytes=self.file_transfer_max_bytes())
         except FilesystemError as exc:
             self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
             return
@@ -1194,7 +1195,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         try:
-            archive_file, archive_size = filesystem.zip_directory(raw_path)
+            archive_file, archive_size = filesystem.zip_directory(raw_path, max_bytes=self.file_transfer_max_bytes())
         except FilesystemError as exc:
             self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
             return
@@ -1546,8 +1547,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return error_payload("event must be an object", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         return self.server.app.client_event(event)
 
+    def file_transfer_max_bytes(self) -> int:
+        getter = getattr(self.server.app, "file_transfer_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        getter = getattr(self.server.app, "upload_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        return UPLOAD_MAX_BYTES
+
     def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
-        upload_max_bytes = self.server.app.upload_max_bytes()
+        upload_max_bytes = self.file_transfer_max_bytes()
         body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
         if error is not None:
             return {"session": session, "error": str(error.get("error") or "")}, status

@@ -634,12 +634,16 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
             """
             const sym = document.querySelector(arguments[0]);
             const dot = document.querySelector(arguments[0] + '-dot');
+            if (arguments[0] !== '#dock-claude') dot.classList.add('agent-window-status-dot--subwindow-pulse');
+            const before = dot ? getComputedStyle(dot, '::before') : null;
             return {
               symAnim: getComputedStyle(sym).animationName,
               symOpacity: getComputedStyle(sym).opacity,
               dotPresent: !!dot,
               dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
               dotAnim: dot ? getComputedStyle(dot).animationName : null,
+              dotBoxShadow: dot ? getComputedStyle(dot).boxShadow : null,
+              beforeAnim: before ? before.animationName : null,
             };
             """,
             selector,
@@ -648,21 +652,32 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
         # On every surface the agent symbol is STATIC (no pulse) ...
         assert info["symAnim"] == "none", results
         assert float(info["symOpacity"]) == 1, results
-        # ... and a separate green ball sits beside it and glows (green via attention-ring-fade).
+        # ... and a separate status marker sits beside it. Session/Tab balls use the old ring pulse;
+        # sub-window glyphs suppress the element ring and animate their CSS glyph shape instead.
         assert info["dotPresent"] is True, results
         assert info["dotWorkingTone"] is True, results
         if not reduced:
-            assert "attention-ring-fade" in info["dotAnim"], results
-            assert "working-ball-hard-flash" in info["dotAnim"], results
+            if label == "dock-tab Claude":
+                assert "attention-ring-fade" in info["dotAnim"], results
+                assert "working-ball-hard-flash" in info["dotAnim"], results
+            else:
+                assert info["dotAnim"] == "none", results
+                assert info["dotBoxShadow"] in ("", "none"), results
+                assert info["beforeAnim"] == "subwindow-status-glyph-pulse", results
 
 
 def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
     page = tmp_path / "working-agent-glow-pixels.html"
     page.write_text(page_html(f"""
       <section class="glow-pixel-fixture">
-        <div id="tabber-glow-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
+        <div id="tabber-glow-row" class="file-tree-row tabber-row" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-glow"))}
+            <span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared">
+              <span class="pane-tab-core">
+                <span class="session-agent-activity-marker">{_working_agent_glyph_html("codex", "tabber-glow")}</span>
+                <span class="session-button-prefix">8001</span>
+              </span>
+            </span>
           </span>
         </div>
       </section>
@@ -743,6 +758,26 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
             </span>
           </span>
         </div>
+        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
+          <span id="stale-cooldown-button" class="tab tmux-window-button">
+            <span class="tmux-window-name-label">
+              <span class="agent-window-activity agent-window-activity--cooldown">
+                <span id="stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
+              </span>
+              <span class="tmux-window-name-text">4:codex</span>
+            </span>
+          </span>
+        </div>
+        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
+          <span id="active-stale-cooldown-button" class="tab tmux-window-button active">
+            <span class="tmux-window-name-label">
+              <span class="agent-window-activity agent-window-activity--cooldown">
+                <span id="active-stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
+              </span>
+              <span class="tmux-window-name-text">5:codex</span>
+            </span>
+          </span>
+        </div>
         <div class="session-agent-window-block">
           <div id="popover-row" class="session-agent-row current">
             {_agent_status_glyph_html("claude", "attention", "popover-attention")}
@@ -772,6 +807,9 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
+        document.getElementById('bar-working-dot').classList.add('agent-window-status-dot--subwindow-pulse');
+        document.getElementById('popover-attention-dot').classList.add('agent-window-status-dot--subwindow-pulse');
+        document.getElementById('tabber-cooldown-dot').classList.add('agent-window-status-dot--subwindow-pulse');
         const read = id => {
           const dot = document.getElementById(id + '-dot');
           const before = getComputedStyle(dot, '::before');
@@ -785,29 +823,48 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
                 fontSize: style.fontSize,
                 overflow: style.overflow,
                 borderRadius: style.borderTopLeftRadius,
+                className: dot.className,
+                animationName: style.animationName,
+                boxShadow: style.boxShadow,
+                filter: style.filter,
                 width: rect.width,
                 height: rect.height,
                 beforeContent: before.content,
                 beforeBackground: before.backgroundColor,
+                beforeAnimationName: before.animationName,
+                beforeOpacity: before.opacity,
                 beforeBorderStartColor: before.borderInlineStartColor,
                 beforeBorderStartWidth: before.borderInlineStartWidth,
-                beforeBorderTopColor: before.borderTopColor,
+            beforeBorderTopColor: before.borderTopColor,
             beforeBorderTopWidth: before.borderTopWidth,
             beforeFilter: before.filter,
+            beforeInlineSize: before.inlineSize || before.width || '',
+            beforeInsetInlineStart: before.insetInlineStart || '',
             afterContent: after.content,
             afterBackground: after.backgroundColor,
+            afterAnimationName: after.animationName,
+            afterOpacity: after.opacity,
             afterBorderTopColor: after.borderTopColor,
             afterBorderTopWidth: after.borderTopWidth,
             afterFilter: after.filter,
+            afterInsetInlineStart: after.insetInlineStart || '',
             buttonColor: button ? getComputedStyle(button).color : '',
           };
         };
-        return {
+        const dark = {
           bar: read('bar-working'),
           stable: read('stable-working'),
+          staleCooldown: read('stale-cooldown'),
+          activeStaleCooldown: read('active-stale-cooldown'),
           popover: read('popover-attention'),
           tabber: read('tabber-cooldown'),
           session: read('session-aggregate'),
+        };
+        document.body.classList.add('theme-light');
+        return {
+          ...dark,
+          lightStaleCooldown: read('stale-cooldown'),
+          lightActiveStaleCooldown: read('active-stale-cooldown'),
         };
         """
     )
@@ -816,32 +873,61 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["bar"]["color"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["bar"]["overflow"] == "visible", metrics
     assert metrics["bar"]["borderRadius"] == "0px", metrics
+    assert "agent-window-status-dot--subwindow-pulse" in metrics["bar"]["className"], metrics
+    assert metrics["bar"]["animationName"] == "none", metrics
+    assert metrics["bar"]["boxShadow"] in ("", "none"), metrics
+    assert metrics["bar"]["filter"] == "none", metrics
     assert 13 <= metrics["bar"]["width"] <= 15 and 13 <= metrics["bar"]["height"] <= 17, metrics
     assert metrics["bar"]["beforeContent"] == '""', metrics
+    assert metrics["bar"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["bar"]["beforeOpacity"] == "1", metrics
     assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["color"], metrics
     assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["buttonColor"], metrics
     assert metrics["bar"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
     assert "drop-shadow" in metrics["bar"]["beforeFilter"], metrics
     stable_width = float(metrics["stable"]["beforeBorderStartWidth"].replace("px", ""))
     pulsing_width = float(metrics["bar"]["beforeBorderStartWidth"].replace("px", ""))
-    assert 0.75 <= stable_width / pulsing_width <= 0.85, metrics
+    stale_pause_width = float(metrics["staleCooldown"]["beforeInlineSize"].replace("px", ""))
+    pulsing_pause_width = float(metrics["tabber"]["beforeInlineSize"].replace("px", ""))
+    assert 0.95 <= stable_width / pulsing_width <= 1.05, metrics
+    assert 0.95 <= stale_pause_width / pulsing_pause_width <= 1.05, metrics
+    assert metrics["staleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["staleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["activeStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["activeStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["lightStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["lightStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
     assert metrics["popover"]["beforeContent"] == '""', metrics
     assert metrics["popover"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["popover"]["beforeBackground"] != metrics["popover"]["color"], metrics
-    assert metrics["popover"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["popover"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
+    assert metrics["popover"]["animationName"] == "none", metrics
+    assert metrics["popover"]["boxShadow"] in ("", "none"), metrics
+    assert metrics["popover"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["popover"]["beforeOpacity"] == "1", metrics
     assert metrics["popover"]["beforeBorderTopWidth"] == "0px", metrics
     assert "drop-shadow" in metrics["popover"]["beforeFilter"], metrics
     assert metrics["tabber"]["beforeContent"] == '""', metrics
     assert metrics["tabber"]["afterContent"] == '""', metrics
     assert metrics["tabber"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["tabber"]["beforeBackground"] != metrics["tabber"]["color"], metrics
-    assert metrics["tabber"]["afterBackground"] != metrics["tabber"]["color"], metrics
-    assert metrics["tabber"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
-    assert metrics["tabber"]["afterBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["tabber"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["tabber"]["afterBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["tabber"]["animationName"] == "none", metrics
+    assert metrics["tabber"]["boxShadow"] in ("", "none"), metrics
+    assert metrics["tabber"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["tabber"]["afterAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["tabber"]["beforeOpacity"] == "1", metrics
+    assert metrics["tabber"]["afterOpacity"] == "1", metrics
     assert metrics["tabber"]["beforeBorderTopWidth"] == "0px", metrics
     assert metrics["tabber"]["afterBorderTopWidth"] == "0px", metrics
     assert "drop-shadow" in metrics["tabber"]["beforeFilter"], metrics
     assert "drop-shadow" in metrics["tabber"]["afterFilter"], metrics
+    for key in ("tabber", "staleCooldown", "activeStaleCooldown"):
+        before_left = float(metrics[key]["beforeInsetInlineStart"].replace("px", ""))
+        after_left = float(metrics[key]["afterInsetInlineStart"].replace("px", ""))
+        bar_width = float(metrics[key]["beforeInlineSize"].replace("px", ""))
+        assert after_left - before_left - bar_width >= 1.0, (key, metrics)
     assert metrics["session"]["beforeContent"] in ("", "none"), metrics
     assert metrics["session"]["beforeBackground"] in ("", "rgba(0, 0, 0, 0)"), metrics
 
@@ -893,11 +979,15 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
+        document.getElementById('tabber-window-cooldown-dot').classList.add('agent-window-status-dot--subwindow-pulse');
+        document.getElementById('info-attention-dot').classList.add('agent-window-status-dot--subwindow-pulse');
         const read = id => {
           const icon = document.getElementById(id);
           const dot = document.getElementById(id + '-dot');
           const dotLiveStyle = getComputedStyle(dot);
+          const beforeLiveStyle = getComputedStyle(dot, '::before');
           const dotAnimationName = dotLiveStyle.animationName;
+          const beforeAnimationName = beforeLiveStyle.animationName;
           const dotAnimationPlayState = dotLiveStyle.animationPlayState;
           const dotAnimationIterationCount = dotLiveStyle.animationIterationCount;
           for (const animation of dot.getAnimations()) {
@@ -921,6 +1011,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
             iconAnimation: iconStyle.animationName,
             iconOpacity: iconStyle.opacity,
             dotAnimation: dotAnimationName,
+            beforeAnimation: beforeAnimationName,
             dotPlayState: dotAnimationPlayState,
             dotIterationCount: dotAnimationIterationCount,
             dotTransform: dotStyle.transform,
@@ -958,10 +1049,15 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         assert item["dotLeft"] >= item["iconRight"] - 0.5, (name, metrics)
         assert item["centerDy"] <= 1, (name, metrics)
         if not metrics["reducedMotion"]:
-            assert "attention-ring-fade" in item["dotAnimation"], (name, metrics)
-            assert item["dotPlayState"] == "running", (name, metrics)
-            assert item["dotIterationCount"] == "infinite", (name, metrics)
-            assert item["dotBoxShadow"] != "none", (name, metrics)
+            if name in ("tabberWindowCooldown", "infoAttention"):
+                assert item["dotAnimation"] == "none", (name, metrics)
+                assert item["beforeAnimation"] == "subwindow-status-glyph-pulse", (name, metrics)
+                assert item["dotBoxShadow"] in ("", "none"), (name, metrics)
+            else:
+                assert "attention-ring-fade" in item["dotAnimation"], (name, metrics)
+                assert item["dotPlayState"] == "running", (name, metrics)
+                assert item["dotIterationCount"] == "infinite", (name, metrics)
+                assert item["dotBoxShadow"] != "none", (name, metrics)
         assert item["dotWidth"] > 0 and item["dotHeight"] > 0, (name, metrics)
     assert metrics["dockAttention"]["dotToneAttention"] is True, metrics
     assert metrics["infoAttention"]["dotToneAttention"] is True, metrics
@@ -1025,6 +1121,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
           const icon = document.getElementById(id);
           const dot = document.getElementById(id + '-dot');
           const wrap = dot.closest('.agent-window-activity');
+          if (id === 'tabber-window-working') dot.classList.add('agent-window-status-dot--subwindow-pulse');
           for (const animation of dot.getAnimations()) {
             const timing = animation.effect?.getTiming?.() || {};
             const duration = Number(timing.duration) || 0;
@@ -1037,6 +1134,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
           const iconStyle = getComputedStyle(icon);
           const wrapStyle = getComputedStyle(wrap);
           const dotStyle = getComputedStyle(dot);
+          const beforeStyle = getComputedStyle(dot, '::before');
           const dotRect = dot.getBoundingClientRect();
           return {
             iconSize: iconStyle.width,
@@ -1045,6 +1143,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
             dotFontSize: dotStyle.fontSize,
             dotFontStretch: dotStyle.fontStretch,
             animationName: dotStyle.animationName,
+            beforeAnimationName: beforeStyle.animationName,
             animationDuration: dotStyle.animationDuration,
             animationDelay: dotStyle.animationDelay,
             animationTimingFunction: dotStyle.animationTimingFunction,
@@ -1069,11 +1168,10 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
     assert abs(metrics["child"]["height"] - metrics["parent"]["height"]) <= 0.5, metrics
     for side in ("parent", "child"):
         assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
-        assert "attention-ring-fade" in metrics[side]["animationName"], metrics
-        assert "working-ball-hard-flash" in metrics[side]["animationName"], metrics
-    assert metrics["parent"]["animationDuration"] == metrics["child"]["animationDuration"], metrics
-    assert metrics["parent"]["animationDelay"] == metrics["child"]["animationDelay"], metrics
-    assert metrics["parent"]["animationTimingFunction"] == metrics["child"]["animationTimingFunction"], metrics
+    assert "attention-ring-fade" in metrics["parent"]["animationName"], metrics
+    assert "working-ball-hard-flash" in metrics["parent"]["animationName"], metrics
+    assert metrics["child"]["animationName"] == "none", metrics
+    assert metrics["child"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
     assert metrics["parent"]["transform"] == metrics["child"]["transform"], metrics
 
 
@@ -1332,6 +1430,8 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
     browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
+        document.getElementById('info-dot').classList.add('agent-window-status-dot--subwindow-pulse');
+        document.getElementById('tabber-dot').classList.add('agent-window-status-dot--subwindow-pulse');
         const rect = id => {
           const r = document.getElementById(id).getBoundingClientRect();
           return {left: r.left, top: r.top, width: r.width, height: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2, right: r.right};
@@ -1341,6 +1441,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
           const rootStyle = getComputedStyle(root);
           const iconStyle = getComputedStyle(document.getElementById(iconId));
           const dotStyle = getComputedStyle(document.getElementById(dotId));
+          const beforeStyle = getComputedStyle(document.getElementById(dotId), '::before');
           const rootRect = rect(rootId);
           const iconRect = rect(iconId);
           const dotRect = rect(dotId);
@@ -1349,6 +1450,9 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
             rootWidth: rootRect.width,
             iconAnimation: iconStyle.animationName,
             dotAnimation: dotStyle.animationName,
+            beforeAnimation: beforeStyle.animationName,
+            beforeDelay: beforeStyle.animationDelay,
+            dotBoxShadow: dotStyle.boxShadow,
             dotDelay: dotStyle.animationDelay,
             rootDelayVar: rootStyle.getPropertyValue('--attention-animation-delay').trim(),
             dotDelayVar: dotStyle.getPropertyValue('--attention-animation-delay').trim(),
@@ -1367,11 +1471,17 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
     for name, item in metrics.items():
         assert item["rootDisplay"] == "flex", (name, item)
         assert item["iconAnimation"] == "none", (name, item)
-        assert "attention-ring-fade" in item["dotAnimation"], (name, item)
+        if name == "base":
+            assert "attention-ring-fade" in item["dotAnimation"], (name, item)
+            assert item["dotDelay"] == item["rootDelayVar"], (name, item)
+        else:
+            assert item["dotAnimation"] == "none", (name, item)
+            assert item["beforeAnimation"] == "subwindow-status-glyph-pulse", (name, item)
+            assert item["beforeDelay"] == item["rootDelayVar"], (name, item)
+            assert item["dotBoxShadow"] in ("", "none"), (name, item)
         assert item["leftGap"] >= -0.5, (name, item)
         assert item["centerDy"] <= 1, (name, item)
         assert item["dotWithinRoot"] is True, (name, item)
-        assert item["dotDelay"] == item["rootDelayVar"], (name, item)
         assert item["dotDelayVar"] == item["rootDelayVar"], (name, item)
     assert metrics["info"]["rootWidth"] >= 24
     assert metrics["tabber"]["rootWidth"] >= 28

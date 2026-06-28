@@ -462,12 +462,13 @@ def test_html_uses_browser_highlight_js_bundle():
 
 
 def test_handle_upload_enforces_live_app_size_limit():
-    app = SimpleNamespace(upload_max_bytes=lambda: 5, upload_files=lambda *_args: (_ for _ in ()).throw(AssertionError("upload_files should not run")))
+    app = SimpleNamespace(file_transfer_max_bytes=lambda: 5, upload_files=lambda *_args: (_ for _ in ()).throw(AssertionError("upload_files should not run")))
     handler = SimpleNamespace(
         headers={"Content-Length": "6", "Content-Type": "multipart/form-data; boundary=x"},
         rfile=io.BytesIO(b"123456"),
         server=SimpleNamespace(app=app),
         close_connection=False,
+        file_transfer_max_bytes=lambda: app.file_transfer_max_bytes(),
     )
 
     payload, status = Handler.handle_upload(handler, "6")

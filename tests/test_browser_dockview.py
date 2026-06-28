@@ -864,6 +864,7 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
 
 def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tmp_path):
     stopped_ts = int(time.time()) - 5
+    cooldown_key = '["agent-window","1","2","","claude","cooldown","stopped"]'
     transcript_sessions = {
         "1": {
             "panes": [
@@ -881,7 +882,7 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
                 "enabled": True,
                 "agent_windows": [
                     {"kind": "claude", "state": "working", "window_index": 1, "window_label": "1:claude"},
-                    {"kind": "claude", "state": "idle", "window_index": 2, "window_label": "2:claude", "working_stopped_ts": stopped_ts},
+                    {"kind": "claude", "state": "idle", "window_index": 2, "window_label": "2:claude", "working_stopped_ts": stopped_ts, "cooldown_attention_key": cooldown_key},
                 ],
             },
         },
@@ -955,15 +956,54 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
             """
         )
     )
-    acknowledged_size = browser.execute_script(
+    acknowledged_glyph = browser.execute_script(
         """
         const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
-        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
+        const style = dot ? getComputedStyle(dot) : null;
+        const before = dot ? getComputedStyle(dot, '::before') : null;
+        const after = dot ? getComputedStyle(dot, '::after') : null;
+        return style ? {
+          fontSize: parseFloat(style.fontSize),
+          glyphScale: style.getPropertyValue('--subwindow-status-glyph-scale').trim(),
+          beforeBackground: before?.backgroundColor || '',
+          afterBackground: after?.backgroundColor || '',
+          ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
+        } : null;
         """
     )
-    assert time.monotonic() - click_started >= 0.8
-    assert acknowledged_size > 0
-    assert initial_size * 0.75 <= acknowledged_size <= initial_size * 0.85
+    assert time.monotonic() - click_started >= 0.6
+    assert acknowledged_glyph and acknowledged_glyph["fontSize"] > 0
+    assert initial_size * 0.95 <= acknowledged_glyph["fontSize"] <= initial_size * 1.05
+    assert acknowledged_glyph["glyphScale"] == "0.8"
+    assert acknowledged_glyph["beforeBackground"] == acknowledged_glyph["afterBackground"], acknowledged_glyph
+    assert acknowledged_glyph["beforeBackground"] != "rgb(255, 214, 51)", acknowledged_glyph
+    assert acknowledged_glyph["ackPosts"] == 1, acknowledged_glyph
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.agent-window-status-dot--acknowledged').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return window.__bootFetches.filter(entry => entry.path === '/api/tmux-window').length >= 2;
+            """
+        )
+    )
+    second_click_glyph = browser.execute_script(
+        """
+        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+        const before = dot ? getComputedStyle(dot, '::before') : null;
+        const after = dot ? getComputedStyle(dot, '::after') : null;
+        return {
+          className: dot?.className || '',
+          beforeBackground: before?.backgroundColor || '',
+          afterBackground: after?.backgroundColor || '',
+          ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
+        };
+        """
+    )
+    assert "agent-window-status-dot--acknowledged" in second_click_glyph["className"], second_click_glyph
+    assert second_click_glyph["beforeBackground"] == acknowledged_glyph["beforeBackground"], second_click_glyph
+    assert second_click_glyph["afterBackground"] == acknowledged_glyph["afterBackground"], second_click_glyph
+    assert second_click_glyph["beforeBackground"] != "rgb(255, 214, 51)", second_click_glyph
+    assert second_click_glyph["ackPosts"] == 1, second_click_glyph
 
 
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
@@ -1061,10 +1101,14 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
             """
         )
     )
-    acknowledged_size = browser.execute_script(
+    acknowledged_glyph = browser.execute_script(
         """
         const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
-        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
+        const style = dot ? getComputedStyle(dot) : null;
+        return style ? {
+          fontSize: parseFloat(style.fontSize),
+          glyphScale: style.getPropertyValue('--subwindow-status-glyph-scale').trim(),
+        } : null;
         """
     )
     WebDriverWait(browser, 5).until(
@@ -1077,13 +1121,16 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
               && !!dot
               && dot.classList.contains('status-indicator--cooldown')
               && !dot.classList.contains('status-indicator--attention')
-              && !dot.classList.contains('agent-window-status-dot--attention-cooldown');
+              && dot.classList.contains('agent-window-status-dot--attention-cooldown')
+              && dot.classList.contains('agent-window-status-dot--tone-attention')
+              && dot.classList.contains('agent-window-status-dot--tone-cooldown');
             """
         )
     )
-    assert time.monotonic() - click_started >= 0.8
-    assert acknowledged_size > 0
-    assert initial_size * 0.75 <= acknowledged_size <= initial_size * 0.85
+    assert time.monotonic() - click_started >= 0.6
+    assert acknowledged_glyph and acknowledged_glyph["fontSize"] > 0
+    assert initial_size * 0.95 <= acknowledged_glyph["fontSize"] <= initial_size * 1.05
+    assert acknowledged_glyph["glyphScale"] == "0.8"
     ack_bodies = browser.execute_script(
         """
         return window.__bootFetches
@@ -1307,6 +1354,7 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
         const workingDot = workingButton?.querySelector('.agent-window-status-dot');
         const workingStyle = getComputedStyle(working);
         const workingDotStyle = workingDot ? getComputedStyle(workingDot) : null;
+        const workingDotBefore = workingDot ? getComputedStyle(workingDot, '::before') : null;
         return {
           workingText: (working?.textContent || '').trim(),
           idleText: idleDot?.textContent || '',
@@ -1324,7 +1372,10 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
           workingDotExists: !!workingDot,
           workingDotIsWorkingTone: workingDot?.classList.contains('status-indicator--working') || false,
           workingDotTransitionPulse: workingDot?.classList.contains('agent-window-status-dot--transition-pulse') || false,
+          workingDotSubwindowPulse: workingDot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false,
           workingDotAnimationName: workingDotStyle ? workingDotStyle.animationName : null,
+          workingDotBoxShadow: workingDotStyle ? workingDotStyle.boxShadow : null,
+          workingDotBeforeAnimationName: workingDotBefore ? workingDotBefore.animationName : null,
           statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
           idleDotCount: idleButton?.querySelectorAll('.agent-window-status-dot').length || 0,
         };
@@ -1349,8 +1400,11 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
     assert metrics["workingDotExists"] is True, metrics
     assert metrics["workingDotIsWorkingTone"] is True, metrics
     assert metrics["workingDotTransitionPulse"] is True, metrics
+    assert metrics["workingDotSubwindowPulse"] is True, metrics
     assert metrics["statusPulseDisabled"] is True, metrics
-    assert metrics["workingDotAnimationName"] == "agent-status-transition-pulse", metrics
+    assert metrics["workingDotAnimationName"] == "none", metrics
+    assert metrics["workingDotBoxShadow"] in ("", "none"), metrics
+    assert metrics["workingDotBeforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
 
 
 def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(browser, tmp_path):
@@ -1358,8 +1412,8 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
     transcript_sessions = {
         "1": {
             "panes": [
-                {"target": "%1", "window": 0, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
-                {"target": "%2", "window": 1, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+                {"target": "%1", "window": 0, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
                 {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
             ],
         },
@@ -1423,10 +1477,15 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
             dotText: dot?.textContent || '',
             dotColor: style?.color || '',
             textIndent: style?.textIndent || '',
+            className: dot?.className || '',
+            animationName: style?.animationName || '',
+            boxShadow: style?.boxShadow || '',
+            filter: style?.filter || '',
             glyphScale: style?.getPropertyValue('--subwindow-status-glyph-scale').trim() || '',
             glyphFill: normalizeCssColor(style?.getPropertyValue('--subwindow-status-glyph-fill')),
             beforeContent: before?.content || '',
             beforeBackground: before?.backgroundColor || '',
+            beforeAnimationName: before?.animationName || '',
             beforeBorderStartWidth: before?.borderInlineStartWidth || '',
             beforeBorderStartColor: before?.borderInlineStartColor || '',
             beforeBorderTopWidth: before?.borderTopWidth || '',
@@ -1434,9 +1493,11 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
             beforeBoxShadow: before?.boxShadow || '',
             beforeFilter: before?.filter || '',
             beforeTransform: before?.transform || '',
+            beforeInlineSize: before?.inlineSize || before?.width || '',
             beforeInsetInlineStart: before?.insetInlineStart || '',
             afterContent: after?.content || '',
             afterBackground: after?.backgroundColor || '',
+            afterAnimationName: after?.animationName || '',
             afterBorderTopWidth: after?.borderTopWidth || '',
             afterBorderTopColor: after?.borderTopColor || '',
             afterBoxShadow: after?.boxShadow || '',
@@ -1445,12 +1506,24 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
             afterInsetInlineStart: after?.insetInlineStart || '',
           };
         }
+        const staleButton = document.createElement('button');
+        staleButton.className = 'tab tmux-window-button';
+        staleButton.innerHTML = '<span class="agent-window-status-dot status-indicator status-indicator--dot status-indicator--attention">●</span>';
+        document.body.append(staleButton);
+        const staleDot = staleButton.querySelector('.agent-window-status-dot');
+        const staleStyle = getComputedStyle(staleDot);
+        const staleBefore = getComputedStyle(staleDot, '::before');
         const tabDot = document.querySelector('.pane-tab .session-agent-activity-marker .agent-window-status-dot');
         const tabBefore = tabDot ? getComputedStyle(tabDot, '::before') : null;
         return {
           working: readButton('0'),
           attention: readButton('1'),
           cooldown: readButton('2'),
+          stale: {
+            glyphScale: staleStyle.getPropertyValue('--subwindow-status-glyph-scale').trim() || '',
+            glyphFill: normalizeCssColor(staleStyle.getPropertyValue('--subwindow-status-glyph-fill')),
+            beforeBackground: staleBefore.backgroundColor || '',
+          },
           tabDotText: tabDot?.textContent || '',
           tabDotBeforeContent: tabBefore?.content || '',
           tabDotBeforeBackground: tabBefore?.backgroundColor || '',
@@ -1466,22 +1539,40 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
     assert metrics["working"]["dotColor"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["attention"]["dotColor"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["cooldown"]["dotColor"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["working"]["glyphScale"] == "1", metrics
-    assert metrics["attention"]["glyphScale"] == "1", metrics
-    assert metrics["cooldown"]["glyphScale"] == "1", metrics
+    assert "agent-window-status-dot--subwindow-pulse" in metrics["working"]["className"], metrics
+    assert "agent-window-status-dot--subwindow-pulse" in metrics["attention"]["className"], metrics
+    assert "agent-window-status-dot--subwindow-pulse" in metrics["cooldown"]["className"], metrics
+    assert metrics["working"]["animationName"] == "none", metrics
+    assert metrics["attention"]["animationName"] == "none", metrics
+    assert metrics["cooldown"]["animationName"] == "none", metrics
+    assert metrics["working"]["boxShadow"] in ("", "none"), metrics
+    assert metrics["attention"]["boxShadow"] in ("", "none"), metrics
+    assert metrics["cooldown"]["boxShadow"] in ("", "none"), metrics
+    assert metrics["working"]["glyphScale"] == "0.8", metrics
+    assert metrics["attention"]["glyphScale"] == "0.8", metrics
+    assert metrics["cooldown"]["glyphScale"] == "0.8", metrics
+    assert metrics["stale"]["glyphScale"] == "0.8", metrics
     assert metrics["working"]["beforeContent"] == '""', metrics
     assert metrics["attention"]["beforeContent"] == '""', metrics
     assert metrics["cooldown"]["beforeContent"] == '""', metrics
-    assert metrics["working"]["active"] is True, metrics
+    assert metrics["working"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["attention"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["cooldown"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["cooldown"]["afterAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["working"]["active"] is False, metrics
+    assert metrics["attention"]["active"] is True, metrics
     assert metrics["working"]["beforeBorderStartColor"] == metrics["working"]["glyphFill"], metrics
     assert metrics["working"]["beforeBorderStartColor"] != metrics["working"]["buttonColor"], metrics
     assert metrics["working"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["working"]["beforeBorderStartWidth"] != "0px", metrics
     assert metrics["attention"]["beforeBackground"] == metrics["attention"]["glyphFill"], metrics
-    assert metrics["attention"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["attention"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
+    assert metrics["stale"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
     assert metrics["attention"]["beforeBorderTopWidth"] == "0px", metrics
     assert metrics["cooldown"]["beforeBackground"] == metrics["cooldown"]["glyphFill"], metrics
     assert metrics["cooldown"]["afterBackground"] == metrics["cooldown"]["glyphFill"], metrics
+    assert metrics["cooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["cooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
     assert metrics["cooldown"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["cooldown"]["beforeBorderTopWidth"] == "0px", metrics
     assert metrics["cooldown"]["afterBorderTopWidth"] == "0px", metrics
@@ -1493,6 +1584,12 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
     assert "drop-shadow" in metrics["attention"]["beforeFilter"], metrics
     assert "drop-shadow" in metrics["cooldown"]["beforeFilter"], metrics
     assert "drop-shadow" in metrics["cooldown"]["afterFilter"], metrics
+    cooldown_gap = (
+        float(metrics["cooldown"]["afterInsetInlineStart"].replace("px", ""))
+        - float(metrics["cooldown"]["beforeInsetInlineStart"].replace("px", ""))
+        - float(metrics["cooldown"]["beforeInlineSize"].replace("px", ""))
+    )
+    assert cooldown_gap >= 1.0, metrics
     assert metrics["cooldown"]["beforeBoxShadow"] in ("", "none"), metrics
     assert metrics["cooldown"]["afterBoxShadow"] in ("", "none"), metrics
     assert metrics["tabDotText"] == "●", metrics
@@ -1604,6 +1701,7 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
         const dot = wrap?.querySelector('.agent-window-status-dot');
         const ss = getComputedStyle(sym);
         const ds = dot ? getComputedStyle(dot) : null;
+        const before = dot ? getComputedStyle(dot, '::before') : null;
         return {
           reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
           wrapDisplay: wrap ? getComputedStyle(wrap).display : null,
@@ -1613,7 +1711,10 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
           dotPresent: !!dot,
           dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
           dotTransitionPulse: dot ? dot.classList.contains('agent-window-status-dot--transition-pulse') : false,
+          dotSubwindowPulse: dot ? dot.classList.contains('agent-window-status-dot--subwindow-pulse') : false,
           dotAnimationName: ds ? ds.animationName : null,
+          dotBoxShadow: ds ? ds.boxShadow : null,
+          dotBeforeAnimationName: before ? before.animationName : null,
           dotIterationCount: ds ? ds.animationIterationCount : null,
           dotPlayState: ds ? ds.animationPlayState : null,
         };
@@ -1629,7 +1730,10 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
     assert data["dotWorkingTone"] is True, data
     assert data["statusPulseDisabled"] is True, data
     assert data["dotTransitionPulse"] is True, data
-    assert data["dotAnimationName"] == "agent-status-transition-pulse", data
+    assert data["dotSubwindowPulse"] is True, data
+    assert data["dotAnimationName"] == "none", data
+    assert data["dotBoxShadow"] in ("", "none"), data
+    assert data["dotBeforeAnimationName"] == "subwindow-status-glyph-pulse", data
 
 
 def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp_path):
@@ -1777,6 +1881,7 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
             "panes": [
                 {"target": "%1", "window": 0, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
                 {"target": "%2", "window": 1, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+                {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
             ],
         },
     }
@@ -1826,6 +1931,7 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
               const icon = root?.querySelector('.agent-window-agent-icon');
               const delay = wrap ? getComputedStyle(wrap).getPropertyValue('--attention-animation-delay').trim() : '';
               const dotStyle = dot ? getComputedStyle(dot) : null;
+              const beforeStyle = dot ? getComputedStyle(dot, '::before') : null;
               const animation = dot?.getAnimations?.().find(item => item.animationName === 'attention-ring-fade') || null;
               return {
                 found: !!root,
@@ -1841,6 +1947,8 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
                 toneCooldown: dot ? dot.classList.contains('agent-window-status-dot--tone-cooldown') : false,
                 toneWorking: dot ? dot.classList.contains('agent-window-status-dot--tone-working') : false,
                 segmentClass: dot ? Array.from(dot.classList).find(name => /^agent-window-status-dot--(attention|cooldown|working)-/.test(name)) || '' : '',
+                subwindowPulse: dot ? dot.classList.contains('agent-window-status-dot--subwindow-pulse') : false,
+                acknowledged: dot ? dot.classList.contains('agent-window-status-dot--acknowledged') : false,
                 backgroundImage: dotStyle?.backgroundImage || '',
                 delay,
                 delaySeconds: Number((delay.match(/-?[0-9.]+/) || [0])[0]),
@@ -1848,6 +1956,10 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
                 animationDuration: dotStyle?.animationDuration || '',
                 animationDelay: dotStyle?.animationDelay || '',
                 animationTiming: dotStyle?.animationTimingFunction || '',
+                beforeAnimationName: beforeStyle?.animationName || '',
+                beforeAnimationDuration: beforeStyle?.animationDuration || '',
+                beforeAnimationDelay: beforeStyle?.animationDelay || '',
+                beforeAnimationTiming: beforeStyle?.animationTimingFunction || '',
                 animationCurrentTime: Number(animation?.currentTime || 0),
               };
             };
@@ -1874,8 +1986,40 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
     assert "conic-gradient" in red_case["tab"]["backgroundImage"], red_case
     assert red_case["tab"]["statusOnly"] is True, red_case
     assert red_case["tab"]["hasIcon"] is False, red_case
-    assert abs(red_case["tab"]["animationCurrentTime"] - red_case["claude"]["animationCurrentTime"]) <= 75, red_case
-    assert abs(red_case["tab"]["animationCurrentTime"] - red_case["codex"]["animationCurrentTime"]) <= 75, red_case
+    assert red_case["claude"]["animationName"] == "none", red_case
+    assert red_case["codex"]["animationName"] == "none", red_case
+    assert red_case["claude"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", red_case
+    assert red_case["codex"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", red_case
+    assert red_case["tab"]["delay"] == red_case["claude"]["delay"] == red_case["codex"]["delay"], red_case
+    assert red_case["tab"]["animationDelay"] == red_case["claude"]["beforeAnimationDelay"] == red_case["codex"]["beforeAnimationDelay"], red_case
+
+    tri_case = load_with([
+        {"kind": "claude", "state": "needs-input", "window_index": 0, "window_label": "0:claude"},
+        {"kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex", "working_stopped_ts": stopped_ts},
+        {"kind": "claude", "state": "working", "window_index": 2, "window_label": "2:claude"},
+    ])
+    assert tri_case["claude"]["attention"] is True, tri_case
+    assert tri_case["codex"]["cooldown"] is True, tri_case
+    assert tri_case["tab"]["attention"] is True, tri_case
+    assert tri_case["tab"]["segmented"] is True, tri_case
+    assert tri_case["tab"]["toneAttention"] is True, tri_case
+    assert tri_case["tab"]["toneCooldown"] is True, tri_case
+    assert tri_case["tab"]["toneWorking"] is True, tri_case
+    assert tri_case["tab"]["segmentClass"] == "agent-window-status-dot--attention-cooldown-working", tri_case
+    assert "conic-gradient" in tri_case["tab"]["backgroundImage"], tri_case
+
+    acknowledged_case = load_with([
+        {"kind": "claude", "state": "needs-input", "window_index": 0, "window_label": "0:claude", "attention_key": "ack-0", "attention_signature": "ack-0", "attention_acknowledged": True},
+        {"kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex", "working_stopped_ts": stopped_ts},
+        {"kind": "claude", "state": "working", "window_index": 2, "window_label": "2:claude"},
+    ])
+    assert acknowledged_case["claude"]["attention"] is True, acknowledged_case
+    assert acknowledged_case["claude"]["acknowledged"] is True, acknowledged_case
+    assert acknowledged_case["tab"]["segmented"] is True, acknowledged_case
+    assert acknowledged_case["tab"]["toneAttention"] is True, acknowledged_case
+    assert acknowledged_case["tab"]["toneCooldown"] is True, acknowledged_case
+    assert acknowledged_case["tab"]["toneWorking"] is True, acknowledged_case
+    assert acknowledged_case["tab"]["segmentClass"] == "agent-window-status-dot--attention-cooldown-working", acknowledged_case
 
     yellow_case = load_with([
         {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"},
@@ -1892,13 +2036,13 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
     assert "conic-gradient" in yellow_case["tab"]["backgroundImage"], yellow_case
     assert yellow_case["tab"]["statusOnly"] is True, yellow_case
     assert yellow_case["tab"]["hasIcon"] is False, yellow_case
-    assert yellow_case["tab"]["animationName"] == yellow_case["codex"]["animationName"], yellow_case
-    assert yellow_case["tab"]["animationDuration"] == yellow_case["codex"]["animationDuration"], yellow_case
-    assert yellow_case["tab"]["animationTiming"] == yellow_case["codex"]["animationTiming"], yellow_case
+    assert yellow_case["tab"]["animationName"] == "agent-status-transition-pulse", yellow_case
+    assert yellow_case["codex"]["animationName"] == "none", yellow_case
+    assert yellow_case["codex"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", yellow_case
+    assert yellow_case["tab"]["animationDuration"] == yellow_case["codex"]["beforeAnimationDuration"], yellow_case
+    assert yellow_case["tab"]["animationTiming"] == yellow_case["codex"]["beforeAnimationTiming"], yellow_case
     assert yellow_case["tab"]["delay"] == yellow_case["codex"]["delay"], yellow_case
-    assert yellow_case["tab"]["animationDelay"] == yellow_case["codex"]["animationDelay"], yellow_case
-    assert abs(yellow_case["tab"]["animationCurrentTime"] - yellow_case["claude"]["animationCurrentTime"]) <= 75, yellow_case
-    assert abs(yellow_case["tab"]["animationCurrentTime"] - yellow_case["codex"]["animationCurrentTime"]) <= 75, yellow_case
+    assert yellow_case["tab"]["animationDelay"] == yellow_case["codex"]["beforeAnimationDelay"], yellow_case
 
 
 def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):

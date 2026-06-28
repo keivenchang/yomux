@@ -39,7 +39,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.5.8"
+YOLOMUX_VERSION = "0.5.9"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -395,7 +395,12 @@ def positive_env_int(name: str, default: int) -> int:
     return parsed
 
 
-UPLOAD_MAX_BYTES = positive_env_int("YOLOMUX_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)
+_FILE_TRANSFER_MAX_BYTES_DEFAULT = 300 * 1024 * 1024
+if "YOLOMUX_FILE_TRANSFER_MAX_BYTES" in os.environ:
+    FILE_TRANSFER_MAX_BYTES = positive_env_int("YOLOMUX_FILE_TRANSFER_MAX_BYTES", _FILE_TRANSFER_MAX_BYTES_DEFAULT)
+else:
+    FILE_TRANSFER_MAX_BYTES = positive_env_int("YOLOMUX_UPLOAD_MAX_BYTES", _FILE_TRANSFER_MAX_BYTES_DEFAULT)
+UPLOAD_MAX_BYTES = FILE_TRANSFER_MAX_BYTES
 UPLOAD_MAX_FILES = positive_env_int("YOLOMUX_UPLOAD_MAX_FILES", 16)
 DEFAULT_UPLOAD_FILENAME_TEMPLATE = "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
 # Uploads default into a `.uploads/` subdir of the session working dir (keeps the cwd/repo clean and

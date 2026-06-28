@@ -700,7 +700,7 @@ const SETTING_FALLBACKS = Object.freeze({
   'general.auto_focus': false,
   'general.startup_tips': true,
   'terminal_editor.scrollback': 5000,
-  'uploads.max_bytes': 20 * 1024 * 1024,
+  'uploads.max_bytes': 300 * 1024 * 1024,
 });
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 let shareResolvedGlobalThemeMode = '';
@@ -2819,7 +2819,7 @@ function writeStoredEditorLineNumbers(value) {
 }
 
 function defaultCollapsedPreferenceSections() {
-  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads']);
+  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads/Downloads']);
 }
 
 function readStoredCollapsedPreferenceSections() {
@@ -7559,7 +7559,7 @@ function attentionAnimationDurationMs(durationMs = agentStatusPulsePeriodMs) {
 }
 
 function statusPulseAnimationEnabled() {
-  return false;
+  return typeof globalThis !== 'undefined' && globalThis.yolomuxEnableBroadStatusPulse === true;
 }
 
 function attentionAnimationPhaseMs(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
@@ -15869,7 +15869,7 @@ const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
 const agentWindowTransitionPulseTimers = new Map();
 const agentWindowAcknowledgedStops = new Map();
-const agentWindowActivityAcknowledgeDelayMs = 1000;
+const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
 const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
@@ -16138,16 +16138,29 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
   const target = agentWindowActivityAcknowledgementTarget(session, windowIndex, options);
   if (!target) return false;
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
+  const acknowledgeStoppedTransition = () => (
+    target.state === 'cooldown'
+      ? acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0})
+      : false
+  );
   if (target.ackKey && typeof acknowledgeAttentionKeys === 'function') {
-    return acknowledgeAttentionKeys([target.ackKey], options);
+    const posted = acknowledgeAttentionKeys([target.ackKey], options);
+    if (target.state === 'cooldown' && target.transitionKey && Number(target.stoppedAt || 0) > 0) {
+      if (delayMs > 0) {
+        setTimeout(acknowledgeStoppedTransition, delayMs);
+      } else {
+        acknowledgeStoppedTransition();
+      }
+    }
+    return posted || target.state === 'cooldown';
   }
   if (delayMs > 0) {
     setTimeout(() => {
-      acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0});
+      acknowledgeStoppedTransition();
     }, delayMs);
     return true;
   }
-  return acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, options);
+  return acknowledgeStoppedTransition();
 }
 
 function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
@@ -16202,8 +16215,8 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       state: STATE_KEY.working,
       icon: '●',
       label: `${agentLabel(kind)} ${t('state.working')}`,
-      pulseActive: agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
-      transitionPulseActive: agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
+      pulseActive: true,
+      transitionPulseActive: true,
     };
   }
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
@@ -16270,6 +16283,11 @@ function agentWindowStatusToneClass(tone) {
   return tone === STATE_KEY.working ? 'working' : String(tone || '');
 }
 
+function agentWindowStatusToneForItem(item) {
+  const tone = item?.state ? agentWindowActivityTone(item.state) : '';
+  return ['attention', 'cooldown', STATE_KEY.working].includes(tone) ? tone : '';
+}
+
 function agentWindowActivityToneWrapperClass(tone) {
   const normalizedTone = agentWindowActivityTone(tone);
   return ['attention', 'cooldown', STATE_KEY.working].includes(normalizedTone)
@@ -16279,15 +16297,17 @@ function agentWindowActivityToneWrapperClass(tone) {
 
 function agentWindowStatusDotHtml(item, options = {}) {
   if (!item) return '';
-  if (!['attention', 'cooldown', STATE_KEY.working].includes(item.state)) return '';
-  const tone = agentWindowActivityTone(item.state);
+  const tone = agentWindowStatusToneForItem(item);
+  if (!tone) return '';
   const statusTones = agentWindowStatusToneOrder(options.statusTones || [tone]);
   const segmented = statusTones.length > 1;
   const segmentKey = statusTones.map(agentWindowStatusToneClass).join('-');
   const animate = options.animate !== false;
   const pulse = animate && item.pulseActive !== false;
+  const subwindowPulse = pulse;
   const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && !segmented && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -16296,6 +16316,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     item.acknowledged === true ? 'agent-window-status-dot--acknowledged' : '',
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
+    subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     segmented ? 'agent-window-status-dot--segmented' : '',
     segmented ? `agent-window-status-dot--${segmentKey}` : '',
     segmented ? `agent-window-status-dot--segments-${statusTones.length}` : '',
@@ -16305,15 +16326,18 @@ function agentWindowStatusDotHtml(item, options = {}) {
   return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
 }
 
-function agentWindowActivityStyleAttribute(tone, item = {}) {
+function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
   if (![STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone)) return '';
   const styles = [];
   const pulseEnabled = item?.pulseActive !== false && typeof statusPulseAnimationEnabled === 'function' && statusPulseAnimationEnabled();
-  if (pulseEnabled && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
+  const subwindowPulse = item?.pulseActive !== false;
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse;
+  if (hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
   if (item?.transitionPulseActive === true && item?.acknowledged !== true) {
     const durationMs = Math.max(1, Number(agentStatusPulsePeriodMs) || 1);
     styles.push(`--agent-status-transition-pulse-duration: ${durationMs / 1000}s`);
-    if (!pulseEnabled && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle(Date.now(), durationMs));
+    if (!hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle(Date.now(), durationMs));
   }
   return styles.length ? ` style="${esc(styles.join('; '))}"` : '';
 }
@@ -16325,6 +16349,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const stateKey = item?.state || 'idle-recent';
   const label = options.label || item?.label || agentLabel(kind);
   const statusOnly = options.statusOnly === true || options.hideAgentIcon === true;
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true || (options.subwindowGlyphPulse !== false && statusOnly !== true);
   const agentClasses = [
     'agent-window-activity-icon',
     'agent-window-agent-icon',
@@ -16332,10 +16357,10 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     `agent-window-agent-icon--${stateKey}`,
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
-  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false});
+  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false, subwindowGlyphPulse});
   if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = agentWindowActivityStyleAttribute(tone, item);
+  const style = agentWindowActivityStyleAttribute(tone, item, {subwindowGlyphPulse});
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
   const wrapperClasses = [
     'agent-window-activity',
@@ -16534,16 +16559,43 @@ function saveBlobDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function triggerFileDownload(path) {
+function fileTransferToastContainer(options = {}) {
+  return displayToastContainer(options.session || options.item || focusedPanelItem || fileExplorerItemId);
+}
+
+function showFileTransferError(message, options = {}) {
+  const text = String(message || t('fileTransfer.failed')).trim();
+  statusErr(esc(text));
+  showToast(t('fileTransfer.failedTitle'), [text], {
+    container: fileTransferToastContainer(options),
+    countdownMs: 20000,
+  });
+}
+
+async function transferErrorMessageFromResponse(response, fallback = '') {
+  const payload = await response.json().catch(() => ({}));
+  return payload?.error || response.statusText || fallback || `HTTP ${response.status}`;
+}
+
+async function triggerFileDownload(path) {
   if (!path) return;
-  const link = document.createElement('a');
-  link.href = rawFileDownloadUrl(path);
-  link.download = basenameOf(path) || 'download';
-  link.hidden = true;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  statusEl.textContent = `download started: ${basenameOf(path) || path}`;
+  const label = basenameOf(path) || path;
+  statusEl.textContent = `downloading ${label}...`;
+  let response;
+  try {
+    response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+  } catch (error) {
+    showFileTransferError(error?.message || String(error));
+    return;
+  }
+  if (!response.ok) {
+    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
+    return;
+  }
+  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
+  const blob = await response.blob();
+  saveBlobDownload(blob, filename);
+  statusEl.textContent = `download started: ${filename}`;
 }
 
 async function triggerFolderZipDownload(path) {
@@ -16554,13 +16606,11 @@ async function triggerFolderZipDownload(path) {
   try {
     response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
   } catch (error) {
-    statusErr(esc(error?.message || String(error)));
+    showFileTransferError(error?.message || String(error));
     return;
   }
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    const message = payload?.error || response.statusText || `HTTP ${response.status}`;
-    statusErr(esc(message));
+    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
     return;
   }
   const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
@@ -21822,18 +21872,26 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
     const item = typeof agentWindowActivityIconForStatusItem === 'function'
       ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
       : null;
-    if (!item || item.acknowledged === true || !['attention', 'cooldown', STATE_KEY.working].includes(item.state)) continue;
+    const tone = typeof agentWindowStatusToneForItem === 'function'
+      ? agentWindowStatusToneForItem(item)
+      : (item?.state ? agentWindowActivityTone(item.state) : '');
+    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(tone)) continue;
     const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
-    if (screenWorking && !hasWorkingWindow && item.state === 'cooldown' && !explicitStopped) continue;
+    if (screenWorking && !hasWorkingWindow && tone === 'cooldown' && !explicitStopped) continue;
     const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
     const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
-    const tone = typeof agentWindowActivityTone === 'function' ? agentWindowActivityTone(item.state) : item.state;
     const toneCurrent = byTone.get(tone);
     const toneCurrentIsActive = toneCurrent ? agentWindowPayloadCurrent(toneCurrent.agent) === true : false;
     if (!toneCurrent || current && !toneCurrentIsActive) byTone.set(tone, {agent, item});
-    if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
+    if (item.acknowledged !== true && (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent))) selected = {agent, item};
+  }
+  if (!selected && byTone.size) {
+    const statusTones = typeof agentWindowStatusToneOrder === 'function'
+      ? agentWindowStatusToneOrder([...byTone.keys()])
+      : [...byTone.keys()];
+    selected = byTone.get(statusTones[0]) || null;
   }
   if (!selected && screenWorking) {
     const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
@@ -32581,13 +32639,13 @@ function preferenceSections() {
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
     {title: t('pref.section.uploads'), items: [
+      {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
       {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
       {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
       {path: 'uploads.show_suggestions', label: t('pref.uploads.show_suggestions.label'), type: 'boolean', help: t('pref.uploads.show_suggestions.help')},
       {path: 'uploads.suggestion_autorun', label: t('pref.uploads.suggestion_autorun.label'), type: 'boolean', help: t('pref.uploads.suggestion_autorun.help')},
       {path: 'uploads.image_action_order', label: t('pref.uploads.image_action_order.label'), type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true, help: t('pref.uploads.image_action_order.help')},
       {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
-      {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
     {title: t('pref.section.performance'), items: [
       {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
@@ -38009,7 +38067,7 @@ function showUploadRsyncRecommendation(options = {}) {
     t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}),
     command,
   ], {
-    container: displayToastContainer(options.session || prefsItemId),
+    container: fileTransferToastContainer(options),
     actions: [action],
     countdownMs: 20000,
   });
@@ -52552,7 +52610,9 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
-    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
+    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
+    statusErr(esc(message));
+    showFileTransferError(message, {session});
   }
 }
 
@@ -52566,6 +52626,7 @@ async function uploadEditorFiles(editorTarget, fileList) {
   const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
   if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
     statusErr(localizedHtml('status.uploadTooLarge', {selected: formatFileSize(totalBytes), limit: formatFileSize(uploadMaxBytes)}));
+    showUploadRsyncRecommendation({item: focusedPanelItem, sizeBytes: totalBytes});
     return;
   }
   const formData = new FormData();
@@ -52581,7 +52642,9 @@ async function uploadEditorFiles(editorTarget, fileList) {
     syncPasteCountersFromPayload(payload);
     insertEditorPasteUploadReferences(editorTarget, payload.files || []);
   } catch (error) {
-    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
+    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
+    statusErr(esc(message));
+    showFileTransferError(message, {item: focusedPanelItem});
   }
 }
 

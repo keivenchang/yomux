@@ -457,18 +457,26 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
     const item = typeof agentWindowActivityIconForStatusItem === 'function'
       ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
       : null;
-    if (!item || item.acknowledged === true || !['attention', 'cooldown', STATE_KEY.working].includes(item.state)) continue;
+    const tone = typeof agentWindowStatusToneForItem === 'function'
+      ? agentWindowStatusToneForItem(item)
+      : (item?.state ? agentWindowActivityTone(item.state) : '');
+    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(tone)) continue;
     const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
-    if (screenWorking && !hasWorkingWindow && item.state === 'cooldown' && !explicitStopped) continue;
+    if (screenWorking && !hasWorkingWindow && tone === 'cooldown' && !explicitStopped) continue;
     const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
     const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
-    const tone = typeof agentWindowActivityTone === 'function' ? agentWindowActivityTone(item.state) : item.state;
     const toneCurrent = byTone.get(tone);
     const toneCurrentIsActive = toneCurrent ? agentWindowPayloadCurrent(toneCurrent.agent) === true : false;
     if (!toneCurrent || current && !toneCurrentIsActive) byTone.set(tone, {agent, item});
-    if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
+    if (item.acknowledged !== true && (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent))) selected = {agent, item};
+  }
+  if (!selected && byTone.size) {
+    const statusTones = typeof agentWindowStatusToneOrder === 'function'
+      ? agentWindowStatusToneOrder([...byTone.keys()])
+      : [...byTone.keys()];
+    selected = byTone.get(statusTones[0]) || null;
   }
   if (!selected && screenWorking) {
     const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];

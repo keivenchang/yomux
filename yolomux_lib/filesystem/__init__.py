@@ -213,14 +213,14 @@ def is_text_path(raw_path: str) -> bool:
     return io_ops.is_text_path(raw_path)
 
 
-def read_raw(raw_path: str) -> tuple[bytes, str]:
+def read_raw(raw_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
     _sync_package_overrides()
-    return io_ops.read_raw(raw_path)
+    return io_ops.read_raw(raw_path, max_bytes=max_bytes)
 
 
-def zip_directory(raw_path: str):
+def zip_directory(raw_path: str, max_bytes: int | None = None):
     _sync_package_overrides()
-    return io_ops.zip_directory(raw_path)
+    return io_ops.zip_directory(raw_path, max_bytes=max_bytes)
 
 
 def count_directory_files(raw_path: str) -> dict[str, Any]:

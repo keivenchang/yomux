@@ -295,7 +295,7 @@
   line-height: 1;
 }
 .agent-window-activity .agent-window-status-dot--acknowledged {
-  font-size: calc(var(--agent-status-ball-size-base) * 4 / 5);
+  font-size: var(--agent-status-ball-size-base);
   border-color: transparent;
   box-shadow: none;
   filter: saturate(0.9) brightness(0.95);

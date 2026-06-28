@@ -1007,8 +1007,8 @@ def test_fs_zip_download_rejects_large_folder_with_json_error(monkeypatch, tmp_p
     folder = tmp_path / "big"
     folder.mkdir()
     (folder / "payload.bin").write_bytes(b"abcd")
-    monkeypatch.setattr(filesystem, "FS_ZIP_MAX_BYTES", 3)
-    server, thread = start_server(monkeypatch, tmp_path)
+    app = SimpleNamespace(sessions=[], dangerously_yolo=False, file_transfer_max_bytes=lambda: 3)
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
     port = server.server_address[1]
     try:
         status, headers, body = request(
@@ -1022,7 +1022,7 @@ def test_fs_zip_download_rejects_large_folder_with_json_error(monkeypatch, tmp_p
         assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
         assert headers["Content-Type"] == "application/json; charset=utf-8"
         assert "4 bytes" in payload["error"]
-        assert "over the 100MB limit" in payload["error"]
+        assert "0.0 MB (3 bytes) file transfer size cap" in payload["error"]
         assert "Please zip it yourself" in payload["error"]
     finally:
         stop_server(server, thread)
