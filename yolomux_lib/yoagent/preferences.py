@@ -80,6 +80,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "performance.latency_refresh_ms": ("latency refresh", "ping refresh"),
     "performance.event_log_refresh_ms": ("event log refresh", "log refresh"),
     "performance.tabber_activity_refresh_ms": ("tabber refresh", "recent agents refresh", "activity refresh"),
+    "performance.agent_status_pulse_period_ms": ("status ball pulse", "ball pulse period", "pulse frequency", "pulsating frequency", "red yellow green pulse"),
     "performance.server_event_poll_ms": ("server event poll", "visible file poll"),
     "performance.server_background_file_event_poll_ms": ("background file poll", "background file refresh"),
     "performance.server_directory_event_poll_ms": ("directory poll", "finder poll", "differ poll"),

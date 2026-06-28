@@ -584,6 +584,8 @@
   "pref.path.copySettings": "設定のパスをコピー",
   "pref.path.rules": "YOLO ルール",
   "pref.path.settings": "設定",
+  "pref.performance.agent_status_pulse_period_ms.help": "赤、黄、緑の Claude/Codex ステータスボールが 1 回パルスする周期です。アニメーションは 4 段階の明るさで表示し、継続的な再描画を減らします。",
+  "pref.performance.agent_status_pulse_period_ms.label": "ステータスボールのパルス周期",
   "pref.performance.auto_approve_interval_seconds.help": "新たに有効化された YOLO ワーカーが表示中の tmux プロンプトを調べる頻度。",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO ワーカーのポーリング間隔",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

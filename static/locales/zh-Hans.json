@@ -584,6 +584,8 @@
   "pref.path.copySettings": "复制设置路径",
   "pref.path.rules": "优乐规则",
   "pref.path.settings": "设置",
+  "pref.performance.agent_status_pulse_period_ms.help": "红色、黄色和绿色 Claude/Codex 状态球每次脉冲循环的时长。动画使用四个离散亮度阶段，以减少持续重绘。",
+  "pref.performance.agent_status_pulse_period_ms.label": "状态球脉冲周期",
   "pref.performance.auto_approve_interval_seconds.help": "新启用的优乐工作进程检查可见 tmux 提示的频率。",
   "pref.performance.auto_approve_interval_seconds.label": "优乐工作进程轮询间隔",
   "pref.performance.event_log_refresh_ms.help": "浏览器刷新已打开的优乐/事件日志窗格的频率。",

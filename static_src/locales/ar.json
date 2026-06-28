@@ -1208,5 +1208,7 @@
   "yolo.state.onHere": "on here",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "pref.performance.agent_status_pulse_period_ms.help": "مدة كل دورة نبض لكرات حالة Claude/Codex الحمراء والصفراء والخضراء. يستخدم التحريك أربع درجات سطوع منفصلة لتقليل إعادة الرسم المستمرة.",
+  "pref.performance.agent_status_pulse_period_ms.label": "فترة نبض كرة الحالة"
 }

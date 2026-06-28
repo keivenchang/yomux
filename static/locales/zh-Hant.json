@@ -584,6 +584,8 @@
   "pref.path.copySettings": "複製設定路徑",
   "pref.path.rules": "優樂規則",
   "pref.path.settings": "設定",
+  "pref.performance.agent_status_pulse_period_ms.help": "紅色、黃色和綠色 Claude/Codex 狀態球每次脈衝循環的時長。動畫使用四個離散亮度階段，以減少持續重繪。",
+  "pref.performance.agent_status_pulse_period_ms.label": "狀態球脈衝週期",
   "pref.performance.auto_approve_interval_seconds.help": "新啟用的優樂工作程式檢查可見 tmux 提示的頻率。",
   "pref.performance.auto_approve_interval_seconds.label": "優樂工作程式輪詢間隔",
   "pref.performance.event_log_refresh_ms.help": "瀏覽器重新整理開啟的優樂/事件記錄窗格的頻率。",

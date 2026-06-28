@@ -28,6 +28,7 @@ def test_pane_spacing_default_is_3px():
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
     assert "red_reminder_ms" not in default_settings()["appearance"]
+    assert default_settings()["performance"]["agent_status_pulse_period_ms"] == 2500
     assert default_settings()["performance"]["workflow_transition_glow_seconds"] == 60
     assert "agent_window_cooldown_seconds" not in default_settings()["performance"]
 
@@ -108,7 +109,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "updates": {"notify_level": "bogus"},
-            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000, "workflow_transition_glow_seconds": 999},
+            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000, "agent_status_pulse_period_ms": 99, "workflow_transition_glow_seconds": 999},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100, "trim_trailing_whitespace_on_save": "yes", "ensure_final_newline_on_save": "no"},
             "uploads": {"max_bytes": 999999999},
@@ -159,6 +160,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["file_explorer"]["dir_cache_ms"] == 5000
     assert settings["performance"]["latency_refresh_ms"] == 1000
     assert settings["performance"]["event_log_refresh_ms"] == 60000
+    assert settings["performance"]["agent_status_pulse_period_ms"] == 250
     assert settings["performance"]["workflow_transition_glow_seconds"] == 300
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False

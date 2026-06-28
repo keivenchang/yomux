@@ -1208,5 +1208,7 @@
   "yolo.state.onHere": "on here",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "pref.performance.agent_status_pulse_period_ms.help": "משך כל מחזור פעימה לנקודות מצב אדומות, צהובות וירוקות של Claude/Codex. האנימציה משתמשת בארבע מדרגות בהירות נפרדות כדי להפחית ציור מחדש רציף.",
+  "pref.performance.agent_status_pulse_period_ms.label": "מחזור פעימת נקודת המצב"
 }

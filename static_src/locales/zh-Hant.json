@@ -1208,5 +1208,7 @@
   "yolo.state.onHere": "在此開啟",
   "yolo.title": "優樂 {state}",
   "yolo.titleForSession": "優樂 {session} {state}",
-  "yolo.titleReadonly": "優樂 {session} {state}；唯讀存取"
+  "yolo.titleReadonly": "優樂 {session} {state}；唯讀存取",
+  "pref.performance.agent_status_pulse_period_ms.help": "紅色、黃色和綠色 Claude/Codex 狀態球每次脈衝循環的時長。動畫使用四個離散亮度階段，以減少持續重繪。",
+  "pref.performance.agent_status_pulse_period_ms.label": "狀態球脈衝週期"
 }

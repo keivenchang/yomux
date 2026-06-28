@@ -584,6 +584,8 @@
   "pref.path.copySettings": "Settings path कॉपी करें",
   "pref.path.rules": "YOLO नियम",
   "pref.path.settings": "settings",
+  "pref.performance.agent_status_pulse_period_ms.help": "Claude/Codex की लाल, पीली और हरी स्थिति बॉल के हर pulse cycle की अवधि। लगातार repaint कम करने के लिए animation चार अलग brightness steps का उपयोग करता है।",
+  "pref.performance.agent_status_pulse_period_ms.label": "स्थिति बॉल pulse अवधि",
   "pref.performance.auto_approve_interval_seconds.help": "नव-सक्षम YOLO workers कितनी बार visible tmux prompts की जांच करते हैं।",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO worker poll अंतराल",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

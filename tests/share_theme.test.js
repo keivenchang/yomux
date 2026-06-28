@@ -2137,6 +2137,7 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*?value="5\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE background editor file-change poll defaults to 5 seconds');
     assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
     assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber server poll interval defaults to 15 seconds in Preferences');
+    assert.ok(/data-setting-path="performance\.agent_status_pulse_period_ms"[\s\S]*?value="2500"[\s\S]*?min="250"[\s\S]*?max="10000"[\s\S]*?step="250"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'status ball pulse period defaults to 2500ms in Preferences');
     assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'workflow transition glow duration defaults to 60 seconds in Preferences');
     assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
@@ -2151,7 +2152,9 @@ async function runShareThemeSuite() {
     assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
     assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
     assert.ok(performanceHtml.includes('Tabber server poll interval'), 'Performance labels the Tabber activity refresh as a server poll interval');
+    assert.equal(performanceHtml.includes('Status ball pulse period'), false, 'Performance does not own the status ball pulse period');
     assert.equal(performanceHtml.includes('Workflow transition glow duration'), false, 'Performance does not own the workflow transition glow duration');
+    assert.ok(notificationsHtml.includes('Status ball pulse period'), 'Notifications labels the status ball pulse period');
     assert.ok(notificationsHtml.includes('Workflow transition glow duration'), 'Notifications labels the workflow transition glow duration');
     assert.ok(notificationsHtml.includes('green, red, or yellow') && notificationsHtml.includes('0 keeps transition balls visible but static.'), 'Notifications explains that transition glow applies to green/red/yellow and 0 disables glow');
     assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
@@ -2166,7 +2169,7 @@ async function runShareThemeSuite() {
     ]) {
       assert.equal(preferencesHtml.includes(`data-setting-path="${removedPath}"`), false, `${removedPath} is no longer exposed in Preferences`);
     }
-    assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*data-setting-path="appearance\.metadata_badge_pulse_seconds"/.test(notificationsHtml), 'Notifications order keeps workflow transition glow before badge pulse duration');
+    assert.ok(/data-setting-path="performance\.agent_status_pulse_period_ms"[\s\S]*data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*data-setting-path="appearance\.metadata_badge_pulse_seconds"/.test(notificationsHtml), 'Notifications order keeps status pulse period before workflow transition glow and badge pulse duration');
     assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"[\s\S]*data-setting-path="performance\.tabber_activity_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers');
     assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
     assert.equal(diffBundle.includes('fileExplorerRefreshMsFromSettings'), false, 'Finder client-pull refresh setting helper is removed');
@@ -2179,6 +2182,7 @@ async function runShareThemeSuite() {
     assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
     assert.equal(diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default in bootstrap JS');
     assert.equal(diffBundle.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default on settings reload');
+    assert.ok(diffBundle.includes("path: 'performance.agent_status_pulse_period_ms'") && diffBundle.includes("initialSetting('performance.agent_status_pulse_period_ms')"), 'status ball pulse period is backed by settings defaults');
     assert.ok(diffBundle.includes("path: 'performance.workflow_transition_glow_seconds'") && diffBundle.includes("initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow duration is backed by the Performance preference through settings defaults');
     assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
     api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});

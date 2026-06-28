@@ -147,7 +147,7 @@
   transform-origin: center;
   animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
+  animation-timing-function: var(--status-pulse-timing);
   animation-iteration-count: infinite;
   animation-direction: normal;
 }
@@ -159,7 +159,7 @@
 .status-indicator.heartbeat-pulse {
   animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
+  animation-timing-function: var(--status-pulse-timing);
   animation-iteration-count: infinite;
   animation-direction: normal;
 }
@@ -193,9 +193,9 @@
 .agent-window-status-dot--transition-pulse:not(.heartbeat-pulse) {
   border: 1px solid transparent;
   animation-name: agent-status-transition-pulse;
-  animation-duration: var(--agent-status-transition-pulse-duration, 1.55s);
+  animation-duration: var(--agent-status-transition-pulse-duration, 2.5s);
   animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
+  animation-timing-function: var(--status-pulse-timing);
   animation-iteration-count: infinite;
 }
 .status-indicator--settled {
@@ -299,7 +299,7 @@
   line-height: 1;
 }
 .agent-window-activity .agent-window-status-dot--acknowledged {
-  font-size: calc(var(--agent-status-ball-size) / 4);
+  font-size: calc(var(--agent-status-ball-size-base) / 2);
   border-color: transparent;
   box-shadow: none;
   filter: saturate(0.9) brightness(0.95);
@@ -312,7 +312,7 @@
   will-change: opacity, transform, filter, box-shadow;
   animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--pulse-easing);
+  animation-timing-function: var(--status-pulse-timing);
   animation-iteration-count: infinite;
   animation-direction: normal;
 }
@@ -564,7 +564,7 @@ body.theme-light .session-yolo-marker.inactive {
 .session-yolo-marker.yoagent-chat-spinner {
   transform-origin: center;
   animation-name: yolo-marker-rotate;
-  animation-duration: var(--pulse-duration, 1.55s);
+  animation-duration: var(--pulse-duration, 2.5s);
   animation-timing-function: linear;
   animation-iteration-count: infinite;
 }

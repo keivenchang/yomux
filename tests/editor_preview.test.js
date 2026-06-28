@@ -163,6 +163,7 @@ async function runEditorPreviewSuite() {
     const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
     const paneTabsCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
     const treeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const settingsRuntimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
@@ -183,7 +184,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'attention/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
     assert.ok(/width:\s*1em/.test(dotBlock) && /min-width:\s*1em/.test(dotBlock) && /color:\s*var\(--muted\)/.test(dotBlock) && /font-size:\s*0\.9em/.test(dotBlock), 'status ball markers keep the compact glyph-dot style from the shared parent modifier');
-    assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-delay:\s*var\(--attention-animation-delay, 0s\)[^}]*animation-timing-function:\s*var\(--pulse-easing\)[^}]*animation-iteration-count:\s*infinite[^}]*animation-direction:\s*normal/.test(sessionsCss), 'heartbeat indicators share one pulse cadence parent');
+    assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-delay:\s*var\(--attention-animation-delay, 0s\)[^}]*animation-timing-function:\s*var\(--status-pulse-timing\)[^}]*animation-iteration-count:\s*infinite[^}]*animation-direction:\s*normal/.test(sessionsCss), 'heartbeat indicators share one stepped pulse cadence parent');
     assert.ok(/\.status-indicator--dot\s*\{[^}]*border-radius:\s*999px[\s\S]*opacity:\s*1/.test(sessionsCss), 'circle status markers stay fully opaque while their glow pulses');
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(sessionsCss), 'pulsing dots opt into a brightness channel so the pulse remains visible on active accent backgrounds');
     assert.equal(/status-ball-size-pulse|--status-dot-rest-scale|--status-dot-peak-scale|--status-dot-size/.test(sessionsCss), false, 'status balls do not pulse by changing geometry or use the filled-disc size path');
@@ -202,14 +203,14 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'the --active agent glyph keeps the glow-cadence; status states use a static symbol plus a glowing ball');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*display:\s*inline-flex[\s\S]*gap:\s*2px/.test(sessionsCss), 'agent status symbols and balls render side by side through the shared inline-flex activity wrapper');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)/.test(sessionsCss), 'the shared activity wrapper owns the base agent status-ball size token');
-    assert.ok(/\.tmux-window-button \.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*calc\(var\(--agent-status-ball-size-base\) \* 3 \/ 5\)/.test(paneTabsCss), 'tmux sub-window buttons share the compact agent status-ball size override');
+    assert.ok(/\.tmux-window-button \.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*calc\(var\(--agent-status-ball-size-base\) \* 3 \/ 4\)/.test(paneTabsCss), 'tmux sub-window buttons use 75% of the base agent status-ball size');
     assert.ok(/\.agent-window-status-dot\s*\{[\s\S]*font-family:\s*var\(--ui-font\)[\s\S]*font-stretch:\s*normal/.test(sessionsCss), 'agent status dots reset inherited condensed tab text so Tabber session-tab balls do not shrink');
     assert.ok(/\.status-indicator--dot\.agent-window-status-dot--segmented\s*\{[\s\S]*background:\s*var\(--agent-status-segment-bg, currentColor\)/.test(sessionsCss), 'multi-state session tabs render one segmented status ball inside the shared dot footprint');
     assert.ok(/\.agent-window-status-dot--attention-cooldown-working\s*\{[\s\S]*conic-gradient\([\s\S]*var\(--agent-status-segment-attention\)[\s\S]*var\(--agent-status-segment-cooldown\)[\s\S]*var\(--agent-status-segment-working\)/.test(sessionsCss), 'tri-color session tab status balls divide red, yellow, and green through one conic gradient');
     assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*agentWindowStatusToneOrder\(options\.statusTones \|\| \[tone\]\)[\s\S]*agent-window-status-dot--segmented[\s\S]*agent-window-status-dot--tone-/.test(activitySource), 'the shared status dot renderer owns segmented multi-tone tab balls');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared tmux-window compact override');
-    assert.ok(/\.agent-window-activity \.agent-window-status-dot--acknowledged\s*\{[\s\S]*font-size:\s*calc\(var\(--agent-status-ball-size\) \/ 4\)/.test(sessionsCss), 'acknowledged red/yellow sub-window balls shrink to one quarter through the shared ball-size token');
+    assert.ok(/\.agent-window-activity \.agent-window-status-dot--acknowledged\s*\{[\s\S]*font-size:\s*calc\(var\(--agent-status-ball-size-base\) \/ 2\)/.test(sessionsCss), 'acknowledged red/yellow sub-window balls use 50% of the base agent status-ball size');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(sessionsCss), false, 'status balls do not size themselves from the surface-specific agent icon token');
     assert.equal(/agent-symbol-status-alternate|agent-status-dot-alternate|--agent-alternate-animation-delay|--agent-alternate-pulse-duration/.test(sessionsCss + activitySource + layoutSource), false, 'agent status indicators no longer alternate symbol and ball');
     assert.equal(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid/.test(sessionsCss), false, 'attention/cooldown agent glyphs and dots are not grid-stacked overlays');
@@ -242,7 +243,7 @@ async function runEditorPreviewSuite() {
     let syncDotCurrentTime = -1;
     const syncDotAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 1550})},
+      effect: {getTiming: () => ({duration: 2500})},
       set currentTime(value) { syncDotCurrentTime = value; },
       get currentTime() { return syncDotCurrentTime; },
     };
@@ -254,7 +255,7 @@ async function runEditorPreviewSuite() {
     let syncAttentionLabelCurrentTime = -2;
     const syncAttentionLabelAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 1550})},
+      effect: {getTiming: () => ({duration: 2500})},
       set currentTime(value) { syncAttentionLabelCurrentTime = value; },
       get currentTime() { return syncAttentionLabelCurrentTime; },
     };
@@ -272,7 +273,12 @@ async function runEditorPreviewSuite() {
     const firstSyncedDelay = api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay');
     api.syncAgentWindowActivityAnimationDelaysForTest(syncRoot);
     assert.equal(api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay'), firstSyncedDelay, 'a second sync keeps the same root animation delay instead of restarting the CSS animation');
-    assert.ok(/root\.setProperty\('--pulse-duration', `\$\{Math\.max\(1, agentStatusPulsePeriodMs\) \/ 1000\}s`\)/.test(settingsRuntimeSource), 'status balls use the fixed shared transition pulse cadence');
+    assert.ok(/let agentStatusPulsePeriodMs = initialSetting\('performance\.agent_status_pulse_period_ms'\)/.test(bootstrapSource), 'status ball pulse period initializes from the persisted setting');
+    assert.ok(/agentStatusPulsePeriodMs = numberSetting\('performance\.agent_status_pulse_period_ms'\)/.test(settingsRuntimeSource), 'status ball pulse period live-updates from settings changes');
+    assert.ok(/root\.setProperty\('--pulse-duration', `\$\{Math\.max\(1, agentStatusPulsePeriodMs\) \/ 1000\}s`\)/.test(settingsRuntimeSource), 'status balls use the shared setting-backed transition pulse cadence');
+    assert.ok(/--pulse-duration:\s*2\.5s/.test(tokensCss), 'status pulse duration fallback matches the 2500ms default');
+    assert.ok(/--status-pulse-timing:\s*steps\(4,\s*end\)/.test(tokensCss), 'status pulse timing has four discrete visual states per period');
+    assert.ok(/\.agent-window-status-dot--transition-pulse:not\(\.heartbeat-pulse\)\s*\{[\s\S]*animation-timing-function:\s*var\(--status-pulse-timing\)/.test(sessionsCss), 'transition status balls use the stepped timing token');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
     assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation-name:\s*metadata-badge-pulse;[^}]*animation-duration:\s*var\(--pulse-duration\);[^}]*animation-timing-function:\s*var\(--pulse-easing\);[^}]*animation-iteration-count:\s*infinite;/.test(sessionsCss), 'metadata pulse repeats until the server-window class is removed');
     assert.equal(/metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), false, 'metadata pulse no longer has a fixed iteration count');
@@ -1006,6 +1012,8 @@ async function runEditorPreviewSuite() {
     assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux sub-window buttons have no per-agent tint CSS');
     assert.ok(source.includes("workflowTransitionGlowSeconds = initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow initializes from the persisted setting');
     assert.ok(source.includes("workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow live-updates from settings changes');
+    assert.ok(source.includes("agentStatusPulsePeriodMs = initialSetting('performance.agent_status_pulse_period_ms')"), 'status pulse period initializes from the persisted setting');
+    assert.ok(source.includes("agentStatusPulsePeriodMs = numberSetting('performance.agent_status_pulse_period_ms')"), 'status pulse period live-updates from settings changes');
     assert.ok(source.includes("if (key === 'cooldown') return 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
     assert.ok(yoloCss.includes('.status-indicator--cooldown') && yoloCss.includes('var(--accent-gold)'), 'cooldown dot uses the shared theme-aware yellow/gold token');
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(yoloCss), 'the --active current agent glyph uses the glow-cadence; working renders a static symbol + glowing green ball');
@@ -6154,7 +6162,7 @@ async function runEditorPreviewSuite() {
       'pref.performance.latency_refresh_ms.label', 'pref.performance.event_log_refresh_ms.label',
       'pref.performance.server_event_poll_ms.label', 'pref.performance.server_background_file_event_poll_ms.label',
       'pref.performance.server_directory_event_poll_ms.label',
-      'pref.performance.tabber_activity_refresh_ms.label', 'pref.performance.workflow_transition_glow_seconds.label',
+      'pref.performance.tabber_activity_refresh_ms.label', 'pref.performance.agent_status_pulse_period_ms.label', 'pref.performance.workflow_transition_glow_seconds.label',
       'pref.editorScheme.group.dark',
       'pref.notifications.throttle_seconds.label',
       'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',

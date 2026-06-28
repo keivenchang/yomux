@@ -584,6 +584,8 @@
   "pref.path.copySettings": "Copier le chemin des paramètres",
   "pref.path.rules": "règles YOLO",
   "pref.path.settings": "paramètres",
+  "pref.performance.agent_status_pulse_period_ms.help": "Durée d’un cycle de pulsation pour les pastilles d’état Claude/Codex rouges, jaunes et vertes. L’animation utilise quatre niveaux de luminosité discrets afin de réduire les repeints continus.",
+  "pref.performance.agent_status_pulse_period_ms.label": "Période de pulsation de la pastille d’état",
   "pref.performance.auto_approve_interval_seconds.help": "Fréquence à laquelle les workers YOLO nouvellement activés inspectent les invites tmux visibles.",
   "pref.performance.auto_approve_interval_seconds.label": "Intervalle de sondage du worker YOLO",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

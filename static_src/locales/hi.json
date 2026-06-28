@@ -1208,5 +1208,7 @@
   "yolo.state.onHere": "on here",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "pref.performance.agent_status_pulse_period_ms.help": "Claude/Codex की लाल, पीली और हरी स्थिति बॉल के हर pulse cycle की अवधि। लगातार repaint कम करने के लिए animation चार अलग brightness steps का उपयोग करता है।",
+  "pref.performance.agent_status_pulse_period_ms.label": "स्थिति बॉल pulse अवधि"
 }

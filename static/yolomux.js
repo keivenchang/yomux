@@ -743,7 +743,7 @@ let latencyRefreshMs = initialSetting('performance.latency_refresh_ms');
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms');
 let tmuxSignalState = null;
 tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
-const agentStatusPulsePeriodMs = 1550;
+let agentStatusPulsePeriodMs = initialSetting('performance.agent_status_pulse_period_ms');
 let workflowTransitionGlowSeconds = initialSetting('performance.workflow_transition_glow_seconds');
 const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms');
@@ -20504,6 +20504,7 @@ function applySettingsPayload(payload, options = {}) {
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
+  agentStatusPulsePeriodMs = numberSetting('performance.agent_status_pulse_period_ms');
   workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
@@ -31777,6 +31778,7 @@ function preferenceSections() {
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
+      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help')},
       {path: 'performance.workflow_transition_glow_seconds', label: t('pref.performance.workflow_transition_glow_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.workflow_transition_glow_seconds.help')},
       {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
     ]},

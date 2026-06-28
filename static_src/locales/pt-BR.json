@@ -1208,5 +1208,7 @@
   "yolo.state.onHere": "on here",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "pref.performance.agent_status_pulse_period_ms.help": "Período de cada pulso das bolas de status vermelhas, amarelas e verdes do Claude/Codex. A animação usa quatro etapas discretas de brilho para reduzir repintura contínua.",
+  "pref.performance.agent_status_pulse_period_ms.label": "Período de pulso da bola de status"
 }

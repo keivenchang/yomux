@@ -757,7 +757,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     assert aggregate_dot_font_sizes == {"14px"}, metrics
     for name in subwindow_names:
         assert "calc(" in metrics[name]["agentStatusBallSize"], (name, metrics)
-        assert 7.5 <= float(metrics[name]["dotFontSize"].replace("px", "")) <= 9.5, (name, metrics)
+        assert 10.0 <= float(metrics[name]["dotFontSize"].replace("px", "")) <= 11.0, (name, metrics)
         assert metrics[name]["dotWidth"] < min(aggregate_peak_widths), (name, metrics)
         assert metrics[name]["dotHeight"] < min(aggregate_peak_heights), (name, metrics)
     assert max(aggregate_peak_widths) - min(aggregate_peak_widths) <= 0.5, metrics
@@ -843,7 +843,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
     assert metrics["parent"]["agentStatusBallSize"] == "14px", metrics
     assert metrics["parent"]["dotFontSize"] == "14px", metrics
     assert "calc(" in metrics["child"]["agentStatusBallSize"], metrics
-    assert 7.5 <= float(metrics["child"]["dotFontSize"].replace("px", "")) <= 9.5, metrics
+    assert 10.0 <= float(metrics["child"]["dotFontSize"].replace("px", "")) <= 11.0, metrics
     assert metrics["child"]["width"] < metrics["parent"]["width"], metrics
     assert metrics["child"]["height"] < metrics["parent"]["height"], metrics
     for side in ("parent", "child"):
@@ -1015,7 +1015,7 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
     """, extra_css="""
-      :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
+      :root { --pulse-duration: 2.5s; --pulse-easing: ease-in-out; --status-pulse-timing: steps(4, end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
     """), encoding="utf-8")
     browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
@@ -1053,7 +1053,8 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
         assert metrics["reduced"] is True, metrics
         attention = metrics["attention"]
         assert attention["primaryAnimationName"] == "attention-ring-fade", metrics
-        assert attention["primaryAnimationDuration"] == "1.55s", metrics
+        assert attention["primaryAnimationDuration"] == "2.5s", metrics
+        assert attention["primaryAnimationTimingFunction"].startswith("steps(4"), metrics
         assert attention["primaryAnimationDelay"] == "-0.42s", metrics
         assert attention["primaryEffectDuration"] > 0, metrics
         for key in ("working", "cooldown"):

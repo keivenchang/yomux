@@ -1208,5 +1208,7 @@
   "yolo.state.onHere": "on here",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "pref.performance.agent_status_pulse_period_ms.help": "Durée d’un cycle de pulsation pour les pastilles d’état Claude/Codex rouges, jaunes et vertes. L’animation utilise quatre niveaux de luminosité discrets afin de réduire les repeints continus.",
+  "pref.performance.agent_status_pulse_period_ms.label": "Période de pulsation de la pastille d’état"
 }

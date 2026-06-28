@@ -858,6 +858,7 @@ function applySettingsPayload(payload, options = {}) {
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
+  agentStatusPulsePeriodMs = numberSetting('performance.agent_status_pulse_period_ms');
   workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');

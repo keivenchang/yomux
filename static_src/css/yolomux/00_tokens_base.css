@@ -468,8 +468,10 @@
   --icon-changes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10'/%3E%3Cpath d='M7 20h10'/%3E%3Cpath d='M12 6v12'/%3E%3Cpath d='M5 10h5'/%3E%3Cpath d='M14 14h5'/%3E%3C/svg%3E");
   --editor-preview-bg: #342f22;
   --topbar-height: 38px;
-  --pulse-duration: 1.55s;
+  /* Default for --pulse-duration; Preferences -> Notifications -> performance.agent_status_pulse_period_ms overrides this at runtime. */
+  --pulse-duration: 2.5s;
   --pulse-easing: ease-in-out;
+  --status-pulse-timing: steps(4, end);
   --red-reminder-duration: var(--pulse-duration);
   --red-reminder-easing: var(--pulse-easing);
   --yolo-reminder-duration: 2.8s;

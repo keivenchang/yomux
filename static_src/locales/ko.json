@@ -1208,5 +1208,7 @@
   "yolo.state.onHere": "on here",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "pref.performance.agent_status_pulse_period_ms.help": "빨간색, 노란색, 초록색 Claude/Codex 상태 점의 한 번 깜박임 주기입니다. 애니메이션은 연속적인 다시 그리기를 줄이기 위해 네 단계의 밝기만 사용합니다.",
+  "pref.performance.agent_status_pulse_period_ms.label": "상태 점 깜박임 주기"
 }
