@@ -2730,6 +2730,10 @@ async function runEditorPreviewSuite() {
 
     await api.pollJsDebugStatsSampleForTest();
     api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 1});
+    const immediateSummary = api.debugGraphBucketSummaryForTest(Date.now());
+    assert.ok(immediateSummary.rawBuckets > 0 && immediateSummary.displayBuckets > 0, 'YO!stats renders browser API timing locally before the stats-history round trip');
+    const immediateHtml = api.debugPanelHtmlForTest();
+    assert.ok(immediateHtml.includes('data-js-debug-chart="count"') && immediateHtml.includes('data-js-debug-chart="latency"'), 'YO!stats immediately shows client API count and latency charts');
     await api.flushJsDebugStatsHistoryForTest();
 
     const sampleRequest = requests.find(request => request.url.startsWith('/api/stats-sample?'));

@@ -668,6 +668,7 @@ function recordJsDebugEventForGraph(event) {
     latencyMs,
     bandwidthBytes: requestBytes + responseBytes + sseBytes,
   };
+  debugGraphAddBucketData(debugGraphBucketForTime(debugGraphEventTimeMs(event), nowMs), data);
   debugGraphQueueServerDelta(bucketRef, data);
   if (event.type === 'api' && Number.isFinite(event.id)) {
     jsDebugGraphEventBuckets.set(event.id, bucketRef);
@@ -688,6 +689,7 @@ function recordApiDebugResponseBytesForGraph(event, responseBytes) {
   jsDebugGraphEventResponseBytes.set(event.id, nextBytes);
   jsDebugGraphEventRefTimes.set(event.id, Date.now());
   if (delta === 0) return;
+  debugGraphAddBucketData(debugGraphBucketForTime(Number(bucket.startMs), Date.now()), {bandwidthBytes: delta});
   debugGraphQueueServerDelta(bucket, {bandwidthBytes: delta});
 }
 
