@@ -1,6 +1,128 @@
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
+def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "project", "kind": "dir"}],
+        "/home/test/project": [{"name": "src", "kind": "dir"}],
+    }
+    page = tmp_path / "live-runtime-disclosure-size.html"
+    page.write_text(live_runtime_boot_fixture_html(fs_entries=fs_entries), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-tree-row[data-path="/home/test/project"] > .file-tree-icon.ui-disclosure-triangle') !== null;
+            """
+        )
+    )
+    before = browser.execute_script(
+        """
+        const row = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
+        const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+        return {
+          rowFont: parseFloat(getComputedStyle(row).fontSize),
+          iconFont: parseFloat(getComputedStyle(icon).fontSize),
+          iconWidth: icon.getBoundingClientRect().width,
+          iconTransform: getComputedStyle(icon).transform,
+          iconText: icon.textContent.trim(),
+          rowHeight: row.getBoundingClientRect().height,
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        """
+    )
+    browser.execute_script(
+        """
+        document.querySelector('.file-tree-row[data-path="/home/test/project"]').click();
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-tree-row[data-path="/home/test/project/src"]') !== null;
+            """
+        )
+    )
+    after = browser.execute_script(
+        """
+        const row = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
+        const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+        return {
+          rowFont: parseFloat(getComputedStyle(row).fontSize),
+          iconFont: parseFloat(getComputedStyle(icon).fontSize),
+          iconTransform: getComputedStyle(icon).transform,
+          iconText: icon.textContent.trim(),
+          rowHeight: row.getBoundingClientRect().height,
+          childVisible: document.querySelector('.file-tree-row[data-path="/home/test/project/src"]') !== null,
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        """
+    )
+    metrics = {"before": before, "after": after}
+    assert before["errors"] == []
+    assert before["rejections"] == []
+    assert after["errors"] == []
+    assert after["rejections"] == []
+    assert before["iconText"] == "›", metrics
+    assert after["iconText"] == "›", metrics
+    assert before["iconTransform"] == "none", metrics
+    assert after["iconTransform"] != "none", metrics
+    assert abs(before["iconFont"] - before["rowFont"]) <= 0.5, metrics
+    assert abs(after["iconFont"] - after["rowFont"]) <= 0.5, metrics
+    assert before["iconWidth"] >= before["iconFont"], metrics
+    assert abs(after["rowHeight"] - before["rowHeight"]) <= 0.5, metrics
+    assert after["childVisible"] is True, metrics
+
+
+def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [
+            {"name": "project", "kind": "dir"},
+            {"name": "note.txt", "kind": "file"},
+        ],
+        "/home/test/project": [{"name": "src", "kind": "dir"}],
+    }
+    page = tmp_path / "live-runtime-folder-zip-menu.html"
+    page.write_text(live_runtime_boot_fixture_html(fs_entries=fs_entries), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-tree-row[data-path="/home/test/project"]')
+              && document.querySelector('.file-tree-row[data-path="/home/test/note.txt"]');
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const rowsForMenu = () => Array.from(document.querySelectorAll('.file-context-menu button')).map(button => ({
+            text: button.textContent.trim(),
+            disabled: button.disabled,
+          }));
+          const folderRow = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
+          await showFileTreeContextMenu(folderRow, '/home/test/project', {kind: 'dir', name: 'project'}, 32, 32);
+          const folderButtons = rowsForMenu();
+          closeFileContextMenu();
+          const fileRow = document.querySelector('.file-tree-row[data-path="/home/test/note.txt"]');
+          await showFileTreeContextMenu(fileRow, '/home/test/note.txt', {kind: 'file', name: 'note.txt'}, 32, 32);
+          const fileButtons = rowsForMenu();
+          closeFileContextMenu();
+          done({folderButtons, fileButtons, errors: window.__bootErrors, rejections: window.__bootRejections});
+        })().catch(error => done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections}));
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    folder_zip = [button for button in metrics["folderButtons"] if button["text"] == "Zip & download"]
+    assert folder_zip == [{"text": "Zip & download", "disabled": False}], metrics
+    assert all(button["text"] != "Zip & download" for button in metrics["fileButtons"]), metrics
+
+
 @pytest.mark.parametrize("legacy_token", ["changes", "__changes__"])
 def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_token):
     load_live_runtime_boot_fixture(browser, tmp_path, f"?layout=left&tabs=left:{legacy_token}")
@@ -2000,4 +2122,3 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
     assert metrics["root"] == "/home/test", metrics
     assert "/home/test/stale" in {row["path"] for row in metrics["rows"]}, metrics
     assert not any(row["hasRepo"] or row["hasTouched"] for row in metrics["rows"]), metrics
-

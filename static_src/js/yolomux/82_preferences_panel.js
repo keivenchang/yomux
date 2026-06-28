@@ -706,6 +706,7 @@ function renderPreferencesPanels(options = {}) {
   // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
   // node aborts the native HTML5 drag.
   if (dragSession != null) { pendingPreferencesRender = true; return; }
+  scheduleDeferredSettingsMetadataRefresh();
   if (options.force !== true && preferencesScrollIsActive()) {
     pendingPreferencesRender = true;
     schedulePreferencesScrollFlush();

@@ -624,9 +624,9 @@ body.app-vw-lte-1100 .topbar-search {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   height: var(--compact-control-height);
-  padding: 0 9px;
+  padding: 0 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
@@ -649,7 +649,7 @@ body.app-vw-lte-1100 .topbar-search {
 .topbar-activity-count {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   font-weight: 600;
 }
 .topbar-activity-count-number {
@@ -657,12 +657,17 @@ body.app-vw-lte-1100 .topbar-search {
   text-align: right;
 }
 .topbar-activity-ball.agent-window-activity {
-  --agent-window-icon-size: var(--agent-status-ball-size-base);
-  min-width: var(--agent-status-ball-size-base);
-  min-height: var(--agent-status-ball-size-base);
+  --agent-status-ball-size: var(--agent-status-ball-size-base);
+  width: var(--agent-status-ball-size);
+  min-width: var(--agent-status-ball-size);
+  min-height: var(--agent-status-ball-size);
   margin-inline-start: 0;
 }
 .topbar-activity-sep {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  margin-inline: -1px;
   opacity: 0.5;
 }
 body.app-vw-lte-1100 .topbar-activity-idle {

@@ -291,18 +291,34 @@ def get_client_events(request: Any, parsed: Any, route: Route) -> None:
 def get_home(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     sessions = request.share_sessions() if request.share_sessions() else request.server.app.sessions
-    request.write_html(html_page(
+    share_record = request.share_record()
+    started = time.perf_counter()
+    body = html_page(
         sessions,
         request.auth_identity().role,
         dev=getattr(request.server, "dev", False),
         dangerously_yolo=request.server.app.dangerously_yolo,
-        share=request.share_bootstrap_payload(request.share_record()) if request.share_record() else None,
-    ))
+        share=request.share_bootstrap_payload(share_record) if share_record else None,
+    )
+    compute_ms = (time.perf_counter() - started) * 1000
+    setattr(request, "_http_response_compute_ms", compute_ms)
+    setattr(request, "_http_response_performance_details", {
+        "html_page": True,
+        "bootstrap_bytes": len(body.encode("utf-8")),
+        "session_count": len(sessions),
+        "share": bool(share_record),
+    })
+    request.write_html(body)
 
 
 def get_preview_popout(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_preview_popout_placeholder(parsed)
+
+
+def get_pane_popout(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_pane_popout_placeholder(parsed)
 
 
 def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
@@ -315,6 +331,13 @@ def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
 
 def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
     get_session_metadata(request, parsed, route)
+
+
+def get_tmux_session_exists(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    request.write_app_result(request.server.app.tmux_session_exists_payload(session))
 
 
 def get_agent_auth(request: Any, parsed: Any, route: Route) -> None:
@@ -337,6 +360,11 @@ def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
 def get_background_status(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_app_result(request.server.app.background_owner_status_payload())
+
+
+def post_background_claim(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_app_result(request.server.app.background_owner_claim_payload())
 
 
 def get_yoagent_skills(request: Any, parsed: Any, route: Route) -> None:
@@ -603,6 +631,16 @@ def get_blame(request: Any, parsed: Any, route: Route) -> None:
 def get_fs_raw(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_fs_raw(parsed)
+
+
+def get_fs_zip(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_zip(parsed)
+
+
+def get_fs_count(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_count(parsed)
 
 
 def get_fs_html_preview(request: Any, parsed: Any, route: Route) -> None:
@@ -983,6 +1021,7 @@ CORE_ROUTES = (
     Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
     Route("GET", "/", "readonly", get_home, group="core"),
     Route("GET", "/preview-popout", "readonly", get_preview_popout, group="core"),
+    Route("GET", "/pane-popout", "readonly", get_pane_popout, group="core"),
     Route("GET", "/api/session-metadata", "readonly", get_session_metadata, group="core"),
     Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core"),
     Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
@@ -1000,9 +1039,11 @@ CORE_ROUTES = (
     Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, group="core"),
     Route("GET", "/api/session-files", "readonly", get_session_files, group="core"),
     Route("GET", "/api/summary", "readonly", get_summary, group="core"),
+    Route("GET", "/api/tmux-session-exists", "readonly", get_tmux_session_exists, group="core"),
     Route("POST", "/login", PUBLIC, post_login, group="core"),
     Route("POST", "/api/self-update", "admin", post_self_update, group="core"),
     Route("POST", "/api/stats-history", "readonly", post_stats_history, body_limit=128 * 1024, group="core"),
+    Route("POST", "/api/background/claim", "admin", post_background_claim, group="core"),
     Route("POST", "/api/ensure-session", "admin", post_ensure_session, group="core"),
     Route("POST", "/api/create-session", "admin", post_create_session, group="core"),
     Route("POST", "/api/rename-session", "admin", post_rename_session, group="core"),
@@ -1062,6 +1103,8 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, group="filesystem"),
     Route("GET", "/api/blame", "readonly", get_blame, group="filesystem"),
     Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem"),
+    Route("GET", "/api/fs/zip", "readonly", get_fs_zip, group="filesystem"),
+    Route("GET", "/api/fs/count", "readonly", get_fs_count, group="filesystem"),
     Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, group="filesystem"),
     Route("POST", "/api/fs/batch", share_readonly_post_role, post_fs_batch, body_limit=64 * 1024, group="filesystem"),
     Route("POST", "/api/fs/write", "admin", post_fs_write, group="filesystem"),

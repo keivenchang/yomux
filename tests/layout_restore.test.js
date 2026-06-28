@@ -1143,6 +1143,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('capturePaneViewStateForItemIfPresent(previous)'), 'switching pane tabs captures the outgoing pane viewport through the shared helper');
     assert.ok(/function setFocusedPanelItem[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== item\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking away from a pane snapshots its live viewport');
     assert.ok(/function setFocusedTerminal[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== session\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking into a terminal snapshots the outgoing pane viewport');
+    assert.ok(/function setFocusedTerminal\(session, options = \{\}\)[\s\S]*const alreadyFocused = focusedTerminal === session && focusedPanelItem === session[\s\S]*if \(alreadyFocused\) \{[\s\S]*options\.userInitiated === true[\s\S]*acknowledgeTerminalAttentionFromUserAction\(session, null, options\)[\s\S]*return;[\s\S]*updateSessionButtonStates\(\);[\s\S]*for \(const activeSession of activeSessions\) updateTypingIndicator\(activeSession\)/.test(source), 'already-focused terminal input acknowledges attention without rerunning full focus chrome updates for every key');
     assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
     assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
     assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
@@ -1150,10 +1151,17 @@ async function runLayoutRestoreSuite() {
     assert.ok(/view\.dispatch\(\{\s*selection: \{anchor, head\},[\s\S]*state\.scrollSnapshot \? \{effects: state\.scrollSnapshot\}/.test(source), 'CodeMirror editor viewport restore dispatches the saved scroll snapshot through CodeMirror');
     assert.ok(/function fileEditorPanelViewStateCaptureHasLayout\(panel, scrollDOM\)[\s\S]*!panel\.isConnected[\s\S]*scrollDOM\.clientHeight <= 0/.test(source), 'CodeMirror editor viewport capture ignores detached zero-height panels');
     assert.ok(/const paneScrollContainerSelector = \[[\s\S]*'\.preferences-scroll'[\s\S]*'\.info-list'[\s\S]*'\.file-explorer-tree-panel'[\s\S]*'\.file-editor-codemirror-panel \.cm-scroller'/.test(source), 'generic pane viewport capture includes non-editor and editor scroll containers');
-    assert.ok(/function movePanelsToPool\(\)[\s\S]*capturePaneViewState\(item, panel\)/.test(source), 'pooled pane capture uses the generic pane viewport path');
-    assert.ok(/function bindPanelShell\(panel, session\)[\s\S]*panel\.addEventListener\('scroll'[\s\S]*schedulePaneViewStateCapture\(session, panel\)/.test(source), 'pane shell delegates scroll captures to the generic pane viewport scheduler');
-    assert.ok(/function schedulePaneViewStateCapture\(item, panel\)[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*capturePaneViewState\(item, currentPanel\)/.test(source), 'pane scroll capture is throttled through one shared scheduler');
-    assert.ok(/function scheduleFileEditorPanelViewStateCapture\(item, panel\)[\s\S]*schedulePaneViewStateCapture\(item, panel\)/.test(source), 'CodeMirror editor scroll capture routes through the shared pane scheduler');
+	    assert.ok(/function movePanelsToPool\(\)[\s\S]*capturePaneViewState\(item, panel\)/.test(source), 'pooled pane capture uses the generic pane viewport path');
+	    assert.ok(/function bindPanelShell\(panel, session\)[\s\S]*panel\.addEventListener\('scroll'[\s\S]*schedulePaneViewStateCapture\(session, panel\)/.test(source), 'pane shell delegates scroll captures to the generic pane viewport scheduler');
+	    assert.ok(/function schedulePaneViewStateCapture\(item, panel\)[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*capturePaneViewState\(item, currentPanel\)/.test(source), 'pane scroll capture is throttled through one shared scheduler');
+	    assert.ok(source.includes('const tabStripOverflowCheckSet = new Set();') && source.includes('let tabStripOverflowCheckFrame = null;'), 'tab-strip overflow checks share one queued measurement owner');
+	    assert.ok(/function flushScheduledTabStripOverflowChecks\(\)[\s\S]*Array\.from\(tabStripOverflowCheckSet\)[\s\S]*strip\.classList\.toggle\('tabs-overflowing', strip\.scrollWidth > strip\.clientWidth \+ 1\)/.test(source), 'tab-strip overflow reads are batched into one post-render frame');
+	    const overflowStart = source.indexOf('function scheduleTabStripOverflowCheck(');
+	    const overflowEnd = source.indexOf('function scheduleAllTabStripOverflowChecks(', overflowStart);
+	    const overflowSchedulerSource = source.slice(overflowStart, overflowEnd);
+	    assert.ok(overflowSchedulerSource.includes('requestAnimationFrame(flushScheduledTabStripOverflowChecks)'), 'tab-strip overflow scheduler uses the shared rAF flush');
+	    assert.equal(/requestAnimationFrame\(\(\) =>/.test(overflowSchedulerSource), false, 'tab-strip overflow check no longer schedules one inline forced-layout read per strip render');
+	    assert.ok(/function scheduleFileEditorPanelViewStateCapture\(item, panel\)[\s\S]*schedulePaneViewStateCapture\(item, panel\)/.test(source), 'CodeMirror editor scroll capture routes through the shared pane scheduler');
     assert.ok(/addEventListener\('scroll', \(\) => \{[\s\S]*scheduleFileEditorSplitScrollSync\(panel, 'editor'\);[\s\S]*scheduleFileEditorPanelViewStateCapture\(item, panel\);[\s\S]*\}\)/.test(source), 'CodeMirror editor scroll listener records viewport state as well as split-preview sync');
   });
 
@@ -1649,15 +1657,19 @@ async function runLayoutRestoreSuite() {
     assert.equal(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), false, 'topbar blocked count stays static when continuous status pulsing is disabled');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
-    assert.ok(/\.topbar-owner-status\s*\{/.test(css), 'the top-bar ownership indicator is styled');
-    assert.ok(/\.topbar-owner-status-part\[data-owner-role="leader"\]/.test(css), 'topbar ownership indicator highlights leader state');
-    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*display:\s*inline-flex/.test(css), 'activity counts align their number and shared status ball');
-    assert.ok(/\.topbar-activity-ball\.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*var\(--agent-status-ball-size-base\)/.test(css), 'topbar activity balls reuse the tab ball size variable');
-    assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
+	    assert.ok(/\.topbar-owner-status\s*\{/.test(css), 'the top-bar ownership indicator is styled');
+	    assert.ok(/\.topbar-owner-status-part\[data-owner-role="leader"\]/.test(css), 'topbar ownership indicator highlights leader state');
+	    assert.ok(/\.topbar-activity\s*\{[\s\S]*gap:\s*4px[\s\S]*padding:\s*0 6px/.test(css), 'topbar activity pill uses the narrower spacing contract');
+	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*display:\s*inline-flex/.test(css), 'activity counts align their number and shared status ball');
+	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*gap:\s*2px/.test(css), 'topbar activity count keeps number-to-dot spacing compact');
+	    assert.ok(/\.topbar-activity-sep\s*\{[\s\S]*margin-inline:\s*-1px/.test(css), 'topbar activity separator adds no extra horizontal padding');
+	    assert.ok(/\.topbar-activity-ball\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)[\s\S]*width:\s*var\(--agent-status-ball-size\)/.test(css), 'topbar activity balls reuse the shared status-ball size parent');
+	    assert.ok(/body\.app-vw-lte-1100 \.topbar-activity-idle\s*\{[\s\S]*display:\s*none/.test(css), 'topbar idle label still hides at the existing narrow-viewport breakpoint');
+	    assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
   });
 
   test('t@2134', () => {
-    // Event-driven session-kill: a terminal WS close roster-confirms gone vs transient disconnect.
+    // Event-driven session-kill: a terminal WS close checks tmux existence once vs transient disconnect.
     const api = loadYolomux('', ['1', '2', '3']);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.equal(api.sessionConfirmedGone('2', ['1', '3']), true, 'a tmux session absent from the roster is confirmed gone');
@@ -1666,19 +1678,21 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.sessionConfirmedGone(api.fileEditorItemFor('/x/y.txt'), []), false, 'non-tmux items are never roster-pruned');
     api.markPendingTmuxSessionForTest('4');
     assert.equal(api.sessionConfirmedGone('4', ['1', '2', '3']), false, 'a stale roster cannot prune a pending new or renamed tmux session');
-    assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item);'), 'terminal WS close roster-confirms before reconnecting');
-    assert.ok(/sessionConfirmedGone\(session, order\)\)\s*\{\s*pruneDeadSession\(session\);/.test(source), 'a confirmed-gone session is pruned immediately');
+    assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item, event);'), 'terminal WS close passes the close event into the exit lifecycle decision');
+    assert.ok(/function tmuxSessionExistsForReconnect\(session\)[\s\S]*\/api\/tmux-session-exists\?session=/.test(source), 'terminal close uses the read-only tmux existence endpoint');
+    assert.equal(/function tmuxSessionExistsForReconnect\(session\)[\s\S]*\/api\/ensure-session\?session=/.test(source), false, 'terminal close no longer routes through the mutating ensure-session endpoint');
+    assert.ok(/terminalSocketCloseLooksFinal\(event\)[\s\S]*pruneDeadSession\(session\);/.test(source), 'a clean terminal close prunes immediately');
     assert.ok(/scheduleTerminalReconnect\(session, item\);\s*\}\s*$/m.test(source) || source.includes('scheduleTerminalReconnect(session, item);'), 'a transient disconnect still reconnects');
   });
 
-  await testAsync('exited Xterm tab prunes even when auto-approve roster is stale', async () => {
+  await testAsync('exited Xterm tab prunes through read-only tmux existence without stale roster fallback', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
     const fetches = [];
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       fetches.push(parsed.pathname + parsed.search);
-      if (parsed.pathname === '/api/ensure-session') {
-        return Promise.resolve(jsonResponse({error: 'session no longer exists: 2'}, 404));
+      if (parsed.pathname === '/api/tmux-session-exists') {
+        return Promise.resolve(jsonResponse({session: parsed.searchParams.get('session'), exists: false, ok: true}));
       }
       if (parsed.pathname === '/api/auto-approve') {
         return Promise.resolve(jsonResponse({
@@ -1699,13 +1713,97 @@ async function runLayoutRestoreSuite() {
     await api.confirmSessionGoneOrReconnectForTest('2', item);
     await flushAsyncWork();
 
-    assert.ok(fetches.includes('/api/ensure-session?session=2'), 'websocket close checks the exact tmux session before consulting cached rosters');
-    assert.equal(fetches.includes('/api/auto-approve'), false, 'stale auto-approve roster is not consulted once ensure-session says the session is gone');
+    assert.ok(fetches.includes('/api/tmux-session-exists?session=2'), 'websocket close checks exact tmux existence without creating or reviving a session');
+    assert.equal(fetches.some(path => path.startsWith('/api/ensure-session')), false, 'websocket close never calls ensure-session');
+    assert.equal(fetches.includes('/api/auto-approve'), false, 'stale auto-approve roster is not consulted once tmux says the session is gone');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
       left: {tabs: ['1'], active: '1'},
     }, 'dead Xterm tab is removed instead of staying on the last [exited] terminal frame');
     assert.equal(socket.closeCount, 1, 'dead terminal socket is closed during prune');
     assert.equal(term.disposeCount, 1, 'dead terminal xterm instance is disposed during prune');
+  });
+
+  await testAsync('clean terminal close prunes immediately without a reconnect existence round trip', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
+    const fetches = [];
+    api.setFetchForTest(url => {
+      fetches.push(String(url));
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    const socket = {readyState: WebSocket.CLOSED, closeCount: 0, close() { this.closeCount += 1; }};
+    const term = {disposeCount: 0, dispose() { this.disposeCount += 1; }};
+    const item = api.registerTerminalForTest('2', term, socket);
+
+    await api.confirmSessionGoneOrReconnectForTest('2', item, {wasClean: true, code: 1000});
+    await flushAsyncWork();
+
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['1'], active: '1'},
+    }, 'normal terminal close removes the tab in the same close turn');
+    assert.deepStrictEqual(fetches, [], 'normal close does not wait for an existence check before pruning');
+    assert.equal(socket.closeCount, 1, 'clean-close prune still tears down the terminal socket');
+    assert.equal(term.disposeCount, 1, 'clean-close prune disposes the terminal instance');
+    const removals = api.jsDebugEventsForTest().filter(event => event.type === 'terminal_removal');
+    assert.equal(removals.length, 1, 'clean-close prune records one terminal-removal debug event');
+    assert.equal(removals[0].targetKind, 'session', 'clean-close latency is recorded as a session removal');
+    assert.equal(removals[0].target, '2', 'clean-close latency names the removed session');
+    assert.equal(removals[0].origin, 'ws-close', 'clean-close latency starts at the websocket close');
+    assert.ok(Number.isFinite(removals[0].durationMs), 'clean-close latency records a numeric duration');
+    const summary = api.terminalRemovalLatencySummaryForTest();
+    assert.equal(summary.count, 1, 'debug state keeps a removal-latency sample count');
+    assert.equal(summary.last.target, '2', 'debug state exposes the latest removed tab/window target');
+  });
+
+  test('tmux signal removed window records pane-death removal latency', () => {
+    const api = loadYolomux('', ['1']);
+    const eventAt = Date.now() / 1000 - 0.25;
+    api.setTmuxSignalStateForTest({
+      ok: true,
+      windows: [
+        {session: '1', window_index: 0, key: '1:0'},
+        {session: '1', window_index: 1, key: '1:1'},
+      ],
+    });
+
+    const data = api.applyTmuxSignalsPayloadForTest({
+      patch: true,
+      windows: [],
+      removed_window_keys: ['1:1'],
+      removed_window_event_at: eventAt,
+      removed_window_event_type: 'pane-exited',
+      ok: true,
+      window_count: 1,
+    });
+
+    assert.deepStrictEqual([...data.windows.map(windowRecord => windowRecord.key)], ['1:0'], 'tmux signal patch removes the dead window');
+    const summary = api.terminalRemovalLatencySummaryForTest();
+    assert.equal(summary.count, 1, 'tmux signal window removal records one latency sample');
+    assert.equal(summary.last.targetKind, 'window', 'tmux signal latency is recorded as a window removal');
+    assert.equal(summary.last.target, '1:1', 'tmux signal latency names the removed window key');
+    assert.equal(summary.last.origin, 'pane-exited', 'tmux signal latency starts at the pane-exit event');
+    assert.ok(summary.last.durationMs >= 0, 'tmux signal latency records elapsed time to client removal');
+    const text = api.jsDebugTextForClipboardForTest();
+    assert.ok(text.includes('removals=1') && text.includes('terminal_removal') && text.includes('window 1:1 removed'), 'YO!stats debug text surfaces removal latency');
+
+    api.clearJsDebugEventsForTest();
+    api.setTmuxSignalStateForTest({
+      ok: true,
+      windows: [
+        {session: '1', window_index: 0, key: '1:0'},
+        {session: '1', window_index: 2, key: '1:2'},
+      ],
+    });
+    api.applyTmuxSignalsPayloadForTest({
+      ok: true,
+      windows: [{session: '1', window_index: 0, key: '1:0'}],
+      removed_window_keys: ['1:2'],
+      removed_window_event_at: Date.now() / 1000 - 0.1,
+      removed_window_event_type: 'pane-died',
+    });
+    const fullSummary = api.terminalRemovalLatencySummaryForTest();
+    assert.equal(fullSummary.count, 1, 'full tmux signal snapshots also record removed-window latency');
+    assert.equal(fullSummary.last.target, '1:2', 'full snapshot latency names the removed window key');
+    assert.equal(fullSummary.last.origin, 'pane-died', 'full snapshot latency keeps the pane-death origin');
   });
 
   test('t@2147', () => {
@@ -1899,6 +1997,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/--file-tree-icon-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(sharedTreeCss), 'Finder/Differ icon boxes scale from the Finder font size');
     assert.equal(/--file-tree-row-control-size:\s*max\(18px/.test(sharedTreeCss), false, 'Finder/Differ row controls must not keep the old fixed 18px minimum');
     assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*flex:\s*0 0 var\(--file-tree-icon-size\)[\s\S]*font-size:\s*var\(--file-tree-icon-font-size\)[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered box that follows the Finder font size');
+    assert.ok(/\.file-tree-icon\.ui-disclosure-triangle\s*\{[^}]*flex:\s*0 0 var\(--file-tree-icon-size\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(sharedTreeCss), 'Finder/Tabber disclosure chevrons use the shared disclosure font size from the row font');
     assert.ok(/\.file-tree-agent \.agent-icon\s*\{[^}]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 3px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 1px\)/.test(sharedTreeCss), 'Finder/Differ AI markers scale with the Finder font size instead of pinning the row height');
     assert.ok(/\.file-tree-diff\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 6\.5ch[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ diff counts reserve one shared column before the git status badge');
     assert.ok(/\.file-tree-git-status\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ git status badges use the same centered box');

@@ -29,6 +29,7 @@ const {
   canonical,
   makeFileTree,
   test,
+  testAsync,
   runSuites,
   finishSuite,
 } = require('./layout_test_helper');
@@ -84,6 +85,64 @@ async function runLayoutAsyncSuite() {
       assert.equal(watchCalls.length, 1, 'adjacent watch-root syncs coalesce into one POST');
       assert.equal(watchCalls[0].method, 'POST', 'watch-root sync still sends the server registration');
     }
+
+    await testAsync('hidden Finder/Differ refresh work is skipped', async () => {
+      const hiddenApi = loadYolomuxWithFileExplorerClosed('', ['1']);
+      const hiddenSlots = hiddenApi.emptyLayoutSlots();
+      hiddenSlots.left = hiddenApi.paneStateWithTabs(['1'], '1');
+      hiddenApi.setLayoutSlotsForTest(hiddenSlots);
+      hiddenApi.setFileExplorerRootForTest('/repo');
+      hiddenApi.setFileExplorerExpandedForTest(['/repo/src']);
+      hiddenApi.setFileExplorerModeForTest('diff');
+      hiddenApi.setFileExplorerSessionFilesPayloadForTest({
+        session: '1',
+        loaded: true,
+        repos: [{repo: '/repo'}],
+        files: [{repo: '/repo', abs_path: '/repo/src/changed.js'}],
+        refs_by_repo: {},
+        errors: [],
+        from_ref: 'HEAD',
+        to_ref: 'current',
+      });
+      const hiddenState = hiddenApi.clientServerWatchStateForTest();
+      assert.deepStrictEqual(canonical(hiddenState.roots), [], 'hidden Finder/Differ does not register Finder tree or session-files roots');
+      assert.equal(Object.prototype.hasOwnProperty.call(hiddenState, 'session_files'), false, 'hidden Finder/Differ does not register session-files refresh work');
+      const hiddenCalls = [];
+      hiddenApi.setFetchForTest(url => {
+        hiddenCalls.push(String(url));
+        return Promise.reject(new Error(`hidden Finder/Differ should not fetch ${url}`));
+      });
+      await hiddenApi.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+      await hiddenApi.refreshWatchedFilesystemForTest({full: true});
+      assert.deepStrictEqual(hiddenCalls, [], 'hidden Finder/Differ skips session-files and tree refresh fetches');
+
+      const visibleApi = loadYolomux('', ['1']);
+      const visibleSlots = visibleApi.emptyLayoutSlots();
+      visibleSlots[visibleApi.layoutTreeKey] = visibleApi.splitNode('row', visibleApi.leafNode('left'), visibleApi.leafNode('right'));
+      visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.fileExplorerItemId], visibleApi.fileExplorerItemId);
+      visibleSlots.right = visibleApi.paneStateWithTabs(['1'], '1');
+      visibleApi.setLayoutSlotsForTest(visibleSlots);
+      visibleApi.setFileExplorerRootForTest('/repo');
+      visibleApi.setFileExplorerExpandedForTest(['/repo/src']);
+      visibleApi.setFileExplorerModeForTest('diff');
+      visibleApi.setFileExplorerSessionFilesPayloadForTest({
+        session: '1',
+        loaded: true,
+        repos: [{repo: '/repo'}],
+        files: [{repo: '/repo', abs_path: '/repo/src/changed.js'}],
+        refs_by_repo: {},
+        errors: [],
+        from_ref: 'HEAD',
+        to_ref: 'current',
+      });
+      const visibleState = visibleApi.clientServerWatchStateForTest();
+      assert.deepStrictEqual(canonical(visibleState.roots), ['/repo', '/repo/src'], 'visible Differ registers only session-files roots while the Finder tree is hidden');
+      assert.deepStrictEqual(canonical(visibleState.session_files), [{session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current', repo_refs: null}], 'visible Differ registers the current session-files request');
+      visibleApi.setFileExplorerModeForTest('tabber');
+      const tabberState = visibleApi.clientServerWatchStateForTest();
+      assert.deepStrictEqual(canonical(tabberState.roots), [], 'visible Tabber does not inherit hidden Finder/Differ roots');
+      assert.equal(Object.prototype.hasOwnProperty.call(tabberState, 'session_files'), false, 'visible Tabber does not register session-files work');
+    });
 
     {
       const api = loadYolomux('', ['1']);
@@ -1067,6 +1126,121 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const api = loadYolomux('', ['1', '2']);
+      api.setFileExplorerRootMode('sync', {sync: false});
+      api.setFileExplorerRootForTest('/home/test');
+      api.setTranscriptInfoForTest('1', {
+        project: {git: {cwd: '/home/test/project/1/src', root: '/home/test/project/1'}},
+        selected_pane: {current_path: '/home/test/project/1/src'},
+      });
+      api.setSessionFilesPayloadForTest({
+        session: '1',
+        repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
+        files: [
+          {repo: '/home/test/project/1', path: 'src/app.js', abs_path: '/home/test/project/1/src/app.js'},
+          {repo: '/home/test/project/2', path: 'README.md', abs_path: '/home/test/project/2/README.md'},
+        ],
+      });
+      assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
+        session: '1',
+        root: '/home/test/project',
+        expandPaths: [
+          '/home/test/project/1',
+          '/home/test/project/2',
+        ],
+        affectedDirs: [
+          '/home/test/project/1',
+          '/home/test/project/2',
+          '/home/test/project/1/src',
+        ],
+      }, 'Finder sync opens the nearest common project root and expands the active tab working repos under it');
+
+      api.setTranscriptInfoForTest('2', {
+        project: {git: {cwd: '/tmp/outside/src', root: '/tmp/outside'}},
+        selected_pane: {current_path: '/tmp/outside/src'},
+      });
+      api.setSessionFilesPayloadForTest({
+        session: '2',
+        repos: [{repo: '/tmp/outside'}, {repo: '/home/test/project/3'}],
+        files: [
+          {repo: '/tmp/outside', path: 'src/app.js', abs_path: '/tmp/outside/src/app.js'},
+          {repo: '/home/test/project/3', path: 'README.md', abs_path: '/home/test/project/3/README.md'},
+        ],
+      });
+      assert.equal(api.fileExplorerSyncPlanForTest('2').root, '/tmp/outside', 'mixed home and outside-home working paths outside home use the focused repo root');
+    }
+
+    {
+      const api = loadYolomux('', ['1', '2']);
+      api.setFileExplorerRootMode('sync', {sync: false});
+      api.setFileExplorerDirListingForTest('/home/test', [{name: 'project', kind: 'dir'}]);
+      api.setFileExplorerDirListingForTest('/home/test/project', [{name: '1', kind: 'dir'}, {name: '2', kind: 'dir'}, {name: '3', kind: 'dir'}]);
+      api.setFileExplorerDirListingForTest('/home/test/project/1', [{name: 'src', kind: 'dir'}]);
+      api.setFileExplorerDirListingForTest('/home/test/project/1/src', [{name: 'app.js', kind: 'file'}]);
+      api.setFileExplorerDirListingForTest('/home/test/project/2', [{name: 'README.md', kind: 'file'}]);
+      api.setFileExplorerDirListingForTest('/home/test/project/3', [{name: 'README.md', kind: 'file'}]);
+      assert.equal(await api.openFileExplorerAtForTest('/home/test', {syncSelection: true}), true);
+
+      api.setTranscriptInfoForTest('1', {
+        project: {git: {cwd: '/home/test/project/1/src', root: '/home/test/project/1'}},
+        selected_pane: {current_path: '/home/test/project/1/src'},
+      });
+      api.setSessionFilesPayloadForTest({
+        session: '1',
+        repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
+        files: [
+          {repo: '/home/test/project/1', path: 'src/app.js', abs_path: '/home/test/project/1/src/app.js'},
+          {repo: '/home/test/project/2', path: 'README.md', abs_path: '/home/test/project/2/README.md'},
+        ],
+      });
+      api.scheduleFileExplorerActiveTabSyncForTest('1', {explicit: true});
+      await flushAsyncWork();
+      await flushAsyncWork();
+      assert.equal(api.fileExplorerRootForTest(), '/home/test/project', 'syncing a home tab opens the nearest common project root');
+      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project/1',
+        '/home/test/project/2',
+      ], 'sync expands the working repo roots for the focused home tab');
+
+      const collapseParent = new TestElement('collapse-parent');
+      const collapseRow = new TestElement('collapse-row');
+      collapseParent.appendChild(collapseRow);
+      api.collapseDirectoryRowForTest(collapseRow, '/home/test/project/1', {manual: true});
+      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project/2',
+      ], 'manual collapse removes the collapsed folder from the active tab expanded set');
+
+      api.setTranscriptInfoForTest('2', {
+        project: {git: {cwd: '/home/test/project/3', root: '/home/test/project/3'}},
+        selected_pane: {current_path: '/home/test/project/3'},
+      });
+      api.setSessionFilesPayloadForTest({
+        session: '2',
+        repos: [{repo: '/home/test/project/3'}],
+        files: [{repo: '/home/test/project/3', path: 'README.md', abs_path: '/home/test/project/3/README.md'}],
+      });
+      api.scheduleFileExplorerActiveTabSyncForTest('2', {explicit: true});
+      await flushAsyncWork();
+      await flushAsyncWork();
+      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'focusing another tab swaps to the single-repo root without carrying previous expanded folders');
+
+      api.setSessionFilesPayloadForTest({
+        session: '1',
+        repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
+        files: [
+          {repo: '/home/test/project/1', path: 'src/app.js', abs_path: '/home/test/project/1/src/app.js'},
+          {repo: '/home/test/project/2', path: 'README.md', abs_path: '/home/test/project/2/README.md'},
+        ],
+      });
+      api.scheduleFileExplorerActiveTabSyncForTest('1', {explicit: true});
+      await flushAsyncWork();
+      await flushAsyncWork();
+      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project/2',
+      ], 'returning to the tab restores its in-memory state without auto-reopening the manually collapsed working folder');
+    }
+
+    {
       const api = loadYolomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
@@ -1563,6 +1737,58 @@ async function runLayoutAsyncSuite() {
       const cachedInfo = await api.fetchFilePathInfoForTest('/home/test');
       assert.strictEqual(cachedInfo, firstInfo, 'completed path-info lookup is reused by the short TTL cache');
       assert.equal(calls.length, 1, 'short TTL cache avoids an immediate repeat path-info lookup');
+    }
+
+    {
+      const deleteCalls = [];
+      const runDelete = async ({path, kind = 'dir', count = 0, confirmResponses = [true], fetchRejectsCount = false, role = 'admin'}) => {
+        const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', role, {fireAllTimeouts: true});
+        const confirms = [];
+        api.setConfirmForTest(message => {
+          confirms.push(String(message));
+          return confirmResponses.length ? confirmResponses.shift() : true;
+        });
+        api.setFetchForTest((url, options = {}) => {
+          const text = String(url || '');
+          deleteCalls.push({url: text, method: options.method || 'GET', body: options.body || ''});
+          if (text.startsWith('/api/fs/count')) {
+            if (fetchRejectsCount) return Promise.reject(new Error('count failed'));
+            return Promise.resolve(jsonResponse({path, kind: 'dir', files: count, recursive: true}));
+          }
+          if (text.startsWith('/api/fs/delete')) return Promise.resolve(jsonResponse({deleted: true, path}));
+          if (text.startsWith('/api/session-files')) return Promise.resolve(jsonResponse({loaded: true, files: [], repos: [], errors: []}));
+          if (text.startsWith('/api/fs/batch')) {
+            const body = JSON.parse(options.body || '{}');
+            return Promise.resolve(jsonResponse({responses: (body.requests || []).map(request => ({id: request.id, ok: true, payload: {path: request.path, entries: [], kind: 'dir'}}))}));
+          }
+          return Promise.resolve(jsonResponse({ok: true}));
+        });
+        await api.deleteFileTreePathForTest(path, {kind, name: path.split('/').pop()}, [path]);
+        return {confirms, calls: deleteCalls.splice(0)};
+      };
+
+      let result = await runDelete({path: '/home/test/small', count: 5, confirmResponses: [true]});
+      assert.equal(result.confirms.length, 1, 'directory with five files uses only the normal delete confirm');
+      assert.equal(result.calls.some(call => call.url.startsWith('/api/fs/delete')), true, 'small directory delete proceeds after the normal confirm');
+
+      result = await runDelete({path: '/home/test/big', count: 6, confirmResponses: [true, false]});
+      assert.equal(result.confirms.length, 2, 'large directory gets a second count-aware confirm');
+      assert.ok(result.confirms[1].includes('You have 6 files in this directory, CONFIRM?') && result.confirms[1].includes('/home/test/big'), 'second confirm shows the file count and directory path');
+      assert.equal(result.calls.some(call => call.url.startsWith('/api/fs/delete')), false, 'cancelling the second confirm aborts the whole delete');
+
+      result = await runDelete({path: '/home/test/file.txt', kind: 'file', count: 99, confirmResponses: [true]});
+      assert.equal(result.confirms.length, 1, 'single file delete still has only one confirm');
+      assert.equal(result.calls.some(call => call.url.startsWith('/api/fs/count')), false, 'single file delete does not fetch a directory count');
+      assert.equal(result.calls.some(call => call.url.startsWith('/api/fs/delete')), true, 'single file delete proceeds unchanged');
+
+      result = await runDelete({path: '/home/test/unknown', count: 0, confirmResponses: [true, false], fetchRejectsCount: true});
+      assert.equal(result.confirms.length, 2, 'directory count failure falls back to a generic second confirm');
+      assert.ok(result.confirms[1].includes('Could not count files in this directory, CONFIRM delete?'), 'count failure still requires an explicit safety confirm');
+      assert.equal(result.calls.some(call => call.url.startsWith('/api/fs/delete')), false, 'declining the fallback confirm aborts delete');
+
+      result = await runDelete({path: '/home/test/readonly', count: 10, confirmResponses: [true, true], role: 'readonly'});
+      assert.equal(result.confirms.length, 0, 'readonly mode blocks delete before any confirm');
+      assert.equal(result.calls.length, 0, 'readonly mode blocks delete before count or delete requests');
     }
 
     {

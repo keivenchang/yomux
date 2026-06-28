@@ -334,6 +334,19 @@ def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
     assert "&lt;" not in fmt
 
 
+def test_main_page_bootstrap_defers_preferences_metadata():
+    page = web.html_page([])
+    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    parsed = json.loads(match.group(1))
+    settings_payload = parsed["settingsPayload"]
+
+    assert settings_payload["deferred_metadata"] is True
+    assert "settings" in settings_payload
+    assert "defaults" in settings_payload
+    assert "catalog" not in settings_payload
+    assert "choices" not in settings_payload
+
+
 def test_main_page_has_logout_button():
     page = web.html_page([])
 

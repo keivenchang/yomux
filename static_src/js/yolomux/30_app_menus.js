@@ -812,6 +812,15 @@ function flushPendingSessionButtonsRender() {
 }
 
 function renderSessionButtons(options = {}) {
+  const perf = clientPerfStart('renderSessionButtons');
+  try {
+    return renderSessionButtonsMeasured(options);
+  } finally {
+    clientPerfEnd(perf, {nodes: sessionButtons?.childElementCount || 0});
+  }
+}
+
+function renderSessionButtonsMeasured(options = {}) {
   if (!sessionButtons) return;
   if (!options.force && appMenuIsOpen()) {
     scheduleTopbarMetricsUpdate();

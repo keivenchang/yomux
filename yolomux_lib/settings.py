@@ -343,6 +343,7 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "auto_approve_interval_seconds"): 0.5,
     ("share", "max_viewers"): 5,
     ("performance", "agent_window_cooldown_seconds"): 0,
+    ("uploads", "max_bytes"): 20 * 1024 * 1024,
 }
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {

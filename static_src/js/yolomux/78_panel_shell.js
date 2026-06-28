@@ -3,6 +3,15 @@
 // Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers split from 80_panes_preferences.js.
 
 function renderPanels(previousActive = [], options = {}) {
+  const perf = clientPerfStart('renderPanels');
+  try {
+    return renderPanelsMeasured(previousActive, options);
+  } finally {
+    clientPerfEnd(perf, {nodes: grid?.childElementCount || 0});
+  }
+}
+
+function renderPanelsMeasured(previousActive = [], options = {}) {
   if (renderPanelsDockview(previousActive, options)) return;
   // a full panel re-render pools every panel and clears the grid, which detaches
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
@@ -358,6 +367,15 @@ function renderEmptyPane(slot) {
 }
 
 function renderPaneTabStrips() {
+  const perf = clientPerfStart('renderPaneTabStrips');
+  try {
+    return renderPaneTabStripsMeasured();
+  } finally {
+    clientPerfEnd(perf, {nodes: document.querySelectorAll?.('.pane-tab')?.length || 0});
+  }
+}
+
+function renderPaneTabStripsMeasured() {
   if (dockviewLayoutActive()) {
     dockviewRefreshTabs();
     dockviewSyncMountedPanels();
@@ -1524,7 +1542,7 @@ function updateTmuxWindowBarActiveButtons(session, windowIndex) {
 }
 
 function refreshTabberPanelsForTmuxWindowChange() {
-  if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+  if (fileExplorerMode === 'tabber' && itemIsActivePaneTab(fileExplorerItemId) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
 }
 
 function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
@@ -1818,7 +1836,7 @@ function tmuxWindowButtonHtml(options = {}) {
   const agentStatus = options.agentStatus || null;
   const activityIconHtml = options.activityIconHtml !== undefined
     ? String(options.activityIconHtml || '')
-    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '');
+    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false});
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
   const numberLabel = String(options.numberLabel || options.indexText || visibleName);
   const numberHtml = options.showNumberLabel === false ? '' : `<span class="tmux-window-number-label">${esc(numberLabel)}</span>`;

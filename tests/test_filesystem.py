@@ -681,6 +681,22 @@ def test_delete_path_removes_directory_tree(tmp_path):
     assert not target.exists()
 
 
+def test_count_directory_files_counts_recursive_regular_files(tmp_path):
+    target = tmp_path / "dir"
+    nested = target / "nested"
+    nested.mkdir(parents=True)
+    (target / "a.txt").write_text("alpha", encoding="utf-8")
+    (nested / "b.txt").write_text("bravo", encoding="utf-8")
+    os.mkfifo(target / "pipe")
+    os_symlink = getattr(os, "symlink", None)
+    if os_symlink:
+        os_symlink(target / "a.txt", target / "a-link.txt")
+
+    result = filesystem.count_directory_files(str(target))
+
+    assert result == {"path": str(target), "kind": "dir", "files": 2, "recursive": True}
+
+
 def test_path_info_returns_git_relative_path(tmp_path):
     git(tmp_path, "init")
     target = tmp_path / "src" / "main.py"

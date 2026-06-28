@@ -81,23 +81,28 @@
 .ui-disclosure-triangle,
 .info-tree-group summary::before,
 .yoagent-message-details summary::before {
+  --disclosure-triangle-box-size: 1.333333em;
+  --disclosure-triangle-font-size: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: 1em;
-  block-size: 1em;
-  flex: 0 0 1em;
+  inline-size: var(--disclosure-triangle-box-size);
+  block-size: var(--disclosure-triangle-box-size);
+  flex: 0 0 var(--disclosure-triangle-box-size);
   color: var(--disclosure-triangle-collapsed-color);
   font: inherit;
-  font-size: 1em;
+  font-size: var(--disclosure-triangle-font-size);
   font-weight: 800;
   line-height: 1;
   text-align: center;
+  transform-origin: center;
+  transition: color 120ms ease, opacity 120ms ease, transform 120ms ease;
 }
 .ui-disclosure-triangle[data-disclosure-expanded="true"],
 .info-tree-group[open] > summary::before,
 .yoagent-message-details[open] summary::before {
   color: var(--disclosure-triangle-expanded-color);
+  transform: rotate(90deg);
 }
 .js-debug-graph-view {
   --js-debug-idle-agent-status: #3f4754;
@@ -162,8 +167,8 @@ body.theme-light .js-debug-graph-view {
   white-space: pre;
 }
 .js-debug-graph {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   min-width: 0;
   min-height: 180px;
@@ -173,10 +178,11 @@ body.theme-light .js-debug-graph-view {
   background: var(--panel);
 }
 .js-debug-graph--empty {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 180px;
 }
 .js-debug-graph-controls {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
@@ -265,13 +271,42 @@ body.theme-light .js-debug-graph-view {
   cursor: pointer;
 }
 .js-debug-graph-meta {
+  flex: 0 0 auto;
   min-width: 0;
   color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1.25 var(--mono-font);
   overflow-wrap: anywhere;
 }
+.js-debug-client-perf {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 68%, transparent);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--mono-font);
+}
+.js-debug-client-perf-title {
+  color: var(--text);
+}
+.js-debug-client-perf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 2px 10px;
+  min-width: 0;
+}
+.js-debug-client-perf-row {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .js-debug-chart-shell {
   display: grid;
+  flex: 1 1 auto;
   grid-template-rows: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
@@ -411,6 +446,10 @@ body.theme-light .js-debug-graph-view {
   fill: rgb(var(--js-debug-bad-connection-rgb) / 0.28);
   pointer-events: none;
 }
+.js-debug-no-data-range {
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.12);
+  pointer-events: none;
+}
 .js-debug-graph--hovering .js-debug-hover-line {
   opacity: 1;
 }
@@ -546,6 +585,8 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-graph-empty {
   display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
   place-items: center;
   color: var(--muted);
   font: 600 var(--ui-font-size-sm)/1.2 var(--ui-font);

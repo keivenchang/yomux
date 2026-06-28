@@ -8,6 +8,7 @@ function paneFrameControlsHtml(session, options = {}) {
   const includeDetails = options.details === true;
   const includeMinimize = options.minimize !== false;
   const includeExpand = options.expand !== false;
+  const includePopout = options.popout === true;
   if (includeActions) {
     controls.push(disabled
       ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
@@ -18,6 +19,11 @@ function paneFrameControlsHtml(session, options = {}) {
     controls.push(disabled
       ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
       : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
+  }
+  if (includePopout) {
+    controls.push(disabled
+      ? `<button class="tab pane-popout" ${disabledAttrs('Pop out tab')}></button>`
+      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="Pop out tab" aria-label="Pop out tab"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -85,9 +91,9 @@ function panelControlsHtml(session, options = {}) {
         </div>`;
 }
 
-function virtualPanelControlsHtml(session) {
+function virtualPanelControlsHtml(session, options = {}) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
-          ${paneFrameControlsHtml(session, {actions: false, close: false})}
+          ${paneFrameControlsHtml(session, {actions: false, close: false, ...options})}
         </div>`;
 }
 
@@ -1421,19 +1427,24 @@ function infoRecordLinearDescHtml(record) {
   return highlight ? infoSearchHighlightHtml(title) : esc(title);
 }
 
+function infoFieldLabel(kind) {
+  const labels = {
+    path: 'info.field.path',
+    branch: 'info.field.gitBranch',
+    pr: 'info.field.githubPr',
+    linear: 'info.field.linear',
+    tab: 'info.field.tabTmuxSession',
+    ai: 'info.field.tmuxSubWindow',
+    'tmux-window': 'info.field.tmuxSubWindow',
+    updated: 'info.field.updated',
+  };
+  return t(labels[kind] || kind);
+}
+
 function infoRecordFieldHtml(kind, html, title = '') {
   if (!html) return '';
-  const labels = {
-    path: 'path',
-    branch: 'Git branch',
-    pr: 'GitHub PR',
-    linear: 'Linear',
-    tab: 'Tab(tmux session)',
-    ai: 'tmux sub-window',
-    updated: 'updated',
-  };
   const titleAttr = title ? ` title="${esc(title)}"` : '';
-  const label = labels[kind] || kind;
+  const label = infoFieldLabel(kind);
   return `<div class="info-tree-field info-tree-field-${esc(kind)}"${titleAttr}>
       <span class="info-tree-field-label">${esc(label)}:</span>
       <span class="info-tree-field-value">${html}</span>
@@ -1505,7 +1516,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
+  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true, animate: false});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
@@ -1538,6 +1549,7 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
     active,
     agentStatus: agent,
     agentKey: record.aiKind,
+    activityAnimate: false,
     title,
     attrs,
     ariaPressed: options.action !== false,
@@ -1640,10 +1652,7 @@ function infoGroupChildCountHtml(group = {}) {
 }
 
 function infoGroupDimensionLabel(key) {
-  if (key === 'tab') return 'Tab(tmux session):';
-  if (key === 'tmux-window') return 'tmux sub-window:';
-  if (key === 'branch') return 'Git branch:';
-  if (key === 'pr') return 'GitHub PR:';
+  if (key === 'tab' || key === 'tmux-window' || key === 'branch' || key === 'pr') return `${infoFieldLabel(key)}:`;
   return `${infoDimensionLabel(key)}:`;
 }
 
@@ -1688,37 +1697,81 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
   return `<div class="info-tree" data-info-grouping="${esc(normalizeInfoGrouping(grouping).join(','))}" data-info-sort="${esc(`${normalizedSort.key}:${normalizedSort.dir}`)}" data-info-search="${esc(infoSearch.trim())}">${childrenHtml}</div>`;
 }
 
-function renderInfoPanel() {
+function infoPanelRenderVisible() {
+  return activePaneItems().includes(infoItemId);
+}
+
+function infoPanelRenderSignature() {
+  return JSON.stringify({
+    loading: transcriptMetaLoading,
+    loaded: transcriptMetaLoaded,
+    error: transcriptMetaLoadError,
+    search: infoSearch,
+    grouping: infoGrouping,
+    sort: infoSort,
+    meta: transcriptMeta,
+  });
+}
+
+function renderInfoPanel(options = {}) {
   const node = document.getElementById('info-content');
   if (!node) return;
+  if (options.force !== true && !infoPanelRenderVisible()) {
+    infoPanelRenderPending = true;
+    recordClientPerfCounter('renderInfoPanel', 0, {skipped: 1});
+    return;
+  }
+  infoPanelRenderPending = false;
+  let renderedNodes = 0;
+  const perf = clientPerfStart('renderInfoPanel');
+  try {
+    return renderInfoPanelMeasured(node, options);
+  } finally {
+    renderedNodes = node.querySelectorAll?.('.info-tree-record, .info-tree-group')?.length || 0;
+    clientPerfEnd(perf, {nodes: renderedNodes});
+  }
+}
+
+function renderInfoPanelMeasured(node, options = {}) {
   const renderInfoContent = html => {
     node.innerHTML = html;
     if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
+    if (typeof refreshPanePopouts === 'function') refreshPanePopouts(infoItemId);
   };
   syncTranscriptMetaLoadingUi();
+  const signature = infoPanelRenderSignature();
+  if (options.force !== true && signature === infoPanelLastRenderSignature && infoPanelLastRenderHtml) {
+    renderInfoContent(infoPanelLastRenderHtml);
+    return;
+  }
+  const commitInfoContent = html => {
+    infoPanelLastRenderSignature = signature;
+    infoPanelLastRenderHtml = html;
+    renderInfoContent(html);
+  };
   const allRecords = infoRelationshipRecords();
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      renderInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
+      commitInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
       return;
     }
     if (transcriptMetaLoading) {
-      renderInfoContent(infoMetadataLoadingHtml());
+      commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
     if (transcriptMetaLoadError) {
-      renderInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
+      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
-      renderInfoContent(infoMetadataLoadingHtml());
+      commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
-    renderInfoContent(`<div class="info-empty">${esc(t('info.empty'))}</div>`);
+    commitInfoContent(`<div class="info-empty">${esc(t('info.empty'))}</div>`);
     return;
   }
-  renderInfoContent(infoTreeHtml(records, infoGrouping, infoSort));
+  commitInfoContent(infoTreeHtml(records, infoGrouping, infoSort));
 }
 
 function infoPrCellHtml(row) {
@@ -2210,7 +2263,7 @@ function applyShareInfoState(info = {}) {
   }
   if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
   refreshInfoGroupingControls();
-  renderInfoPanel();
+  renderInfoPanel({force: true});
   restoreShareScrollTargetByKey('info');
 }
 
@@ -2743,14 +2796,22 @@ function insertIntoTerminal(session, text) {
     return sent;
   }
   if (item.socket?.readyState !== WebSocket.OPEN) return false;
+  const sendPerf = clientPerfStart('wsSend');
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
+  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
+  item.lastInputSentAt = clientPerfNow();
   if (autoFocusEnabled) item.term?.focus?.();
   return true;
 }
 
 function noteTerminalExplicitInput(session) {
+  const item = terminals.get(session);
+  if (item) {
+    item.lastExplicitInputMark = clientPerfMark(`terminal-keydown:${session}`);
+    item.lastExplicitInputAt = clientPerfNow();
+  }
   noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
+  setFocusedTerminal(session, {userInitiated: true, syncFinder: false});
 }
 
 function terminalDataWithoutPassiveReports(data) {
@@ -2906,7 +2967,7 @@ function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, opti
   if (options.render !== false) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
-    if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+    if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
   return true;
 }
@@ -2925,7 +2986,7 @@ function applyTmuxSignalActiveWindowsToTranscriptInfo(payload = {}) {
   if (changed) {
     for (const session of seen) updatePanelHeader(session, transcriptMeta.sessions?.[session]);
     renderInfoPanel();
-    if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+    if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
   return changed;
 }
@@ -3042,20 +3103,36 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
 }
 
 function handleTerminalData(session, data, options = {}) {
+  const perf = clientPerfStart('term.onData');
+  try {
+    return handleTerminalDataMeasured(session, data, options);
+  } finally {
+    clientPerfEnd(perf, {bytes: jsDebugByteLength(data)});
+  }
+}
+
+function handleTerminalDataMeasured(session, data, options = {}) {
   if (readOnlyMode && !shareWriteMode) return false;
   const filtered = stripTerminalQueryResponses(data);
   if (!filtered) return false;
+  const current = terminals.get(session);
+  if (current?.lastExplicitInputMark) {
+    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: jsDebugByteLength(filtered)});
+    current.lastExplicitInputMark = '';
+  }
   if (shareReplayShellActive && shareWriteMode) {
     acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
     shareSendTerminalInputIntent(session, filtered);
     return true;
   }
-  const current = terminals.get(session);
   const socket = current?.socket;
   if (socket?.readyState !== WebSocket.OPEN) return false;
   observeTerminalTmuxPrefixWindowSwitches(session, filtered);
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
+  const sendPerf = clientPerfStart('wsSend');
   socket.send(JSON.stringify({type: 'input', data: filtered}));
+  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
+  current.lastInputSentAt = clientPerfNow();
   return true;
 }
 
@@ -3221,7 +3298,7 @@ function activateTab(session, name, options = {}) {
   if (name === 'terminal') {
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
-    scheduleTerminalBlankScreenRefresh(session);
+    scheduleTerminalBlankScreenRefresh(session, {reason: 'terminal-tab'});
     if (options.userInitiated) focusTerminalFromUserAction(session);
     else focusTerminalWhenAutoFocus(session, 25);
   } else {
@@ -3322,11 +3399,13 @@ function connectTerminalSocket(session, item) {
   item.socket = socket;
   item.manualClose = false;
   socket.onopen = () => {
+    clearTerminalRemovalLatency('session', session);
+    item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
     dismissTerminalConnectionToasts(session);
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
-      scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
       if (!shareViewMode) scheduleRemoteResize(session, shareRemoteResizeAfterSocketOpenMs);
     }
     updateTypingIndicator(session);
@@ -3336,6 +3415,13 @@ function connectTerminalSocket(session, item) {
   socket.onmessage = event => {
     if (terminals.get(session) !== item || !item.term) return;
     try {
+      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : jsDebugByteLength(event.data);
+      const inputSentAt = Number(item.lastInputSentAt || 0);
+      if (inputSentAt > 0) {
+        recordClientPerfCounter('echoToTermWrite', clientPerfNow() - inputSentAt, {bytes: dataBytes});
+        item.lastInputSentAt = 0;
+      }
+      const writePerf = clientPerfStart('xtermWrite');
       if (shareViewMode) {
         handleShareViewSocketMessage(session, item, event.data);
       } else if (event.data instanceof ArrayBuffer) {
@@ -3343,22 +3429,25 @@ function connectTerminalSocket(session, item) {
       } else {
         item.term.write(String(event.data));
       }
-      item.fileUnderlineController?.schedule?.();
-      scheduleTerminalBlankScreenRefresh(session);
+      clientPerfEnd(writePerf, {bytes: dataBytes});
+      const firstOutput = item.terminalOutputSeen !== true;
+      item.terminalOutputSeen = true;
+      item.fileUnderlineController?.schedule?.({reason: 'output'});
+      if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
       scheduleTerminalAttentionHighlight(session);
     } catch (_) {
       if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
   };
-  socket.onclose = () => {
+  socket.onclose = event => {
     if (item.manualClose || terminals.get(session) !== item) return;
     postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
     clearFocusedTerminal(session);
     updateStatus();
     refreshTrackedSessionChrome(session);
-    // Roster-confirm before reconnecting: a killed session is pruned immediately, a transient
-    // disconnect reconnects as before.
-    confirmSessionGoneOrReconnect(session, item);
+    // Confirm once before reconnecting: a dead tmux session is pruned without the old reconnect
+    // backoff loop, while a live session still reconnects after a transient close.
+    confirmSessionGoneOrReconnect(session, item, event);
   };
   socket.onerror = () => {
     updateTypingIndicator(session);
@@ -3518,6 +3607,8 @@ function startTerminal(session) {
     shareTerminalSkippedResetCount: 0,
     blankScreenRefreshTimer: 0,
     blankScreenRefreshAttempts: 0,
+    attentionHighlightFrame: 0,
+    terminalOutputSeen: false,
     fileUnderlineController: null,
   };
   terminals.set(session, item);
@@ -3618,19 +3709,17 @@ async function setAutoApprove(session, enabled) {
 }
 
 async function refreshAutoStatuses() {
-  await loadAutoStatuses();
+  const result = await loadAutoStatuses({render: false});
+  renderAutoApproveStatusSurfaces(result);
   bindClipboardPaste();
-  renderAutoApproveButtons();
-  updateSessionButtonStates();
-  refreshActivePanelHeaders();
-  trackSessionStateChanges();
   refreshOpenEventLogs();
 }
 
-async function loadAutoStatuses() {
+async function loadAutoStatuses(options = {}) {
+  let result = null;
   try {
     const payload = await apiFetchJson('/api/auto-approve');
-    applyAutoApprovePayload(payload);
+    result = applyAutoApprovePayload(payload, options);
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -3638,15 +3727,34 @@ async function loadAutoStatuses() {
         autoApproveStates.set(session, payload);
       } catch (_) {}
     }
+    result = {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
-  updateDocumentTitle();
+  if (options.render !== false && !result?.rendered) renderAutoApproveStatusSurfaces(result);
+  return result;
+}
+
+function renderAutoApproveStatusSurfaces(result = {}) {
+  const perf = clientPerfStart('autoStatusRender');
+  try {
+    if (result?.sessionsChanged) renderPanels(result.previousActive || activeSessions.slice());
+    else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+    updateDocumentTitle();
   // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
-  renderAutoApproveButtons();
+    renderAutoApproveButtons();
+    updateSessionButtonStates();
+    refreshActivePanelHeaders();
+    trackSessionStateChanges();
+    syncTerminalAttentionHighlights();
+    scheduleShareUiStatePublish();
+    if (result && typeof result === 'object') result.rendered = true;
+  } finally {
+    clientPerfEnd(perf, {sessions: sessions.length});
+  }
 }
 
-function applyAutoApprovePayload(payload) {
+function applyAutoApprovePayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const previousActive = activeSessions.slice();
   const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
@@ -3658,16 +3766,10 @@ function applyAutoApprovePayload(payload) {
     const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
     autoApproveStates.set(session, state);
   }
-  if (sessionsChanged) renderPanels(previousActive);
-  else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
-  updateDocumentTitle();
-  renderAutoApproveButtons();
-  updateSessionButtonStates();
-  refreshActivePanelHeaders();
-  trackSessionStateChanges();
-  syncTerminalAttentionHighlights();
-  scheduleShareUiStatePublish();
-  return true;
+  const result = {applied: true, sessionsChanged, previousActive};
+  if (options.render === false) return result;
+  renderAutoApproveStatusSurfaces(result);
+  return result;
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -4553,6 +4655,7 @@ async function boot() {
   }
   bindClipboardPaste();
   paintInitialAppShell();
+  scheduleDeferredSettingsMetadataRefresh();
   if (!shareViewMode) {
     await refreshTranscripts({refreshAuto: false});
   } else {
@@ -4764,7 +4867,9 @@ function tmuxSignalsPayloadWithPatch(data) {
   if (!data || typeof data !== 'object' || data.patch !== true) return data;
   if (!tmuxSignalState || typeof tmuxSignalState !== 'object' || !Array.isArray(tmuxSignalState.windows)) return data;
   const nextByKey = new Map(tmuxSignalState.windows.map(windowRecord => [tmuxSignalWindowKey(windowRecord), windowRecord]).filter(([key]) => key));
-  for (const key of data.removed_window_keys || []) nextByKey.delete(String(key || ''));
+  for (const key of data.removed_window_keys || []) {
+    nextByKey.delete(String(key || ''));
+  }
   for (const windowRecord of data.windows || []) {
     const key = tmuxSignalWindowKey(windowRecord);
     if (key) nextByKey.set(key, windowRecord);
@@ -4777,10 +4882,26 @@ function tmuxSignalsPayloadWithPatch(data) {
   };
 }
 
+function recordTmuxSignalRemovedWindowLatencies(data) {
+  if (!data || typeof data !== 'object') return;
+  const removedWindowEventAt = Number(data.removed_window_event_at);
+  const removedWindowEventType = String(data.removed_window_event_type || '');
+  for (const key of data.removed_window_keys || []) {
+    const windowKey = String(key || '');
+    if (!windowKey) continue;
+    completeTerminalRemovalLatencyFromEpochSeconds('window', windowKey, removedWindowEventAt, {
+      origin: removedWindowEventType || 'tmux-signal',
+      eventType: removedWindowEventType,
+      reason: data.patch === true ? 'tmux-signal-patch' : 'tmux-signal-snapshot',
+    });
+  }
+}
+
 function applyTmuxSignalsPayload(payload = {}) {
   const rawData = tmuxSignalsPayloadWithPatch(tmuxSignalPayloadData(payload));
   const data = tmuxSignalsPayloadWithWindowOverrides(rawData);
   if (!data || typeof data !== 'object') return null;
+  recordTmuxSignalRemovedWindowLatencies(data);
   tmuxSignalState = data;
   applyTmuxSignalActiveWindowsToTranscriptInfo(data);
   confirmTmuxWindowActiveOverridesFromRawSignals(rawData);
@@ -4788,7 +4909,39 @@ function applyTmuxSignalsPayload(payload = {}) {
   return data;
 }
 
+function clientPushEventSessionKey(payload = {}) {
+  return String(payload.session || payload.request?.session || payload.data?.session || payload.data?.target || '');
+}
+
+function clientPushEventCoalesceKey(type, payload = {}) {
+  const key = String(type || 'event');
+  const session = clientPushEventSessionKey(payload);
+  if (session) return `${key}:${session}`;
+  return key;
+}
+
+function queueClientPushEvent(type, payload = {}) {
+  const key = clientPushEventCoalesceKey(type, payload);
+  clientPushEventQueue.set(key, {type, payload});
+  if (clientPushEventFrame) return;
+  clientPushEventFrame = requestAnimationFrame(() => {
+    clientPushEventFrame = 0;
+    flushQueuedClientPushEvents();
+  });
+}
+
+function flushQueuedClientPushEvents() {
+  const events = Array.from(clientPushEventQueue.values());
+  clientPushEventQueue.clear();
+  recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
+  for (const event of events) handleClientPushEventNow(event.type, event.payload);
+}
+
 function handleClientPushEvent(type, payload = {}) {
+  queueClientPushEvent(type, payload);
+}
+
+function handleClientPushEventNow(type, payload = {}) {
   if (type === 'update_available') {
     applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
     return;

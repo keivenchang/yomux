@@ -219,6 +219,133 @@ function shareReplayFeatureEnabled() {
   return shareReplayEnabled === true;
 }
 
+function shareHostConnectedViewerCount() {
+  if (shareViewMode) return 0;
+  return (activeShares || []).reduce((total, share) => {
+    const count = Math.max(0, Math.floor(Number(share?.viewers) || 0));
+    const details = Array.isArray(share?.viewerDetails) ? share.viewerDetails.length : 0;
+    return total + Math.max(count, details);
+  }, 0);
+}
+
+function shareHostHasConnectedViewers() {
+  return shareHostConnectedViewerCount() > 0;
+}
+
+function shareReplayHostPerfCounter() {
+  return {
+    count: 0,
+    totalMs: 0,
+    maxMs: 0,
+    lastMs: null,
+    lastAt: 0,
+    skippedNoViewers: 0,
+    lastSkipAt: 0,
+    lastViewerCount: 0,
+    lastDetail: {},
+  };
+}
+
+const shareReplayHostPerformance = {
+  geometryDigest: shareReplayHostPerfCounter(),
+  mutationRecords: shareReplayHostPerfCounter(),
+  mutationFlush: shareReplayHostPerfCounter(),
+  mutationObserver: {
+    installed: 0,
+    disconnected: 0,
+    skippedNoViewers: 0,
+    lastAt: 0,
+    lastSkipAt: 0,
+    active: false,
+  },
+};
+
+function shareReplayHostPerfNow() {
+  const value = globalThis.performance?.now?.();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function shareReplayHostPerfMs(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
+}
+
+function shareReplayDebugPerfEventsEnabled() {
+  return typeof debugModeEnabled !== 'undefined'
+    && debugModeEnabled === true
+    && typeof recordJsDebugEvent === 'function';
+}
+
+function shareReplayRecordHostPerfEvent(kind = '', payload = {}, durationMs = null) {
+  if (!shareReplayDebugPerfEventsEnabled()) return;
+  if (durationMs !== null && durationMs < 8 && kind !== 'geometryDigest') return;
+  recordJsDebugEvent('share-replay-perf', {
+    kind,
+    ...payload,
+  });
+}
+
+function shareReplayRecordHostPerfSkip(kind = '', reason = 'no-viewers') {
+  const counter = shareReplayHostPerformance[kind];
+  if (!counter) return;
+  counter.skippedNoViewers = Math.max(0, Math.round(Number(counter.skippedNoViewers) || 0)) + 1;
+  counter.lastSkipAt = Date.now();
+  counter.lastViewerCount = shareHostConnectedViewerCount();
+  shareReplayRecordHostPerfEvent(kind, {
+    reason,
+    viewerCount: counter.lastViewerCount,
+    skippedNoViewers: counter.skippedNoViewers,
+  });
+}
+
+function shareReplayRecordHostPerf(kind = '', startedAt = 0, detail = {}) {
+  const counter = shareReplayHostPerformance[kind];
+  if (!counter) return;
+  const durationMs = shareReplayHostPerfMs(shareReplayHostPerfNow() - Number(startedAt || 0)) ?? 0;
+  counter.count += 1;
+  counter.totalMs = shareReplayHostPerfMs(Number(counter.totalMs || 0) + durationMs) ?? 0;
+  counter.maxMs = Math.max(Number(counter.maxMs || 0), durationMs);
+  counter.lastMs = durationMs;
+  counter.lastAt = Date.now();
+  counter.lastViewerCount = shareHostConnectedViewerCount();
+  counter.lastDetail = {...detail};
+  shareReplayRecordHostPerfEvent(kind, {
+    durationMs,
+    viewerCount: counter.lastViewerCount,
+    ...detail,
+  }, durationMs);
+}
+
+function shareReplayHostPerfSnapshot(counter = {}) {
+  const count = Math.max(0, Math.round(Number(counter.count) || 0));
+  const totalMs = shareReplayHostPerfMs(counter.totalMs) ?? 0;
+  return {
+    count,
+    totalMs,
+    avgMs: count ? shareReplayHostPerfMs(totalMs / count) : null,
+    maxMs: shareReplayHostPerfMs(counter.maxMs) ?? 0,
+    lastMs: counter.lastMs,
+    lastAt: Math.max(0, Math.round(Number(counter.lastAt) || 0)),
+    skippedNoViewers: Math.max(0, Math.round(Number(counter.skippedNoViewers) || 0)),
+    lastSkipAt: Math.max(0, Math.round(Number(counter.lastSkipAt) || 0)),
+    lastViewerCount: Math.max(0, Math.round(Number(counter.lastViewerCount) || 0)),
+    lastDetail: {...(counter.lastDetail || {})},
+  };
+}
+
+function shareReplayHostPerformanceDiagnostics() {
+  return {
+    viewerCount: shareHostConnectedViewerCount(),
+    mutationObserver: {
+      ...shareReplayHostPerformance.mutationObserver,
+      active: Boolean(shareReplayMutationObserver),
+    },
+    geometryDigest: shareReplayHostPerfSnapshot(shareReplayHostPerformance.geometryDigest),
+    mutationRecords: shareReplayHostPerfSnapshot(shareReplayHostPerformance.mutationRecords),
+    mutationFlush: shareReplayHostPerfSnapshot(shareReplayHostPerformance.mutationFlush),
+  };
+}
+
 function shareReplayHostNodeId(node) {
   if (!node || (typeof node !== 'object' && typeof node !== 'function') || (typeof Node !== 'undefined' && !(node instanceof Node) && !node.localName && !node.tagName && Number(node.nodeType) !== 3)) {
     return 0;
@@ -1077,10 +1204,22 @@ function shareReplayMutationEntries(records = []) {
   return entries;
 }
 
-function shareReplayEnqueueMutationRecords(records = []) {
+function shareReplayEnqueueMutationRecords(records = [], options = {}) {
   if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused) return [];
-  const entries = shareReplayMutationEntries(records);
+  if (options.requireViewers === true && !shareHostHasConnectedViewers()) {
+    shareReplayRecordHostPerfSkip('mutationRecords');
+    shareReplayDrainMutationPublisher();
+    return [];
+  }
+  const sourceRecords = Array.from(records || []);
+  const startedAt = shareReplayHostPerfNow();
+  const entries = shareReplayMutationEntries(sourceRecords);
   const terminals = Array.isArray(entries.terminals) ? entries.terminals : [];
+  shareReplayRecordHostPerf('mutationRecords', startedAt, {
+    records: sourceRecords.length,
+    entries: entries.length,
+    terminals: terminals.length,
+  });
   if (!entries.length && !terminals.length) return [];
   if (entries.length) shareReplayPendingMutations.push(...entries);
   if (terminals.length) shareReplayPendingTerminalPlaceholders.push(...terminals);
@@ -1096,6 +1235,9 @@ function shareReplayDrainMutationPublisher() {
     shareReplayMutationObserver.takeRecords?.();
     shareReplayMutationObserver.disconnect?.();
     shareReplayMutationObserver = null;
+    shareReplayHostPerformance.mutationObserver.disconnected += 1;
+    shareReplayHostPerformance.mutationObserver.active = false;
+    shareReplayHostPerformance.mutationObserver.lastAt = Date.now();
   }
   shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
   shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
@@ -1153,12 +1295,19 @@ function shareReplayFlushMutationDeltas() {
   const mutations = shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
   const terminals = shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
   if (!mutations.length && !terminals.length) return null;
+  const startedAt = shareReplayHostPerfNow();
   const payload = {
     mutations,
     count: mutations.length,
   };
   if (terminals.length) payload.terminals = terminals;
   const published = shareReplayPublishDeltaPayload(payload, 'mutation', {maxBytes: shareReplayHostDeltaMaxBytes});
+  shareReplayRecordHostPerf('mutationFlush', startedAt, {
+    mutations: mutations.length,
+    terminals: terminals.length,
+    bytes: Math.max(0, Math.round(Number(published?.bytes) || 0)),
+    skipped: published?.skipped === true,
+  });
   if (published?.skipped) {
     sharePublishDomKeyframe('backpressure');
     return null;
@@ -1167,17 +1316,27 @@ function shareReplayFlushMutationDeltas() {
 }
 
 function installShareReplayMutationPublisher() {
-  if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused || shareReplayMutationObserver || typeof MutationObserver === 'undefined') return;
+  if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused || typeof MutationObserver === 'undefined') return;
+  if (!shareHostHasConnectedViewers()) {
+    shareReplayHostPerformance.mutationObserver.skippedNoViewers += 1;
+    shareReplayHostPerformance.mutationObserver.lastSkipAt = Date.now();
+    shareReplayDrainMutationPublisher();
+    return;
+  }
+  if (shareReplayMutationObserver) return;
   const root = appRootElement();
   if (!root || root === document.body) return;
   shareReplayHostNodeId(root);
-  shareReplayMutationObserver = new MutationObserver(records => shareReplayEnqueueMutationRecords(records));
+  shareReplayMutationObserver = new MutationObserver(records => shareReplayEnqueueMutationRecords(records, {requireViewers: true}));
   shareReplayMutationObserver.observe(root, {
     attributes: true,
     characterData: true,
     childList: true,
     subtree: true,
   });
+  shareReplayHostPerformance.mutationObserver.installed += 1;
+  shareReplayHostPerformance.mutationObserver.active = true;
+  shareReplayHostPerformance.mutationObserver.lastAt = Date.now();
 }
 
 function shareReplayResetMutationPublisherForKeyframe(reason = 'manual-debug') {
@@ -2930,6 +3089,15 @@ function shareGeometryDigestFrame() {
   return {digest: shareGeometryDigestValue(snapshot), snapshot};
 }
 
+function shareGeometryDigestSnapshotCounts(snapshot = {}) {
+  return {
+    tabStrips: Array.isArray(snapshot.tabStrips) ? snapshot.tabStrips.length : 0,
+    terminalCells: Array.isArray(snapshot.terminalCells) ? snapshot.terminalCells.length : 0,
+    editors: Array.isArray(snapshot.editors) ? snapshot.editors.length : 0,
+    textWraps: Array.isArray(snapshot.textWraps) ? snapshot.textWraps.length : 0,
+  };
+}
+
 function shareGeometryRectsWithinTolerance(hostRect = {}, localRect = {}, tolerancePx = 1) {
   for (const key of ['left', 'top', 'width', 'height']) {
     const hostValue = Math.round(Number(hostRect?.[key] || 0));
@@ -3255,6 +3423,7 @@ function shareReplayHealthDiagnostics() {
     redactionPolicyVersion: shareReplayLastRedactionPolicyVersion,
     nodeCount: shareReplayNodeMap.size,
     lastReplayError: shareReplayLastReplayError,
+    hostPerformance: shareReplayHostPerformanceDiagnostics(),
     terminalPlaceholders,
     context: shareDebugContextSnapshot(),
   });
@@ -3523,7 +3692,17 @@ function applyShareGeometryDigest(payload = {}) {
 
 function publishShareGeometryDigest() {
   if (shareViewMode || !shareCanPublishUi()) return;
-  sharePublish('geometry-digest', shareGeometryDigestFrame());
+  if (!shareHostHasConnectedViewers()) {
+    shareReplayRecordHostPerfSkip('geometryDigest');
+    return;
+  }
+  const startedAt = shareReplayHostPerfNow();
+  const frame = shareGeometryDigestFrame();
+  shareReplayRecordHostPerf('geometryDigest', startedAt, {
+    digest: frame.digest,
+    ...shareGeometryDigestSnapshotCounts(frame.snapshot),
+  });
+  sharePublish('geometry-digest', frame);
 }
 
 function installShareGeometryDigestLoop() {

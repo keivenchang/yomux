@@ -107,6 +107,8 @@ TMUX_SIGNAL_CONTROL_EVENTS = frozenset({
     "layout-change",
     "output",
     "extended-output",
+    "pane-died",
+    "pane-exited",
     "pane-mode-changed",
     "session-changed",
     "session-renamed",
@@ -129,6 +131,8 @@ TMUX_SIGNAL_HOOKS = (
     "client-resized",
     "window-resized",
 )
+TMUX_SIGNAL_PANE_EXIT_HOOKS = frozenset({"pane-exited", "pane-died"})
+TMUX_SIGNAL_HOOK_EVENT_PREFIX = "yolomux-tmux-signal-hook:"
 TMUX_SIGNAL_HOOK_INDEX = 7717
 TMUX_SIGNAL_MONITOR_SILENCE_SECONDS = 60
 TMUX_SIGNAL_EVENT_RETRY_SECONDS = 2.003
@@ -176,6 +180,12 @@ def tmux_signal_subscription_commands() -> list[list[str]]:
     return [["refresh-client", "-B", f"{name}:{fmt}"] for name, fmt in TMUX_SIGNAL_SUBSCRIPTIONS]
 
 
+def tmux_signal_hook_command(hook: str) -> str:
+    if hook in TMUX_SIGNAL_PANE_EXIT_HOOKS:
+        return f'display-message -p "{TMUX_SIGNAL_HOOK_EVENT_PREFIX}{hook}:#{{hook_pane}}" ; refresh-client'
+    return "refresh-client"
+
+
 def install_tmux_signal_control_subscriptions(process: subprocess.Popen[str]) -> None:
     if process.stdin is None:
         return
@@ -189,6 +199,8 @@ def install_tmux_signal_control_subscriptions(process: subprocess.Popen[str]) ->
 
 def tmux_control_event_type(line: str) -> str:
     text = str(line or "").strip()
+    if text.startswith(TMUX_SIGNAL_HOOK_EVENT_PREFIX):
+        return text[len(TMUX_SIGNAL_HOOK_EVENT_PREFIX):].split(":", 1)[0]
     if not text.startswith("%"):
         return ""
     return text[1:].split(None, 1)[0]
@@ -214,7 +226,7 @@ def install_tmux_signal_monitoring(sessions: Sequence[str], timeout: float = 1.5
             "set-hook",
             "-g",
             f"{hook}[{TMUX_SIGNAL_HOOK_INDEX}]",
-            "refresh-client",
+            tmux_signal_hook_command(hook),
         ], timeout=timeout)
         if result.returncode != 0:
             errors.append(cmd_error(result, f"tmux set-hook {hook} failed"))

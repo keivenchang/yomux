@@ -35,6 +35,7 @@ function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
   if (isFiles) rememberFileExplorerOpenIntent(false);
+  if (typeof closePopoutsForLayoutItem === 'function') closePopoutsForLayoutItem(item);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
@@ -48,6 +49,7 @@ function removePaneFromLayout(item) {
   if (!slot) return;
   const moved = paneTabs(slot);
   if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
+  if (typeof closePopoutsForLayoutItem === 'function') moved.forEach(closePopoutsForLayoutItem);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
@@ -1344,10 +1346,11 @@ async function ensureSession(session) {
 }
 
 async function tmuxSessionExistsForReconnect(session) {
-  if (readOnlyMode) return null;
   try {
-    await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    return true;
+    const payload = await apiFetchJson(`/api/tmux-session-exists?session=${encodeURIComponent(session)}`, {cache: 'no-store'});
+    if (payload?.exists === true) return true;
+    if (payload?.exists === false) return false;
+    return null;
   } catch (error) {
     if (error?.status === 404) return false;
     return null;
@@ -2264,6 +2267,16 @@ function placeTerminalAttentionOverlay(session, item, record, index = 0) {
 }
 
 function syncTerminalAttentionHighlight(session) {
+  const perf = clientPerfStart('terminalAttentionScan');
+  try {
+    return syncTerminalAttentionHighlightMeasured(session);
+  } finally {
+    const item = terminals.get(session);
+    clientPerfEnd(perf, {rows: Math.max(0, Number(item?.term?.rows || 0))});
+  }
+}
+
+function syncTerminalAttentionHighlightMeasured(session) {
   const item = terminals.get(session);
   if (!item?.container || !item?.term) return false;
   clearTerminalAttentionHighlight(session, item);
@@ -2280,7 +2293,16 @@ function syncTerminalAttentionHighlight(session) {
 }
 
 function scheduleTerminalAttentionHighlight(session) {
-  requestAnimationFrame(() => syncTerminalAttentionHighlight(session));
+  const item = terminals.get(session);
+  if (!item) {
+    requestAnimationFrame(() => syncTerminalAttentionHighlight(session));
+    return;
+  }
+  if (item.attentionHighlightFrame) return;
+  item.attentionHighlightFrame = requestAnimationFrame(() => {
+    item.attentionHighlightFrame = 0;
+    if (terminals.get(session) === item) syncTerminalAttentionHighlight(session);
+  });
 }
 
 function syncTerminalAttentionHighlights() {
@@ -2288,8 +2310,29 @@ function syncTerminalAttentionHighlights() {
 }
 
 const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);
+const terminalBlankScreenRefreshRiskReasons = Object.freeze(new Set([
+  'socket-open',
+  'fit',
+  'first-output',
+  'terminal-tab',
+  'tmux-window',
+  'blank-risk',
+]));
+
+function terminalBlankScreenRefreshAllowed(reason) {
+  return terminalBlankScreenRefreshRiskReasons.has(String(reason || 'blank-risk'));
+}
 
 function terminalRenderedContentPresent(session, item = terminals.get(session)) {
+  const perf = clientPerfStart('terminalBlankProbe');
+  try {
+    return terminalRenderedContentPresentMeasured(session, item);
+  } finally {
+    clientPerfEnd(perf, {rows: Math.max(0, Number(item?.term?.rows || 0))});
+  }
+}
+
+function terminalRenderedContentPresentMeasured(session, item = terminals.get(session)) {
   if (!item?.term) return false;
   const buffer = item.term.buffer?.active;
   const bufferLength = Number(buffer?.length);
@@ -2348,6 +2391,10 @@ function runTerminalBlankScreenRefresh(session) {
 function scheduleTerminalBlankScreenRefresh(session, options = {}) {
   const item = terminals.get(session);
   if (!item || shareViewMode || !terminalIsVisible(session, item.container)) return;
+  const reason = String(options.reason || 'blank-risk');
+  if (!terminalBlankScreenRefreshAllowed(reason)) return;
+  if (item.socket?.readyState !== WebSocket.OPEN) return;
+  if (item.blankScreenRefreshTimer && options.reset !== true) return;
   if (terminalRenderedContentPresent(session, item)) {
     item.blankScreenRefreshAttempts = 0;
     if (item.blankScreenRefreshTimer) {
@@ -2376,12 +2423,12 @@ function scheduleFit(session) {
     item.fitFrame = requestAnimationFrame(() => {
       item.fitFrame = 0;
       fitTerminal(session);
-      scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     });
     item.fitTimer = setTimeout(() => {
       item.fitTimer = 0;
       fitTerminal(session);
-      scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     }, 250);
     return;
   }
@@ -2509,10 +2556,12 @@ function closeTerminalItem(session, item) {
   if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
   if (item.fitTimer) clearTimeout(item.fitTimer);
   if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
   item.fileUnderlineController?.dispose?.();
   item.fitFrame = 0;
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
+  item.attentionHighlightFrame = 0;
   item.fileUnderlineController = null;
   const observer = resizeObservers.get(session);
   if (observer) {
@@ -2567,11 +2616,17 @@ function sessionConfirmedGone(session, order) {
   return isTmuxSession(session) && !isPendingTmuxSession(session) && Array.isArray(order) && !order.includes(session);
 }
 
+function terminalSocketCloseLooksFinal(event = null) {
+  const code = Number(event?.code || 0);
+  return event?.wasClean === true || code === 1000 || code === 1001;
+}
+
 // Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
 // cleanup without the confirm/POST, for sessions that ended outside this client.
 function pruneDeadSession(session) {
   const previousActive = activeSessions.slice();
   stopSessionUi(session);
+  completeTerminalRemovalLatency('session', session, {reason: 'prune-dead-session'});
   autoApproveStates.delete(session);
   if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
   updateDocumentTitle();
@@ -2584,12 +2639,23 @@ function pruneDeadSession(session) {
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
-async function confirmSessionGoneOrReconnect(session, item) {
+async function confirmSessionGoneOrReconnect(session, item, event = null) {
   if (item.manualClose || terminals.get(session) !== item) return;
+  const closeDetails = {
+    origin: 'ws-close',
+    closeCode: Number(event?.code || 0),
+    wasClean: event?.wasClean === true,
+  };
+  if (terminalSocketCloseLooksFinal(event) && isTmuxSession(session) && !isPendingTmuxSession(session)) {
+    noteTerminalRemovalLatencyStart('session', session, closeDetails);
+    pruneDeadSession(session);
+    return;
+  }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
   if (item.confirmingGone) return;
+  noteTerminalRemovalLatencyStart('session', session, closeDetails);
   item.confirmingGone = true;
   try {
     const exists = await tmuxSessionExistsForReconnect(session);
@@ -2600,16 +2666,6 @@ async function confirmSessionGoneOrReconnect(session, item) {
     }
     if (exists === true) {
       scheduleTerminalReconnect(session, item);
-      return;
-    }
-    let order = null;
-    try {
-      const payload = await apiFetchJson('/api/auto-approve');
-      if (Array.isArray(payload.session_order)) order = payload.session_order;
-    } catch (_) {}
-    if (item.manualClose || terminals.get(session) !== item) return;
-    if (sessionConfirmedGone(session, order)) {
-      pruneDeadSession(session);
       return;
     }
     scheduleTerminalReconnect(session, item);

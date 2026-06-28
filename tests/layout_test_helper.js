@@ -84,6 +84,29 @@ class TestStyle {
   }
 }
 
+class TestWebSocket {
+  constructor(url) {
+    this.url = String(url || '');
+    this.readyState = TestWebSocket.OPEN;
+    this.sent = [];
+    TestWebSocket.instances.push(this);
+    setImmediate(() => this.onopen?.({target: this}));
+  }
+
+  send(message) {
+    this.sent.push(message);
+  }
+
+  close() {
+    this.readyState = TestWebSocket.CLOSED;
+    this.onclose?.({target: this});
+  }
+}
+TestWebSocket.instances = [];
+TestWebSocket.OPEN = 1;
+TestWebSocket.CLOSING = 2;
+TestWebSocket.CLOSED = 3;
+
 function testDatasetKeyForAttribute(name) {
   return String(name || '').replace(/-([a-z])/g, (_match, char) => char.toUpperCase());
 }
@@ -456,7 +479,8 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     File: TestFile,
     FormData: TestFormData,
     URLSearchParams,
-    WebSocket: {OPEN: 1, CLOSING: 2, CLOSED: 3},
+    WebSocket: TestWebSocket,
+    __testWebSocketInstances: TestWebSocket.instances,
     clearInterval() {},
     clearTimeout() {},
     document: {
@@ -537,6 +561,33 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       innerWidth: 1200,
       location,
       localStorage,
+      open(url, name, features) {
+        const record = {
+          url: String(url || ''),
+          name: String(name || ''),
+          features: String(features || ''),
+        };
+        const documentStub = {
+          readyState: 'complete',
+          body: element(`popout-body-${context.__openedWindows.length}`),
+          title: '',
+          open() { this.html = ''; },
+          write(html) { this.html = String(html || ''); },
+          close() {},
+          querySelector() { return null; },
+        };
+        const popoutWindow = {
+          closed: false,
+          document: documentStub,
+          location: {pathname: record.url.split('?')[0] || ''},
+          addEventListener() {},
+          close() { this.closed = true; },
+          focus() { record.focused = true; },
+        };
+        record.window = popoutWindow;
+        context.__openedWindows.push(record);
+        return popoutWindow;
+      },
       sessionStorage,
       removeEventListener(type, listener) {
         const listeners = windowListeners.get(type) || [];
@@ -554,6 +605,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     Uint8Array,
   };
   context.globalThis = context;
+  context.__openedWindows = [];
   vm.createContext(context);
   vm.runInContext(`${source.slice(0, bootStart)}
 globalThis.__layoutTestApi = {
@@ -586,8 +638,12 @@ globalThis.__layoutTestApi = {
   backgroundOwnerSearchIndexSummaryForTest: backgroundOwnerSearchIndexSummary,
   backgroundOwnerStatsSummaryForTest: backgroundOwnerStatsSummary,
   backgroundOwnerSessionFilesSummaryForTest: backgroundOwnerSessionFilesSummary,
+  backgroundOwnerOwnsAllRolesForTest: backgroundOwnerOwnsAllRoles,
+  backgroundOwnerCurrentOwnerLiveForTest: backgroundOwnerCurrentOwnerLive,
   topbarOwnerStatusHtmlForTest: topbarOwnerStatusHtml,
   topbarOwnerStatusTitleForTest: topbarOwnerStatusTitle,
+  createTopbarOwnerStatusForTest: createTopbarOwnerStatus,
+  showBackgroundOwnerContextMenuForTest: showBackgroundOwnerContextMenu,
   setBackgroundOwnerStatusPayloadForTest(payload) {
     backgroundOwnerStatusPayload = payload;
     backgroundOwnerStatusLoaded = Boolean(payload);
@@ -670,6 +726,7 @@ globalThis.__layoutTestApi = {
   noteFileExplorerChangesSessionInteractionForTest: noteFileExplorerChangesSessionInteraction,
   setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
   changesGroupsSnapshotHtmlForTest: changesGroupsSnapshotHtml,
+  fetchSessionFilesForTest: fetchSessionFiles,
   fileExplorerChangesCollapseToggleHtml,
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
   toggleAllFileExplorerChangesForTest: toggleAllFileExplorerChanges,
@@ -772,6 +829,7 @@ globalThis.__layoutTestApi = {
   setFileExplorerPushRefreshDepthForTest(value) { fileExplorerPushRefreshDepth = Math.max(0, Number(value) || 0); },
   setFileExplorerLastListErrorForTest(path, error = 'failed') { setFileExplorerListError(path, error, 500); },
   fetchFilePathInfoForTest: fetchFilePathInfo,
+  deleteFileTreePathForTest: deleteFileTreePath,
   flushFileExplorerFsBatchForTest: flushFileExplorerFsBatch,
   firstEmptyPane,
   filePopoverRows,
@@ -783,6 +841,7 @@ globalThis.__layoutTestApi = {
   fileConflictCompareHtml,
   childPathParts,
   debugModeEnabledForTest() { return debugModeEnabled; },
+  debugModeExplicitUrlEnabledForTest() { return debugModeExplicitUrlEnabled; },
   debugPaneItemId,
   debugPanelHtmlForTest: debugPanelHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
@@ -801,8 +860,10 @@ globalThis.__layoutTestApi = {
   clearDebugGraphZoomForTest: clearDebugGraphZoom,
   clearJsDebugEventsForTest: clearJsDebugEvents,
   jsDebugEventsForTest() { return jsDebugEvents.map(event => ({...event})); },
+  terminalRemovalLatencySummaryForTest: terminalRemovalLatencySummary,
   jsDebugTextForClipboardForTest: jsDebugTextForClipboard,
   recordSseDebugEventForTest: recordSseDebugEvent,
+  recordClientPerfCounterForTest: recordClientPerfCounter,
   shareDebugTextForClipboardForTest: shareDebugTextForClipboard,
   shareDebugProfileUploadPayloadForTest: shareDebugProfileUploadPayload,
   recordJsDebugEventForTest: recordJsDebugEvent,
@@ -1102,6 +1163,7 @@ globalThis.__layoutTestApi = {
   clearPaneTabDropPreview,
   showSessionContextMenu,
   showTabContextMenu,
+  openedWindowsForTest() { return globalThis.__openedWindows.map(record => ({url: record.url, name: record.name, features: record.features, focused: record.focused === true})); },
   bodyChildren() { return document.body.children; },
   defaultLayoutSlots,
   layoutShapeSignature,
@@ -1132,11 +1194,13 @@ globalThis.__layoutTestApi = {
   sessionFileTimeText,
   sessionFileRelativeTimeText,
   sessionFileDisplayTimeText,
-  fileExplorerTreeDateModeLabel,
-  fileExplorerTreeDateModeButtonLabel,
-  fileExplorerTreeDateModeTitle,
-  fileExplorerTreeDateModeForTest() { return fileExplorerTreeDateMode; },
-  setFileExplorerTreeDateModeForTest(value) { fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(value); },
+	  fileExplorerTreeDateModeLabel,
+	  fileExplorerTreeDateModeButtonLabel,
+	  fileExplorerTreeDateModeTitle,
+	  nextFileExplorerTreeDateMode,
+	  cycleFileExplorerTreeDateModeForTest: cycleFileExplorerTreeDateMode,
+	  fileExplorerTreeDateModeForTest() { return fileExplorerTreeDateMode; },
+	  setFileExplorerTreeDateModeForTest(value) { fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(value); },
   fileTreeRecencyStateForMtimeForTest(mtime, nowMs) {
     const state = fileTreeRecencyStateForMtime(mtime, nowMs);
     return state ? {...state} : null;
@@ -1275,6 +1339,8 @@ globalThis.__layoutTestApi = {
   changesRepoCollapsedForTest() { return Array.from(changesRepoCollapsed).sort(); },
   rawFileUrl,
   rawFileDownloadUrl,
+  zipFileDownloadUrl,
+  downloadFilenameFromContentDisposition,
   displayQuickAccessPath,
   expandQuickAccessPath,
   markOpenFileDiffUnavailable,
@@ -1619,6 +1685,10 @@ globalThis.__layoutTestApi = {
   shareGeometryDigestSnapshotForTest: shareGeometryDigestSnapshot,
   shareGeometryFirstDifferenceForTest: shareGeometryFirstDifference,
   shareGeometryRepairActionForDiffForTest: shareGeometryRepairActionForDiff,
+  publishShareGeometryDigestForTest: publishShareGeometryDigest,
+  shareHostConnectedViewerCountForTest: shareHostConnectedViewerCount,
+  shareHostHasConnectedViewersForTest: shareHostHasConnectedViewers,
+  shareReplayHostPerformanceForTest: shareReplayHostPerformanceDiagnostics,
   applyShareTerminalCellsRepairForTest: applyShareTerminalCellsRepair,
   shareWrappedTextDigestSnapshotForTest: shareWrappedTextDigestSnapshot,
   applyShareUiStateForTest: applyShareUiState,

@@ -1575,13 +1575,12 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   content: '';
 }
 .yoagent-message-details summary::before {
-  content: "▸";
+  content: "›";
   margin-top: 0.15em;
   opacity: 0.9;
-  transition: color 120ms ease, opacity 120ms ease;
 }
 .yoagent-message-details[open] summary::before {
-  content: "▾";
+  content: "›";
   opacity: 1;
 }
 .yoagent-message-details summary > span:first-child {
@@ -2098,10 +2097,10 @@ body.theme-light .info-tree {
   display: none;
 }
 .info-tree-group summary::before {
-  content: "▾";
+  content: "›";
 }
 .info-tree-group:not([open]) summary::before {
-  content: "▸";
+  content: "›";
 }
 .info-tree-group[data-info-depth="1"] > summary::after,
 .info-tree-group[data-info-depth="2"] > summary::after,
@@ -3440,6 +3439,14 @@ body.app-vw-lte-980 .tabs {
   line-height: 1;
   border-radius: 3px;
 }
+.file-tree-icon.ui-disclosure-triangle {
+  inline-size: var(--file-tree-icon-size);
+  block-size: var(--file-tree-icon-size);
+  flex: 0 0 var(--file-tree-icon-size);
+  width: var(--file-tree-icon-size);
+  height: var(--file-tree-icon-size);
+  font-size: var(--disclosure-triangle-font-size);
+}
 /* symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
    and get a small arrow badge overlaid — macOS-Finder / Popular IDE style. Broken links go red + struck. */
 .file-tree-row.is-symlink > .file-tree-icon {
@@ -3491,6 +3498,9 @@ body.app-vw-lte-980 .tabs {
   font-weight: 800;
   line-height: 1;
   color: var(--disclosure-triangle-collapsed-color);
+}
+.file-tree-row.kind-dir > .file-tree-icon.ui-disclosure-triangle {
+  font-size: var(--disclosure-triangle-font-size);
 }
 .file-tree-row.kind-dir.expanded > .file-tree-icon,
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {

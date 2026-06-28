@@ -153,6 +153,23 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
     )
 
 
+def bootstrap_agent_auth_status() -> dict[str, dict[str, object]]:
+    try:
+        return agent_auth_status(block=False, allow_stale=True, refresh=True)
+    except TypeError:
+        return agent_auth_status()
+
+
+def bootstrap_settings_payload(settings_data: dict) -> dict:
+    """Return first-paint settings without the heavy Preferences-only metadata."""
+    if not isinstance(settings_data, dict):
+        return {}
+    payload = {key: settings_data[key] for key in ("settings", "defaults", "path", "display_path", "mtime_ns", "error") if key in settings_data}
+    if "catalog" in settings_data or "choices" in settings_data:
+        payload["deferred_metadata"] = True
+    return payload
+
+
 def html_page(
     sessions: list[str],
     access_role: str = "admin",
@@ -171,7 +188,7 @@ def html_page(
         "agentLaunchCommands": {agent: agent_command(agent, dangerously_yolo) for agent in ("claude", "codex", "term")},
         # per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
-        "agentAuth": agent_auth_status(),
+        "agentAuth": bootstrap_agent_auth_status(),
         "accessRole": access_role,
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
@@ -185,7 +202,7 @@ def html_page(
         "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
         "versionCommitCount": yolomux_commit_count(),
-        "settingsPayload": settings_data,
+        "settingsPayload": bootstrap_settings_payload(settings_data),
         # i18n: resolved active locale for first paint ("system" -> en server-side; the client
         # may refine via navigator.language). The active locale's catalog (+ the en fallback) is INLINED
         # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // File preview popout window helpers split from 95_codemirror_editor.js.
 
-const filePreviewPopouts = new Map();
+const filePreviewPopouts = panePopoutNamespaceMap('file-preview');
 
 function filePreviewPopoutsForPath(path) {
   const record = filePreviewPopouts.get(path);
@@ -133,12 +133,6 @@ function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) 
   else if (typeof requestAnimationFrame === 'function') record.scrollSyncFrame = requestAnimationFrame(run);
   else record.scrollSyncFrame = setTimeout(run, 0);
   return true;
-}
-
-function currentStylesheetHref(match) {
-  const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-    .find(item => String(item.getAttribute('href') || '').includes(match));
-  return link ? link.href : '';
 }
 
 function previewPopoutBodyClassName() {

@@ -40,6 +40,7 @@ SEARCH_SKIP_DIRS = search.SEARCH_SKIP_DIRS
 
 EXTENSIONLESS_TEXT_NAMES = io_ops.EXTENSIONLESS_TEXT_NAMES
 IMAGE_EXTENSIONS = io_ops.IMAGE_EXTENSIONS
+FS_ZIP_MAX_BYTES = io_ops.FS_ZIP_MAX_BYTES
 MAX_RAW_BYTES = io_ops.MAX_RAW_BYTES
 MAX_WRITE_BYTES = io_ops.MAX_WRITE_BYTES
 MTIME_NS_CONFLICT_TOLERANCE = io_ops.MTIME_NS_CONFLICT_TOLERANCE
@@ -119,6 +120,7 @@ def _sync_package_overrides() -> None:
     search._search_full_tree = _search_full_tree
 
     io_ops.EXTENSIONLESS_TEXT_NAMES = EXTENSIONLESS_TEXT_NAMES
+    io_ops.FS_ZIP_MAX_BYTES = FS_ZIP_MAX_BYTES
     io_ops.IMAGE_EXTENSIONS = IMAGE_EXTENSIONS
     io_ops.MAX_RAW_BYTES = MAX_RAW_BYTES
     io_ops.MAX_WRITE_BYTES = MAX_WRITE_BYTES
@@ -216,11 +218,22 @@ def read_raw(raw_path: str) -> tuple[bytes, str]:
     return io_ops.read_raw(raw_path)
 
 
+def zip_directory(raw_path: str):
+    _sync_package_overrides()
+    return io_ops.zip_directory(raw_path)
+
+
+def count_directory_files(raw_path: str) -> dict[str, Any]:
+    _sync_package_overrides()
+    return io_ops.count_directory_files(raw_path)
+
+
 __all__ = [
     "BINARY_SNIFF_BYTES",
     "DEFAULT_FS_ROOTS",
     "EXTENSIONLESS_TEXT_NAMES",
     "FilesystemError",
+    "FS_ZIP_MAX_BYTES",
     "FS_ROOTS_ENV",
     "IMAGE_EXTENSIONS",
     "MAX_DIRECTORY_ENTRIES",
@@ -235,6 +248,7 @@ __all__ = [
     "SEARCH_SKIP_DIRS",
     "TEXT_EXTENSIONS",
     "blame_file",
+    "count_directory_files",
     "create_directory",
     "delete_path",
     "diff_file",
@@ -252,4 +266,5 @@ __all__ = [
     "search_files",
     "unindex_root",
     "write_file",
+    "zip_directory",
 ]

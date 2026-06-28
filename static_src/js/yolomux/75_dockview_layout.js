@@ -1381,6 +1381,7 @@ function dockviewHeaderActionsHtml(item) {
     return `${paneHandle}${paneFrameControlsGroupHtml(item, {
       groupClass: 'file-editor-frame-controls',
       actions: false,
+      popout: paneCanPopout(item),
       minimize: true,
       expand: true,
       close: true,
@@ -1389,7 +1390,7 @@ function dockviewHeaderActionsHtml(item) {
       closeLabel: t('editor.closePane'),
     })}`;
   }
-  if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item)}`;
+  if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item, {popout: paneCanPopout(item)})}`;
   return '';
 }
 
@@ -1404,7 +1405,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   if (!button) return;
   const item = button.dataset.tab || button.dataset.windowSession || button.dataset.detailToggle
     || button.dataset.paneActions || button.dataset.paneMinimize || button.dataset.paneExpand
-    || button.dataset.paneClose || fallbackItem;
+    || button.dataset.panePopout || button.dataset.paneClose || fallbackItem;
   if (!item) return;
   if (button.dataset.tab !== undefined) {
     event.preventDefault();
@@ -1444,6 +1445,12 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
     event.preventDefault();
     event.stopPropagation();
     expandPaneFromLayout(button.dataset.paneExpand || item);
+    return;
+  }
+  if (button.dataset.panePopout !== undefined) {
+    event.preventDefault();
+    event.stopPropagation();
+    openPanePopout(button.dataset.panePopout || item);
     return;
   }
   if (button.dataset.paneClose !== undefined) {

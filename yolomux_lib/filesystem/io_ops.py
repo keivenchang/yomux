@@ -5,6 +5,9 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import stat
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +91,8 @@ IMAGE_EXTENSIONS = {
     ".rar": "application/vnd.rar",
 }
 
-MAX_RAW_BYTES = 20 * 1024 * 1024  # 20 MB cap on raw (image) reads
+MAX_RAW_BYTES = 100 * 1024 * 1024  # 100 MB cap on raw image/file download reads.
+FS_ZIP_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB cap on server-side folder zip downloads
 
 
 def _sniff_raw_mime(data: bytes) -> str:
@@ -343,3 +347,95 @@ def read_raw(raw_path: str) -> tuple[bytes, str]:
             data = fh.read(MAX_RAW_BYTES + 1)
     mime = _sniff_raw_mime(data) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
     return data, mime
+
+
+def _format_zip_size(size: int) -> str:
+    mib = size / (1024 * 1024)
+    return f"{mib:.1f} MB ({size} bytes)"
+
+
+def _zip_limit_message(path: Path, size: int) -> str:
+    return f"Folder is {_format_zip_size(size)}; over the 100MB limit. Please zip it yourself (e.g. `zip -r {path.name}.zip {path.name}`)."
+
+
+def _walk_directory_sources(path: Path, size_limit: int | None = None) -> tuple[list[Path], list[Path], int]:
+    directories: list[Path] = [path]
+    files: list[Path] = []
+    total_size = 0
+
+    def on_error(exc: OSError) -> None:
+        status = 403 if isinstance(exc, PermissionError) else 500
+        raise paths.FilesystemError(str(exc), status=status) from exc
+
+    for root, dirnames, filenames in os.walk(path, topdown=True, onerror=on_error, followlinks=False):
+        root_path = Path(root)
+        kept_dirnames: list[str] = []
+        for dirname in dirnames:
+            child = root_path / dirname
+            try:
+                mode = child.lstat().st_mode
+            except PermissionError as exc:
+                raise paths.FilesystemError(str(exc), status=403) from exc
+            except OSError as exc:
+                raise paths.FilesystemError(str(exc), status=500) from exc
+            if stat.S_ISDIR(mode):
+                kept_dirnames.append(dirname)
+                directories.append(child)
+        dirnames[:] = kept_dirnames
+        for filename in filenames:
+            child = root_path / filename
+            try:
+                child_stat = child.lstat()
+            except PermissionError as exc:
+                raise paths.FilesystemError(str(exc), status=403) from exc
+            except OSError as exc:
+                raise paths.FilesystemError(str(exc), status=500) from exc
+            if not stat.S_ISREG(child_stat.st_mode):
+                continue
+            total_size += child_stat.st_size
+            if size_limit is not None and total_size > size_limit:
+                raise paths.FilesystemError(_zip_limit_message(path, total_size), status=413)
+            files.append(child)
+    return directories, files, total_size
+
+
+def _walk_zip_sources(path: Path) -> tuple[list[Path], list[Path], int]:
+    return _walk_directory_sources(path, FS_ZIP_MAX_BYTES)
+
+
+def count_directory_files(raw_path: str) -> dict[str, Any]:
+    path = paths._validated_path(raw_path)
+    if not path.exists():
+        raise paths.FilesystemError(f"path not found: {path}", status=404)
+    if not path.is_dir():
+        raise paths.FilesystemError(f"is not a directory: {path}", status=400)
+    _directories, files, _total_size = _walk_directory_sources(path)
+    return {"path": str(path), "kind": "dir", "files": len(files), "recursive": True}
+
+
+def zip_directory(raw_path: str) -> tuple[Any, int]:
+    path = paths._validated_path(raw_path)
+    if not path.exists():
+        raise paths.FilesystemError(f"path not found: {path}", status=404)
+    if not path.is_dir():
+        raise paths.FilesystemError(f"is not a directory: {path}", status=400)
+    directories, files, _total_size = _walk_zip_sources(path)
+    base_parent = path.parent
+    data = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
+    try:
+        with zipfile.ZipFile(data, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            for directory in directories:
+                archive.write(directory, directory.relative_to(base_parent).as_posix() + "/")
+            for file_path in files:
+                try:
+                    archive.write(file_path, file_path.relative_to(base_parent).as_posix())
+                except PermissionError as exc:
+                    raise paths.FilesystemError(str(exc), status=403) from exc
+                except OSError as exc:
+                    raise paths.FilesystemError(str(exc), status=500) from exc
+        size = data.tell()
+        data.seek(0)
+        return data, size
+    except Exception:
+        data.close()
+        raise

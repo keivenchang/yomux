@@ -686,6 +686,9 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+let clientSettingsMetadataDeferred = clientSettingsPayload.deferred_metadata === true;
+let clientSettingsMetadataRefreshPromise = null;
+let clientSettingsMetadataRefreshTimer = null;
 const SETTING_FALLBACKS = Object.freeze({
   'appearance.date_time_hour_cycle': '24',
   'appearance.editor_font_size': 13,
@@ -833,13 +836,22 @@ function urlFlagEnabled(name) {
   }
 }
 const jsDebugCollectionEnabled = true;
-let debugModeEnabled = urlFlagEnabled('debug');
+const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
+let debugModeEnabled = debugModeExplicitUrlEnabled;
 const jsDebugEventLimit = 200;
 const jsDebugRenderDebounceMs = 500;
 let jsDebugEventSeq = 0;
 let jsDebugEvents = [];
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
+const clientPerfCounterLimit = 80;
+const clientPerfLongTaskSampleLimit = 40;
+const clientPerfCounters = new Map();
+let clientPerfLongTaskSamples = [];
+let clientPerfLongTaskObserverInstalled = false;
+const terminalRemovalLatencyPending = new Map();
+let terminalRemovalLatencySamples = [];
+const terminalRemovalLatencySampleLimit = 40;
 const CLS = Object.freeze({
   active: 'active',
   collapsed: 'collapsed',
@@ -961,6 +973,17 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    canPopout: item => {
+      const path = fileItemPath(item);
+      return Boolean(path && editorPreviewModeAvailable(path, openFiles.get(path)));
+    },
+    popoutDisabledReason: item => fileItemPath(item)
+      ? 'file editor popout needs a preview-capable file'
+      : 'file editor popout needs a file path',
+    openPopout: item => {
+      const path = fileItemPath(item);
+      return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
+    },
     className,
     icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -983,6 +1006,8 @@ const TAB_TYPES = [
     detail: () => t('menu.file.info.detail'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
+    canPopout: true,
+    popoutRenderer: item => panePopoutPanelSnapshot(item),
     renderAttached: () => {
       renderInfoPanel();
     },
@@ -1013,6 +1038,7 @@ const TAB_TYPES = [
     },
     className: () => 'yoagent',
     icon: 'yoagent',
+    popoutDisabledReason: 'interactive YO!agent popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1031,6 +1057,7 @@ const TAB_TYPES = [
     createPanel: () => createFileExplorerPanel(),
     className: () => 'file-explorer',
     icon: 'finder',
+    popoutDisabledReason: 'interactive Finder/Tabber popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1050,6 +1077,7 @@ const TAB_TYPES = [
     renderAttached: () => loadSearchHistoryPanelData({silent: true}),
     className: () => 'search-history-item',
     icon: 'document',
+    popoutDisabledReason: 'interactive Search & Runs popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1066,6 +1094,7 @@ const TAB_TYPES = [
     detail: () => compactHomePath(settingsConfigPath()),
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
+    popoutDisabledReason: 'interactive Preferences popout is disabled in phase 1',
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1084,6 +1113,8 @@ const TAB_TYPES = [
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
+    canPopout: true,
+    popoutRenderer: item => panePopoutPanelSnapshot(item),
     renderAttached: () => {
       enableDebugMode();
       renderDebugPanels();
@@ -1243,8 +1274,13 @@ let transcriptMetaLoading = false;
 let transcriptMetaLoaded = false;
 let transcriptMetaLoadError = '';
 let transcriptMetaRefreshPromise = null;
+let infoPanelRenderPending = false;
+let infoPanelLastRenderSignature = '';
+let infoPanelLastRenderHtml = '';
 let clientEventsSource = null;
 let clientEventsConnected = false;
+const clientPushEventQueue = new Map();
+let clientPushEventFrame = 0;
 let reconnectResyncTimer = null;
 const reconnectResyncDebounceMs = 751;
 let serverVersionReloadHandled = '';
@@ -1343,6 +1379,7 @@ const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
+const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
@@ -1357,6 +1394,8 @@ let pasteUploadInFlight = false;
 let layoutResizeState = null;
 let responsiveLayoutPruneTimer = null;
 let topbarResizeObserver = null;
+const tabStripOverflowCheckSet = new Set();
+let tabStripOverflowCheckFrame = null;
 let latencySamples = [];
 let tabMetaVisible = readStoredTabMetaVisible();
 let authRedirectStarted = false;
@@ -1682,18 +1721,21 @@ async function apiFetch(url, options = {}) {
       requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
     }
   }
-  const startedAt = jsDebugPerformanceNow();
-  const method = jsDebugRequestMethod(requestOptions);
-  const requestBytes = jsDebugRequestBytes(url, requestOptions);
+  const apiDebugEnabled = jsDebugCollectionEnabled;
+  const startedAt = apiDebugEnabled ? jsDebugPerformanceNow() : 0;
+  const method = apiDebugEnabled ? jsDebugRequestMethod(requestOptions) : '';
+  const requestBytes = apiDebugEnabled ? jsDebugRequestBytes(url, requestOptions) : 0;
   let response;
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
-    recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
+    if (apiDebugEnabled) recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
-  const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
-  recordApiDebugResponseBytes(event, response);
+  if (apiDebugEnabled) {
+    const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
+    recordApiDebugResponseBytes(event, response);
+  }
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -1869,9 +1911,239 @@ function recordJsDebugEvent(type, payload = {}) {
   return event;
 }
 
+function clientPerfNow() {
+  const value = globalThis.performance?.now?.();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function clientPerfMark(name) {
+  if (!name || typeof globalThis.performance?.mark !== 'function') return '';
+  const mark = `yolomux:${String(name)}`;
+  try {
+    globalThis.performance.mark(mark);
+    return mark;
+  } catch (_) {
+    return '';
+  }
+}
+
+function clientPerfMeasureSinceMark(counterName, markName, details = {}) {
+  if (!counterName || !markName) return null;
+  const endMark = clientPerfMark(`${counterName}:end`);
+  let durationMs = null;
+  if (typeof globalThis.performance?.measure === 'function' && endMark) {
+    try {
+      const measure = globalThis.performance.measure(`yolomux:${counterName}`, markName, endMark);
+      durationMs = Number(measure?.duration);
+      globalThis.performance.clearMeasures?.(`yolomux:${counterName}`);
+    } catch (_) {}
+  }
+  if (!Number.isFinite(durationMs)) {
+    const entries = typeof globalThis.performance?.getEntriesByName === 'function'
+      ? globalThis.performance.getEntriesByName(markName)
+      : [];
+    const startedAt = Number(entries?.at?.(-1)?.startTime);
+    if (Number.isFinite(startedAt)) durationMs = clientPerfNow() - startedAt;
+  }
+  globalThis.performance?.clearMarks?.(markName);
+  if (endMark) globalThis.performance?.clearMarks?.(endMark);
+  return recordClientPerfCounter(counterName, durationMs, details);
+}
+
+function clientPerfActiveAnimationCount() {
+  const animations = typeof document?.getAnimations === 'function' ? document.getAnimations({subtree: true}) : [];
+  return animations.filter(animation => animation?.playState === 'running').length;
+}
+
+function recordClientPerfCounter(name, durationMs = null, details = {}) {
+  const key = String(name || '').trim();
+  if (!key) return null;
+  let counter = clientPerfCounters.get(key);
+  if (!counter) {
+    counter = {name: key, count: 0, totalMs: 0, maxMs: 0, lastMs: null, lastAt: '', rows: 0, nodes: 0, bytes: 0, skipped: 0};
+    clientPerfCounters.set(key, counter);
+    if (clientPerfCounters.size > clientPerfCounterLimit) {
+      clientPerfCounters.delete(clientPerfCounters.keys().next().value);
+    }
+  }
+  counter.count += 1;
+  const duration = Number(durationMs);
+  if (Number.isFinite(duration) && duration >= 0) {
+    const rounded = Number(duration.toFixed(2));
+    counter.totalMs = Number((counter.totalMs + rounded).toFixed(2));
+    counter.maxMs = Number(Math.max(counter.maxMs, rounded).toFixed(2));
+    counter.lastMs = rounded;
+  }
+  for (const field of ['rows', 'nodes', 'bytes', 'skipped']) {
+    const value = Number(details?.[field]);
+    if (Number.isFinite(value) && value > 0) counter[field] += value;
+  }
+  counter.lastAt = new Date().toISOString();
+  counter.lastDetails = {...details};
+  if (typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible()) scheduleJsDebugPanelRefresh();
+  return counter;
+}
+
+function clientPerfStart(name) {
+  return {name: String(name || ''), startedAt: clientPerfNow()};
+}
+
+function clientPerfEnd(token, details = {}) {
+  if (!token?.name) return null;
+  return recordClientPerfCounter(token.name, clientPerfNow() - Number(token.startedAt || 0), details);
+}
+
+function clientPerfMeasure(name, fn, details = {}) {
+  const token = clientPerfStart(name);
+  try {
+    return fn();
+  } finally {
+    clientPerfEnd(token, typeof details === 'function' ? details() : details);
+  }
+}
+
+function clientPerfSummary() {
+  return Array.from(clientPerfCounters.values()).map(counter => ({
+    ...counter,
+    avgMs: counter.count ? Number((counter.totalMs / counter.count).toFixed(2)) : 0,
+  }));
+}
+
+function clientPerfLongTaskSummary() {
+  const samples = clientPerfLongTaskSamples.slice();
+  const total = samples.reduce((sum, sample) => sum + Number(sample.durationMs || 0), 0);
+  const max = samples.reduce((value, sample) => Math.max(value, Number(sample.durationMs || 0)), 0);
+  return {
+    count: samples.length,
+    averageMs: samples.length ? Number((total / samples.length).toFixed(1)) : 0,
+    maxMs: Number(max.toFixed(1)),
+    samples,
+  };
+}
+
+function clearClientPerfCounters() {
+  clientPerfCounters.clear();
+  clientPerfLongTaskSamples = [];
+}
+
+function installClientPerfLongTaskObserver() {
+  if (clientPerfLongTaskObserverInstalled || typeof globalThis.PerformanceObserver !== 'function') return;
+  clientPerfLongTaskObserverInstalled = true;
+  try {
+    const observer = new globalThis.PerformanceObserver(list => {
+      for (const entry of list.getEntries?.() || []) {
+        const durationMs = Number(entry.duration || 0);
+        const sample = {ts: new Date().toISOString(), durationMs: Number(durationMs.toFixed(1)), name: String(entry.name || 'longtask')};
+        clientPerfLongTaskSamples.push(sample);
+        if (clientPerfLongTaskSamples.length > clientPerfLongTaskSampleLimit) {
+          clientPerfLongTaskSamples.splice(0, clientPerfLongTaskSamples.length - clientPerfLongTaskSampleLimit);
+        }
+        recordClientPerfCounter('longTask', durationMs);
+      }
+    });
+    observer.observe({entryTypes: ['longtask']});
+  } catch (_) {}
+}
+
+function terminalRemovalLatencyNowMs() {
+  const value = Date.now();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function terminalRemovalLatencyKey(targetKind, target) {
+  return `${String(targetKind || 'target')}:${String(target || '')}`;
+}
+
+function noteTerminalRemovalLatencyStart(targetKind, target, details = {}) {
+  if (!jsDebugCollectionEnabled) return;
+  const key = terminalRemovalLatencyKey(targetKind, target);
+  terminalRemovalLatencyPending.set(key, {
+    targetKind: String(targetKind || 'target'),
+    target: String(target || ''),
+    origin: String(details.origin || 'unknown'),
+    startedAtMs: terminalRemovalLatencyNowMs(),
+    details: {...details},
+  });
+}
+
+function clearTerminalRemovalLatency(targetKind, target) {
+  terminalRemovalLatencyPending.delete(terminalRemovalLatencyKey(targetKind, target));
+}
+
+function completeTerminalRemovalLatency(targetKind, target, details = {}) {
+  if (!jsDebugCollectionEnabled) return null;
+  const key = terminalRemovalLatencyKey(targetKind, target);
+  const pending = terminalRemovalLatencyPending.get(key) || null;
+  const explicitStartedAtMs = Number(details.startedAtMs);
+  const startedAtMs = Number.isFinite(explicitStartedAtMs)
+    ? explicitStartedAtMs
+    : Number(pending?.startedAtMs);
+  if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) return null;
+  terminalRemovalLatencyPending.delete(key);
+  const nowMs = terminalRemovalLatencyNowMs();
+  const durationMs = Math.max(0, nowMs - startedAtMs);
+  const sample = {
+    ts: new Date(nowMs).toISOString(),
+    targetKind: String(targetKind || pending?.targetKind || 'target'),
+    target: String(target || pending?.target || ''),
+    origin: String(details.origin || pending?.origin || 'unknown'),
+    reason: String(details.reason || ''),
+    durationMs: Number(durationMs.toFixed(1)),
+    startedAtMs,
+    removedAtMs: nowMs,
+  };
+  if (Number.isFinite(Number(details.eventAtMs))) sample.eventAtMs = Number(details.eventAtMs);
+  if (details.eventType) sample.eventType = String(details.eventType);
+  if (Number.isFinite(Number(details.closeCode))) sample.closeCode = Number(details.closeCode);
+  if (typeof details.wasClean === 'boolean') sample.wasClean = details.wasClean;
+  terminalRemovalLatencySamples.push(sample);
+  if (terminalRemovalLatencySamples.length > terminalRemovalLatencySampleLimit) {
+    terminalRemovalLatencySamples.splice(0, terminalRemovalLatencySamples.length - terminalRemovalLatencySampleLimit);
+  }
+  recordJsDebugEvent('terminal_removal', {
+    message: `${sample.targetKind} ${sample.target} removed after ${sample.durationMs}ms from ${sample.origin}`,
+    durationMs: sample.durationMs,
+    targetKind: sample.targetKind,
+    target: sample.target,
+    origin: sample.origin,
+    reason: sample.reason,
+    eventType: sample.eventType,
+    closeCode: sample.closeCode,
+    wasClean: sample.wasClean,
+  });
+  return sample;
+}
+
+function completeTerminalRemovalLatencyFromEpochSeconds(targetKind, target, epochSeconds, details = {}) {
+  const eventAtMs = Number(epochSeconds) * 1000;
+  if (!Number.isFinite(eventAtMs) || eventAtMs <= 0) return null;
+  return completeTerminalRemovalLatency(targetKind, target, {
+    ...details,
+    startedAtMs: eventAtMs,
+    eventAtMs,
+  });
+}
+
+function terminalRemovalLatencySummary() {
+  const samples = terminalRemovalLatencySamples.slice();
+  const total = samples.reduce((sum, sample) => sum + Number(sample.durationMs || 0), 0);
+  const max = samples.reduce((value, sample) => Math.max(value, Number(sample.durationMs || 0)), 0);
+  return {
+    count: samples.length,
+    pending: terminalRemovalLatencyPending.size,
+    averageMs: samples.length ? Number((total / samples.length).toFixed(1)) : 0,
+    maxMs: Number(max.toFixed(1)),
+    last: samples.at(-1) || null,
+    samples,
+  };
+}
+
 function clearJsDebugEvents() {
   jsDebugEvents = [];
   jsDebugEventSeq = 0;
+  terminalRemovalLatencyPending.clear();
+  terminalRemovalLatencySamples = [];
+  clearClientPerfCounters();
   if (typeof clearJsDebugGraphData === 'function') clearJsDebugGraphData();
   if (typeof clearJsDebugServerHistory === 'function') clearJsDebugServerHistory();
   if (jsDebugRenderTimer) {
@@ -1916,6 +2188,7 @@ function enableDebugMode() {
 }
 
 installJsDebugEventCapture();
+installClientPerfLongTaskObserver();
 
 let appViewportOverride = null;
 let appMirrorTransform = {scale: 1, tx: 0, ty: 0};
@@ -3021,7 +3294,30 @@ function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null,
 }
 
 function setFocusedTerminal(session, options = {}) {
+  const perf = clientPerfStart('focusSet');
+  try {
+    return setFocusedTerminalMeasured(session, options);
+  } finally {
+    clientPerfEnd(perf, {sessions: activeSessions.length, user: options.userInitiated === true ? 1 : 0});
+  }
+}
+
+function setFocusedTerminalMeasured(session, options = {}) {
   const previousItem = focusedPanelItem;
+  const alreadyFocused = focusedTerminal === session && focusedPanelItem === session;
+  if (alreadyFocused) {
+    rememberActivePaneItem(session);
+    if (isTmuxSession(session)) lastFocusedTmuxSession = session;
+    if (options.userInitiated === true) {
+      dismissAttentionAlertsForSession(session);
+      acknowledgeTerminalAttentionFromUserAction(session, null, options);
+      if (options.syncFinder !== false) {
+        rememberFileExplorerExplicitSyncSession(session);
+        scheduleFileExplorerActiveTabSync(session, {explicit: true});
+      }
+    }
+    return;
+  }
   if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
@@ -3157,8 +3453,9 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-const disclosureTriangleExpandedGlyph = '▾';
-const disclosureTriangleCollapsedGlyph = '▸';
+const disclosureChevronGlyph = '›';
+const disclosureTriangleExpandedGlyph = disclosureChevronGlyph;
+const disclosureTriangleCollapsedGlyph = disclosureChevronGlyph;
 
 function disclosureTriangleGlyph(expanded) {
   return expanded === true ? disclosureTriangleExpandedGlyph : disclosureTriangleCollapsedGlyph;
@@ -3640,6 +3937,14 @@ async function terminalReferenceProviderLinks(session, term, y) {
 
 const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 90;
 
+function terminalFileReferenceViewportSignature(term) {
+  return [
+    Math.max(0, Math.floor(Number(term?.cols || 0))),
+    Math.max(0, Math.floor(Number(term?.rows || 0))),
+    Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0))),
+  ].join(':');
+}
+
 function terminalFileReferenceKey(reference) {
   const range = reference?.range || {};
   const start = range.start || {};
@@ -3730,6 +4035,17 @@ function updateTerminalFileReferenceUnderlineHover(container, hoverKey = '') {
 }
 
 function renderTerminalFileReferenceUnderlines(term, container, references, options = {}) {
+  let renderedNodes = 0;
+  const perf = clientPerfStart('terminalUnderlineRender');
+  try {
+    renderedNodes = renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options);
+    return renderedNodes;
+  } finally {
+    clientPerfEnd(perf, {nodes: renderedNodes, rows: Math.max(0, Number(term?.rows || 0))});
+  }
+}
+
+function renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options = {}) {
   const layer = terminalFileUnderlineLayer(container);
   if (!layer) return 0;
   const cell = terminalCellDimensions(term, container);
@@ -3772,7 +4088,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   const disposables = [];
   let disposed = false;
   let timer = 0;
+  let renderFrame = 0;
   let sequence = 0;
+  let lastRenderedViewportSignature = '';
   let existingReferenceKeys = new Set();
   const existingReferenceTargets = new Map();
   let hoverKey = '';
@@ -3801,7 +4119,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     }
     existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
     if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    return renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+    return count;
   };
 
   const refresh = async () => {
@@ -3815,7 +4135,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     if (!refs.length) {
       existingReferenceKeys = new Set();
       hoverKey = '';
-      return renderTerminalFileReferenceUnderlines(term, container, []);
+      const count = renderTerminalFileReferenceUnderlines(term, container, []);
+      lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+      return count;
     }
     const targets = await Promise.all(refs.map(ref => (
       Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
@@ -3835,13 +4157,26 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
       .filter(Boolean);
     existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
     if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    return renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+    return count;
   };
 
-  const schedule = () => {
+  const scheduleCachedRender = () => {
     if (disposed) return;
+    if (renderFrame) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = 0;
+      if (!disposed) renderCached();
+    });
+  };
+
+  const schedule = (scheduleOptions = {}) => {
+    if (disposed) return;
+    const viewportSignature = terminalFileReferenceViewportSignature(term);
+    const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
+    if (viewportChanged) scheduleCachedRender();
     if (timer) clearTimeout(timer);
-    renderCached();
     timer = setTimeout(() => {
       timer = 0;
       refresh();
@@ -3852,9 +4187,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     const disposable = typeof term?.[name] === 'function' ? term[name](callback) : null;
     if (disposable?.dispose) disposables.push(disposable);
   };
-  bindTerminalEvent('onScroll', schedule);
-  bindTerminalEvent('onResize', schedule);
-  bindTerminalEvent('onRender', schedule);
+  bindTerminalEvent('onScroll', () => schedule({reason: 'scroll', viewportChanged: true}));
+  bindTerminalEvent('onResize', () => schedule({reason: 'resize', viewportChanged: true}));
+  bindTerminalEvent('onRender', () => schedule({reason: 'render'}));
   container.addEventListener?.('mousemove', updateHover);
   container.addEventListener?.('mouseleave', clearHover);
   disposables.push({
@@ -3872,7 +4207,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
       disposed = true;
       sequence += 1;
       if (timer) clearTimeout(timer);
+      if (renderFrame) cancelAnimationFrame(renderFrame);
       timer = 0;
+      renderFrame = 0;
       disposables.forEach(disposable => {
         try { disposable.dispose(); } catch (_) {}
       });
@@ -4878,6 +5215,9 @@ function showTabContextMenu(item, x, y, options = {}) {
         shortcut: `${appShortcutText('K', {shift: true})} Enter`,
       },
     );
+    if (typeof paneCanPopout === 'function' && paneCanPopout(item)) {
+      appendContextMenuButton(menu, t('tab.popout'), () => openPanePopout(item), closeSessionContextMenu);
+    }
   }
   if (isTmuxSession(item)) {
     if (isPinnableTab(item)) appendContextMenuSeparator(menu);
@@ -6487,6 +6827,8 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (screenKey === 'error') {
     return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
   }
+  const agentWindowCooldown = agentWindowCooldownState(session, info, auto);
+  if (agentWindowCooldown) return agentWindowCooldown;
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
     return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
@@ -6506,6 +6848,30 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
   }
   return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
+}
+
+function agentWindowCooldownState(session, info = null, auto = autoApproveStates.get(session) || {}) {
+  if (
+    typeof sessionAgentWindowStatusPayloads !== 'function'
+    || typeof agentWindowActivityIconForStatusItem !== 'function'
+    || typeof agentWindowActivityOptionsForStatus !== 'function'
+    || typeof agentWindowActivityTone !== 'function'
+  ) return null;
+  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
+  if (!windows.length) return null;
+  let cooldownWindow = null;
+  for (const agent of windows) {
+    const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
+    const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
+    if (!item || item.acknowledged === true) continue;
+    const tone = agentWindowActivityTone(item.state);
+    if (tone === 'attention' || tone === STATE_KEY.working) return null;
+    if (tone === 'cooldown') cooldownWindow = cooldownWindow || {agent, item};
+  }
+  if (!cooldownWindow) return null;
+  const label = String(cooldownWindow.agent?.window_label || cooldownWindow.agent?.window || cooldownWindow.agent?.kind || '').trim();
+  const reason = label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown');
+  return stateValue('cooldown', reason, {agentWindowState: 'cooldown'});
 }
 
 function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
@@ -7019,7 +7385,7 @@ function globalActivityStatusLineHtml() {
 }
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
-  const activityToneClass = tone === STATE_KEY.working ? 'agent-window-activity--working' : tone === 'attention' ? 'agent-window-activity--attention' : 'agent-window-activity--cooldown';
+  const activityToneClass = typeof agentWindowActivityToneWrapperClass === 'function' ? agentWindowActivityToneWrapperClass(tone) : '';
   return `
     <span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-count', extraClass, count ? 'active' : ''))}">
       <span class="topbar-activity-count-number">${esc(String(count))}</span>
@@ -7074,6 +7440,71 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSum
   return lines.filter(Boolean).join('\n');
 }
 
+function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
+  if (!payload || typeof payload !== 'object' || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return [];
+  return [
+    {...backgroundOwnerSearchIndexSummary(payload), label: 'IDX'},
+    {...backgroundOwnerStatsSummary(payload), label: 'STATS'},
+    {...backgroundOwnerSessionFilesSummary(payload), label: 'SESS'},
+  ];
+}
+
+function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusPayload) {
+  const summaries = topbarOwnerStatusSummaries(payload).filter(item => item && typeof item === 'object');
+  return Boolean(summaries.length) && summaries.every(item => item.ownsRole === true || item.ownsIndex === true);
+}
+
+function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusPayload, nowSeconds = Date.now() / 1000) {
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : {};
+  const latest = data.latest_generation && typeof data.latest_generation === 'object' ? data.latest_generation : {};
+  if (owner.generation_id && latest.generation_id && owner.generation_id === latest.generation_id) return true;
+  const heartbeat = Number(owner.last_heartbeat || 0);
+  return Number.isFinite(heartbeat) && heartbeat > 0 && Number(nowSeconds) - heartbeat <= 10;
+}
+
+async function claimBackgroundOwnerLeader() {
+  try {
+    const result = await apiFetchJson('/api/background/claim', {method: 'POST'});
+    if (result?.status && typeof applyBackgroundOwnerStatusPayload === 'function') {
+      applyBackgroundOwnerStatusPayload(result.status, {render: false});
+    }
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      await refreshBackgroundOwnerStatus({force: true, render: false});
+    }
+    statusOk(localizedHtml(result?.was_owner ? 'status.backgroundOwnerAlreadyLeader' : 'status.backgroundOwnerClaimed'));
+  } catch (error) {
+    statusErr(localizedHtml('status.backgroundOwnerClaimFailed', {error}));
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      refreshBackgroundOwnerStatus({force: true, render: false}).catch(refreshError => console.warn('background-owner status refresh failed', refreshError));
+    }
+  }
+}
+
+function showBackgroundOwnerContextMenu(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu background-owner-context-menu';
+  menu.setAttribute('role', 'menu');
+  const alreadyLeader = backgroundOwnerOwnsAllRoles();
+  if (alreadyLeader || readOnlyMode) {
+    appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
+  } else {
+    appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
+      const payload = backgroundOwnerStatusPayload && typeof backgroundOwnerStatusPayload === 'object' ? backgroundOwnerStatusPayload : {};
+      const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
+      if (backgroundOwnerCurrentOwnerLive(payload)) {
+        const label = backgroundServerLabel(owner, t('common.unknown'));
+        const message = t('backgroundOwner.takeoverConfirm', {server: label});
+        if (typeof window.confirm === 'function' && !window.confirm(message)) return;
+      }
+      claimBackgroundOwnerLeader();
+    }, () => backgroundOwnerContextMenu.close());
+  }
+  backgroundOwnerContextMenu.open(menu, event.clientX, event.clientY);
+}
+
 function topbarOwnerStatusHtml() {
   if (shareViewMode) return '';
   if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
@@ -7082,15 +7513,7 @@ function topbarOwnerStatusHtml() {
   if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
   }
-  if (!backgroundOwnerStatusPayload || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return '';
-  const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
-  const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
-  const sessionSummary = backgroundOwnerSessionFilesSummary(backgroundOwnerStatusPayload);
-  return topbarOwnerStatusCombinedHtml([
-    {...indexSummary, label: 'IDX'},
-    {...statsSummary, label: 'STATS'},
-    {...sessionSummary, label: 'SESS'},
-  ]);
+  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusPayload));
 }
 
 function createTopbarOwnerStatus() {
@@ -7105,6 +7528,7 @@ function createTopbarOwnerStatus() {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
     }
   };
+  button.addEventListener('contextmenu', showBackgroundOwnerContextMenu);
   return button;
 }
 
@@ -7116,10 +7540,9 @@ function updateTopbarOwnerStatus() {
   node.hidden = !html;
   node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
   node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
-  if (backgroundOwnerStatusPayload && typeof backgroundOwnerSearchIndexSummary === 'function' && typeof backgroundOwnerStatsSummary === 'function' && typeof backgroundOwnerSessionFilesSummary === 'function') {
-    const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
-    const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
-    const sessionSummary = backgroundOwnerSessionFilesSummary(backgroundOwnerStatusPayload);
+  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
+  if (summaries.length) {
+    const [indexSummary, statsSummary, sessionSummary] = summaries;
     node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || 'Refresh connected server ownership status';
   } else if (backgroundOwnerStatusError) {
     node.title = backgroundOwnerStatusError;
@@ -7991,7 +8414,7 @@ function fileQuickOpenItem(path, options = {}) {
     key: `file:${path}`,
     path,
     mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
-    iconText: isDir ? '▸' : fileIconFor(label),
+    iconText: isDir ? disclosureTriangleCollapsedGlyph : fileIconFor(label),
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
@@ -8046,7 +8469,7 @@ function fileQuickOpenOpenFolderItem() {
     label: t('palette.openFolder', {name: fileExplorerLabel()}),
     detail: compactHomePath(target),
     key: `open-folder:${target}`,
-    iconText: '▸',
+    iconText: disclosureTriangleCollapsedGlyph,
     keybinding: appShortcutText('Enter'),
     pinTop: true,
     searchFields: ['open folder', target],
@@ -9204,6 +9627,16 @@ function bindTopbarMetrics() {
   topbarResizeObserver.observe(topbar);
 }
 
+function flushScheduledTabStripOverflowChecks() {
+  const strips = Array.from(tabStripOverflowCheckSet);
+  tabStripOverflowCheckSet.clear();
+  tabStripOverflowCheckFrame = null;
+  for (const strip of strips) {
+    if (!strip?.isConnected) continue;
+    strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
+  }
+}
+
 function scheduleTabStripOverflowCheck(strip) {
   if (!strip) return;
   if (strip === sessionButtons || strip.classList?.contains('pane-tabs')) {
@@ -9212,9 +9645,9 @@ function scheduleTabStripOverflowCheck(strip) {
     return;
   }
   strip.classList.remove('tabs-overflowing');
-  requestAnimationFrame(() => {
-    strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
-  });
+  tabStripOverflowCheckSet.add(strip);
+  if (tabStripOverflowCheckFrame) return;
+  tabStripOverflowCheckFrame = requestAnimationFrame(flushScheduledTabStripOverflowChecks);
 }
 
 function scheduleAllTabStripOverflowChecks() {
@@ -10211,6 +10644,15 @@ function flushPendingSessionButtonsRender() {
 }
 
 function renderSessionButtons(options = {}) {
+  const perf = clientPerfStart('renderSessionButtons');
+  try {
+    return renderSessionButtonsMeasured(options);
+  } finally {
+    clientPerfEnd(perf, {nodes: sessionButtons?.childElementCount || 0});
+  }
+}
+
+function renderSessionButtonsMeasured(options = {}) {
   if (!sessionButtons) return;
   if (!options.force && appMenuIsOpen()) {
     scheduleTopbarMetricsUpdate();
@@ -11215,6 +11657,10 @@ async function fetchFilesystemWatchDiff(options = {}) {
 }
 
 async function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
+  if (!fileExplorerTreePaneIsVisible()) {
+    recordClientPerfCounter('finderRefresh', 0, {skipped: 1});
+    return;
+  }
   const fullDue = Date.now() - fileExplorerFilesystemLastFullAt >= fileExplorerFilesystemKeyframeMs;
   const previousToken = fileExplorerFilesystemWatchToken;
   const requestedFull = options.full === true || payload.full === true || fullDue || !previousToken;
@@ -11265,34 +11711,50 @@ async function refreshOpenFilesFromPush(payload = {}) {
 
 async function refreshFileExplorerFromPush(payload = {}) {
   const nextToken = payload?.token ? String(payload.token || '') : '';
-  const entriesByDir = entriesByDirFromFilesystemPush(payload);
-  const visibleRootRemoved = invalidateFileExplorerRoots(payload?.removed_roots);
-  if (!entriesByDir.size && payload?.refresh === true) {
-    await refreshFileExplorerFromWatchDiff(payload);
-    return;
-  }
-  if (nextToken) fileExplorerFilesystemWatchToken = nextToken;
-  if (payload?.mode === 'full' || (Array.isArray(payload?.directories) && payload.directories.length && payload.refresh !== true)) {
-    fileExplorerFilesystemLastFullAt = Date.now();
-  }
-  if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-  if (!entriesByDir.size) return;
-  fileExplorerPushRefreshDepth += 1;
+  const treeVisible = fileExplorerTreePaneIsVisible();
+  const changedRoots = Array.isArray(payload?.directories)
+    ? payload.directories.length
+    : Math.max(0, Number(payload?.change_summary?.roots_changed || 0));
+  let renderedRows = 0;
+  let skipped = 0;
+  const perf = clientPerfStart('finderRefresh');
   try {
-    const root = normalizeDirectoryPath(currentFileExplorerRoot());
-    if (fileExplorerPaneIsOpen() && entriesByDir.has(root)) {
-      await refreshFileExplorerTreesInPlace({
-        root,
-        entries: entriesByDir.get(root),
-        preserveExpanded: true,
-        preserveScroll: true,
-        entriesByDir,
-      });
+    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload) : new Map();
+    renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
+    const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
+    if (!entriesByDir.size && payload?.refresh === true) {
+      await refreshFileExplorerFromWatchDiff(payload);
+      return;
     }
-    const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
-    if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+    if (nextToken) fileExplorerFilesystemWatchToken = nextToken;
+    if (payload?.mode === 'full' || (Array.isArray(payload?.directories) && payload.directories.length && payload.refresh !== true)) {
+      fileExplorerFilesystemLastFullAt = Date.now();
+    }
+    if (!treeVisible) {
+      skipped = 1;
+      return;
+    }
+    if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    if (!entriesByDir.size) return;
+    fileExplorerPushRefreshDepth += 1;
+    try {
+      const root = normalizeDirectoryPath(currentFileExplorerRoot());
+      if (fileExplorerPaneIsOpen() && entriesByDir.has(root)) {
+        await refreshFileExplorerTreesInPlace({
+          root,
+          entries: entriesByDir.get(root),
+          preserveExpanded: true,
+          preserveScroll: true,
+          entriesByDir,
+        });
+      }
+      const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
+      if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+    } finally {
+      fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
+    }
   } finally {
-    fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
+    clientPerfEnd(perf, {nodes: changedRoots, rows: renderedRows, skipped});
   }
 }
 
@@ -11759,11 +12221,14 @@ function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [
   const normalizedRepoRoots = Array.from(new Set(repoRoots
     .map(path => normalizeDirectoryPath(path))
     .filter(Boolean)));
-  const repoTargets = normalizedRepoRoots
-    .filter(path => path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const candidates = normalizedRepoRoots.length
-    ? repoTargets
-    : affectedDirs.map(path => firstChildPathUnderRoot(normalizedRoot, path));
+  const normalizedAffectedDirs = Array.from(new Set(affectedDirs
+    .map(path => normalizeDirectoryPath(path))
+    .filter(Boolean)));
+  const repoTargets = normalizedRepoRoots.filter(path => path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
+  const affectedTargets = normalizedAffectedDirs
+    .map(path => firstChildPathUnderRoot(normalizedRoot, path))
+    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
+  const candidates = repoTargets.length ? repoTargets : affectedTargets;
   return Array.from(new Set(candidates
     .map(path => normalizeDirectoryPath(path))
     .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
@@ -11801,16 +12266,17 @@ function fileExplorerSyncPlanForFile(path) {
   if (!target) return {session: '', root: '', expandPaths: [], affectedDirs: []};
   const repo = typeof fileRepoForPath === 'function' ? normalizeDirectoryPath(fileRepoForPath(target)) : '';
   const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
+  const targetDir = normalizeDirectoryPath(dirnameOf(target));
   let root = repo && pathIsInsideDirectory(target, repo) ? repo : '';
   if (!root && currentRoot && pathIsInsideDirectory(target, currentRoot) && target !== currentRoot) root = currentRoot;
-  if (!root) root = normalizeDirectoryPath(dirnameOf(target));
+  if (!root) root = targetDir;
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
   const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
   return {
     session,
     root,
     expandPaths,
-    affectedDirs: [normalizeDirectoryPath(dirnameOf(target))].filter(Boolean),
+    affectedDirs: [targetDir].filter(Boolean),
   };
 }
 
@@ -12027,7 +12493,7 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
 function displayedFileExplorerRoot() {
   const input = fileExplorerPathInputs()[0];
   const value = input ? ('value' in input ? input.value : input.textContent) : '';
-  return normalizeDirectoryPath(value || currentFileExplorerRoot());
+  return normalizeDirectoryPath(expandUserPath(value || currentFileExplorerRoot()));
 }
 
 function restoreCommittedFileExplorerRootDisplay() {
@@ -12278,6 +12744,14 @@ function fileExplorerPaneIsOpen() {
   return itemInLayout(fileExplorerItemId);
 }
 
+function fileExplorerTreePaneIsVisible() {
+  return fileExplorerPaneIsOpen() && normalizeFileExplorerMode(fileExplorerMode) === 'files';
+}
+
+function fileExplorerSessionFilesPaneIsVisible() {
+  return fileExplorerPaneIsOpen() && normalizeFileExplorerMode(fileExplorerMode) !== 'tabber';
+}
+
 function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return;
   if (fileExplorerRootMode !== 'sync') return;
@@ -12365,7 +12839,8 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     let changed = false;
     const previousTargetKey = fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot);
     const nextTargetKey = fileExplorerSyncTargetKey(plan.session, plan.root);
-    if (nextTargetKey && nextTargetKey !== previousTargetKey) {
+    const targetChanged = Boolean(nextTargetKey && nextTargetKey !== previousTargetKey);
+    if (targetChanged) {
       rememberFileExplorerSyncExpandedState();
     }
     if (plan.root !== currentFileExplorerRoot()) {
@@ -12377,6 +12852,11 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
         showPending: options.force === true,
       });
       if (!changed) return false;
+      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
+    } else if (targetChanged) {
+      fileExplorerExpanded.clear();
+      await refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: false});
+      changed = true;
       if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
@@ -13455,6 +13935,10 @@ function rawFileUrl(path, params = {}) {
   return `/api/fs/raw?${queryParts.join('&')}`;
 }
 
+function zipFileDownloadUrl(path) {
+  return `/api/fs/zip?path=${encodeURIComponent(path)}`;
+}
+
 function closeFileImagePreview(options = {}) {
   if (!options.fromController) fileImagePreviewController?.cancelTimers?.();
   fileImagePreviewPopover?.remove();
@@ -14245,8 +14729,9 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
 // updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
-// collapse state is a persisted COLLAPSED set (default expanded), times come from the activity ledger with
-// parent = max(child), and sort honors the active Finder sort (label for A-Z, mtime for recent).
+// collapse state is a persisted COLLAPSED set (default expanded), window times come from one semantic
+// recency helper (agent transcript events or non-agent activity ledger) with parent = max(child), and sort
+// honors the active Finder sort (label for A-Z, mtime for recent).
 // ---------------------------------------------------------------------------
 let tabberRefreshDeferredTimer = null;
 
@@ -14294,12 +14779,32 @@ function tabberAgentRecency(agent) {
   return Math.max(Number(agent.sort_ts || 0), Number(agent.last_used_ts || 0));
 }
 
-function tabberAgentDateText(agent) {
-  if (!agent) return '';
-  if (agent.running === true) return t('yoagent.agent.running');
-  const ts = Number(agent.last_used_ts || 0);
-  if (!Number.isFinite(ts) || ts <= 0) return '';
-  return sessionFileDisplayTimeText(ts);
+// Window rows have one semantic recency clock: this exact timestamp feeds row mtime,
+// visible date text, and parent session bubbling.
+function tabberWindowRecency(row) {
+  const isAgent = row?.isAgent === true || ['claude', 'codex'].includes(String(row?.agentKey || '').toLowerCase());
+  if (isAgent) {
+    const activityTs = tabberAgentRecency(row?.agentActivity);
+    if (activityTs > 0) return activityTs;
+    if (String(row?.agentStatus?.state || STATE_KEY.idle) !== STATE_KEY.idle) return 0;
+    const statusTs = Number(row?.agentStatus?.idle_since || row?.agentStatus?.last_active_ts || 0);
+    return Number.isFinite(statusTs) && statusTs > 0 ? statusTs : 0;
+  }
+  const session = String(row?.session || '').trim();
+  const windowIndex = row?.windowIndex ?? row?.record?.index;
+  if (!session || windowIndex === null || windowIndex === undefined || windowIndex === '') return 0;
+  return tabberRecency(`${session}:${windowIndex}`);
+}
+
+function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
+  if (fileExplorerTreeDateMode === 'none') return {text: '', html: ''};
+  const state = String(agentStatus?.state || STATE_KEY.idle);
+  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds});
+  if (!text) return {text: '', html: ''};
+  if (agentWindowIsAttentionState(state)) {
+    return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
+  }
+  return {text, html: ''};
 }
 
 function tabberActivityVisibleConsumer() {
@@ -14530,13 +15035,7 @@ function buildTabberTree() {
       const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
-      const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
-      const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
-      // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but
-      // parent window/session recency must still answer "when was this agent last used?"
-      const windowMtime = isAgent
-        ? tabberAgentRecency(agentActivity)
-        : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
+      const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});
       const agentCurrent = agentWindowPayloadCurrent(agentStatus);
       const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
       const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
@@ -14545,16 +15044,13 @@ function buildTabberTree() {
       const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
-      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
-      const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
-      const dateHtml = agentStatusForDisplay && agentWindowIsAttentionState(agentStatusForDisplay.state)
-        ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
-        : '';
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session, {animate: false});
+      const dateDisplay = tabberWindowDateDisplay(windowMtime, agentStatusForDisplay, nowSeconds);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: label,
-        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText, dateHtml},
+        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText: dateDisplay.text, dateHtml: dateDisplay.html},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -15450,11 +15946,18 @@ function mutationTouchesAgentWindowActivity(mutation) {
 }
 
 function ensureAgentWindowActivityMutationObserver() {
+  if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) return;
   if (agentWindowActivityMutationObserver || typeof MutationObserver !== 'function' || !document?.body) return;
   agentWindowActivityMutationObserver = new MutationObserver(mutations => {
     if (mutations.some(mutationTouchesAgentWindowActivity)) scheduleAgentWindowActivityAnimationSync();
   });
   agentWindowActivityMutationObserver.observe(document.body, {childList: true, subtree: true});
+}
+
+function disconnectAgentWindowActivityMutationObserver() {
+  if (!agentWindowActivityMutationObserver) return;
+  agentWindowActivityMutationObserver.disconnect?.();
+  agentWindowActivityMutationObserver = null;
 }
 
 function syncAgentWindowPulseAnimationCurrentTime(node, nowMs = Date.now()) {
@@ -15487,6 +15990,7 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
 }
 
 function scheduleAgentWindowActivityAnimationSync(root = document) {
+  if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) disconnectAgentWindowActivityMutationObserver();
   ensureAgentWindowActivityMutationObserver();
   syncAgentWindowActivityAnimationDelays(root);
   if (agentWindowActivityAnimationSyncFrame && typeof cancelAnimationFrame === 'function') {
@@ -15766,6 +16270,13 @@ function agentWindowStatusToneClass(tone) {
   return tone === STATE_KEY.working ? 'working' : String(tone || '');
 }
 
+function agentWindowActivityToneWrapperClass(tone) {
+  const normalizedTone = agentWindowActivityTone(tone);
+  return ['attention', 'cooldown', STATE_KEY.working].includes(normalizedTone)
+    ? `agent-window-activity--${agentWindowStatusToneClass(normalizedTone)}`
+    : '';
+}
+
 function agentWindowStatusDotHtml(item, options = {}) {
   if (!item) return '';
   if (!['attention', 'cooldown', STATE_KEY.working].includes(item.state)) return '';
@@ -15773,8 +16284,9 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const statusTones = agentWindowStatusToneOrder(options.statusTones || [tone]);
   const segmented = statusTones.length > 1;
   const segmentKey = statusTones.map(agentWindowStatusToneClass).join('-');
-  const pulse = item.pulseActive !== false;
-  const transitionPulse = item.transitionPulseActive === true && item.acknowledged !== true;
+  const animate = options.animate !== false;
+  const pulse = animate && item.pulseActive !== false;
+  const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
   const classes = statusIndicatorDotClasses(
     tone,
@@ -15820,13 +16332,14 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     `agent-window-agent-icon--${stateKey}`,
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
-  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones});
+  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false});
   if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = agentWindowActivityStyleAttribute(tone, item);
+  const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
   const wrapperClasses = [
     'agent-window-activity',
-    `agent-window-activity--${stateKey}`,
+    toneWrapperClass || `agent-window-activity--${stateKey}`,
     item?.acknowledged === true ? 'agent-window-activity--acknowledged' : '',
     statusOnly ? 'agent-window-activity--status-only' : '',
   ].filter(Boolean).join(' ');
@@ -15894,6 +16407,11 @@ async function fetchFilePathInfo(path, options = {}) {
   })());
 }
 
+async function fetchDirectoryFileCount(path) {
+  const normalized = normalizeDirectoryPath(path);
+  return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -15927,6 +16445,9 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  if (entry?.kind === 'dir') {
+    appendContextMenuButton(menu, 'Zip & download', () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
+  }
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
@@ -15943,6 +16464,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     openInNewTabDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
+    zipDownloadDisabled: multiple || entry?.kind !== 'dir' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
@@ -15984,6 +16506,34 @@ function rawFileDownloadUrl(path) {
   return rawFileUrl(path, {download: 1});
 }
 
+function downloadFilenameFromContentDisposition(header, fallback = 'download') {
+  const text = String(header || '');
+  const starMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (starMatch) {
+    try {
+      return decodeURIComponent(starMatch[1]).trim() || fallback;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+  const quotedMatch = text.match(/filename="([^"]+)"/i);
+  if (quotedMatch) return quotedMatch[1].trim() || fallback;
+  const bareMatch = text.match(/filename=([^;]+)/i);
+  return bareMatch ? bareMatch[1].trim() || fallback : fallback;
+}
+
+function saveBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename || 'download';
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function triggerFileDownload(path) {
   if (!path) return;
   const link = document.createElement('a');
@@ -15994,6 +16544,30 @@ function triggerFileDownload(path) {
   link.click();
   link.remove();
   statusEl.textContent = `download started: ${basenameOf(path) || path}`;
+}
+
+async function triggerFolderZipDownload(path) {
+  if (!path) return;
+  const label = basenameOf(path) || path;
+  statusEl.textContent = `zipping ${label}...`;
+  let response;
+  try {
+    response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+  } catch (error) {
+    statusErr(esc(error?.message || String(error)));
+    return;
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message = payload?.error || response.statusText || `HTTP ${response.status}`;
+    statusErr(esc(message));
+    return;
+  }
+  const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
+  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
+  const blob = await response.blob();
+  saveBlobDownload(blob, filename);
+  statusEl.textContent = `download started: ${filename}`;
 }
 
 function copyCurrentFileExplorerPath() {
@@ -16230,6 +16804,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     ? `Delete ${kind}?\n${deletePaths[0]}`
     : `Delete ${deletePaths.length} selected items?\n${deletePaths.join('\n')}`;
   if (!window.confirm(confirmText)) return;
+  if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
   try {
     for (const path of deletePaths) {
       await apiFetchJson('/api/fs/delete', {
@@ -16255,6 +16830,47 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   } catch (error) {
     statusErr(localizedHtml('status.deleteFailed', {error}));
   }
+}
+
+function fileTreeEntryFromRow(path) {
+  const row = document.querySelector(`.file-tree-row[data-path="${cssEscape(path)}"]`);
+  if (!row) return null;
+  return {
+    kind: row.dataset.kind || '',
+    name: row.dataset.name || basenameOf(path),
+    is_repo: row.dataset.isRepo === 'true',
+  };
+}
+
+async function fileTreeDeleteEntryForPath(path, primaryPath, primaryEntry = null) {
+  if (path === primaryPath && primaryEntry?.kind) return primaryEntry;
+  const rowEntry = fileTreeEntryFromRow(path);
+  if (rowEntry?.kind) return rowEntry;
+  try {
+    return await fetchFilePathInfo(path, {fresh: true});
+  } catch (error) {
+    console.warn('delete path info failed', path, error);
+    return null;
+  }
+}
+
+async function confirmLargeDirectoryDeletes(deletePaths, primaryPath, primaryEntry = null) {
+  for (const path of deletePaths) {
+    const entry = await fileTreeDeleteEntryForPath(path, primaryPath, primaryEntry);
+    if (entry?.kind !== 'dir') continue;
+    let count = null;
+    try {
+      const payload = await fetchDirectoryFileCount(path);
+      count = Number(payload?.files);
+    } catch (error) {
+      console.warn('directory delete count failed', path, error);
+      if (!window.confirm(`Could not count files in this directory, CONFIRM delete?\n${path}`)) return false;
+      continue;
+    }
+    if (!Number.isFinite(count) || count <= 5) continue;
+    if (!window.confirm(`You have ${Math.round(count)} files in this directory, CONFIRM?\n${path}`)) return false;
+  }
+  return true;
 }
 
 // C10: keyboard delete for the Finder tree. macOS Finder deletes the selection with Command-Delete (plain
@@ -17897,7 +18513,8 @@ async function refreshOpenFilesIfChanged(options = {}) {
 function watchedFileExplorerDirectories() {
   const root = currentFileExplorerRoot();
   const directories = new Set();
-  if (fileExplorerRoot || fileExplorerPaneIsOpen()) directories.add(root);
+  if (!fileExplorerTreePaneIsVisible()) return [];
+  directories.add(root);
   for (const path of fileExplorerExpanded) {
     if (pathIsInsideDirectory(path, root)) directories.add(normalizeDirectoryPath(path));
   }
@@ -17923,13 +18540,15 @@ function backgroundFileEditorWatchFiles() {
 
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
-  for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
-    const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
-    if (path && path !== '/') roots.add(path);
-  }
-  for (const file of fileExplorerSessionFilesPayload?.files || []) {
-    const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
-    if (path && path !== '/') roots.add(dirnameOf(path));
+  if (fileExplorerSessionFilesPaneIsVisible()) {
+    for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
+      const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
+      if (path && path !== '/') roots.add(path);
+    }
+    for (const file of fileExplorerSessionFilesPayload?.files || []) {
+      const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
+      if (path && path !== '/') roots.add(dirnameOf(path));
+    }
   }
   return Array.from(roots)
     .map(path => normalizeDirectoryPath(path))
@@ -17965,7 +18584,7 @@ function clientServerWatchState() {
       hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
-  if (document.querySelector('.file-explorer-changes-panel') && typeof clientSessionFilesWatchRequests === 'function') {
+  if (fileExplorerSessionFilesPaneIsVisible() && typeof clientSessionFilesWatchRequests === 'function') {
     state.session_files = clientSessionFilesWatchRequests();
   }
   return state;
@@ -18009,7 +18628,9 @@ function syncServerWatchRoots(options = {}) {
 }
 
 async function refreshFileExplorerIfChanged() {
+  if (!fileExplorerTreePaneIsVisible()) return;
   const directories = watchedFileExplorerDirectories();
+  if (!directories.length) return;
   let changed = false;
   const entriesByDir = new Map();
   const signaturesByDir = new Map();
@@ -18040,13 +18661,15 @@ async function refreshWatchedFilesystem(options = {}) {
   if (filesystemRefreshInFlight) return;
   filesystemRefreshInFlight = true;
   try {
-    if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
-      await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
-    } else {
-      await refreshFileExplorerIfChanged();
+    if (fileExplorerTreePaneIsVisible()) {
+      if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
+        await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+      } else {
+        await refreshFileExplorerIfChanged();
+      }
     }
     await refreshOpenFilesIfChanged();
-    if (document.querySelector('.file-explorer-changes-panel')) {
+    if (fileExplorerSessionFilesPaneIsVisible()) {
       fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
     syncServerWatchRoots();
@@ -19932,6 +20555,7 @@ function applyEditorThemeMode(options = {}) {
   document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
 
 function setFileEditorThemeMode(mode) {
@@ -20462,6 +21086,7 @@ function applyGlobalThemeMode(options = {}) {
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
   scheduleShareTopologySnapshot('theme');
   if (typeof scheduleShareAppearancePublish === 'function') {
     scheduleShareAppearancePublish({reason: options.reason || 'theme', topology: false});
@@ -20553,6 +21178,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
   clientSettingsPayload = payload;
+  clientSettingsMetadataDeferred = payload.deferred_metadata === true;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
   clientSettingsMtimeNs = nextMtime;
@@ -20641,6 +21267,18 @@ function applySettingsPayload(payload, options = {}) {
     scheduleShareAppearancePublish();
   }
   return true;
+}
+
+function scheduleDeferredSettingsMetadataRefresh() {
+  if (!clientSettingsMetadataDeferred || shareViewMode) return null;
+  if (clientSettingsMetadataRefreshPromise) return clientSettingsMetadataRefreshPromise;
+  if (clientSettingsMetadataRefreshTimer) return null;
+  clientSettingsMetadataRefreshTimer = setTimeout(() => {
+    clientSettingsMetadataRefreshTimer = null;
+    clientSettingsMetadataRefreshPromise = refreshSettings({force: true, silent: true})
+      .finally(() => { clientSettingsMetadataRefreshPromise = null; });
+  }, 0);
+  return null;
 }
 
 async function refreshSettings(options = {}) {
@@ -22238,7 +22876,7 @@ function fileDragPreviewMedia(path, entry) {
   if (kind === 'file' && previewMediaKindForPath(path) === 'image') {
     return `<img class="file-drag-thumb" src="${rawFileUrl(path)}" alt="">`;
   }
-  const icon = kind === 'dir' ? '▸' : '📄';
+  const icon = kind === 'dir' ? disclosureTriangleCollapsedGlyph : '📄';
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
@@ -22405,6 +23043,7 @@ function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
   if (isFiles) rememberFileExplorerOpenIntent(false);
+  if (typeof closePopoutsForLayoutItem === 'function') closePopoutsForLayoutItem(item);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
@@ -22418,6 +23057,7 @@ function removePaneFromLayout(item) {
   if (!slot) return;
   const moved = paneTabs(slot);
   if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
+  if (typeof closePopoutsForLayoutItem === 'function') moved.forEach(closePopoutsForLayoutItem);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
@@ -23714,10 +24354,11 @@ async function ensureSession(session) {
 }
 
 async function tmuxSessionExistsForReconnect(session) {
-  if (readOnlyMode) return null;
   try {
-    await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    return true;
+    const payload = await apiFetchJson(`/api/tmux-session-exists?session=${encodeURIComponent(session)}`, {cache: 'no-store'});
+    if (payload?.exists === true) return true;
+    if (payload?.exists === false) return false;
+    return null;
   } catch (error) {
     if (error?.status === 404) return false;
     return null;
@@ -24634,6 +25275,16 @@ function placeTerminalAttentionOverlay(session, item, record, index = 0) {
 }
 
 function syncTerminalAttentionHighlight(session) {
+  const perf = clientPerfStart('terminalAttentionScan');
+  try {
+    return syncTerminalAttentionHighlightMeasured(session);
+  } finally {
+    const item = terminals.get(session);
+    clientPerfEnd(perf, {rows: Math.max(0, Number(item?.term?.rows || 0))});
+  }
+}
+
+function syncTerminalAttentionHighlightMeasured(session) {
   const item = terminals.get(session);
   if (!item?.container || !item?.term) return false;
   clearTerminalAttentionHighlight(session, item);
@@ -24650,7 +25301,16 @@ function syncTerminalAttentionHighlight(session) {
 }
 
 function scheduleTerminalAttentionHighlight(session) {
-  requestAnimationFrame(() => syncTerminalAttentionHighlight(session));
+  const item = terminals.get(session);
+  if (!item) {
+    requestAnimationFrame(() => syncTerminalAttentionHighlight(session));
+    return;
+  }
+  if (item.attentionHighlightFrame) return;
+  item.attentionHighlightFrame = requestAnimationFrame(() => {
+    item.attentionHighlightFrame = 0;
+    if (terminals.get(session) === item) syncTerminalAttentionHighlight(session);
+  });
 }
 
 function syncTerminalAttentionHighlights() {
@@ -24658,8 +25318,29 @@ function syncTerminalAttentionHighlights() {
 }
 
 const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);
+const terminalBlankScreenRefreshRiskReasons = Object.freeze(new Set([
+  'socket-open',
+  'fit',
+  'first-output',
+  'terminal-tab',
+  'tmux-window',
+  'blank-risk',
+]));
+
+function terminalBlankScreenRefreshAllowed(reason) {
+  return terminalBlankScreenRefreshRiskReasons.has(String(reason || 'blank-risk'));
+}
 
 function terminalRenderedContentPresent(session, item = terminals.get(session)) {
+  const perf = clientPerfStart('terminalBlankProbe');
+  try {
+    return terminalRenderedContentPresentMeasured(session, item);
+  } finally {
+    clientPerfEnd(perf, {rows: Math.max(0, Number(item?.term?.rows || 0))});
+  }
+}
+
+function terminalRenderedContentPresentMeasured(session, item = terminals.get(session)) {
   if (!item?.term) return false;
   const buffer = item.term.buffer?.active;
   const bufferLength = Number(buffer?.length);
@@ -24718,6 +25399,10 @@ function runTerminalBlankScreenRefresh(session) {
 function scheduleTerminalBlankScreenRefresh(session, options = {}) {
   const item = terminals.get(session);
   if (!item || shareViewMode || !terminalIsVisible(session, item.container)) return;
+  const reason = String(options.reason || 'blank-risk');
+  if (!terminalBlankScreenRefreshAllowed(reason)) return;
+  if (item.socket?.readyState !== WebSocket.OPEN) return;
+  if (item.blankScreenRefreshTimer && options.reset !== true) return;
   if (terminalRenderedContentPresent(session, item)) {
     item.blankScreenRefreshAttempts = 0;
     if (item.blankScreenRefreshTimer) {
@@ -24746,12 +25431,12 @@ function scheduleFit(session) {
     item.fitFrame = requestAnimationFrame(() => {
       item.fitFrame = 0;
       fitTerminal(session);
-      scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     });
     item.fitTimer = setTimeout(() => {
       item.fitTimer = 0;
       fitTerminal(session);
-      scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     }, 250);
     return;
   }
@@ -24879,10 +25564,12 @@ function closeTerminalItem(session, item) {
   if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
   if (item.fitTimer) clearTimeout(item.fitTimer);
   if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
   item.fileUnderlineController?.dispose?.();
   item.fitFrame = 0;
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
+  item.attentionHighlightFrame = 0;
   item.fileUnderlineController = null;
   const observer = resizeObservers.get(session);
   if (observer) {
@@ -24937,11 +25624,17 @@ function sessionConfirmedGone(session, order) {
   return isTmuxSession(session) && !isPendingTmuxSession(session) && Array.isArray(order) && !order.includes(session);
 }
 
+function terminalSocketCloseLooksFinal(event = null) {
+  const code = Number(event?.code || 0);
+  return event?.wasClean === true || code === 1000 || code === 1001;
+}
+
 // Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
 // cleanup without the confirm/POST, for sessions that ended outside this client.
 function pruneDeadSession(session) {
   const previousActive = activeSessions.slice();
   stopSessionUi(session);
+  completeTerminalRemovalLatency('session', session, {reason: 'prune-dead-session'});
   autoApproveStates.delete(session);
   if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
   updateDocumentTitle();
@@ -24954,12 +25647,23 @@ function pruneDeadSession(session) {
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
-async function confirmSessionGoneOrReconnect(session, item) {
+async function confirmSessionGoneOrReconnect(session, item, event = null) {
   if (item.manualClose || terminals.get(session) !== item) return;
+  const closeDetails = {
+    origin: 'ws-close',
+    closeCode: Number(event?.code || 0),
+    wasClean: event?.wasClean === true,
+  };
+  if (terminalSocketCloseLooksFinal(event) && isTmuxSession(session) && !isPendingTmuxSession(session)) {
+    noteTerminalRemovalLatencyStart('session', session, closeDetails);
+    pruneDeadSession(session);
+    return;
+  }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
   if (item.confirmingGone) return;
+  noteTerminalRemovalLatencyStart('session', session, closeDetails);
   item.confirmingGone = true;
   try {
     const exists = await tmuxSessionExistsForReconnect(session);
@@ -24970,16 +25674,6 @@ async function confirmSessionGoneOrReconnect(session, item) {
     }
     if (exists === true) {
       scheduleTerminalReconnect(session, item);
-      return;
-    }
-    let order = null;
-    try {
-      const payload = await apiFetchJson('/api/auto-approve');
-      if (Array.isArray(payload.session_order)) order = payload.session_order;
-    } catch (_) {}
-    if (item.manualClose || terminals.get(session) !== item) return;
-    if (sessionConfirmedGone(session, order)) {
-      pruneDeadSession(session);
       return;
     }
     scheduleTerminalReconnect(session, item);
@@ -26893,6 +27587,7 @@ function dockviewHeaderActionsHtml(item) {
     return `${paneHandle}${paneFrameControlsGroupHtml(item, {
       groupClass: 'file-editor-frame-controls',
       actions: false,
+      popout: paneCanPopout(item),
       minimize: true,
       expand: true,
       close: true,
@@ -26901,7 +27596,7 @@ function dockviewHeaderActionsHtml(item) {
       closeLabel: t('editor.closePane'),
     })}`;
   }
-  if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item)}`;
+  if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item, {popout: paneCanPopout(item)})}`;
   return '';
 }
 
@@ -26916,7 +27611,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   if (!button) return;
   const item = button.dataset.tab || button.dataset.windowSession || button.dataset.detailToggle
     || button.dataset.paneActions || button.dataset.paneMinimize || button.dataset.paneExpand
-    || button.dataset.paneClose || fallbackItem;
+    || button.dataset.panePopout || button.dataset.paneClose || fallbackItem;
   if (!item) return;
   if (button.dataset.tab !== undefined) {
     event.preventDefault();
@@ -26956,6 +27651,12 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
     event.preventDefault();
     event.stopPropagation();
     expandPaneFromLayout(button.dataset.paneExpand || item);
+    return;
+  }
+  if (button.dataset.panePopout !== undefined) {
+    event.preventDefault();
+    event.stopPropagation();
+    openPanePopout(button.dataset.panePopout || item);
     return;
   }
   if (button.dataset.paneClose !== undefined) {
@@ -27364,6 +28065,15 @@ function bindActionDispatcher(parent, handlers = {}, options = {}) {
 // Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers split from 80_panes_preferences.js.
 
 function renderPanels(previousActive = [], options = {}) {
+  const perf = clientPerfStart('renderPanels');
+  try {
+    return renderPanelsMeasured(previousActive, options);
+  } finally {
+    clientPerfEnd(perf, {nodes: grid?.childElementCount || 0});
+  }
+}
+
+function renderPanelsMeasured(previousActive = [], options = {}) {
   if (renderPanelsDockview(previousActive, options)) return;
   // a full panel re-render pools every panel and clears the grid, which detaches
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
@@ -27719,6 +28429,15 @@ function renderEmptyPane(slot) {
 }
 
 function renderPaneTabStrips() {
+  const perf = clientPerfStart('renderPaneTabStrips');
+  try {
+    return renderPaneTabStripsMeasured();
+  } finally {
+    clientPerfEnd(perf, {nodes: document.querySelectorAll?.('.pane-tab')?.length || 0});
+  }
+}
+
+function renderPaneTabStripsMeasured() {
   if (dockviewLayoutActive()) {
     dockviewRefreshTabs();
     dockviewSyncMountedPanels();
@@ -28885,7 +29604,7 @@ function updateTmuxWindowBarActiveButtons(session, windowIndex) {
 }
 
 function refreshTabberPanelsForTmuxWindowChange() {
-  if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+  if (fileExplorerMode === 'tabber' && itemIsActivePaneTab(fileExplorerItemId) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
 }
 
 function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
@@ -29179,7 +29898,7 @@ function tmuxWindowButtonHtml(options = {}) {
   const agentStatus = options.agentStatus || null;
   const activityIconHtml = options.activityIconHtml !== undefined
     ? String(options.activityIconHtml || '')
-    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '');
+    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false});
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
   const numberLabel = String(options.numberLabel || options.indexText || visibleName);
   const numberHtml = options.showNumberLabel === false ? '' : `<span class="tmux-window-number-label">${esc(numberLabel)}</span>`;
@@ -32331,6 +33050,7 @@ function renderPreferencesPanels(options = {}) {
   // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
   // node aborts the native HTML5 drag.
   if (dragSession != null) { pendingPreferencesRender = true; return; }
+  scheduleDeferredSettingsMetadataRefresh();
   if (options.force !== true && preferencesScrollIsActive()) {
     pendingPreferencesRender = true;
     schedulePreferencesScrollFlush();
@@ -32590,6 +33310,20 @@ const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
 const jsDebugGraphMovingAverageSeries = new Set(['api', 'sse', 'latency', 'bandwidth']);
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
+const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentStatusSeriesLabels = Object.freeze({
+  askAgents: 'Attention',
+  workingAgents: 'Working',
+  transitionAgents: 'Transition',
+  idleAgents: 'Idle',
+});
+const jsDebugAgentStatusBucketValueGetters = Object.freeze({
+  askAgents: bucket => bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0,
+  workingAgents: bucket => bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0,
+  transitionAgents: bucket => bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0,
+  idleAgents: bucket => bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0,
+});
 const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--accent-sky-strong)',
   'var(--good)',
@@ -32608,20 +33342,17 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'sse', label: 'SSE', unit: 'countPerSecond'},
   {key: 'latency', label: 'Client latency', unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond'},
-  {key: 'askAgents', label: 'Attention', unit: 'count'},
-  {key: 'workingAgents', label: 'Working', unit: 'count'},
-  {key: 'transitionAgents', label: 'Transition', unit: 'count'},
-  {key: 'idleAgents', label: 'Idle', unit: 'count'},
+  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, label: jsDebugAgentStatusSeriesLabels[key], unit: 'count'})),
   {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
   {key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent'},
   {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true},
-  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true},
-  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true},
+  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
-  {key: 'activity', label: 'Agent status', series: ['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'], legendSeries: ['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
+  {key: 'activity', label: 'Agent status', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
   {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, legendPlacement: 'footer', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
 
@@ -33477,10 +34208,7 @@ function debugGraphBucketValue(bucket, key) {
   if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
   if (key === 'latency') return bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0;
   if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
-  if (key === 'askAgents') return bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0;
-  if (key === 'workingAgents') return bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0;
-  if (key === 'transitionAgents') return bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0;
-  if (key === 'idleAgents') return bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0;
+  if (jsDebugAgentStatusBucketValueGetters[key]) return jsDebugAgentStatusBucketValueGetters[key](bucket);
   if (key === 'tokensPerAgent') return bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0;
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
@@ -33495,7 +34223,7 @@ function debugGraphBucketValue(bucket, key) {
 function debugGraphBucketHasSeriesData(bucket, key) {
   if (!bucket) return false;
   if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
-  if (key === 'askAgents' || key === 'workingAgents' || key === 'transitionAgents' || key === 'idleAgents') return Number(bucket.agentActivitySamples || 0) > 0;
+  if (jsDebugAgentStatusSeriesKeys.includes(key)) return Number(bucket.agentActivitySamples || 0) > 0;
   if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
@@ -33658,6 +34386,50 @@ function debugGraphTotalMegabytesText(bytes) {
   return value.toFixed(2);
 }
 
+function debugRemovalLatencyMetaText() {
+  if (typeof terminalRemovalLatencySummary !== 'function') return '';
+  const summary = terminalRemovalLatencySummary();
+  if (!summary?.count) return '';
+  return `removal last ${debugGraphTerseTimeText(summary.last?.durationMs)} avg ${debugGraphTerseTimeText(summary.averageMs)} n=${summary.count}`;
+}
+
+function debugClientPerfRows() {
+  if (typeof clientPerfSummary !== 'function') return [];
+  const preferred = ['focusSet', 'keydownToTermData', 'term.onData', 'wsSend', 'echoToTermWrite', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
+  const order = new Map(preferred.map((name, index) => [name, index]));
+  return clientPerfSummary()
+    .filter(row => Number(row.count || 0) > 0)
+    .sort((left, right) => (order.get(left.name) ?? 999) - (order.get(right.name) ?? 999) || Number(right.maxMs || 0) - Number(left.maxMs || 0))
+    .slice(0, 18);
+}
+
+function debugClientPerfText(row) {
+  const parts = [
+    `${row.name}`,
+    `n=${Math.floor(Number(row.count || 0))}`,
+  ];
+  if (Number.isFinite(Number(row.avgMs)) && Number(row.avgMs) > 0) parts.push(`avg=${Number(row.avgMs).toFixed(1)}ms`);
+  if (Number.isFinite(Number(row.maxMs)) && Number(row.maxMs) > 0) parts.push(`max=${Number(row.maxMs).toFixed(1)}ms`);
+  if (Number(row.rows || 0) > 0) parts.push(`rows=${Math.floor(Number(row.rows))}`);
+  if (Number(row.nodes || 0) > 0) parts.push(`nodes=${Math.floor(Number(row.nodes))}`);
+  if (Number(row.bytes || 0) > 0) parts.push(`bytes=${Math.floor(Number(row.bytes))}`);
+  if (Number(row.skipped || 0) > 0) parts.push(`skipped=${Math.floor(Number(row.skipped))}`);
+  return parts.join(' ');
+}
+
+function debugClientPerfHtml() {
+  if (debugModeExplicitUrlEnabled !== true) return '';
+  const rows = debugClientPerfRows();
+  const longTasks = typeof clientPerfLongTaskSummary === 'function' ? clientPerfLongTaskSummary() : {count: 0, averageMs: 0, maxMs: 0};
+  const activeAnimations = typeof clientPerfActiveAnimationCount === 'function' ? clientPerfActiveAnimationCount() : 0;
+  if (!rows.length && !longTasks.count && !activeAnimations) return '';
+  const header = `Client work | animations ${activeAnimations} | long tasks ${longTasks.count}${longTasks.count ? ` avg ${longTasks.averageMs}ms max ${longTasks.maxMs}ms` : ''}`;
+  return `<div class="js-debug-client-perf" data-js-debug-client-perf>
+    <div class="js-debug-client-perf-title">${esc(header)}</div>
+    <div class="js-debug-client-perf-grid">${rows.map(row => `<div class="js-debug-client-perf-row">${esc(debugClientPerfText(row))}</div>`).join('')}</div>
+  </div>`;
+}
+
 function debugGraphMetaHtml() {
   const items = [];
   if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`yolomux.py uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
@@ -33665,6 +34437,8 @@ function debugGraphMetaHtml() {
   const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
   if (rss) items.push(`rss ${rss}`);
   if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(`server seq ${Math.floor(jsDebugStatsServerSequence)}`);
+  const removalLatency = debugRemovalLatencyMetaText();
+  if (removalLatency) items.push(removalLatency);
   if (items.length) {
     const counts = debugEventCounts();
     const uploadedMb = debugGraphTotalMegabytesText(counts.apiRequestBytes);
@@ -33766,11 +34540,22 @@ function debugGraphSeriesTimeMs(series, index) {
 }
 
 function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues = null) {
-  return values
-    .map((value, i) => ({value, time: times[i], hasData: !hasDataValues || hasDataValues[i] === true}))
-    .filter(point => point.hasData)
-    .map(point => debugGraphPointForValue(point.value, point.time, chartMax, domain).join(','))
-    .join(' ');
+  return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
+}
+
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null) {
+  const segments = [];
+  let current = [];
+  values.forEach((value, index) => {
+    if (hasDataValues && hasDataValues[index] !== true) {
+      if (current.length) segments.push(current);
+      current = [];
+      return;
+    }
+    current.push(debugGraphPointForValue(value, times[index], chartMax, domain).join(','));
+  });
+  if (current.length) segments.push(current);
+  return segments;
 }
 
 function debugGraphPointForValue(value, timeMs, chartMax, domain) {
@@ -33832,6 +34617,70 @@ function debugGraphDisconnectedRectsHtml(buckets, domain) {
   }).join('');
 }
 
+function debugGraphBucketRanges(buckets) {
+  return (buckets || [])
+    .map(bucket => {
+      const startMs = Number(bucket?.startMs);
+      const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+      return Number.isFinite(startMs) ? {bucket, startMs, endMs: startMs + durationMs, durationMs} : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.startMs - b.startMs);
+}
+
+function debugGraphOverlayStepMs(bucketRanges) {
+  const durations = (bucketRanges || [])
+    .map(item => Number(item.durationMs))
+    .filter(value => Number.isFinite(value) && value > 0);
+  return durations.length ? Math.max(1000, Math.min(...durations)) : jsDebugGraphRawBucketMs;
+}
+
+function debugGraphRangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return Number(aStart) < Number(bEnd) && Number(bStart) < Number(aEnd);
+}
+
+function debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, seriesKeys) {
+  return bucketRanges.some(item => debugGraphRangesOverlap(startMs, endMs, item.startMs, item.endMs)
+    && seriesKeys.some(key => debugGraphBucketHasSeriesData(item.bucket, key)));
+}
+
+function debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs) {
+  return disconnectedRanges.some(range => debugGraphRangesOverlap(startMs, endMs, range.startMs, range.endMs));
+}
+
+function debugGraphNoDataRuns(buckets, domain, seriesKeys) {
+  const keys = Array.isArray(seriesKeys) ? seriesKeys.filter(Boolean) : [];
+  if (!keys.length) return [];
+  const domainStart = Number(domain?.startMs);
+  const domainEnd = Number(domain?.endMs);
+  if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
+  const bucketRanges = debugGraphBucketRanges(buckets);
+  const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
+  const stepMs = debugGraphOverlayStepMs(bucketRanges);
+  const runs = [];
+  for (let startMs = domainStart; startMs < domainEnd;) {
+    const endMs = Math.min(domainEnd, startMs + stepMs);
+    const hasData = debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, keys);
+    const coveredByDisconnect = debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs);
+    if (!hasData && !coveredByDisconnect) {
+      const previous = runs.at(-1);
+      if (previous && startMs <= previous.endMs + 1) previous.endMs = endMs;
+      else runs.push({startMs, endMs});
+    }
+    startMs = endMs;
+  }
+  return runs;
+}
+
+function debugGraphNoDataRectsHtml(buckets, domain, seriesKeys) {
+  return debugGraphNoDataRuns(buckets, domain, seriesKeys).map((range, index) => {
+    const x1 = debugGraphXForTime(range.startMs, domain);
+    const x2 = debugGraphXForTime(range.endMs, domain);
+    const width = Math.max(1.5, x2 - x1);
+    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc('No client communication data collected')}</title></rect>`;
+  }).join('');
+}
+
 function debugGraphSeriesPlotValues(series) {
   return Array.isArray(series.plotValues) ? series.plotValues : (series.values || []);
 }
@@ -33855,9 +34704,17 @@ function debugGraphSeriesTokenAgentAttrs(series) {
 }
 
 function debugGraphPolylineHtml(series, chartMax, domain) {
-  const points = debugGraphPolylinePoints(debugGraphSeriesPlotValues(series), series.times || [], chartMax, domain, debugGraphSeriesPlotHasDataValues(series));
-  if (!points) return '';
-  return `<polyline class="js-debug-line js-debug-line--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)} points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
+  return debugGraphPolylinePointSegments(
+    debugGraphSeriesPlotValues(series),
+    series.times || [],
+    chartMax,
+    domain,
+    debugGraphSeriesPlotHasDataValues(series),
+  ).map((points, index) => {
+    if (!points.length) return '';
+    const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
+    return `<polyline class="js-debug-line js-debug-line--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
+  }).join('');
 }
 
 function debugGraphAreaPathHtml(series, chartMax, domain) {
@@ -34083,6 +34940,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
+          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, group.series) : ''}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}
@@ -34115,13 +34973,14 @@ function debugGraphInnerHtml() {
   activeJsDebugGraphRangeSeconds(nowMs);
   const controls = debugGraphControlsHtml(nowMs);
   const meta = debugGraphMetaHtml();
+  const clientPerf = debugClientPerfHtml();
   const buckets = debugGraphDisplayBuckets(nowMs);
   if (!buckets.length) {
-    return `${controls}${meta}<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
+    return `${controls}${meta}${clientPerf}<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
   }
   const seriesItems = debugGraphSeriesData(buckets);
   const chartGroups = debugGraphVisibleChartGroups(seriesItems);
-  return `${controls}${meta}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}`;
+  return `${controls}${meta}${clientPerf}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}`;
 }
 
 function debugGraphHtml() {
@@ -34280,6 +35139,7 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
 function jsDebugTextForClipboard() {
   const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
   const counts = debugEventCounts();
+  const removalSummary = terminalRemovalLatencySummary();
   const header = [
     `JS Debug ${new Date().toISOString()}`,
     `page=${page || '/'}`,
@@ -34287,6 +35147,8 @@ function jsDebugTextForClipboard() {
     `api=${counts.apiCalls}`,
     `sse=${counts.sseEvents}`,
     `errors=${counts.errors}`,
+    `removals=${removalSummary.count}`,
+    `removal_avg=${removalSummary.averageMs}ms`,
     `api_tx=${counts.apiRequestBytes}B`,
     `api_rx=${counts.apiResponseBytes}B`,
     `sse_rx=${counts.sseBytes}B`,
@@ -34294,12 +35156,14 @@ function jsDebugTextForClipboard() {
   const apiSummaryRows = debugApiSummaryRows();
   const sseSummaryRows = debugSseSummaryRows();
   const sseLatencySummaryRows = debugSseLatencySummaryRows();
+  const clientPerfRows = debugClientPerfRows().map(debugClientPerfText);
   const rows = jsDebugEvents.map(debugEventLineText);
   return [
     header,
     ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
     ...(sseSummaryRows.length ? ['Slow SSE server work:', ...sseSummaryRows, ''] : []),
     ...(sseLatencySummaryRows.length ? ['Slow SSE receive latency:', ...sseLatencySummaryRows, ''] : []),
+    ...(clientPerfRows.length ? ['Client work counters:', ...clientPerfRows, ''] : []),
     ...rows,
   ].join('\n');
 }
@@ -34363,12 +35227,14 @@ function renderDebugPanels(options = {}) {
     }
     bindDebugPanel(panel);
   }
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelsFromEvents() {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel);
   }
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelFromEvents(panel, options = {}) {
@@ -35640,7 +36506,16 @@ function sessionFilesRenderOptions(options = {}) {
   return options.force === true || options.silent !== true ? {force: true} : {};
 }
 
+function sessionFilesPerfDetails(payload = {}, extra = {}) {
+  const files = Array.isArray(payload?.files) ? payload.files.length : 0;
+  return {nodes: sessionFilesRepoRoots(payload).length, rows: files, ...extra};
+}
+
 function renderSessionFilesDestination(destination, options = {}) {
+  if (!fileExplorerSessionFilesPaneIsVisible()) {
+    recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
+    return;
+  }
   renderFileExplorerChangesPanels(options);
 }
 
@@ -35648,6 +36523,10 @@ async function fetchSessionFiles(options = {}) {
   const destination = 'finder';
   const forceRefresh = options.force === true;
   const backgroundRefresh = options.background === true;
+  if (!fileExplorerSessionFilesPaneIsVisible()) {
+    recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
+    return false;
+  }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
   const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
@@ -35658,6 +36537,7 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, emptyPayload);
     setSessionFilesSignatureForDestination(destination, signature);
+    recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(emptyPayload));
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
@@ -35685,6 +36565,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+    recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
@@ -35694,12 +36575,13 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
+    recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: err}));
   } finally {
     const current = requestIsCurrent();
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
-    if (current && (shouldRender || wasLoading)) {
+    if (current && (shouldRender || wasLoading) && fileExplorerSessionFilesPaneIsVisible()) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
@@ -35713,6 +36595,11 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
   if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
   if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
+  if (!fileExplorerSessionFilesPaneIsVisible()) {
+    if (sessionFilesLoadingForDestination(destination)) setSessionFilesLoadingForDestination(destination, false);
+    recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
+    return false;
+  }
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -35722,6 +36609,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (shouldRender) {
     renderSessionFilesDestination(destination, {force: true});
@@ -35789,7 +36677,7 @@ function sessionFileMissingTimeText() {
 function sessionFileDisplayTimeText(mtime, options = {}) {
   if (fileExplorerTreeDateMode === 'none') return '';
   const text = fileExplorerTreeDateMode === 'date' ? sessionFileTimeText(mtime)
-    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime)
+    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
       : '';
   if (!text && options.placeholderForMissingTime === true) return sessionFileMissingTimeText();
   return text;
@@ -36174,6 +37062,8 @@ function initializeDefaultCollapsedChangesFolders(entriesByDir) {
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
   const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
   const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(treeRoot, sessionFiles);
+  const renderedRows = entries.length + Array.from(entriesByDir.values()).reduce((total, childEntries) => total + (Array.isArray(childEntries) ? childEntries.length : 0), 0);
+  recordClientPerfCounter('sessionFilesRender', 0, {nodes: entriesByDir.size, rows: renderedRows});
   initializeDefaultCollapsedChangesFolders(entriesByDir);
   renderTreeChildren(container, treeRoot, entries, 0, {
     entriesByDir,
@@ -37410,6 +38300,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
 }
 
 function renderFileExplorerChangesPanels(options = {}) {
+  if (!fileExplorerPaneIsOpen()) return;
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     renderFileExplorerChangesPanel(panel, options);
   }
@@ -40393,9 +41284,367 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Shared detached pane popout host. Per-pane code supplies only a snapshot renderer.
+
+const panePopouts = new Map();
+const paneItemPopouts = panePopoutNamespaceMap('pane');
+
+function panePopoutStorageKey(namespace, id) {
+  return `${namespace}:${id}`;
+}
+
+function panePopoutNamespaceMap(namespace) {
+  return {
+    get(id) {
+      return panePopouts.get(panePopoutStorageKey(namespace, id));
+    },
+    set(id, record) {
+      const key = panePopoutStorageKey(namespace, id);
+      panePopouts.set(key, {...record, key, namespace, id});
+      return this;
+    },
+    has(id) {
+      return panePopouts.has(panePopoutStorageKey(namespace, id));
+    },
+    delete(id) {
+      return panePopouts.delete(panePopoutStorageKey(namespace, id));
+    },
+    keys() {
+      return Array.from(panePopouts.values())
+        .filter(record => record.namespace === namespace)
+        .map(record => record.id)
+        [Symbol.iterator]();
+    },
+  };
+}
+
+function closePanePopoutRecord(record) {
+  if (!record) return false;
+  panePopouts.delete(record.key);
+  const popoutWindow = record.window;
+  if (!popoutWindow || popoutWindow.closed) return false;
+  try { popoutWindow.close?.(); } catch (_) {}
+  return true;
+}
+
+function panePopoutDocument(popoutWindow) {
+  try { return popoutWindow?.document || null; } catch (_) { return null; }
+}
+
+function currentStylesheetHref(match = 'yolomux.css') {
+  const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+    .find(item => String(item.getAttribute('href') || '').includes(match));
+  return link ? link.href : '';
+}
+
+function panePopoutBodyClassName(extraClass = '') {
+  const preserve = [
+    ...THEME_BODY_CLASSES,
+    ...EDITOR_THEME_BODY_CLASSES,
+    EDITOR_PREVIEW_VANILLA_CLASS,
+    'status-pulse-disabled',
+  ];
+  const classes = preserve.filter(name => document.body?.classList?.contains(name));
+  classes.push('pane-popout-window');
+  if (extraClass) classes.push(extraClass);
+  return classes.join(' ');
+}
+
+function panePopoutVariableStyle() {
+  const root = getComputedStyle(document.documentElement);
+  const names = [];
+  for (let index = 0; index < root.length; index += 1) {
+    const name = root.item(index);
+    if (name?.startsWith?.('--')) names.push(name);
+  }
+  return names
+    .sort()
+    .map(name => {
+      const value = root.getPropertyValue(name).trim();
+      return value ? `${name}: ${value}` : '';
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
+function writePanePopoutDocument(popoutWindow, options = {}) {
+  const doc = panePopoutDocument(popoutWindow);
+  if (!doc) return false;
+  const title = options.title || 'YOLOmux popout';
+  const cssHref = options.cssHref || currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
+  const bodyClass = options.bodyClass || panePopoutBodyClassName();
+  const bodyStyle = options.bodyStyle || panePopoutVariableStyle();
+  const style = options.style || '';
+  const bodyHtml = options.bodyHtml || '<main class="pane-popout-shell"><section data-pane-popout-root></section></main>';
+  doc.open();
+  doc.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)}</title>
+  <link rel="stylesheet" href="${esc(cssHref)}">
+  ${style ? `<style>${style}</style>` : ''}
+</head>
+<body class="${esc(bodyClass)}" style="${esc(bodyStyle)}">
+${bodyHtml}
+</body>
+</html>`);
+  doc.close();
+  return true;
+}
+
+function writePanePopoutAfterNavigation(popoutWindow, expectedPathname, write) {
+  let written = false;
+  const run = () => {
+    if (written || !popoutWindow || popoutWindow.closed) return;
+    written = true;
+    write();
+    popoutWindow.focus?.();
+  };
+  try {
+    if (popoutWindow.location?.pathname === expectedPathname && popoutWindow.document?.readyState === 'complete') {
+      run();
+      return;
+    }
+    popoutWindow.addEventListener?.('load', run, {once: true});
+    window.setTimeout(run, 1000);
+  } catch (_) {
+    run();
+  }
+}
+
+function paneCanPopout(item) {
+  const type = tabTypeForItem(item);
+  if (!type) return false;
+  if (typeof type.canPopout === 'function') return type.canPopout(item) === true;
+  return type.canPopout === true || typeof type.popoutRenderer === 'function' || typeof type.openPopout === 'function';
+}
+
+function panePopoutDisabledReason(item) {
+  if (isTmuxSession(item)) return 'live terminal/transcript popout is disabled in phase 1';
+  const type = tabTypeForItem(item);
+  const reason = type?.popoutDisabledReason;
+  if (typeof reason === 'function') return String(reason(item) || 'pane popout disabled for this tab');
+  if (reason) return String(reason);
+  return 'pane popout disabled for this tab';
+}
+
+function panePopoutPanelSnapshot(item, options = {}) {
+  if (options.refresh === 'info' && typeof renderInfoPanel === 'function') renderInfoPanel({force: true});
+  if (options.refresh === 'debug' && typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
+  const panel = document.getElementById(panelDomId(item));
+  if (!panel) return null;
+  const clone = panel.cloneNode(true);
+  clone.querySelector('.panel-head')?.remove();
+  clone.querySelectorAll('[id]').forEach(node => node.removeAttribute('id'));
+  clone.querySelectorAll('[autofocus]').forEach(node => node.removeAttribute('autofocus'));
+  clone.querySelectorAll('input, textarea, select, button').forEach(node => {
+    if (node.matches?.('input, textarea, select')) node.setAttribute('disabled', 'disabled');
+    if (node.matches?.('button')) node.setAttribute('disabled', 'disabled');
+  });
+  const label = itemLabel(item);
+  return {
+    title: `${label} popout`,
+    label,
+    className: `pane-popout-snapshot ${clone.className || ''}`.trim(),
+    html: clone.innerHTML,
+  };
+}
+
+function panePopoutSnapshotForItem(item) {
+  const type = tabTypeForItem(item);
+  if (!type) return null;
+  if (typeof type.popoutRenderer === 'function') return type.popoutRenderer(item);
+  return panePopoutPanelSnapshot(item);
+}
+
+function panePopoutDocumentStyle() {
+  return `
+    html, body {
+      min-height: 100%;
+      margin: 0;
+      overflow: auto;
+    }
+    body.pane-popout-window {
+      display: block !important;
+      height: auto;
+      min-height: 100%;
+      background: var(--bg, #0f131a);
+      color: var(--text, #e5e7eb);
+      font: 13px/1.35 var(--font, system-ui, sans-serif);
+    }
+    .pane-popout-shell {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 100vh;
+      padding: 48px 16px 20px;
+    }
+    .pane-popout-title {
+      position: fixed;
+      top: 0;
+      inset-inline: 0;
+      z-index: 1000;
+      box-sizing: border-box;
+      min-height: 36px;
+      padding: 9px 14px 8px;
+      border-bottom: 1px solid var(--line, #2a3444);
+      background: var(--panel, #151b24);
+      color: var(--text, #e5e7eb);
+      font-weight: 700;
+      box-shadow: 0 1px 0 rgb(0 0 0 / 0.18);
+    }
+    .pane-popout-root,
+    .pane-popout-snapshot {
+      min-width: 0;
+    }
+    .pane-popout-window .panel {
+      position: static !important;
+      display: block !important;
+      width: 100% !important;
+      height: auto !important;
+      min-height: 0 !important;
+      overflow: visible !important;
+      border: 0 !important;
+      background: transparent !important;
+      box-shadow: none !important;
+    }
+    .pane-popout-window .panel-overlay-root,
+    .pane-popout-window .info-pane,
+    .pane-popout-window .preferences-body,
+    .pane-popout-window .preferences-scroll {
+      position: static !important;
+      inset: auto !important;
+      height: auto !important;
+      max-height: none !important;
+      min-height: 0 !important;
+      overflow: visible !important;
+    }
+    .pane-popout-window .panel-toast-stack {
+      display: none !important;
+    }
+    body.theme-light.pane-popout-window {
+      background: var(--bg, #f8fafc);
+      color: var(--text, #111827);
+    }
+    body.theme-light.pane-popout-window .pane-popout-title {
+      background: var(--panel, #ffffff);
+      color: var(--text, #111827);
+      box-shadow: 0 1px 0 rgb(15 23 42 / 0.08);
+    }
+    @media (max-width: 640px) {
+      .pane-popout-shell { padding: 46px 10px 16px; }
+      .pane-popout-title { padding-inline: 10px; }
+    }
+  `;
+}
+
+function writePaneItemPopoutDocument(record, snapshot) {
+  if (!record?.window || !snapshot) return false;
+  return writePanePopoutDocument(record.window, {
+    title: snapshot.title || 'YOLOmux popout',
+    bodyClass: panePopoutBodyClassName('pane-popout-item-window'),
+    bodyStyle: panePopoutVariableStyle(),
+    style: panePopoutDocumentStyle(),
+    bodyHtml: `<main class="pane-popout-shell">
+  <header class="pane-popout-title">${esc(snapshot.label || snapshot.title || 'YOLOmux')}</header>
+  <section data-pane-popout-root class="pane-popout-root ${esc(snapshot.className || '')}">${snapshot.html || ''}</section>
+</main>`,
+  });
+}
+
+function updatePanePopout(item) {
+  const record = paneItemPopouts.get(item);
+  if (!record) return false;
+  const popoutWindow = record.window;
+  if (!popoutWindow || popoutWindow.closed) {
+    paneItemPopouts.delete(item);
+    return false;
+  }
+  const snapshot = panePopoutSnapshotForItem(item);
+  if (!snapshot) return false;
+  try {
+    const doc = popoutWindow.document;
+    const root = doc?.querySelector?.('[data-pane-popout-root]');
+    if (!root) return writePaneItemPopoutDocument(record, snapshot);
+    doc.title = snapshot.title || 'YOLOmux popout';
+    doc.body.className = panePopoutBodyClassName('pane-popout-item-window');
+    doc.body.setAttribute('style', panePopoutVariableStyle());
+    const title = doc.querySelector('.pane-popout-title');
+    if (title) title.textContent = snapshot.label || snapshot.title || 'YOLOmux';
+    root.className = `pane-popout-root ${snapshot.className || ''}`.trim();
+    root.innerHTML = snapshot.html || '';
+    return true;
+  } catch (_) {
+    paneItemPopouts.delete(item);
+    return false;
+  }
+}
+
+function refreshPanePopouts(item = '') {
+  let updated = false;
+  for (const id of Array.from(paneItemPopouts.keys())) {
+    if (item && id !== item) continue;
+    updated = updatePanePopout(id) || updated;
+  }
+  return updated;
+}
+
+function closePanePopout(item) {
+  return closePanePopoutRecord(paneItemPopouts.get(item));
+}
+
+function closePopoutsForLayoutItem(item) {
+  let closed = closePanePopout(item);
+  if (isFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
+    closed = closeFilePreviewPopout(fileItemPath(item)) || closed;
+  }
+  return closed;
+}
+
+function closeAllPanePopouts() {
+  for (const record of Array.from(panePopouts.values())) closePanePopoutRecord(record);
+}
+
+window.addEventListener('beforeunload', closeAllPanePopouts);
+
+function openPanePopout(item) {
+  if (!paneCanPopout(item)) {
+    console.info('[YOLOmux] pane popout unavailable', {item, reason: panePopoutDisabledReason(item)});
+    return false;
+  }
+  const type = tabTypeForItem(item);
+  if (typeof type?.openPopout === 'function') return type.openPopout(item);
+  const snapshot = panePopoutSnapshotForItem(item);
+  if (!snapshot) return false;
+  const existing = paneItemPopouts.get(item)?.window;
+  if (existing && !existing.closed) {
+    updatePanePopout(item);
+    existing.focus?.();
+    return true;
+  }
+  const popoutWindow = window.open(`/pane-popout?item=${encodeURIComponent(item)}`, `yolomux-pane-${encodeURIComponent(item)}`, 'popup,width=980,height=900');
+  if (!popoutWindow) {
+    statusErr('pane pop-out was blocked by the browser');
+    return false;
+  }
+  try {
+    paneItemPopouts.set(item, {window: popoutWindow});
+    const record = paneItemPopouts.get(item);
+    writePanePopoutAfterNavigation(popoutWindow, '/pane-popout', () => writePaneItemPopoutDocument(record, snapshot));
+    return true;
+  } catch (error) {
+    paneItemPopouts.delete(item);
+    try { popoutWindow.close(); } catch (_) {}
+    statusErr(`pane pop-out failed: ${error}`);
+    return false;
+  }
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // File preview popout window helpers split from 95_codemirror_editor.js.
 
-const filePreviewPopouts = new Map();
+const filePreviewPopouts = panePopoutNamespaceMap('file-preview');
 
 function filePreviewPopoutsForPath(path) {
   const record = filePreviewPopouts.get(path);
@@ -40526,12 +41775,6 @@ function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) 
   else if (typeof requestAnimationFrame === 'function') record.scrollSyncFrame = requestAnimationFrame(run);
   else record.scrollSyncFrame = setTimeout(run, 0);
   return true;
-}
-
-function currentStylesheetHref(match) {
-  const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-    .find(item => String(item.getAttribute('href') || '').includes(match));
-  return link ? link.href : '';
 }
 
 function previewPopoutBodyClassName() {
@@ -44355,6 +45598,133 @@ function shareReplayFeatureEnabled() {
   return shareReplayEnabled === true;
 }
 
+function shareHostConnectedViewerCount() {
+  if (shareViewMode) return 0;
+  return (activeShares || []).reduce((total, share) => {
+    const count = Math.max(0, Math.floor(Number(share?.viewers) || 0));
+    const details = Array.isArray(share?.viewerDetails) ? share.viewerDetails.length : 0;
+    return total + Math.max(count, details);
+  }, 0);
+}
+
+function shareHostHasConnectedViewers() {
+  return shareHostConnectedViewerCount() > 0;
+}
+
+function shareReplayHostPerfCounter() {
+  return {
+    count: 0,
+    totalMs: 0,
+    maxMs: 0,
+    lastMs: null,
+    lastAt: 0,
+    skippedNoViewers: 0,
+    lastSkipAt: 0,
+    lastViewerCount: 0,
+    lastDetail: {},
+  };
+}
+
+const shareReplayHostPerformance = {
+  geometryDigest: shareReplayHostPerfCounter(),
+  mutationRecords: shareReplayHostPerfCounter(),
+  mutationFlush: shareReplayHostPerfCounter(),
+  mutationObserver: {
+    installed: 0,
+    disconnected: 0,
+    skippedNoViewers: 0,
+    lastAt: 0,
+    lastSkipAt: 0,
+    active: false,
+  },
+};
+
+function shareReplayHostPerfNow() {
+  const value = globalThis.performance?.now?.();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function shareReplayHostPerfMs(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
+}
+
+function shareReplayDebugPerfEventsEnabled() {
+  return typeof debugModeEnabled !== 'undefined'
+    && debugModeEnabled === true
+    && typeof recordJsDebugEvent === 'function';
+}
+
+function shareReplayRecordHostPerfEvent(kind = '', payload = {}, durationMs = null) {
+  if (!shareReplayDebugPerfEventsEnabled()) return;
+  if (durationMs !== null && durationMs < 8 && kind !== 'geometryDigest') return;
+  recordJsDebugEvent('share-replay-perf', {
+    kind,
+    ...payload,
+  });
+}
+
+function shareReplayRecordHostPerfSkip(kind = '', reason = 'no-viewers') {
+  const counter = shareReplayHostPerformance[kind];
+  if (!counter) return;
+  counter.skippedNoViewers = Math.max(0, Math.round(Number(counter.skippedNoViewers) || 0)) + 1;
+  counter.lastSkipAt = Date.now();
+  counter.lastViewerCount = shareHostConnectedViewerCount();
+  shareReplayRecordHostPerfEvent(kind, {
+    reason,
+    viewerCount: counter.lastViewerCount,
+    skippedNoViewers: counter.skippedNoViewers,
+  });
+}
+
+function shareReplayRecordHostPerf(kind = '', startedAt = 0, detail = {}) {
+  const counter = shareReplayHostPerformance[kind];
+  if (!counter) return;
+  const durationMs = shareReplayHostPerfMs(shareReplayHostPerfNow() - Number(startedAt || 0)) ?? 0;
+  counter.count += 1;
+  counter.totalMs = shareReplayHostPerfMs(Number(counter.totalMs || 0) + durationMs) ?? 0;
+  counter.maxMs = Math.max(Number(counter.maxMs || 0), durationMs);
+  counter.lastMs = durationMs;
+  counter.lastAt = Date.now();
+  counter.lastViewerCount = shareHostConnectedViewerCount();
+  counter.lastDetail = {...detail};
+  shareReplayRecordHostPerfEvent(kind, {
+    durationMs,
+    viewerCount: counter.lastViewerCount,
+    ...detail,
+  }, durationMs);
+}
+
+function shareReplayHostPerfSnapshot(counter = {}) {
+  const count = Math.max(0, Math.round(Number(counter.count) || 0));
+  const totalMs = shareReplayHostPerfMs(counter.totalMs) ?? 0;
+  return {
+    count,
+    totalMs,
+    avgMs: count ? shareReplayHostPerfMs(totalMs / count) : null,
+    maxMs: shareReplayHostPerfMs(counter.maxMs) ?? 0,
+    lastMs: counter.lastMs,
+    lastAt: Math.max(0, Math.round(Number(counter.lastAt) || 0)),
+    skippedNoViewers: Math.max(0, Math.round(Number(counter.skippedNoViewers) || 0)),
+    lastSkipAt: Math.max(0, Math.round(Number(counter.lastSkipAt) || 0)),
+    lastViewerCount: Math.max(0, Math.round(Number(counter.lastViewerCount) || 0)),
+    lastDetail: {...(counter.lastDetail || {})},
+  };
+}
+
+function shareReplayHostPerformanceDiagnostics() {
+  return {
+    viewerCount: shareHostConnectedViewerCount(),
+    mutationObserver: {
+      ...shareReplayHostPerformance.mutationObserver,
+      active: Boolean(shareReplayMutationObserver),
+    },
+    geometryDigest: shareReplayHostPerfSnapshot(shareReplayHostPerformance.geometryDigest),
+    mutationRecords: shareReplayHostPerfSnapshot(shareReplayHostPerformance.mutationRecords),
+    mutationFlush: shareReplayHostPerfSnapshot(shareReplayHostPerformance.mutationFlush),
+  };
+}
+
 function shareReplayHostNodeId(node) {
   if (!node || (typeof node !== 'object' && typeof node !== 'function') || (typeof Node !== 'undefined' && !(node instanceof Node) && !node.localName && !node.tagName && Number(node.nodeType) !== 3)) {
     return 0;
@@ -45213,10 +46583,22 @@ function shareReplayMutationEntries(records = []) {
   return entries;
 }
 
-function shareReplayEnqueueMutationRecords(records = []) {
+function shareReplayEnqueueMutationRecords(records = [], options = {}) {
   if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused) return [];
-  const entries = shareReplayMutationEntries(records);
+  if (options.requireViewers === true && !shareHostHasConnectedViewers()) {
+    shareReplayRecordHostPerfSkip('mutationRecords');
+    shareReplayDrainMutationPublisher();
+    return [];
+  }
+  const sourceRecords = Array.from(records || []);
+  const startedAt = shareReplayHostPerfNow();
+  const entries = shareReplayMutationEntries(sourceRecords);
   const terminals = Array.isArray(entries.terminals) ? entries.terminals : [];
+  shareReplayRecordHostPerf('mutationRecords', startedAt, {
+    records: sourceRecords.length,
+    entries: entries.length,
+    terminals: terminals.length,
+  });
   if (!entries.length && !terminals.length) return [];
   if (entries.length) shareReplayPendingMutations.push(...entries);
   if (terminals.length) shareReplayPendingTerminalPlaceholders.push(...terminals);
@@ -45232,6 +46614,9 @@ function shareReplayDrainMutationPublisher() {
     shareReplayMutationObserver.takeRecords?.();
     shareReplayMutationObserver.disconnect?.();
     shareReplayMutationObserver = null;
+    shareReplayHostPerformance.mutationObserver.disconnected += 1;
+    shareReplayHostPerformance.mutationObserver.active = false;
+    shareReplayHostPerformance.mutationObserver.lastAt = Date.now();
   }
   shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
   shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
@@ -45289,12 +46674,19 @@ function shareReplayFlushMutationDeltas() {
   const mutations = shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
   const terminals = shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
   if (!mutations.length && !terminals.length) return null;
+  const startedAt = shareReplayHostPerfNow();
   const payload = {
     mutations,
     count: mutations.length,
   };
   if (terminals.length) payload.terminals = terminals;
   const published = shareReplayPublishDeltaPayload(payload, 'mutation', {maxBytes: shareReplayHostDeltaMaxBytes});
+  shareReplayRecordHostPerf('mutationFlush', startedAt, {
+    mutations: mutations.length,
+    terminals: terminals.length,
+    bytes: Math.max(0, Math.round(Number(published?.bytes) || 0)),
+    skipped: published?.skipped === true,
+  });
   if (published?.skipped) {
     sharePublishDomKeyframe('backpressure');
     return null;
@@ -45303,17 +46695,27 @@ function shareReplayFlushMutationDeltas() {
 }
 
 function installShareReplayMutationPublisher() {
-  if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused || shareReplayMutationObserver || typeof MutationObserver === 'undefined') return;
+  if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused || typeof MutationObserver === 'undefined') return;
+  if (!shareHostHasConnectedViewers()) {
+    shareReplayHostPerformance.mutationObserver.skippedNoViewers += 1;
+    shareReplayHostPerformance.mutationObserver.lastSkipAt = Date.now();
+    shareReplayDrainMutationPublisher();
+    return;
+  }
+  if (shareReplayMutationObserver) return;
   const root = appRootElement();
   if (!root || root === document.body) return;
   shareReplayHostNodeId(root);
-  shareReplayMutationObserver = new MutationObserver(records => shareReplayEnqueueMutationRecords(records));
+  shareReplayMutationObserver = new MutationObserver(records => shareReplayEnqueueMutationRecords(records, {requireViewers: true}));
   shareReplayMutationObserver.observe(root, {
     attributes: true,
     characterData: true,
     childList: true,
     subtree: true,
   });
+  shareReplayHostPerformance.mutationObserver.installed += 1;
+  shareReplayHostPerformance.mutationObserver.active = true;
+  shareReplayHostPerformance.mutationObserver.lastAt = Date.now();
 }
 
 function shareReplayResetMutationPublisherForKeyframe(reason = 'manual-debug') {
@@ -47066,6 +48468,15 @@ function shareGeometryDigestFrame() {
   return {digest: shareGeometryDigestValue(snapshot), snapshot};
 }
 
+function shareGeometryDigestSnapshotCounts(snapshot = {}) {
+  return {
+    tabStrips: Array.isArray(snapshot.tabStrips) ? snapshot.tabStrips.length : 0,
+    terminalCells: Array.isArray(snapshot.terminalCells) ? snapshot.terminalCells.length : 0,
+    editors: Array.isArray(snapshot.editors) ? snapshot.editors.length : 0,
+    textWraps: Array.isArray(snapshot.textWraps) ? snapshot.textWraps.length : 0,
+  };
+}
+
 function shareGeometryRectsWithinTolerance(hostRect = {}, localRect = {}, tolerancePx = 1) {
   for (const key of ['left', 'top', 'width', 'height']) {
     const hostValue = Math.round(Number(hostRect?.[key] || 0));
@@ -47391,6 +48802,7 @@ function shareReplayHealthDiagnostics() {
     redactionPolicyVersion: shareReplayLastRedactionPolicyVersion,
     nodeCount: shareReplayNodeMap.size,
     lastReplayError: shareReplayLastReplayError,
+    hostPerformance: shareReplayHostPerformanceDiagnostics(),
     terminalPlaceholders,
     context: shareDebugContextSnapshot(),
   });
@@ -47659,7 +49071,17 @@ function applyShareGeometryDigest(payload = {}) {
 
 function publishShareGeometryDigest() {
   if (shareViewMode || !shareCanPublishUi()) return;
-  sharePublish('geometry-digest', shareGeometryDigestFrame());
+  if (!shareHostHasConnectedViewers()) {
+    shareReplayRecordHostPerfSkip('geometryDigest');
+    return;
+  }
+  const startedAt = shareReplayHostPerfNow();
+  const frame = shareGeometryDigestFrame();
+  shareReplayRecordHostPerf('geometryDigest', startedAt, {
+    digest: frame.digest,
+    ...shareGeometryDigestSnapshotCounts(frame.snapshot),
+  });
+  sharePublish('geometry-digest', frame);
 }
 
 function installShareGeometryDigestLoop() {
@@ -47829,6 +49251,20 @@ function renderShareCountdowns() {
     const viewer = share?.viewerDetails?.[index];
     if (viewer) node.textContent = shareViewerDurationText(viewer);
   });
+}
+
+function shareModalIsVisible() {
+  const modal = document.getElementById('modal');
+  return Boolean(modal?.classList?.contains(CLS.open) && modal.classList.contains('share-open'));
+}
+
+function shareStatusSurfaceVisible() {
+  if (document.visibilityState === 'hidden') return false;
+  if (shareViewMode) return Boolean(shareViewerBanner?.isConnected);
+  if (shareStatusPill?.isConnected && shareStatusPill.hidden !== true) return true;
+  if (!shareModalIsVisible()) return false;
+  const {body} = shareModalElements();
+  return Boolean(body?.querySelector?.('.share-entry, [data-share-countdown], [data-share-viewer-count], [data-share-viewer-duration]'));
 }
 
 async function refreshActiveShare(options = {}) {
@@ -48271,9 +49707,11 @@ function startShareStatusRefresh() {
   if (shareStatusTimer) clearInterval(shareStatusTimer);
   shareStatusTimer = setInterval(() => {
     if (redirectExpiredShareViewerToLogin()) return;
-    renderShareStatusPill();
-    updateShareViewerBanner();
-    renderShareCountdowns();
+    if (shareStatusSurfaceVisible()) {
+      renderShareStatusPill();
+      updateShareViewerBanner();
+      renderShareCountdowns();
+    }
     if (shareViewMode && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
       refreshShareViewerStatus({silent: true});
     } else if (!readOnlyMode && Date.now() - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs) {
@@ -48470,6 +49908,7 @@ function paneFrameControlsHtml(session, options = {}) {
   const includeDetails = options.details === true;
   const includeMinimize = options.minimize !== false;
   const includeExpand = options.expand !== false;
+  const includePopout = options.popout === true;
   if (includeActions) {
     controls.push(disabled
       ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
@@ -48480,6 +49919,11 @@ function paneFrameControlsHtml(session, options = {}) {
     controls.push(disabled
       ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
       : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
+  }
+  if (includePopout) {
+    controls.push(disabled
+      ? `<button class="tab pane-popout" ${disabledAttrs('Pop out tab')}></button>`
+      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="Pop out tab" aria-label="Pop out tab"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -48547,9 +49991,9 @@ function panelControlsHtml(session, options = {}) {
         </div>`;
 }
 
-function virtualPanelControlsHtml(session) {
+function virtualPanelControlsHtml(session, options = {}) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
-          ${paneFrameControlsHtml(session, {actions: false, close: false})}
+          ${paneFrameControlsHtml(session, {actions: false, close: false, ...options})}
         </div>`;
 }
 
@@ -49883,19 +51327,24 @@ function infoRecordLinearDescHtml(record) {
   return highlight ? infoSearchHighlightHtml(title) : esc(title);
 }
 
+function infoFieldLabel(kind) {
+  const labels = {
+    path: 'info.field.path',
+    branch: 'info.field.gitBranch',
+    pr: 'info.field.githubPr',
+    linear: 'info.field.linear',
+    tab: 'info.field.tabTmuxSession',
+    ai: 'info.field.tmuxSubWindow',
+    'tmux-window': 'info.field.tmuxSubWindow',
+    updated: 'info.field.updated',
+  };
+  return t(labels[kind] || kind);
+}
+
 function infoRecordFieldHtml(kind, html, title = '') {
   if (!html) return '';
-  const labels = {
-    path: 'path',
-    branch: 'Git branch',
-    pr: 'GitHub PR',
-    linear: 'Linear',
-    tab: 'Tab(tmux session)',
-    ai: 'tmux sub-window',
-    updated: 'updated',
-  };
   const titleAttr = title ? ` title="${esc(title)}"` : '';
-  const label = labels[kind] || kind;
+  const label = infoFieldLabel(kind);
   return `<div class="info-tree-field info-tree-field-${esc(kind)}"${titleAttr}>
       <span class="info-tree-field-label">${esc(label)}:</span>
       <span class="info-tree-field-value">${html}</span>
@@ -49967,7 +51416,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
+  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true, animate: false});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
@@ -50000,6 +51449,7 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
     active,
     agentStatus: agent,
     agentKey: record.aiKind,
+    activityAnimate: false,
     title,
     attrs,
     ariaPressed: options.action !== false,
@@ -50102,10 +51552,7 @@ function infoGroupChildCountHtml(group = {}) {
 }
 
 function infoGroupDimensionLabel(key) {
-  if (key === 'tab') return 'Tab(tmux session):';
-  if (key === 'tmux-window') return 'tmux sub-window:';
-  if (key === 'branch') return 'Git branch:';
-  if (key === 'pr') return 'GitHub PR:';
+  if (key === 'tab' || key === 'tmux-window' || key === 'branch' || key === 'pr') return `${infoFieldLabel(key)}:`;
   return `${infoDimensionLabel(key)}:`;
 }
 
@@ -50150,37 +51597,81 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
   return `<div class="info-tree" data-info-grouping="${esc(normalizeInfoGrouping(grouping).join(','))}" data-info-sort="${esc(`${normalizedSort.key}:${normalizedSort.dir}`)}" data-info-search="${esc(infoSearch.trim())}">${childrenHtml}</div>`;
 }
 
-function renderInfoPanel() {
+function infoPanelRenderVisible() {
+  return activePaneItems().includes(infoItemId);
+}
+
+function infoPanelRenderSignature() {
+  return JSON.stringify({
+    loading: transcriptMetaLoading,
+    loaded: transcriptMetaLoaded,
+    error: transcriptMetaLoadError,
+    search: infoSearch,
+    grouping: infoGrouping,
+    sort: infoSort,
+    meta: transcriptMeta,
+  });
+}
+
+function renderInfoPanel(options = {}) {
   const node = document.getElementById('info-content');
   if (!node) return;
+  if (options.force !== true && !infoPanelRenderVisible()) {
+    infoPanelRenderPending = true;
+    recordClientPerfCounter('renderInfoPanel', 0, {skipped: 1});
+    return;
+  }
+  infoPanelRenderPending = false;
+  let renderedNodes = 0;
+  const perf = clientPerfStart('renderInfoPanel');
+  try {
+    return renderInfoPanelMeasured(node, options);
+  } finally {
+    renderedNodes = node.querySelectorAll?.('.info-tree-record, .info-tree-group')?.length || 0;
+    clientPerfEnd(perf, {nodes: renderedNodes});
+  }
+}
+
+function renderInfoPanelMeasured(node, options = {}) {
   const renderInfoContent = html => {
     node.innerHTML = html;
     if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
+    if (typeof refreshPanePopouts === 'function') refreshPanePopouts(infoItemId);
   };
   syncTranscriptMetaLoadingUi();
+  const signature = infoPanelRenderSignature();
+  if (options.force !== true && signature === infoPanelLastRenderSignature && infoPanelLastRenderHtml) {
+    renderInfoContent(infoPanelLastRenderHtml);
+    return;
+  }
+  const commitInfoContent = html => {
+    infoPanelLastRenderSignature = signature;
+    infoPanelLastRenderHtml = html;
+    renderInfoContent(html);
+  };
   const allRecords = infoRelationshipRecords();
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      renderInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
+      commitInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
       return;
     }
     if (transcriptMetaLoading) {
-      renderInfoContent(infoMetadataLoadingHtml());
+      commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
     if (transcriptMetaLoadError) {
-      renderInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
+      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
-      renderInfoContent(infoMetadataLoadingHtml());
+      commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
-    renderInfoContent(`<div class="info-empty">${esc(t('info.empty'))}</div>`);
+    commitInfoContent(`<div class="info-empty">${esc(t('info.empty'))}</div>`);
     return;
   }
-  renderInfoContent(infoTreeHtml(records, infoGrouping, infoSort));
+  commitInfoContent(infoTreeHtml(records, infoGrouping, infoSort));
 }
 
 function infoPrCellHtml(row) {
@@ -50672,7 +52163,7 @@ function applyShareInfoState(info = {}) {
   }
   if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
   refreshInfoGroupingControls();
-  renderInfoPanel();
+  renderInfoPanel({force: true});
   restoreShareScrollTargetByKey('info');
 }
 
@@ -51205,14 +52696,22 @@ function insertIntoTerminal(session, text) {
     return sent;
   }
   if (item.socket?.readyState !== WebSocket.OPEN) return false;
+  const sendPerf = clientPerfStart('wsSend');
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
+  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
+  item.lastInputSentAt = clientPerfNow();
   if (autoFocusEnabled) item.term?.focus?.();
   return true;
 }
 
 function noteTerminalExplicitInput(session) {
+  const item = terminals.get(session);
+  if (item) {
+    item.lastExplicitInputMark = clientPerfMark(`terminal-keydown:${session}`);
+    item.lastExplicitInputAt = clientPerfNow();
+  }
   noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
+  setFocusedTerminal(session, {userInitiated: true, syncFinder: false});
 }
 
 function terminalDataWithoutPassiveReports(data) {
@@ -51368,7 +52867,7 @@ function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, opti
   if (options.render !== false) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
-    if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+    if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
   return true;
 }
@@ -51387,7 +52886,7 @@ function applyTmuxSignalActiveWindowsToTranscriptInfo(payload = {}) {
   if (changed) {
     for (const session of seen) updatePanelHeader(session, transcriptMeta.sessions?.[session]);
     renderInfoPanel();
-    if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+    if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
   return changed;
 }
@@ -51504,20 +53003,36 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
 }
 
 function handleTerminalData(session, data, options = {}) {
+  const perf = clientPerfStart('term.onData');
+  try {
+    return handleTerminalDataMeasured(session, data, options);
+  } finally {
+    clientPerfEnd(perf, {bytes: jsDebugByteLength(data)});
+  }
+}
+
+function handleTerminalDataMeasured(session, data, options = {}) {
   if (readOnlyMode && !shareWriteMode) return false;
   const filtered = stripTerminalQueryResponses(data);
   if (!filtered) return false;
+  const current = terminals.get(session);
+  if (current?.lastExplicitInputMark) {
+    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: jsDebugByteLength(filtered)});
+    current.lastExplicitInputMark = '';
+  }
   if (shareReplayShellActive && shareWriteMode) {
     acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
     shareSendTerminalInputIntent(session, filtered);
     return true;
   }
-  const current = terminals.get(session);
   const socket = current?.socket;
   if (socket?.readyState !== WebSocket.OPEN) return false;
   observeTerminalTmuxPrefixWindowSwitches(session, filtered);
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
+  const sendPerf = clientPerfStart('wsSend');
   socket.send(JSON.stringify({type: 'input', data: filtered}));
+  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
+  current.lastInputSentAt = clientPerfNow();
   return true;
 }
 
@@ -51683,7 +53198,7 @@ function activateTab(session, name, options = {}) {
   if (name === 'terminal') {
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
-    scheduleTerminalBlankScreenRefresh(session);
+    scheduleTerminalBlankScreenRefresh(session, {reason: 'terminal-tab'});
     if (options.userInitiated) focusTerminalFromUserAction(session);
     else focusTerminalWhenAutoFocus(session, 25);
   } else {
@@ -51784,11 +53299,13 @@ function connectTerminalSocket(session, item) {
   item.socket = socket;
   item.manualClose = false;
   socket.onopen = () => {
+    clearTerminalRemovalLatency('session', session);
+    item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
     dismissTerminalConnectionToasts(session);
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
-      scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
       if (!shareViewMode) scheduleRemoteResize(session, shareRemoteResizeAfterSocketOpenMs);
     }
     updateTypingIndicator(session);
@@ -51798,6 +53315,13 @@ function connectTerminalSocket(session, item) {
   socket.onmessage = event => {
     if (terminals.get(session) !== item || !item.term) return;
     try {
+      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : jsDebugByteLength(event.data);
+      const inputSentAt = Number(item.lastInputSentAt || 0);
+      if (inputSentAt > 0) {
+        recordClientPerfCounter('echoToTermWrite', clientPerfNow() - inputSentAt, {bytes: dataBytes});
+        item.lastInputSentAt = 0;
+      }
+      const writePerf = clientPerfStart('xtermWrite');
       if (shareViewMode) {
         handleShareViewSocketMessage(session, item, event.data);
       } else if (event.data instanceof ArrayBuffer) {
@@ -51805,22 +53329,25 @@ function connectTerminalSocket(session, item) {
       } else {
         item.term.write(String(event.data));
       }
-      item.fileUnderlineController?.schedule?.();
-      scheduleTerminalBlankScreenRefresh(session);
+      clientPerfEnd(writePerf, {bytes: dataBytes});
+      const firstOutput = item.terminalOutputSeen !== true;
+      item.terminalOutputSeen = true;
+      item.fileUnderlineController?.schedule?.({reason: 'output'});
+      if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
       scheduleTerminalAttentionHighlight(session);
     } catch (_) {
       if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
   };
-  socket.onclose = () => {
+  socket.onclose = event => {
     if (item.manualClose || terminals.get(session) !== item) return;
     postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
     clearFocusedTerminal(session);
     updateStatus();
     refreshTrackedSessionChrome(session);
-    // Roster-confirm before reconnecting: a killed session is pruned immediately, a transient
-    // disconnect reconnects as before.
-    confirmSessionGoneOrReconnect(session, item);
+    // Confirm once before reconnecting: a dead tmux session is pruned without the old reconnect
+    // backoff loop, while a live session still reconnects after a transient close.
+    confirmSessionGoneOrReconnect(session, item, event);
   };
   socket.onerror = () => {
     updateTypingIndicator(session);
@@ -51980,6 +53507,8 @@ function startTerminal(session) {
     shareTerminalSkippedResetCount: 0,
     blankScreenRefreshTimer: 0,
     blankScreenRefreshAttempts: 0,
+    attentionHighlightFrame: 0,
+    terminalOutputSeen: false,
     fileUnderlineController: null,
   };
   terminals.set(session, item);
@@ -52080,19 +53609,17 @@ async function setAutoApprove(session, enabled) {
 }
 
 async function refreshAutoStatuses() {
-  await loadAutoStatuses();
+  const result = await loadAutoStatuses({render: false});
+  renderAutoApproveStatusSurfaces(result);
   bindClipboardPaste();
-  renderAutoApproveButtons();
-  updateSessionButtonStates();
-  refreshActivePanelHeaders();
-  trackSessionStateChanges();
   refreshOpenEventLogs();
 }
 
-async function loadAutoStatuses() {
+async function loadAutoStatuses(options = {}) {
+  let result = null;
   try {
     const payload = await apiFetchJson('/api/auto-approve');
-    applyAutoApprovePayload(payload);
+    result = applyAutoApprovePayload(payload, options);
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -52100,15 +53627,34 @@ async function loadAutoStatuses() {
         autoApproveStates.set(session, payload);
       } catch (_) {}
     }
+    result = {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
-  updateDocumentTitle();
+  if (options.render !== false && !result?.rendered) renderAutoApproveStatusSurfaces(result);
+  return result;
+}
+
+function renderAutoApproveStatusSurfaces(result = {}) {
+  const perf = clientPerfStart('autoStatusRender');
+  try {
+    if (result?.sessionsChanged) renderPanels(result.previousActive || activeSessions.slice());
+    else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+    updateDocumentTitle();
   // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
-  renderAutoApproveButtons();
+    renderAutoApproveButtons();
+    updateSessionButtonStates();
+    refreshActivePanelHeaders();
+    trackSessionStateChanges();
+    syncTerminalAttentionHighlights();
+    scheduleShareUiStatePublish();
+    if (result && typeof result === 'object') result.rendered = true;
+  } finally {
+    clientPerfEnd(perf, {sessions: sessions.length});
+  }
 }
 
-function applyAutoApprovePayload(payload) {
+function applyAutoApprovePayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const previousActive = activeSessions.slice();
   const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
@@ -52120,16 +53666,10 @@ function applyAutoApprovePayload(payload) {
     const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
     autoApproveStates.set(session, state);
   }
-  if (sessionsChanged) renderPanels(previousActive);
-  else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
-  updateDocumentTitle();
-  renderAutoApproveButtons();
-  updateSessionButtonStates();
-  refreshActivePanelHeaders();
-  trackSessionStateChanges();
-  syncTerminalAttentionHighlights();
-  scheduleShareUiStatePublish();
-  return true;
+  const result = {applied: true, sessionsChanged, previousActive};
+  if (options.render === false) return result;
+  renderAutoApproveStatusSurfaces(result);
+  return result;
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -53015,6 +54555,7 @@ async function boot() {
   }
   bindClipboardPaste();
   paintInitialAppShell();
+  scheduleDeferredSettingsMetadataRefresh();
   if (!shareViewMode) {
     await refreshTranscripts({refreshAuto: false});
   } else {
@@ -53226,7 +54767,9 @@ function tmuxSignalsPayloadWithPatch(data) {
   if (!data || typeof data !== 'object' || data.patch !== true) return data;
   if (!tmuxSignalState || typeof tmuxSignalState !== 'object' || !Array.isArray(tmuxSignalState.windows)) return data;
   const nextByKey = new Map(tmuxSignalState.windows.map(windowRecord => [tmuxSignalWindowKey(windowRecord), windowRecord]).filter(([key]) => key));
-  for (const key of data.removed_window_keys || []) nextByKey.delete(String(key || ''));
+  for (const key of data.removed_window_keys || []) {
+    nextByKey.delete(String(key || ''));
+  }
   for (const windowRecord of data.windows || []) {
     const key = tmuxSignalWindowKey(windowRecord);
     if (key) nextByKey.set(key, windowRecord);
@@ -53239,10 +54782,26 @@ function tmuxSignalsPayloadWithPatch(data) {
   };
 }
 
+function recordTmuxSignalRemovedWindowLatencies(data) {
+  if (!data || typeof data !== 'object') return;
+  const removedWindowEventAt = Number(data.removed_window_event_at);
+  const removedWindowEventType = String(data.removed_window_event_type || '');
+  for (const key of data.removed_window_keys || []) {
+    const windowKey = String(key || '');
+    if (!windowKey) continue;
+    completeTerminalRemovalLatencyFromEpochSeconds('window', windowKey, removedWindowEventAt, {
+      origin: removedWindowEventType || 'tmux-signal',
+      eventType: removedWindowEventType,
+      reason: data.patch === true ? 'tmux-signal-patch' : 'tmux-signal-snapshot',
+    });
+  }
+}
+
 function applyTmuxSignalsPayload(payload = {}) {
   const rawData = tmuxSignalsPayloadWithPatch(tmuxSignalPayloadData(payload));
   const data = tmuxSignalsPayloadWithWindowOverrides(rawData);
   if (!data || typeof data !== 'object') return null;
+  recordTmuxSignalRemovedWindowLatencies(data);
   tmuxSignalState = data;
   applyTmuxSignalActiveWindowsToTranscriptInfo(data);
   confirmTmuxWindowActiveOverridesFromRawSignals(rawData);
@@ -53250,7 +54809,39 @@ function applyTmuxSignalsPayload(payload = {}) {
   return data;
 }
 
+function clientPushEventSessionKey(payload = {}) {
+  return String(payload.session || payload.request?.session || payload.data?.session || payload.data?.target || '');
+}
+
+function clientPushEventCoalesceKey(type, payload = {}) {
+  const key = String(type || 'event');
+  const session = clientPushEventSessionKey(payload);
+  if (session) return `${key}:${session}`;
+  return key;
+}
+
+function queueClientPushEvent(type, payload = {}) {
+  const key = clientPushEventCoalesceKey(type, payload);
+  clientPushEventQueue.set(key, {type, payload});
+  if (clientPushEventFrame) return;
+  clientPushEventFrame = requestAnimationFrame(() => {
+    clientPushEventFrame = 0;
+    flushQueuedClientPushEvents();
+  });
+}
+
+function flushQueuedClientPushEvents() {
+  const events = Array.from(clientPushEventQueue.values());
+  clientPushEventQueue.clear();
+  recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
+  for (const event of events) handleClientPushEventNow(event.type, event.payload);
+}
+
 function handleClientPushEvent(type, payload = {}) {
+  queueClientPushEvent(type, payload);
+}
+
+function handleClientPushEventNow(type, payload = {}) {
   if (type === 'update_available') {
     applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
     return;

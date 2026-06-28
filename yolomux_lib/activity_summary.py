@@ -18,7 +18,7 @@ from .common import project_git
 from .common import tail_file_lines
 from .common import truncate_text
 from .transcripts import compact_transcript_items
-from .transcripts import newest_transcript_timestamp
+from .transcripts import newest_transcript_activity_timestamp
 from .transcripts import session_transcript_activity_state
 from .transcripts import transcript_activity_state
 from .web import server_string
@@ -146,25 +146,37 @@ def relative_age_text(timestamp: float | None, now: datetime | None = None) -> s
     return f"{days} day{'s' if days != 1 else ''} ago"
 
 
-def transcript_last_activity(agent: AgentInfo | None) -> dict[str, Any]:
+def agent_transcript_activity_ts(agent: AgentInfo | None) -> dict[str, Any]:
     if not agent or not agent.transcript:
-        return {"timestamp": None, "text": "", "path": ""}
+        return {"timestamp": None, "source": "none", "reason": "no transcript", "path": ""}
     path = Path(agent.transcript).expanduser()
-    timestamps: list[datetime] = []
+    mtime: datetime | None = None
     try:
-        timestamps.append(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
-    except OSError:
-        pass
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError as exc:
+        stat_error = str(exc)
+    else:
+        stat_error = ""
     try:
-        newest = newest_transcript_timestamp(tail_file_lines(path, 800))
-    except OSError:
+        newest = newest_transcript_activity_timestamp(tail_file_lines(path, 800), str(agent.kind or "").lower())
+    except OSError as exc:
         newest = None
-    if newest:
-        timestamps.append(newest)
-    if not timestamps:
-        return {"timestamp": None, "text": "", "path": str(path)}
-    latest = max(timestamps)
-    return {"timestamp": latest.timestamp(), "text": relative_age_text(latest.timestamp()), "path": str(path)}
+        read_error = str(exc)
+    else:
+        read_error = ""
+    if newest is not None:
+        return {"timestamp": newest.timestamp(), "source": "transcript-event", "reason": "meaningful transcript event", "path": str(path)}
+    if mtime is not None:
+        return {"timestamp": mtime.timestamp(), "source": "file-mtime", "reason": "file mtime fallback: no meaningful transcript timestamp", "path": str(path)}
+    reason = read_error or stat_error or "no transcript timestamp"
+    return {"timestamp": None, "source": "none", "reason": reason, "path": str(path)}
+
+
+def transcript_last_activity(agent: AgentInfo | None) -> dict[str, Any]:
+    activity = dict(agent_transcript_activity_ts(agent))
+    timestamp = activity.get("timestamp")
+    activity["text"] = relative_age_text(timestamp) if isinstance(timestamp, (int, float)) and timestamp > 0 else ""
+    return activity
 
 
 def recent_activity_label(activity_state: dict[str, Any], last_activity: dict[str, Any], now: datetime | None = None) -> tuple[str, bool]:
@@ -288,6 +300,8 @@ def build_recent_agents_payload(
                 "recent_paths": recent_agent_paths_from_files((session_files_by_session or {}).get(session), agent=agent, window=window),
                 "last_used_ts": float(last_used_ts or 0.0),
                 "last_used_text": last_activity.get("text") or "",
+                "last_used_source": last_activity.get("source") or "",
+                "last_used_reason": last_activity.get("reason") or "",
                 "running": running,
                 "state": activity_state.get("key") or "idle",
                 "state_text": activity_state.get("text") or "",

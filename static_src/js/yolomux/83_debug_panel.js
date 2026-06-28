@@ -50,6 +50,20 @@ const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
 const jsDebugGraphMovingAverageSeries = new Set(['api', 'sse', 'latency', 'bandwidth']);
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
+const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentStatusSeriesLabels = Object.freeze({
+  askAgents: 'Attention',
+  workingAgents: 'Working',
+  transitionAgents: 'Transition',
+  idleAgents: 'Idle',
+});
+const jsDebugAgentStatusBucketValueGetters = Object.freeze({
+  askAgents: bucket => bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0,
+  workingAgents: bucket => bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0,
+  transitionAgents: bucket => bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0,
+  idleAgents: bucket => bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0,
+});
 const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--accent-sky-strong)',
   'var(--good)',
@@ -68,20 +82,17 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'sse', label: 'SSE', unit: 'countPerSecond'},
   {key: 'latency', label: 'Client latency', unit: 'ms'},
   {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond'},
-  {key: 'askAgents', label: 'Attention', unit: 'count'},
-  {key: 'workingAgents', label: 'Working', unit: 'count'},
-  {key: 'transitionAgents', label: 'Transition', unit: 'count'},
-  {key: 'idleAgents', label: 'Idle', unit: 'count'},
+  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, label: jsDebugAgentStatusSeriesLabels[key], unit: 'count'})),
   {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
   {key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent'},
   {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true},
-  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true},
-  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true},
+  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
-  {key: 'activity', label: 'Agent status', series: ['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'], legendSeries: ['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'], unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
+  {key: 'activity', label: 'Agent status', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
   {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, legendPlacement: 'footer', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
 
@@ -937,10 +948,7 @@ function debugGraphBucketValue(bucket, key) {
   if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
   if (key === 'latency') return bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0;
   if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
-  if (key === 'askAgents') return bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0;
-  if (key === 'workingAgents') return bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0;
-  if (key === 'transitionAgents') return bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0;
-  if (key === 'idleAgents') return bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0;
+  if (jsDebugAgentStatusBucketValueGetters[key]) return jsDebugAgentStatusBucketValueGetters[key](bucket);
   if (key === 'tokensPerAgent') return bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0;
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
@@ -955,7 +963,7 @@ function debugGraphBucketValue(bucket, key) {
 function debugGraphBucketHasSeriesData(bucket, key) {
   if (!bucket) return false;
   if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
-  if (key === 'askAgents' || key === 'workingAgents' || key === 'transitionAgents' || key === 'idleAgents') return Number(bucket.agentActivitySamples || 0) > 0;
+  if (jsDebugAgentStatusSeriesKeys.includes(key)) return Number(bucket.agentActivitySamples || 0) > 0;
   if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
@@ -1118,6 +1126,50 @@ function debugGraphTotalMegabytesText(bytes) {
   return value.toFixed(2);
 }
 
+function debugRemovalLatencyMetaText() {
+  if (typeof terminalRemovalLatencySummary !== 'function') return '';
+  const summary = terminalRemovalLatencySummary();
+  if (!summary?.count) return '';
+  return `removal last ${debugGraphTerseTimeText(summary.last?.durationMs)} avg ${debugGraphTerseTimeText(summary.averageMs)} n=${summary.count}`;
+}
+
+function debugClientPerfRows() {
+  if (typeof clientPerfSummary !== 'function') return [];
+  const preferred = ['focusSet', 'keydownToTermData', 'term.onData', 'wsSend', 'echoToTermWrite', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
+  const order = new Map(preferred.map((name, index) => [name, index]));
+  return clientPerfSummary()
+    .filter(row => Number(row.count || 0) > 0)
+    .sort((left, right) => (order.get(left.name) ?? 999) - (order.get(right.name) ?? 999) || Number(right.maxMs || 0) - Number(left.maxMs || 0))
+    .slice(0, 18);
+}
+
+function debugClientPerfText(row) {
+  const parts = [
+    `${row.name}`,
+    `n=${Math.floor(Number(row.count || 0))}`,
+  ];
+  if (Number.isFinite(Number(row.avgMs)) && Number(row.avgMs) > 0) parts.push(`avg=${Number(row.avgMs).toFixed(1)}ms`);
+  if (Number.isFinite(Number(row.maxMs)) && Number(row.maxMs) > 0) parts.push(`max=${Number(row.maxMs).toFixed(1)}ms`);
+  if (Number(row.rows || 0) > 0) parts.push(`rows=${Math.floor(Number(row.rows))}`);
+  if (Number(row.nodes || 0) > 0) parts.push(`nodes=${Math.floor(Number(row.nodes))}`);
+  if (Number(row.bytes || 0) > 0) parts.push(`bytes=${Math.floor(Number(row.bytes))}`);
+  if (Number(row.skipped || 0) > 0) parts.push(`skipped=${Math.floor(Number(row.skipped))}`);
+  return parts.join(' ');
+}
+
+function debugClientPerfHtml() {
+  if (debugModeExplicitUrlEnabled !== true) return '';
+  const rows = debugClientPerfRows();
+  const longTasks = typeof clientPerfLongTaskSummary === 'function' ? clientPerfLongTaskSummary() : {count: 0, averageMs: 0, maxMs: 0};
+  const activeAnimations = typeof clientPerfActiveAnimationCount === 'function' ? clientPerfActiveAnimationCount() : 0;
+  if (!rows.length && !longTasks.count && !activeAnimations) return '';
+  const header = `Client work | animations ${activeAnimations} | long tasks ${longTasks.count}${longTasks.count ? ` avg ${longTasks.averageMs}ms max ${longTasks.maxMs}ms` : ''}`;
+  return `<div class="js-debug-client-perf" data-js-debug-client-perf>
+    <div class="js-debug-client-perf-title">${esc(header)}</div>
+    <div class="js-debug-client-perf-grid">${rows.map(row => `<div class="js-debug-client-perf-row">${esc(debugClientPerfText(row))}</div>`).join('')}</div>
+  </div>`;
+}
+
 function debugGraphMetaHtml() {
   const items = [];
   if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`yolomux.py uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
@@ -1125,6 +1177,8 @@ function debugGraphMetaHtml() {
   const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
   if (rss) items.push(`rss ${rss}`);
   if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(`server seq ${Math.floor(jsDebugStatsServerSequence)}`);
+  const removalLatency = debugRemovalLatencyMetaText();
+  if (removalLatency) items.push(removalLatency);
   if (items.length) {
     const counts = debugEventCounts();
     const uploadedMb = debugGraphTotalMegabytesText(counts.apiRequestBytes);
@@ -1226,11 +1280,22 @@ function debugGraphSeriesTimeMs(series, index) {
 }
 
 function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues = null) {
-  return values
-    .map((value, i) => ({value, time: times[i], hasData: !hasDataValues || hasDataValues[i] === true}))
-    .filter(point => point.hasData)
-    .map(point => debugGraphPointForValue(point.value, point.time, chartMax, domain).join(','))
-    .join(' ');
+  return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
+}
+
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null) {
+  const segments = [];
+  let current = [];
+  values.forEach((value, index) => {
+    if (hasDataValues && hasDataValues[index] !== true) {
+      if (current.length) segments.push(current);
+      current = [];
+      return;
+    }
+    current.push(debugGraphPointForValue(value, times[index], chartMax, domain).join(','));
+  });
+  if (current.length) segments.push(current);
+  return segments;
 }
 
 function debugGraphPointForValue(value, timeMs, chartMax, domain) {
@@ -1292,6 +1357,70 @@ function debugGraphDisconnectedRectsHtml(buckets, domain) {
   }).join('');
 }
 
+function debugGraphBucketRanges(buckets) {
+  return (buckets || [])
+    .map(bucket => {
+      const startMs = Number(bucket?.startMs);
+      const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+      return Number.isFinite(startMs) ? {bucket, startMs, endMs: startMs + durationMs, durationMs} : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.startMs - b.startMs);
+}
+
+function debugGraphOverlayStepMs(bucketRanges) {
+  const durations = (bucketRanges || [])
+    .map(item => Number(item.durationMs))
+    .filter(value => Number.isFinite(value) && value > 0);
+  return durations.length ? Math.max(1000, Math.min(...durations)) : jsDebugGraphRawBucketMs;
+}
+
+function debugGraphRangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return Number(aStart) < Number(bEnd) && Number(bStart) < Number(aEnd);
+}
+
+function debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, seriesKeys) {
+  return bucketRanges.some(item => debugGraphRangesOverlap(startMs, endMs, item.startMs, item.endMs)
+    && seriesKeys.some(key => debugGraphBucketHasSeriesData(item.bucket, key)));
+}
+
+function debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs) {
+  return disconnectedRanges.some(range => debugGraphRangesOverlap(startMs, endMs, range.startMs, range.endMs));
+}
+
+function debugGraphNoDataRuns(buckets, domain, seriesKeys) {
+  const keys = Array.isArray(seriesKeys) ? seriesKeys.filter(Boolean) : [];
+  if (!keys.length) return [];
+  const domainStart = Number(domain?.startMs);
+  const domainEnd = Number(domain?.endMs);
+  if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
+  const bucketRanges = debugGraphBucketRanges(buckets);
+  const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
+  const stepMs = debugGraphOverlayStepMs(bucketRanges);
+  const runs = [];
+  for (let startMs = domainStart; startMs < domainEnd;) {
+    const endMs = Math.min(domainEnd, startMs + stepMs);
+    const hasData = debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, keys);
+    const coveredByDisconnect = debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs);
+    if (!hasData && !coveredByDisconnect) {
+      const previous = runs.at(-1);
+      if (previous && startMs <= previous.endMs + 1) previous.endMs = endMs;
+      else runs.push({startMs, endMs});
+    }
+    startMs = endMs;
+  }
+  return runs;
+}
+
+function debugGraphNoDataRectsHtml(buckets, domain, seriesKeys) {
+  return debugGraphNoDataRuns(buckets, domain, seriesKeys).map((range, index) => {
+    const x1 = debugGraphXForTime(range.startMs, domain);
+    const x2 = debugGraphXForTime(range.endMs, domain);
+    const width = Math.max(1.5, x2 - x1);
+    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc('No client communication data collected')}</title></rect>`;
+  }).join('');
+}
+
 function debugGraphSeriesPlotValues(series) {
   return Array.isArray(series.plotValues) ? series.plotValues : (series.values || []);
 }
@@ -1315,9 +1444,17 @@ function debugGraphSeriesTokenAgentAttrs(series) {
 }
 
 function debugGraphPolylineHtml(series, chartMax, domain) {
-  const points = debugGraphPolylinePoints(debugGraphSeriesPlotValues(series), series.times || [], chartMax, domain, debugGraphSeriesPlotHasDataValues(series));
-  if (!points) return '';
-  return `<polyline class="js-debug-line js-debug-line--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)} points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
+  return debugGraphPolylinePointSegments(
+    debugGraphSeriesPlotValues(series),
+    series.times || [],
+    chartMax,
+    domain,
+    debugGraphSeriesPlotHasDataValues(series),
+  ).map((points, index) => {
+    if (!points.length) return '';
+    const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
+    return `<polyline class="js-debug-line js-debug-line--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
+  }).join('');
 }
 
 function debugGraphAreaPathHtml(series, chartMax, domain) {
@@ -1543,6 +1680,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
+          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, group.series) : ''}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}
@@ -1575,13 +1713,14 @@ function debugGraphInnerHtml() {
   activeJsDebugGraphRangeSeconds(nowMs);
   const controls = debugGraphControlsHtml(nowMs);
   const meta = debugGraphMetaHtml();
+  const clientPerf = debugClientPerfHtml();
   const buckets = debugGraphDisplayBuckets(nowMs);
   if (!buckets.length) {
-    return `${controls}${meta}<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
+    return `${controls}${meta}${clientPerf}<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
   }
   const seriesItems = debugGraphSeriesData(buckets);
   const chartGroups = debugGraphVisibleChartGroups(seriesItems);
-  return `${controls}${meta}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}`;
+  return `${controls}${meta}${clientPerf}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}`;
 }
 
 function debugGraphHtml() {
@@ -1740,6 +1879,7 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
 function jsDebugTextForClipboard() {
   const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
   const counts = debugEventCounts();
+  const removalSummary = terminalRemovalLatencySummary();
   const header = [
     `JS Debug ${new Date().toISOString()}`,
     `page=${page || '/'}`,
@@ -1747,6 +1887,8 @@ function jsDebugTextForClipboard() {
     `api=${counts.apiCalls}`,
     `sse=${counts.sseEvents}`,
     `errors=${counts.errors}`,
+    `removals=${removalSummary.count}`,
+    `removal_avg=${removalSummary.averageMs}ms`,
     `api_tx=${counts.apiRequestBytes}B`,
     `api_rx=${counts.apiResponseBytes}B`,
     `sse_rx=${counts.sseBytes}B`,
@@ -1754,12 +1896,14 @@ function jsDebugTextForClipboard() {
   const apiSummaryRows = debugApiSummaryRows();
   const sseSummaryRows = debugSseSummaryRows();
   const sseLatencySummaryRows = debugSseLatencySummaryRows();
+  const clientPerfRows = debugClientPerfRows().map(debugClientPerfText);
   const rows = jsDebugEvents.map(debugEventLineText);
   return [
     header,
     ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
     ...(sseSummaryRows.length ? ['Slow SSE server work:', ...sseSummaryRows, ''] : []),
     ...(sseLatencySummaryRows.length ? ['Slow SSE receive latency:', ...sseLatencySummaryRows, ''] : []),
+    ...(clientPerfRows.length ? ['Client work counters:', ...clientPerfRows, ''] : []),
     ...rows,
   ].join('\n');
 }
@@ -1823,12 +1967,14 @@ function renderDebugPanels(options = {}) {
     }
     bindDebugPanel(panel);
   }
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelsFromEvents() {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel);
   }
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelFromEvents(panel, options = {}) {

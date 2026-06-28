@@ -437,11 +437,11 @@ def pc_controls_fixture_html():
           </div>
         </section>
         <div class="file-explorer-tree-panel">
-          <div id="collapsed-dir" class="file-tree-row kind-dir" aria-expanded="false"><span class="file-tree-icon">▸</span><span class="file-tree-name">Alpha</span></div>
-          <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon">▾</span><span class="file-tree-name">Bravo</span></div>
+          <div id="collapsed-dir" class="file-tree-row kind-dir" aria-expanded="false"><span class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="false">›</span><span class="file-tree-name">Alpha</span></div>
+          <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span><span class="file-tree-name">Bravo</span></div>
           <div id="selected-file-row" class="file-tree-row kind-file selected"><span class="file-tree-icon">M</span><span class="file-tree-name">clicked.md</span></div>
           <div id="current-file-row" class="file-tree-row kind-file current-file"><span class="file-tree-icon">M</span><span class="file-tree-name">README.md</span></div>
-          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon">▸</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span>]</span></span><span class="file-tree-agent" hidden></span><span class="file-tree-diff"><span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-3</span></span><span class="file-tree-dir-count" hidden></span><span class="file-tree-git-status" hidden></span><span class="file-tree-date" hidden></span></div>
+          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="false">›</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span>]</span></span><span class="file-tree-agent" hidden></span><span class="file-tree-diff"><span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-3</span></span><span class="file-tree-dir-count" hidden></span><span class="file-tree-git-status" hidden></span><span class="file-tree-date" hidden></span></div>
         </div>
         <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
         <div id="test-image-preview" class="file-image-preview-popover" style="top: 220px; left: 24px;"></div>
@@ -1392,7 +1392,7 @@ def finder_click_toolbar_fixture_html():
               </div>
               <section class="changes-repo-group">
                 <button type="button" id="modified-files-repo-head" class="changes-repo-head">
-                  <span class="changes-repo-caret">▾</span>
+                  <span class="ui-disclosure-triangle changes-repo-caret" data-disclosure-expanded="true">›</span>
                   <span class="changes-repo-title">~/yolomux.dev8002</span>
                   <span class="changes-repo-totals"><span class="changes-diff-add">+0</span><span class="changes-diff-remove">-0</span><span class="changes-repo-count">0</span></span>
                 </button>

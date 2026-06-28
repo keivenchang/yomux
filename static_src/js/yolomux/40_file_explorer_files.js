@@ -343,6 +343,10 @@ async function fetchFilesystemWatchDiff(options = {}) {
 }
 
 async function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
+  if (!fileExplorerTreePaneIsVisible()) {
+    recordClientPerfCounter('finderRefresh', 0, {skipped: 1});
+    return;
+  }
   const fullDue = Date.now() - fileExplorerFilesystemLastFullAt >= fileExplorerFilesystemKeyframeMs;
   const previousToken = fileExplorerFilesystemWatchToken;
   const requestedFull = options.full === true || payload.full === true || fullDue || !previousToken;
@@ -393,34 +397,50 @@ async function refreshOpenFilesFromPush(payload = {}) {
 
 async function refreshFileExplorerFromPush(payload = {}) {
   const nextToken = payload?.token ? String(payload.token || '') : '';
-  const entriesByDir = entriesByDirFromFilesystemPush(payload);
-  const visibleRootRemoved = invalidateFileExplorerRoots(payload?.removed_roots);
-  if (!entriesByDir.size && payload?.refresh === true) {
-    await refreshFileExplorerFromWatchDiff(payload);
-    return;
-  }
-  if (nextToken) fileExplorerFilesystemWatchToken = nextToken;
-  if (payload?.mode === 'full' || (Array.isArray(payload?.directories) && payload.directories.length && payload.refresh !== true)) {
-    fileExplorerFilesystemLastFullAt = Date.now();
-  }
-  if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-  if (!entriesByDir.size) return;
-  fileExplorerPushRefreshDepth += 1;
+  const treeVisible = fileExplorerTreePaneIsVisible();
+  const changedRoots = Array.isArray(payload?.directories)
+    ? payload.directories.length
+    : Math.max(0, Number(payload?.change_summary?.roots_changed || 0));
+  let renderedRows = 0;
+  let skipped = 0;
+  const perf = clientPerfStart('finderRefresh');
   try {
-    const root = normalizeDirectoryPath(currentFileExplorerRoot());
-    if (fileExplorerPaneIsOpen() && entriesByDir.has(root)) {
-      await refreshFileExplorerTreesInPlace({
-        root,
-        entries: entriesByDir.get(root),
-        preserveExpanded: true,
-        preserveScroll: true,
-        entriesByDir,
-      });
+    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload) : new Map();
+    renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
+    const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
+    if (!entriesByDir.size && payload?.refresh === true) {
+      await refreshFileExplorerFromWatchDiff(payload);
+      return;
     }
-    const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
-    if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+    if (nextToken) fileExplorerFilesystemWatchToken = nextToken;
+    if (payload?.mode === 'full' || (Array.isArray(payload?.directories) && payload.directories.length && payload.refresh !== true)) {
+      fileExplorerFilesystemLastFullAt = Date.now();
+    }
+    if (!treeVisible) {
+      skipped = 1;
+      return;
+    }
+    if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    if (!entriesByDir.size) return;
+    fileExplorerPushRefreshDepth += 1;
+    try {
+      const root = normalizeDirectoryPath(currentFileExplorerRoot());
+      if (fileExplorerPaneIsOpen() && entriesByDir.has(root)) {
+        await refreshFileExplorerTreesInPlace({
+          root,
+          entries: entriesByDir.get(root),
+          preserveExpanded: true,
+          preserveScroll: true,
+          entriesByDir,
+        });
+      }
+      const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
+      if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+    } finally {
+      fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
+    }
   } finally {
-    fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
+    clientPerfEnd(perf, {nodes: changedRoots, rows: renderedRows, skipped});
   }
 }
 
@@ -887,11 +907,14 @@ function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [
   const normalizedRepoRoots = Array.from(new Set(repoRoots
     .map(path => normalizeDirectoryPath(path))
     .filter(Boolean)));
-  const repoTargets = normalizedRepoRoots
-    .filter(path => path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const candidates = normalizedRepoRoots.length
-    ? repoTargets
-    : affectedDirs.map(path => firstChildPathUnderRoot(normalizedRoot, path));
+  const normalizedAffectedDirs = Array.from(new Set(affectedDirs
+    .map(path => normalizeDirectoryPath(path))
+    .filter(Boolean)));
+  const repoTargets = normalizedRepoRoots.filter(path => path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
+  const affectedTargets = normalizedAffectedDirs
+    .map(path => firstChildPathUnderRoot(normalizedRoot, path))
+    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
+  const candidates = repoTargets.length ? repoTargets : affectedTargets;
   return Array.from(new Set(candidates
     .map(path => normalizeDirectoryPath(path))
     .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
@@ -929,16 +952,17 @@ function fileExplorerSyncPlanForFile(path) {
   if (!target) return {session: '', root: '', expandPaths: [], affectedDirs: []};
   const repo = typeof fileRepoForPath === 'function' ? normalizeDirectoryPath(fileRepoForPath(target)) : '';
   const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
+  const targetDir = normalizeDirectoryPath(dirnameOf(target));
   let root = repo && pathIsInsideDirectory(target, repo) ? repo : '';
   if (!root && currentRoot && pathIsInsideDirectory(target, currentRoot) && target !== currentRoot) root = currentRoot;
-  if (!root) root = normalizeDirectoryPath(dirnameOf(target));
+  if (!root) root = targetDir;
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
   const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
   return {
     session,
     root,
     expandPaths,
-    affectedDirs: [normalizeDirectoryPath(dirnameOf(target))].filter(Boolean),
+    affectedDirs: [targetDir].filter(Boolean),
   };
 }
 
@@ -1155,7 +1179,7 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
 function displayedFileExplorerRoot() {
   const input = fileExplorerPathInputs()[0];
   const value = input ? ('value' in input ? input.value : input.textContent) : '';
-  return normalizeDirectoryPath(value || currentFileExplorerRoot());
+  return normalizeDirectoryPath(expandUserPath(value || currentFileExplorerRoot()));
 }
 
 function restoreCommittedFileExplorerRootDisplay() {
@@ -1406,6 +1430,14 @@ function fileExplorerPaneIsOpen() {
   return itemInLayout(fileExplorerItemId);
 }
 
+function fileExplorerTreePaneIsVisible() {
+  return fileExplorerPaneIsOpen() && normalizeFileExplorerMode(fileExplorerMode) === 'files';
+}
+
+function fileExplorerSessionFilesPaneIsVisible() {
+  return fileExplorerPaneIsOpen() && normalizeFileExplorerMode(fileExplorerMode) !== 'tabber';
+}
+
 function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return;
   if (fileExplorerRootMode !== 'sync') return;
@@ -1493,7 +1525,8 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     let changed = false;
     const previousTargetKey = fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot);
     const nextTargetKey = fileExplorerSyncTargetKey(plan.session, plan.root);
-    if (nextTargetKey && nextTargetKey !== previousTargetKey) {
+    const targetChanged = Boolean(nextTargetKey && nextTargetKey !== previousTargetKey);
+    if (targetChanged) {
       rememberFileExplorerSyncExpandedState();
     }
     if (plan.root !== currentFileExplorerRoot()) {
@@ -1505,6 +1538,11 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
         showPending: options.force === true,
       });
       if (!changed) return false;
+      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
+    } else if (targetChanged) {
+      fileExplorerExpanded.clear();
+      await refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: false});
+      changed = true;
       if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
@@ -2583,6 +2621,10 @@ function rawFileUrl(path, params = {}) {
   return `/api/fs/raw?${queryParts.join('&')}`;
 }
 
+function zipFileDownloadUrl(path) {
+  return `/api/fs/zip?path=${encodeURIComponent(path)}`;
+}
+
 function closeFileImagePreview(options = {}) {
   if (!options.fromController) fileImagePreviewController?.cancelTimers?.();
   fileImagePreviewPopover?.remove();
@@ -3373,8 +3415,9 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
 // updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
-// collapse state is a persisted COLLAPSED set (default expanded), times come from the activity ledger with
-// parent = max(child), and sort honors the active Finder sort (label for A-Z, mtime for recent).
+// collapse state is a persisted COLLAPSED set (default expanded), window times come from one semantic
+// recency helper (agent transcript events or non-agent activity ledger) with parent = max(child), and sort
+// honors the active Finder sort (label for A-Z, mtime for recent).
 // ---------------------------------------------------------------------------
 let tabberRefreshDeferredTimer = null;
 
@@ -3422,12 +3465,32 @@ function tabberAgentRecency(agent) {
   return Math.max(Number(agent.sort_ts || 0), Number(agent.last_used_ts || 0));
 }
 
-function tabberAgentDateText(agent) {
-  if (!agent) return '';
-  if (agent.running === true) return t('yoagent.agent.running');
-  const ts = Number(agent.last_used_ts || 0);
-  if (!Number.isFinite(ts) || ts <= 0) return '';
-  return sessionFileDisplayTimeText(ts);
+// Window rows have one semantic recency clock: this exact timestamp feeds row mtime,
+// visible date text, and parent session bubbling.
+function tabberWindowRecency(row) {
+  const isAgent = row?.isAgent === true || ['claude', 'codex'].includes(String(row?.agentKey || '').toLowerCase());
+  if (isAgent) {
+    const activityTs = tabberAgentRecency(row?.agentActivity);
+    if (activityTs > 0) return activityTs;
+    if (String(row?.agentStatus?.state || STATE_KEY.idle) !== STATE_KEY.idle) return 0;
+    const statusTs = Number(row?.agentStatus?.idle_since || row?.agentStatus?.last_active_ts || 0);
+    return Number.isFinite(statusTs) && statusTs > 0 ? statusTs : 0;
+  }
+  const session = String(row?.session || '').trim();
+  const windowIndex = row?.windowIndex ?? row?.record?.index;
+  if (!session || windowIndex === null || windowIndex === undefined || windowIndex === '') return 0;
+  return tabberRecency(`${session}:${windowIndex}`);
+}
+
+function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
+  if (fileExplorerTreeDateMode === 'none') return {text: '', html: ''};
+  const state = String(agentStatus?.state || STATE_KEY.idle);
+  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds});
+  if (!text) return {text: '', html: ''};
+  if (agentWindowIsAttentionState(state)) {
+    return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
+  }
+  return {text, html: ''};
 }
 
 function tabberActivityVisibleConsumer() {
@@ -3658,13 +3721,7 @@ function buildTabberTree() {
       const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
-      const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
-      const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
-      // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but
-      // parent window/session recency must still answer "when was this agent last used?"
-      const windowMtime = isAgent
-        ? tabberAgentRecency(agentActivity)
-        : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
+      const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});
       const agentCurrent = agentWindowPayloadCurrent(agentStatus);
       const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
       const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
@@ -3673,16 +3730,13 @@ function buildTabberTree() {
       const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
-      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
-      const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
-      const dateHtml = agentStatusForDisplay && agentWindowIsAttentionState(agentStatusForDisplay.state)
-        ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
-        : '';
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session, {animate: false});
+      const dateDisplay = tabberWindowDateDisplay(windowMtime, agentStatusForDisplay, nowSeconds);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: label,
-        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText, dateHtml},
+        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText: dateDisplay.text, dateHtml: dateDisplay.html},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);

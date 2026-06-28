@@ -842,8 +842,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)/.test(changedFilesCss), 'Differ/Finder changes trees use a brighter dark-mode guide line');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'Differ/Finder changes repo headers read the same pane bar background as the Sort toolbar');
     assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*--changes-indent-line:\s*var\(--tree-indent-line\);[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide stays subdued while repo headers share the pane bar token');
-    assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*inline-size:\s*1em[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*1em/.test(changedFilesCss), 'all disclosure triangles share the same font-sized muted collapsed parent style');
-    assert.ok(/\.ui-disclosure-triangle\[data-disclosure-expanded="true"\],[\s\S]*\.info-tree-group\[open\]\s*>\s*summary::before,[\s\S]*\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*color:\s*var\(--disclosure-triangle-expanded-color\)/.test(changedFilesCss), 'expanded disclosure triangles use the shared active theme color');
+    assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*--disclosure-triangle-box-size:\s*1\.333333em[\s\S]*--disclosure-triangle-font-size:\s*100%[\s\S]*inline-size:\s*var\(--disclosure-triangle-box-size\)[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(changedFilesCss), 'all disclosure chevrons share the same scaled muted collapsed parent style');
+    assert.ok(/\.ui-disclosure-triangle\[data-disclosure-expanded="true"\],[\s\S]*\.info-tree-group\[open\]\s*>\s*summary::before,[\s\S]*\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(changedFilesCss), 'expanded disclosure chevrons use the shared active color and rotate down');
     assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*2px/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
     assert.equal(/(?:^|\n)\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
     assert.equal(changedFilesCss.includes('.changes-tree-folder'), false, 'Differ folders use the shared Finder tree renderer, not a stale changes-tree-folder CSS path');
@@ -2912,11 +2912,12 @@ async function runShareThemeSuite() {
       assert.ok(/function shareDebugProfileUploadPayload[\s\S]*shareRedactDiagnosticValue[\s\S]*async function shareUploadDebugProfile[\s\S]*shareDebugProfileUploadEnabled\(\)[\s\S]*apiFetchJson\('\/api\/share\/debug-profile'/.test(shareSource), 'YO!share debug/profiling uploads are opt-in, sent to the share debug endpoint, and client-redacted');
       assert.ok(/async function boot\(\)[\s\S]*shareBootstrap\?\.uiState[\s\S]*await applyShareUiState/.test(shareSource), 'share-view boot applies the server UI-state bootstrap after the initial panes render');
       assert.ok(/function shareBootstrapLayoutParams\(\)[\s\S]*shareBootstrap\.layout[\s\S]*shareBootstrap\.tabs[\s\S]*shareBootstrap\.sessions[\s\S]*function initialLayoutSlots\(\)[\s\S]*const shareParams = shareBootstrapLayoutParams\(\)[\s\S]*const params = shareParams \|\| new URLSearchParams[\s\S]*preserveMissingFileExplorer: shareParams !== null/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot uses the server share bootstrap layout before the browser query string and preserves a host-minimized Finder');
-      assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*transcriptMeta = \{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a stub only until scoped metadata loads');
+      assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*scheduleDeferredSettingsMetadataRefresh\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*transcriptMeta = \{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a stub only until scoped metadata loads');
       assert.ok(/function updateActiveSessionParam\(\)[\s\S]*if \(shareViewMode\) return/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot does not rewrite the share URL from local layout state');
       assert.ok(/function syncShareProtocolControls[\s\S]*!readOnly\.checked[\s\S]*https\.checked = true[\s\S]*http\.disabled = true/.test(shareSource), 'YO!share modal locks write mode to https');
       assert.ok(/let activeShares = \[\]/.test(shareSource), 'YO!share tracks active shares as a list for concurrent shares');
       assert.ok(/function refreshActiveShare\(options = \{\}\)[\s\S]*setActiveShares\(normalizeShareListPayload[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'YO!share status refresh consumes the active share list and opens per-token host sockets');
+      assert.ok(/function shareStatusSurfaceVisible\(\)[\s\S]*document\.visibilityState === 'hidden'[\s\S]*shareViewerBanner\?\.isConnected[\s\S]*shareStatusPill\?\.isConnected[\s\S]*shareModalIsVisible\(\)[\s\S]*data-share-viewer-duration/.test(shareSource), 'YO!share per-second status DOM updates are gated to visible share surfaces');
       assert.ok(/function renderShareManageView\(errorText = ''\)[\s\S]*share-create-panel[\s\S]*shareCreateFormHtml[\s\S]*share-active-panel[\s\S]*share-entry-list/.test(shareSource), 'YO!share manage view sections New share before Active share URLs');
       assert.ok(/function shareEntryHtml\(share\)[\s\S]*share-url-primary[\s\S]*share-url-primary-head[\s\S]*<span class="share-url-control">[\s\S]*<input type="text" readonly value="\$\{esc\(share\.url\)\}" data-share-secret>[\s\S]*share-url-copy-button[\s\S]*data-share-copy[\s\S]*data-share-secret/.test(shareSource), 'YO!share manage rows make the active URL prominent while keeping the copy icon immediately beside a redacted URL input');
       const replayRegistrationFindings = source => {
@@ -2972,6 +2973,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareHostWsUrl\(token\)[\s\S]*URLSearchParams\(\{share: token, client: shareClientId\}\)[\s\S]*\/ws\/share-host\?\$\{params\.toString\(\)\}/.test(shareSource), 'share hosts publish UI state through /ws/share-host with a sender client id');
       assert.ok(/function shareViewerUiWsUrl\(token\)[\s\S]*\/ws\/share-ui\?/.test(shareSource), 'share-view clients receive UI state through the share-scoped /ws/share-ui socket');
       assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
+      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*setInterval\(\(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status interval skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
       assert.ok(/shareViewerStatusBackupRefreshMs:\s*uiDelayMs\.shareViewerStatusBackupRefresh/.test(timingSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup through the shared timing owner');
       assert.ok(/function shareCanPublishUi\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode[\s\S]*shareWriteMode[\s\S]*shareToken[\s\S]*shareHasActiveShare/.test(shareSource), 'DOIT.72 P5.3: share UI publication is allowed for hosts with shares and legacy rw viewers, but replay viewers cannot publish semantic UI frames');
       assert.ok(/function beginShareRemoteUiApply\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*\+ 1[\s\S]*return \(\) => \{[\s\S]*applyingShareRemoteUiState[\s\S]*- 1/.test(shareSource), 'remote UI apply uses a depth counter so overlapping async/sync mirror applies cannot leave rw viewers non-publishable');
@@ -3063,6 +3065,10 @@ async function runShareThemeSuite() {
       assert.equal(/scrollHeight:\s*Math\.round\(Number\(panel\._cmView/.test(shareSource), false, 'M9: editor digest does not compare CodeMirror scrollHeight across share clients');
       assert.ok(/const shareWrappedTextDigestSelectors = \[[\s\S]*'textarea\[data-setting-path\]'[\s\S]*'\.app-menu-command-label'[\s\S]*'\.info-tree-record'/.test(shareSource), 'M9: wrapped text digest covers native controls, menus, and YO!info tree rows');
       assert.ok(/function shareGeometryFirstDifference\(host = \{\}, local = \{\}\)[\s\S]*'textWraps'/.test(shareSource), 'M9: digest comparison names wrapped text/control drift separately');
+      assert.ok(/function shareHostConnectedViewerCount\(\)[\s\S]*share\?\.viewers[\s\S]*share\?\.viewerDetails/.test(shareSource), 'YO!share host perf gates count active viewers from status payloads');
+      assert.ok(/function publishShareGeometryDigest\(\)[\s\S]*!shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('geometryDigest'\)[\s\S]*shareGeometryDigestFrame\(\)/.test(shareSource), 'YO!share skips expensive geometry digest snapshots when an active share has no connected viewers');
+    assert.ok(/function shareReplayEnqueueMutationRecords\(records = \[\], options = \{\}\)[\s\S]*options\.requireViewers === true && !shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('mutationRecords'\)[\s\S]*shareReplayRecordHostPerf\('mutationRecords'/.test(shareSource), 'YO!share mutation replay batches record cost while observer-driven mutation publishing stops when no viewers are connected');
+      assert.ok(/function shareReplayRecordHostPerfEvent\(kind = '', payload = \{\}, durationMs = null\)[\s\S]*recordJsDebugEvent\('share-replay-perf'/.test(shareSource), 'YO!share replay performance samples reuse the JS debug event stream');
       assert.ok(/async function boot\(\)[\s\S]*waitForYolomuxFontsReady\(\{timeoutMs: 0\}\)\.catch\(\(\) => \{\}\)[\s\S]*paintInitialAppShell\(\)[\s\S]*installYolomuxFontMetricRefresh\(\)/.test(shareSource), 'M9: first app render starts bundled font loading and corrects wrapped widgets after metrics settle');
       assert.ok(/const shareAppliedTextWrapMetricsByKey = new Map\(\)/.test(shareSource), 'M9: share viewers retain host wrapped-text metrics for digest repair');
       assert.ok(/function shareTextWrapDigestEntryWithHostMetrics\(entry, metric = null\)[\s\S]*clientWidth[\s\S]*scrollHeight/.test(shareSource), 'M9: wrapped text digest uses host-owned dimensions after metrics are applied');
@@ -3082,6 +3088,25 @@ async function runShareThemeSuite() {
       assert.ok(/function applyShareGeometryDigest\(payload = \{\}\)[\s\S]*shareGeometryDigestCompare\(payload\)[\s\S]*!shareGeometryRepairInFlight[\s\S]*repairShareGeometryDigest\(payload, diff\)/.test(shareSource), 'M9: viewers compare geometry digests and route mismatch through the guarded repair helper');
       assert.ok(/shareGeometryDigestPublishMs:\s*uiDelayMs\.shareGeometryDigestPublish/.test(timingSource), 'M9/MV-3: the odd geometry digest cadence is owned by the shared timing partial');
       assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*setInterval\(publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared timing owner');
+      const digestApi = loadYolomux('?debug=1&shareReplay=1', ['1'], 'https:');
+      const digestFrames = [];
+      digestApi.setActiveSharesForTest([{token: 'idle-share', viewers: 0}]);
+      digestApi.setShareHostSocketForTest('idle-share', {readyState: 1, send(frame) { digestFrames.push(frame); }});
+      digestApi.publishShareGeometryDigestForTest();
+      let digestPerf = digestApi.shareReplayHostPerformanceForTest();
+      assert.equal(digestPerf.viewerCount, 0, 'YO!share host perf sees no connected viewers');
+      assert.equal(digestPerf.geometryDigest.count, 0, 'YO!share skips geometry digest snapshots before measuring layout when nobody is viewing');
+      assert.equal(digestPerf.geometryDigest.skippedNoViewers, 1, 'YO!share counts no-viewer digest skips');
+      assert.equal(digestFrames.length, 0, 'YO!share does not publish geometry frames with zero viewers');
+      digestApi.setActiveSharesForTest([{token: 'active-share', viewers: 2}]);
+      digestApi.setShareHostSocketForTest('active-share', {readyState: 1, send(frame) { digestFrames.push(frame); }});
+      digestApi.publishShareGeometryDigestForTest();
+      digestPerf = digestApi.shareReplayHostPerformanceForTest();
+      assert.equal(digestPerf.viewerCount, 2, 'YO!share host perf counts connected viewers from active share status');
+      assert.equal(digestPerf.geometryDigest.count, 1, 'YO!share records one measured geometry digest when viewers are connected');
+      assert.equal(digestPerf.geometryDigest.lastViewerCount, 2, 'YO!share geometry digest samples record viewer count');
+      assert.ok(digestFrames.some(frame => JSON.parse(frame).type === 'geometry-digest'), 'YO!share publishes the geometry digest once viewers are connected');
+      assert.ok(digestApi.jsDebugEventsForTest().some(event => event.type === 'share-replay-perf' && event.kind === 'geometryDigest'), 'YO!share geometry digest timings are visible in the existing JS debug event stream');
       assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors and ignore their own echoed cursor');
       assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareHostDimensions\.get[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
       assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');
@@ -3535,10 +3560,19 @@ async function runShareThemeSuite() {
   	    assert.equal(ignoredChildListEntries.length, 0, 'DOIT.72 P2.1: childList mutations touching ignored nodes wait for a keyframe instead of emitting partial deltas');
   	    assert.equal(ignoredJson.includes('volatile timer text'), false, 'DOIT.72 P2.1: mutation delta suppresses volatile nodes');
   	    assert.equal(ignoredJson.includes('terminal internal text'), false, 'DOIT.72 P2.1: mutation delta suppresses terminal internals');
+      deltaApi.setActiveSharesForTest([{token: 'idle-delta-share', viewers: 0}]);
+      const idleDeltaEntries = deltaApi.shareReplayEnqueueMutationRecordsForTest(records, {requireViewers: true});
+      assert.equal(idleDeltaEntries.length, 0, 'YO!share skips observer-driven mutation delta work while an active share has no connected viewers');
+      assert.equal(deltaApi.shareReplayHostPerformanceForTest().mutationRecords.skippedNoViewers, 1, 'YO!share counts no-viewer mutation skips');
+      deltaApi.setActiveSharesForTest([{token: 'delta-share', viewers: 1}]);
+      deltaApi.setShareHostSocketForTest('delta-share', {readyState: 1, send() {}});
   	    deltaApi.shareReplayEnqueueMutationRecordsForTest(records);
       const deltaBatch = deltaApi.shareReplayLastDeltaBatchForTest();
       assert.equal(deltaBatch.count, deltaEntries.length, 'DOIT.72 P2.1: mutation records coalesce into one dom-delta batch');
       assert.deepStrictEqual(deltaBatch.mutations, deltaEntries, 'DOIT.72 P2.1: coalesced batch preserves sanitized mutation entries');
+      const mutationPerf = deltaApi.shareReplayHostPerformanceForTest();
+      assert.equal(mutationPerf.mutationRecords.count, 1, 'YO!share measures mutation record processing with connected viewers');
+      assert.equal(mutationPerf.mutationFlush.count, 1, 'YO!share measures mutation delta flush cost with connected viewers');
 
       const rwApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share-rw-meta', mode: 'rw', session: '1', sessions: ['1']},
@@ -4058,8 +4092,8 @@ async function runShareThemeSuite() {
     assert.ok(source.includes('fileExplorerSyncManualCollapsedPaths'), 'Finder Sync tracks manually collapsed auto-expanded paths');
     assert.ok(/function fileExplorerSyncExpansionPaths\(plan\)[\s\S]*filter\(path => !fileExplorerSyncPathSuppressed\(path\)\)/.test(source), 'Finder Sync filters manually collapsed paths out of future auto-expansion');
     assert.ok(source.includes('function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [])'), 'Finder Sync expansion targets are centralized');
-    assert.ok(source.includes('const candidates = normalizedRepoRoots.length'), 'Finder Sync prefers repo-root expansion when repo metadata exists');
-    assert.ok(source.includes('affectedDirs.map(path => firstChildPathUnderRoot(normalizedRoot, path))'), 'Finder Sync falls back to first-level affected directories, not every touched directory');
+    assert.ok(source.includes('const candidates = repoTargets.length ? repoTargets : affectedTargets;'), 'Finder Sync expands direct repo roots when available, otherwise direct affected path children');
+    assert.ok(source.includes('function commonAncestorPath(paths)') && source.includes('function focusedRepoRootForSync(focusedDir, repoRoots = sessionFilesRepoRoots())'), 'Finder Sync root selection is centralized through common-ancestor and focused-repo helpers');
     const viewMenu = menus.find(menu => menu.id === 'view');
     assert.equal(viewMenu.items.find(item => item.label === 'Hide tab metadata').iconHtml.includes('app-menu-ui-icon-tab-meta active'), true);
     assert.equal(viewMenu.items.find(item => item.label === 'Hide tab metadata').keepOpen, true);
@@ -5037,6 +5071,7 @@ async function runShareThemeSuite() {
     assert.ok(contextMenu.children[0].innerHTML.includes('Pin Tab'), 'tab context menu starts with Pin Tab');
     assert.ok(contextMenu.children[0].innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
     assert.equal(contextMenu.children[0].getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
+    assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
     assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
@@ -5046,11 +5081,18 @@ async function runShareThemeSuite() {
     const pinnedContextMenu = contextMenuNode();
     assert.ok(pinnedContextMenu.children[0].innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
     assert.equal(pinnedContextMenu.children[0].getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
-    const fileItemForMenu = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
+    const filePathForMenu = '/home/test/yolomux.dev/README.md';
+    api.setOpenFileStateForTest(filePathForMenu, {mtime: 1, kind: 'text', original: '# hello', content: '# hello', dirty: false});
+    const fileItemForMenu = api.registerFileEditorLayoutItem(filePathForMenu);
     api.showTabContextMenu(fileItemForMenu, 30, 30);
     const fileContextMenu = contextMenuNode();
     assert.ok(fileContextMenu.children[0].innerHTML.includes('Pin Tab'), 'file editor tabs also get the Pin Tab context menu');
-    assert.equal(fileContextMenu.children.length, 1, 'non-tmux tab context menu only shows tab-level actions today');
+    const filePopoutButton = Array.from(fileContextMenu.children).find(child => child.getAttribute('aria-label') === 'Pop out');
+    assert.ok(filePopoutButton, 'preview-capable file editor tabs expose Pop out in the shared tab context menu');
+    for (const listener of filePopoutButton.listeners.get('click') || []) {
+      listener({preventDefault() {}, stopPropagation() {}});
+    }
+    assert.deepStrictEqual(canonical(api.openedWindowsForTest().map(record => record.url)), ['/preview-popout?path=%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md'], 'file tab Pop out opens the same preview popout route as the header button');
     api.setPinnedTabsForTest([]);
     const sessionViews = api.tmuxSessionViewCommands('1');
     assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Info Bar']);
@@ -5303,7 +5345,7 @@ async function runShareThemeSuite() {
       session: '1',
       root: '/home/test/dynamo1',
       affectedDirs: ['/home/test/dynamo1', '/tmp/x', '/home/test/dynamo1/src'],
-      expandPaths: [],
+      expandPaths: ['/home/test/dynamo1/src'],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/ai-config/claude/skills'}});
     api.setSessionFilesPayloadForTest({
@@ -5318,7 +5360,7 @@ async function runShareThemeSuite() {
       session: '1',
       root: '/home/test/ai-config',
       affectedDirs: ['/home/test/ai-config', '/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks'],
-      expandPaths: [],
+      expandPaths: ['/home/test/ai-config/claude', '/home/test/ai-config/hooks'],
     });
     api.setSessionFilesPayloadForTest({
       session: '1',

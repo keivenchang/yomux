@@ -1,8 +1,16 @@
 """DOIT.58 A5 — activity ledger coalescing semantics (these tests DEFINE the contract)."""
 
+from datetime import datetime
+from datetime import timezone
 import json
+import os
 
 from yolomux_lib.activity import ActivityLedger
+from yolomux_lib.activity_summary import agent_transcript_activity_ts
+from yolomux_lib.activity_summary import build_recent_agents_payload
+from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import PaneInfo
+from yolomux_lib.common import SessionInfo
 
 
 def _ledger(tmp_path, idle_gap_seconds=120.0, retention_days=14.0):
@@ -12,6 +20,142 @@ def _ledger(tmp_path, idle_gap_seconds=120.0, retention_days=14.0):
         idle_gap_seconds=idle_gap_seconds,
         retention_days=retention_days,
     )
+
+
+def _timestamp(year, month, day, hour, minute, second):
+    return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc).timestamp()
+
+
+def _write_jsonl(path, records):
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+
+def _agent(kind, transcript, cwd, session="s1", target="s1:0.0"):
+    return AgentInfo(
+        session=session,
+        kind=kind,
+        pid=1,
+        pane_target=target,
+        command=kind,
+        cwd=str(cwd),
+        status="running",
+        session_id=f"{kind}-sid",
+        transcript=str(transcript),
+        error=None,
+    )
+
+
+def test_claude_transcript_activity_uses_event_timestamp_before_recent_mtime(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    recent_mtime = _timestamp(2026, 6, 28, 14, 51, 23)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+            }
+        ],
+    )
+    os.utime(transcript, (recent_mtime, recent_mtime))
+
+    activity = agent_transcript_activity_ts(_agent("claude", transcript, tmp_path))
+
+    assert activity["timestamp"] == event_ts
+    assert activity["source"] == "transcript-event"
+
+
+def test_claude_transcript_activity_ignores_metadata_only_tail_records(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Finished the fix."}]},
+            },
+            {"timestamp": "2026-06-28T14:40:00Z", "type": "last-prompt", "value": "repeat the last prompt"},
+            {"timestamp": "2026-06-28T14:41:00Z", "type": "metadata", "key": "ai-title", "value": "Tabber work"},
+            {"timestamp": "2026-06-28T14:42:00Z", "payload": {"type": "metadata", "key": "permission-mode", "value": "default"}},
+            {"timestamp": "2026-06-28T14:43:00Z", "type": "pr-link", "value": "https://example.invalid/pr/1"},
+        ],
+    )
+
+    activity = agent_transcript_activity_ts(_agent("claude", transcript, tmp_path))
+
+    assert activity["timestamp"] == event_ts
+    assert activity["source"] == "transcript-event"
+
+
+def test_codex_transcript_activity_uses_jsonl_timestamp_before_recent_mtime(tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    recent_mtime = _timestamp(2026, 6, 28, 14, 51, 23)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Done."},
+            }
+        ],
+    )
+    os.utime(transcript, (recent_mtime, recent_mtime))
+
+    activity = agent_transcript_activity_ts(_agent("codex", transcript, tmp_path))
+
+    assert activity["timestamp"] == event_ts
+    assert activity["source"] == "transcript-event"
+
+
+def test_recent_agents_payload_uses_meaningful_transcript_timestamp(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    recent_mtime = _timestamp(2026, 6, 28, 14, 51, 23)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+            }
+        ],
+    )
+    os.utime(transcript, (recent_mtime, recent_mtime))
+    pane = PaneInfo(
+        session="4",
+        window="0",
+        pane="0",
+        pane_id="%40",
+        target="4:0.0",
+        current_path=str(tmp_path),
+        command="claude",
+        active=True,
+        window_active=True,
+        title="",
+        pid=40,
+        window_name="claude",
+        process_label="claude",
+    )
+    info = SessionInfo(
+        session="4",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[_agent("claude", transcript, tmp_path, session="4", target="4:0.0")],
+    )
+
+    rows = build_recent_agents_payload({"4": info}, ["4"])
+
+    assert len(rows) == 1
+    assert rows[0]["last_used_ts"] == event_ts
+    assert rows[0]["sort_ts"] == event_ts
+    assert rows[0]["last_used_source"] == "transcript-event"
 
 
 def test_two_close_heartbeats_count_the_real_gap(tmp_path):

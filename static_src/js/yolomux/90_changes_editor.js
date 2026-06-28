@@ -945,7 +945,16 @@ function sessionFilesRenderOptions(options = {}) {
   return options.force === true || options.silent !== true ? {force: true} : {};
 }
 
+function sessionFilesPerfDetails(payload = {}, extra = {}) {
+  const files = Array.isArray(payload?.files) ? payload.files.length : 0;
+  return {nodes: sessionFilesRepoRoots(payload).length, rows: files, ...extra};
+}
+
 function renderSessionFilesDestination(destination, options = {}) {
+  if (!fileExplorerSessionFilesPaneIsVisible()) {
+    recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
+    return;
+  }
   renderFileExplorerChangesPanels(options);
 }
 
@@ -953,6 +962,10 @@ async function fetchSessionFiles(options = {}) {
   const destination = 'finder';
   const forceRefresh = options.force === true;
   const backgroundRefresh = options.background === true;
+  if (!fileExplorerSessionFilesPaneIsVisible()) {
+    recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
+    return false;
+  }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
   const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
@@ -963,6 +976,7 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, emptyPayload);
     setSessionFilesSignatureForDestination(destination, signature);
+    recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(emptyPayload));
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
@@ -990,6 +1004,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+    recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
@@ -999,12 +1014,13 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
+    recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: err}));
   } finally {
     const current = requestIsCurrent();
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
-    if (current && (shouldRender || wasLoading)) {
+    if (current && (shouldRender || wasLoading) && fileExplorerSessionFilesPaneIsVisible()) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
@@ -1018,6 +1034,11 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
   if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
   if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
+  if (!fileExplorerSessionFilesPaneIsVisible()) {
+    if (sessionFilesLoadingForDestination(destination)) setSessionFilesLoadingForDestination(destination, false);
+    recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
+    return false;
+  }
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -1027,6 +1048,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (shouldRender) {
     renderSessionFilesDestination(destination, {force: true});
@@ -1094,7 +1116,7 @@ function sessionFileMissingTimeText() {
 function sessionFileDisplayTimeText(mtime, options = {}) {
   if (fileExplorerTreeDateMode === 'none') return '';
   const text = fileExplorerTreeDateMode === 'date' ? sessionFileTimeText(mtime)
-    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime)
+    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
       : '';
   if (!text && options.placeholderForMissingTime === true) return sessionFileMissingTimeText();
   return text;
@@ -1479,6 +1501,8 @@ function initializeDefaultCollapsedChangesFolders(entriesByDir) {
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
   const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
   const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(treeRoot, sessionFiles);
+  const renderedRows = entries.length + Array.from(entriesByDir.values()).reduce((total, childEntries) => total + (Array.isArray(childEntries) ? childEntries.length : 0), 0);
+  recordClientPerfCounter('sessionFilesRender', 0, {nodes: entriesByDir.size, rows: renderedRows});
   initializeDefaultCollapsedChangesFolders(entriesByDir);
   renderTreeChildren(container, treeRoot, entries, 0, {
     entriesByDir,
@@ -2715,6 +2739,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
 }
 
 function renderFileExplorerChangesPanels(options = {}) {
+  if (!fileExplorerPaneIsOpen()) return;
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     renderFileExplorerChangesPanel(panel, options);
   }

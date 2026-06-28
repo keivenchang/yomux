@@ -78,6 +78,20 @@ function renderShareCountdowns() {
   });
 }
 
+function shareModalIsVisible() {
+  const modal = document.getElementById('modal');
+  return Boolean(modal?.classList?.contains(CLS.open) && modal.classList.contains('share-open'));
+}
+
+function shareStatusSurfaceVisible() {
+  if (document.visibilityState === 'hidden') return false;
+  if (shareViewMode) return Boolean(shareViewerBanner?.isConnected);
+  if (shareStatusPill?.isConnected && shareStatusPill.hidden !== true) return true;
+  if (!shareModalIsVisible()) return false;
+  const {body} = shareModalElements();
+  return Boolean(body?.querySelector?.('.share-entry, [data-share-countdown], [data-share-viewer-count], [data-share-viewer-duration]'));
+}
+
 async function refreshActiveShare(options = {}) {
   if (readOnlyMode) return [];
   if (shareStatusRefreshInFlight) return activeShares;
@@ -518,9 +532,11 @@ function startShareStatusRefresh() {
   if (shareStatusTimer) clearInterval(shareStatusTimer);
   shareStatusTimer = setInterval(() => {
     if (redirectExpiredShareViewerToLogin()) return;
-    renderShareStatusPill();
-    updateShareViewerBanner();
-    renderShareCountdowns();
+    if (shareStatusSurfaceVisible()) {
+      renderShareStatusPill();
+      updateShareViewerBanner();
+      renderShareCountdowns();
+    }
     if (shareViewMode && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
       refreshShareViewerStatus({silent: true});
     } else if (!readOnlyMode && Date.now() - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs) {

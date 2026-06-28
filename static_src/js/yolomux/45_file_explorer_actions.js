@@ -50,6 +50,11 @@ async function fetchFilePathInfo(path, options = {}) {
   })());
 }
 
+async function fetchDirectoryFileCount(path) {
+  const normalized = normalizeDirectoryPath(path);
+  return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -83,6 +88,9 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  if (entry?.kind === 'dir') {
+    appendContextMenuButton(menu, 'Zip & download', () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
+  }
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
@@ -99,6 +107,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     openInNewTabDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
+    zipDownloadDisabled: multiple || entry?.kind !== 'dir' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
@@ -140,6 +149,34 @@ function rawFileDownloadUrl(path) {
   return rawFileUrl(path, {download: 1});
 }
 
+function downloadFilenameFromContentDisposition(header, fallback = 'download') {
+  const text = String(header || '');
+  const starMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (starMatch) {
+    try {
+      return decodeURIComponent(starMatch[1]).trim() || fallback;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+  const quotedMatch = text.match(/filename="([^"]+)"/i);
+  if (quotedMatch) return quotedMatch[1].trim() || fallback;
+  const bareMatch = text.match(/filename=([^;]+)/i);
+  return bareMatch ? bareMatch[1].trim() || fallback : fallback;
+}
+
+function saveBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename || 'download';
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function triggerFileDownload(path) {
   if (!path) return;
   const link = document.createElement('a');
@@ -150,6 +187,30 @@ function triggerFileDownload(path) {
   link.click();
   link.remove();
   statusEl.textContent = `download started: ${basenameOf(path) || path}`;
+}
+
+async function triggerFolderZipDownload(path) {
+  if (!path) return;
+  const label = basenameOf(path) || path;
+  statusEl.textContent = `zipping ${label}...`;
+  let response;
+  try {
+    response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+  } catch (error) {
+    statusErr(esc(error?.message || String(error)));
+    return;
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message = payload?.error || response.statusText || `HTTP ${response.status}`;
+    statusErr(esc(message));
+    return;
+  }
+  const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
+  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
+  const blob = await response.blob();
+  saveBlobDownload(blob, filename);
+  statusEl.textContent = `download started: ${filename}`;
 }
 
 function copyCurrentFileExplorerPath() {
@@ -386,6 +447,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     ? `Delete ${kind}?\n${deletePaths[0]}`
     : `Delete ${deletePaths.length} selected items?\n${deletePaths.join('\n')}`;
   if (!window.confirm(confirmText)) return;
+  if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
   try {
     for (const path of deletePaths) {
       await apiFetchJson('/api/fs/delete', {
@@ -411,6 +473,47 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   } catch (error) {
     statusErr(localizedHtml('status.deleteFailed', {error}));
   }
+}
+
+function fileTreeEntryFromRow(path) {
+  const row = document.querySelector(`.file-tree-row[data-path="${cssEscape(path)}"]`);
+  if (!row) return null;
+  return {
+    kind: row.dataset.kind || '',
+    name: row.dataset.name || basenameOf(path),
+    is_repo: row.dataset.isRepo === 'true',
+  };
+}
+
+async function fileTreeDeleteEntryForPath(path, primaryPath, primaryEntry = null) {
+  if (path === primaryPath && primaryEntry?.kind) return primaryEntry;
+  const rowEntry = fileTreeEntryFromRow(path);
+  if (rowEntry?.kind) return rowEntry;
+  try {
+    return await fetchFilePathInfo(path, {fresh: true});
+  } catch (error) {
+    console.warn('delete path info failed', path, error);
+    return null;
+  }
+}
+
+async function confirmLargeDirectoryDeletes(deletePaths, primaryPath, primaryEntry = null) {
+  for (const path of deletePaths) {
+    const entry = await fileTreeDeleteEntryForPath(path, primaryPath, primaryEntry);
+    if (entry?.kind !== 'dir') continue;
+    let count = null;
+    try {
+      const payload = await fetchDirectoryFileCount(path);
+      count = Number(payload?.files);
+    } catch (error) {
+      console.warn('directory delete count failed', path, error);
+      if (!window.confirm(`Could not count files in this directory, CONFIRM delete?\n${path}`)) return false;
+      continue;
+    }
+    if (!Number.isFinite(count) || count <= 5) continue;
+    if (!window.confirm(`You have ${Math.round(count)} files in this directory, CONFIRM?\n${path}`)) return false;
+  }
+  return true;
 }
 
 // C10: keyboard delete for the Finder tree. macOS Finder deletes the selection with Command-Delete (plain
@@ -2053,7 +2156,8 @@ async function refreshOpenFilesIfChanged(options = {}) {
 function watchedFileExplorerDirectories() {
   const root = currentFileExplorerRoot();
   const directories = new Set();
-  if (fileExplorerRoot || fileExplorerPaneIsOpen()) directories.add(root);
+  if (!fileExplorerTreePaneIsVisible()) return [];
+  directories.add(root);
   for (const path of fileExplorerExpanded) {
     if (pathIsInsideDirectory(path, root)) directories.add(normalizeDirectoryPath(path));
   }
@@ -2079,13 +2183,15 @@ function backgroundFileEditorWatchFiles() {
 
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
-  for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
-    const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
-    if (path && path !== '/') roots.add(path);
-  }
-  for (const file of fileExplorerSessionFilesPayload?.files || []) {
-    const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
-    if (path && path !== '/') roots.add(dirnameOf(path));
+  if (fileExplorerSessionFilesPaneIsVisible()) {
+    for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
+      const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
+      if (path && path !== '/') roots.add(path);
+    }
+    for (const file of fileExplorerSessionFilesPayload?.files || []) {
+      const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
+      if (path && path !== '/') roots.add(dirnameOf(path));
+    }
   }
   return Array.from(roots)
     .map(path => normalizeDirectoryPath(path))
@@ -2121,7 +2227,7 @@ function clientServerWatchState() {
       hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
-  if (document.querySelector('.file-explorer-changes-panel') && typeof clientSessionFilesWatchRequests === 'function') {
+  if (fileExplorerSessionFilesPaneIsVisible() && typeof clientSessionFilesWatchRequests === 'function') {
     state.session_files = clientSessionFilesWatchRequests();
   }
   return state;
@@ -2165,7 +2271,9 @@ function syncServerWatchRoots(options = {}) {
 }
 
 async function refreshFileExplorerIfChanged() {
+  if (!fileExplorerTreePaneIsVisible()) return;
   const directories = watchedFileExplorerDirectories();
+  if (!directories.length) return;
   let changed = false;
   const entriesByDir = new Map();
   const signaturesByDir = new Map();
@@ -2196,13 +2304,15 @@ async function refreshWatchedFilesystem(options = {}) {
   if (filesystemRefreshInFlight) return;
   filesystemRefreshInFlight = true;
   try {
-    if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
-      await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
-    } else {
-      await refreshFileExplorerIfChanged();
+    if (fileExplorerTreePaneIsVisible()) {
+      if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
+        await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+      } else {
+        await refreshFileExplorerIfChanged();
+      }
     }
     await refreshOpenFilesIfChanged();
-    if (document.querySelector('.file-explorer-changes-panel')) {
+    if (fileExplorerSessionFilesPaneIsVisible()) {
       fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
     syncServerWatchRoots();

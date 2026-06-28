@@ -46,6 +46,59 @@ def test_get_agent_auth_honors_force_query():
     assert writes == [(HTTPStatus.OK, {"ok": True, "force": True})]
 
 
+def test_get_home_records_html_page_compute_time(monkeypatch):
+    writes = []
+    html_calls = []
+    clock = iter([100.0, 100.037])
+
+    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None):
+        html_calls.append((sessions, access_role, dev, dangerously_yolo, share))
+        return "<html>boot</html>"
+
+    monkeypatch.setattr(http_routes, "html_page", fake_html_page)
+    monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=SimpleNamespace(sessions=["5"], dangerously_yolo=True), dev=True),
+        share_sessions=lambda: [],
+        share_record=lambda: None,
+        share_bootstrap_payload=lambda record: {"record": record},
+        auth_identity=lambda: SimpleNamespace(role="admin"),
+        write_html=lambda body: writes.append(body),
+    )
+
+    http_routes.get_home(request, SimpleNamespace(query=""), route_by_path("GET", "/"))
+
+    assert writes == ["<html>boot</html>"]
+    assert html_calls == [(["5"], "admin", True, True, None)]
+    assert request._http_response_compute_ms == pytest.approx(37.0)
+    assert request._http_response_performance_details == {
+        "html_page": True,
+        "bootstrap_bytes": len("<html>boot</html>".encode("utf-8")),
+        "session_count": 1,
+        "share": False,
+    }
+
+
+def test_record_http_response_bytes_includes_route_compute_details():
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/"
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    handler._http_response_compute_ms = 37.0
+    handler._http_response_performance_details = {"html_page": True, "bootstrap_bytes": 17}
+
+    Handler.record_http_response_bytes(handler, HTTPStatus.OK, 17, "text/html; charset=utf-8")
+
+    assert len(records) == 1
+    args, kwargs = records[0]
+    assert args == ("http-endpoint", "GET /")
+    assert kwargs["compute_ms"] == 37.0
+    assert kwargs["payload_bytes"] == 17
+    assert kwargs["details"]["html_page"] is True
+    assert kwargs["details"]["bootstrap_bytes"] == 17
+
+
 def test_get_stats_sample_uses_app_payload():
     writes = []
     calls = []
@@ -495,6 +548,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "filesystem", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert route_by_path("GET", "/api/stats-sample").handler is http_routes.get_stats_sample
+    assert route_by_path("GET", "/pane-popout").handler is http_routes.get_pane_popout
     assert route_by_path("POST", "/api/stats-history").role == "readonly"
     assert route_by_path("POST", "/api/stats-history").body_limit == 128 * 1024
     assert route_by_path("GET", "/ws/share-ui").handler is http_routes.get_share_ui_websocket
@@ -504,6 +558,9 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
     assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_readonly_post_role
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
+    assert route_by_path("GET", "/api/fs/zip").handler is http_routes.get_fs_zip
+    assert route_by_path("GET", "/api/fs/count").handler is http_routes.get_fs_count
+    assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
 
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
@@ -512,6 +569,7 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
         activity_payload=lambda hours=24.0, visible=True: ({"hours": hours, "visible": visible}, HTTPStatus.OK),
         stats_sample_payload=lambda since=0, client_id="", token_consumer=False: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer},
+        tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
 
     handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1", app)
@@ -523,6 +581,11 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"sessions": {}, "force": True})]
+
+    handler, calls, writes = route_handler("/api/tmux-session-exists?session=2", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"session": "2", "exists": True})]
 
     handler, calls, writes = route_handler("/api/transcripts?force=1", app)
     Handler.do_GET(handler)
@@ -544,6 +607,13 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"status": "owner"})]
+
+    app = SimpleNamespace(background_owner_claim_payload=lambda: ({"ok": True, "claimed": True, "was_owner": False}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/background/claim", app)
+    handler.headers = {"Content-Length": "0"}
+    Handler.do_POST(handler)
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "claimed": True, "was_owner": False})]
 
     app = SimpleNamespace(tmux_signals_payload=lambda force=False, session="": ({"force": force, "session": session}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/tmux-signals?force=1&session=5", app)
@@ -591,6 +661,22 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
 def test_do_get_fs_routes_reject_readonly_before_file_handlers():
     handler, calls, writes = route_handler("/api/fs/list?path=/repo", readonly=True)
     handler.handle_fs_list = lambda parsed: writes.append(("fs-list", parsed.path))
+
+    Handler.do_GET(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
+
+    handler, calls, writes = route_handler("/api/fs/zip?path=/repo", readonly=True)
+    handler.handle_fs_zip = lambda parsed: writes.append(("fs-zip", parsed.path))
+
+    Handler.do_GET(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
+
+    handler, calls, writes = route_handler("/api/fs/count?path=/repo", readonly=True)
+    handler.handle_fs_count = lambda parsed: writes.append(("fs-count", parsed.path))
 
     Handler.do_GET(handler)
 

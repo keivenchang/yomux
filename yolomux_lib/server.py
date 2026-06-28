@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -38,6 +39,7 @@ from .common import DEFAULT_ROWS
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import PROJECT_ROOT
+from .common import PACIFIC_TIME
 from .common import WEBSOCKET_GUID
 from .common import codex_event_kind
 from .common import codex_exec_argv
@@ -72,6 +74,7 @@ from .websocket import read_ws_frame
 from .websocket import set_pty_size
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
+from .workdir import start_agent_auth_status_refresh
 
 
 PTY_DIMENSION_MIN = 1
@@ -215,12 +218,19 @@ STATIC_GZIP_CONTENT_TYPES = {
     "text/html",
     "text/plain",
 }
+FS_ZIP_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
 def content_disposition_attachment(raw_path: str) -> str:
     name = Path(str(raw_path or "")).name or "download"
     safe = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";", "/"} else "_" for char in name).strip()
     return f'attachment; filename="{safe or "download"}"'
+
+
+def fs_zip_attachment_filename(raw_path: str) -> str:
+    name = Path(os.path.expanduser(str(raw_path or ""))).name or "folder"
+    stamp = datetime.now(PACIFIC_TIME).strftime(FS_ZIP_TIMESTAMP_FORMAT)
+    return f"{name}.{stamp}.zip"
 
 
 def content_type_base(content_type: str) -> str:
@@ -917,21 +927,26 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         status_code = int(status)
         endpoint = self.http_endpoint_metric_key()
+        details = {
+            "status": status_code,
+            "method": endpoint.split(" ", 1)[0],
+            "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
+            "content_type": content_type_base(content_type),
+        }
+        extra_details = getattr(self, "_http_response_performance_details", None)
+        if isinstance(extra_details, dict):
+            details.update(extra_details)
         recorder(
             "http-endpoint",
             endpoint,
             trigger=endpoint,
+            compute_ms=getattr(self, "_http_response_compute_ms", None),
             payload_bytes=max(0, int(body_bytes or 0)),
             cache_key={"kind": endpoint},
             cache_status=str(status_code),
             owner_role="server",
             count=1,
-            details={
-                "status": status_code,
-                "method": endpoint.split(" ", 1)[0],
-                "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
-                "content_type": content_type_base(content_type),
-            },
+            details=details,
         )
 
     def plaintext_share_scope_allowed(self, parsed: Any) -> bool:
@@ -1175,6 +1190,39 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.wfile.write(data)
         self.record_http_response_bytes(HTTPStatus.OK, len(data), mime)
 
+    def handle_fs_zip(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        try:
+            archive_file, archive_size = filesystem.zip_directory(raw_path)
+        except FilesystemError as exc:
+            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            return
+        mime = "application/zip"
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(archive_size))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Disposition", content_disposition_attachment(fs_zip_attachment_filename(raw_path)))
+            self.send_auth_cookie_if_needed()
+            if self.close_connection:
+                self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                chunk = archive_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+            self.record_http_response_bytes(HTTPStatus.OK, archive_size, mime)
+        finally:
+            archive_file.close()
+
+    def handle_fs_count(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        self.write_filesystem_json(raw_path, lambda: filesystem.count_directory_files(raw_path))
+
     def handle_fs_html_preview(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
@@ -1208,6 +1256,21 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
         title = html.escape(f"{Path(raw_path).name or 'Preview'} preview")
+        body = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+</head>
+<body></body>
+</html>"""
+        self.write_html(body)
+
+    def handle_pane_popout_placeholder(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_item = qs.get("item", [""])[0]
+        title = html.escape(f"{raw_item or 'YOLOmux'} popout")
         body = f"""<!doctype html>
 <html>
 <head>
@@ -2368,7 +2431,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 filtered = strip_terminal_query_responses(data)
                 if filtered:
                     os.write(master_fd, filtered.encode("utf-8"))
-                    # DOIT.58 Phase 1: one user-input heartbeat (readonly already returned above).
+                    # Queue input activity outside the PTY echo loop (readonly already returned above).
                     self.server.app.record_user_input(session, len(filtered), data=filtered)
         elif msg_type == "resize":
             if readonly:
@@ -2465,12 +2528,15 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_pointer_clicks: dict[str, list[dict[str, Any]]] = {}
         self.share_pointer_threads: dict[str, threading.Thread] = {}
         self.share_pointer_stop = threading.Event()
+        if hasattr(self.app, "start_input_heartbeat_worker"):
+            self.app.start_input_heartbeat_worker()
         if hasattr(self.app, "start_tabber_activity_cache_warmer"):
             self.app.start_tabber_activity_cache_warmer()
         if hasattr(self.app, "start_stats_history_sampler"):
             self.app.start_stats_history_sampler()
         if hasattr(self.app, "start_update_check_thread"):
             self.app.start_update_check_thread()
+        start_agent_auth_status_refresh(force=True)
 
     def server_close(self) -> None:
         self.share_pointer_stop.set()
@@ -2478,6 +2544,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             self.app.stop_stats_history_sampler()
         if hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
+        if hasattr(self.app, "stop_input_heartbeat_worker"):
+            self.app.stop_input_heartbeat_worker()
         super().server_close()
 
     def record_host_pty_dimensions(self, session: str, rows: int, cols: int) -> None:

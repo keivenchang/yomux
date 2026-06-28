@@ -104,6 +104,43 @@ def test_background_owner_takeover_requests_release_then_acquires(monkeypatch, t
     assert release_requests[0][1]["action"] == "background_release_owner"
 
 
+def test_background_owner_claim_payload_takeover_demotes_live_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
+    owner = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, clock=lambda: 100.0)
+    follower = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=101, clock=lambda: 100.0)
+    owner.started_at_ns = 10
+    follower.started_at_ns = 20
+    owner.publish_generation()
+    follower.publish_generation()
+    assert owner.acquire_owner_lock() is True
+    owner.owner = True
+    owner.status = "owner"
+    owner.write_owner_record()
+
+    release_requests = []
+
+    def release_owner(current, request, timeout=2.0):
+        release_requests.append((current, request, timeout))
+        owner.release_owner("control_release")
+        return {"ok": True}
+
+    monkeypatch.setattr(background_owner_module, "send_yolomux_control_request", release_owner)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.background_owner = follower
+    webapp.performance_metrics_payload = lambda: {"record_count": 0}
+
+    payload, status = webapp.background_owner_claim_payload()
+
+    assert status == HTTPStatus.OK
+    assert payload["ok"] is True
+    assert payload["claimed"] is True
+    assert payload["was_owner"] is False
+    assert follower.is_owner() is True
+    assert owner.is_owner() is False
+    assert release_requests[0][1]["action"] == "background_release_owner"
+    follower.release_owner("test-cleanup")
+
+
 def test_background_owner_reports_blocked_unreachable_owner(monkeypatch, tmp_path):
     registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
     registry.started_at_ns = 20

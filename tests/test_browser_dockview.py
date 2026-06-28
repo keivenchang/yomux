@@ -963,7 +963,7 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
     )
     assert time.monotonic() - click_started >= 0.8
     assert acknowledged_size > 0
-    assert initial_size * 0.45 <= acknowledged_size <= initial_size * 0.55
+    assert initial_size * 0.75 <= acknowledged_size <= initial_size * 0.85
 
 
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
@@ -1083,7 +1083,7 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
     )
     assert time.monotonic() - click_started >= 0.8
     assert acknowledged_size > 0
-    assert initial_size * 0.45 <= acknowledged_size <= initial_size * 0.55
+    assert initial_size * 0.75 <= acknowledged_size <= initial_size * 0.85
     ack_bodies = browser.execute_script(
         """
         return window.__bootFetches
@@ -1351,6 +1351,153 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
     assert metrics["workingDotTransitionPulse"] is True, metrics
     assert metrics["statusPulseDisabled"] is True, metrics
     assert metrics["workingDotAnimationName"] == "agent-status-transition-pulse", metrics
+
+
+def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(browser, tmp_path):
+    stopped_at = time.time()
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+                {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"},
+                    {"kind": "codex", "state": "needs-input", "window_index": 1, "window_label": "1:codex", "attention_key": "ask-1"},
+                    {"kind": "claude", "state": "idle", "window_index": 2, "window_label": "2:claude", "working_stopped_ts": stopped_at, "cooldown_attention_key": "cool-1"},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.panel-detail-row .tmux-window-button[data-window-index="0"]')
+              && document.querySelector('.panel-detail-row .tmux-window-button[data-window-index="1"]')
+              && document.querySelector('.panel-detail-row .tmux-window-button[data-window-index="2"]');
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        function normalizeCssColor(value) {
+          const text = String(value || '').trim();
+          if (!text) return '';
+          const probe = document.createElement('span');
+          probe.style.color = text;
+          document.body.appendChild(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color;
+        }
+        function readButton(index) {
+          const button = document.querySelector(`.panel-detail-row .tmux-window-button[data-window-index="${index}"]`);
+          const dot = button?.querySelector('.agent-window-status-dot');
+          const buttonStyle = button ? getComputedStyle(button) : null;
+          const style = dot ? getComputedStyle(dot) : null;
+          const before = dot ? getComputedStyle(dot, '::before') : null;
+          const after = dot ? getComputedStyle(dot, '::after') : null;
+          return {
+            label: button?.textContent || '',
+            active: button?.classList?.contains('active') || false,
+            buttonColor: buttonStyle?.color || '',
+            dotText: dot?.textContent || '',
+            dotColor: style?.color || '',
+            textIndent: style?.textIndent || '',
+            glyphScale: style?.getPropertyValue('--subwindow-status-glyph-scale').trim() || '',
+            glyphFill: normalizeCssColor(style?.getPropertyValue('--subwindow-status-glyph-fill')),
+            beforeContent: before?.content || '',
+            beforeBackground: before?.backgroundColor || '',
+            beforeBorderStartWidth: before?.borderInlineStartWidth || '',
+            beforeBorderStartColor: before?.borderInlineStartColor || '',
+            beforeBorderTopWidth: before?.borderTopWidth || '',
+            beforeBorderTopColor: before?.borderTopColor || '',
+            beforeBoxShadow: before?.boxShadow || '',
+            beforeFilter: before?.filter || '',
+            beforeTransform: before?.transform || '',
+            beforeInsetInlineStart: before?.insetInlineStart || '',
+            afterContent: after?.content || '',
+            afterBackground: after?.backgroundColor || '',
+            afterBorderTopWidth: after?.borderTopWidth || '',
+            afterBorderTopColor: after?.borderTopColor || '',
+            afterBoxShadow: after?.boxShadow || '',
+            afterFilter: after?.filter || '',
+            afterTransform: after?.transform || '',
+            afterInsetInlineStart: after?.insetInlineStart || '',
+          };
+        }
+        const tabDot = document.querySelector('.pane-tab .session-agent-activity-marker .agent-window-status-dot');
+        const tabBefore = tabDot ? getComputedStyle(tabDot, '::before') : null;
+        return {
+          working: readButton('0'),
+          attention: readButton('1'),
+          cooldown: readButton('2'),
+          tabDotText: tabDot?.textContent || '',
+          tabDotBeforeContent: tabBefore?.content || '',
+          tabDotBeforeBackground: tabBefore?.backgroundColor || '',
+        };
+        """
+    )
+    assert metrics["working"]["dotText"] == "●", metrics
+    assert metrics["attention"]["dotText"] == "●", metrics
+    assert metrics["cooldown"]["dotText"] == "●", metrics
+    assert metrics["working"]["textIndent"] == "0px", metrics
+    assert metrics["attention"]["textIndent"] == "0px", metrics
+    assert metrics["cooldown"]["textIndent"] == "0px", metrics
+    assert metrics["working"]["dotColor"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["attention"]["dotColor"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["cooldown"]["dotColor"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["working"]["glyphScale"] == "1", metrics
+    assert metrics["attention"]["glyphScale"] == "1", metrics
+    assert metrics["cooldown"]["glyphScale"] == "1", metrics
+    assert metrics["working"]["beforeContent"] == '""', metrics
+    assert metrics["attention"]["beforeContent"] == '""', metrics
+    assert metrics["cooldown"]["beforeContent"] == '""', metrics
+    assert metrics["working"]["active"] is True, metrics
+    assert metrics["working"]["beforeBorderStartColor"] == metrics["working"]["glyphFill"], metrics
+    assert metrics["working"]["beforeBorderStartColor"] != metrics["working"]["buttonColor"], metrics
+    assert metrics["working"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["working"]["beforeBorderStartWidth"] != "0px", metrics
+    assert metrics["attention"]["beforeBackground"] == metrics["attention"]["glyphFill"], metrics
+    assert metrics["attention"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["attention"]["beforeBorderTopWidth"] == "0px", metrics
+    assert metrics["cooldown"]["beforeBackground"] == metrics["cooldown"]["glyphFill"], metrics
+    assert metrics["cooldown"]["afterBackground"] == metrics["cooldown"]["glyphFill"], metrics
+    assert metrics["cooldown"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["cooldown"]["beforeBorderTopWidth"] == "0px", metrics
+    assert metrics["cooldown"]["afterBorderTopWidth"] == "0px", metrics
+    assert metrics["cooldown"]["afterContent"] == '""', metrics
+    assert metrics["cooldown"]["afterBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["cooldown"]["beforeTransform"] == metrics["cooldown"]["afterTransform"], metrics
+    assert metrics["cooldown"]["beforeInsetInlineStart"] != metrics["cooldown"]["afterInsetInlineStart"], metrics
+    assert "drop-shadow" in metrics["working"]["beforeFilter"], metrics
+    assert "drop-shadow" in metrics["attention"]["beforeFilter"], metrics
+    assert "drop-shadow" in metrics["cooldown"]["beforeFilter"], metrics
+    assert "drop-shadow" in metrics["cooldown"]["afterFilter"], metrics
+    assert metrics["cooldown"]["beforeBoxShadow"] in ("", "none"), metrics
+    assert metrics["cooldown"]["afterBoxShadow"] in ("", "none"), metrics
+    assert metrics["tabDotText"] == "●", metrics
+    assert metrics["tabDotBeforeContent"] in ("", "none"), metrics
+    assert metrics["tabDotBeforeBackground"] in ("", "rgba(0, 0, 0, 0)"), metrics
 
 
 def test_dockview_window_bar_active_agent_glyph_is_static_by_default(browser, tmp_path):

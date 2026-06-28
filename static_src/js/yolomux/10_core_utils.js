@@ -10,18 +10,21 @@ async function apiFetch(url, options = {}) {
       requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
     }
   }
-  const startedAt = jsDebugPerformanceNow();
-  const method = jsDebugRequestMethod(requestOptions);
-  const requestBytes = jsDebugRequestBytes(url, requestOptions);
+  const apiDebugEnabled = jsDebugCollectionEnabled;
+  const startedAt = apiDebugEnabled ? jsDebugPerformanceNow() : 0;
+  const method = apiDebugEnabled ? jsDebugRequestMethod(requestOptions) : '';
+  const requestBytes = apiDebugEnabled ? jsDebugRequestBytes(url, requestOptions) : 0;
   let response;
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
-    recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
+    if (apiDebugEnabled) recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
-  const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
-  recordApiDebugResponseBytes(event, response);
+  if (apiDebugEnabled) {
+    const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
+    recordApiDebugResponseBytes(event, response);
+  }
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -197,9 +200,239 @@ function recordJsDebugEvent(type, payload = {}) {
   return event;
 }
 
+function clientPerfNow() {
+  const value = globalThis.performance?.now?.();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function clientPerfMark(name) {
+  if (!name || typeof globalThis.performance?.mark !== 'function') return '';
+  const mark = `yolomux:${String(name)}`;
+  try {
+    globalThis.performance.mark(mark);
+    return mark;
+  } catch (_) {
+    return '';
+  }
+}
+
+function clientPerfMeasureSinceMark(counterName, markName, details = {}) {
+  if (!counterName || !markName) return null;
+  const endMark = clientPerfMark(`${counterName}:end`);
+  let durationMs = null;
+  if (typeof globalThis.performance?.measure === 'function' && endMark) {
+    try {
+      const measure = globalThis.performance.measure(`yolomux:${counterName}`, markName, endMark);
+      durationMs = Number(measure?.duration);
+      globalThis.performance.clearMeasures?.(`yolomux:${counterName}`);
+    } catch (_) {}
+  }
+  if (!Number.isFinite(durationMs)) {
+    const entries = typeof globalThis.performance?.getEntriesByName === 'function'
+      ? globalThis.performance.getEntriesByName(markName)
+      : [];
+    const startedAt = Number(entries?.at?.(-1)?.startTime);
+    if (Number.isFinite(startedAt)) durationMs = clientPerfNow() - startedAt;
+  }
+  globalThis.performance?.clearMarks?.(markName);
+  if (endMark) globalThis.performance?.clearMarks?.(endMark);
+  return recordClientPerfCounter(counterName, durationMs, details);
+}
+
+function clientPerfActiveAnimationCount() {
+  const animations = typeof document?.getAnimations === 'function' ? document.getAnimations({subtree: true}) : [];
+  return animations.filter(animation => animation?.playState === 'running').length;
+}
+
+function recordClientPerfCounter(name, durationMs = null, details = {}) {
+  const key = String(name || '').trim();
+  if (!key) return null;
+  let counter = clientPerfCounters.get(key);
+  if (!counter) {
+    counter = {name: key, count: 0, totalMs: 0, maxMs: 0, lastMs: null, lastAt: '', rows: 0, nodes: 0, bytes: 0, skipped: 0};
+    clientPerfCounters.set(key, counter);
+    if (clientPerfCounters.size > clientPerfCounterLimit) {
+      clientPerfCounters.delete(clientPerfCounters.keys().next().value);
+    }
+  }
+  counter.count += 1;
+  const duration = Number(durationMs);
+  if (Number.isFinite(duration) && duration >= 0) {
+    const rounded = Number(duration.toFixed(2));
+    counter.totalMs = Number((counter.totalMs + rounded).toFixed(2));
+    counter.maxMs = Number(Math.max(counter.maxMs, rounded).toFixed(2));
+    counter.lastMs = rounded;
+  }
+  for (const field of ['rows', 'nodes', 'bytes', 'skipped']) {
+    const value = Number(details?.[field]);
+    if (Number.isFinite(value) && value > 0) counter[field] += value;
+  }
+  counter.lastAt = new Date().toISOString();
+  counter.lastDetails = {...details};
+  if (typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible()) scheduleJsDebugPanelRefresh();
+  return counter;
+}
+
+function clientPerfStart(name) {
+  return {name: String(name || ''), startedAt: clientPerfNow()};
+}
+
+function clientPerfEnd(token, details = {}) {
+  if (!token?.name) return null;
+  return recordClientPerfCounter(token.name, clientPerfNow() - Number(token.startedAt || 0), details);
+}
+
+function clientPerfMeasure(name, fn, details = {}) {
+  const token = clientPerfStart(name);
+  try {
+    return fn();
+  } finally {
+    clientPerfEnd(token, typeof details === 'function' ? details() : details);
+  }
+}
+
+function clientPerfSummary() {
+  return Array.from(clientPerfCounters.values()).map(counter => ({
+    ...counter,
+    avgMs: counter.count ? Number((counter.totalMs / counter.count).toFixed(2)) : 0,
+  }));
+}
+
+function clientPerfLongTaskSummary() {
+  const samples = clientPerfLongTaskSamples.slice();
+  const total = samples.reduce((sum, sample) => sum + Number(sample.durationMs || 0), 0);
+  const max = samples.reduce((value, sample) => Math.max(value, Number(sample.durationMs || 0)), 0);
+  return {
+    count: samples.length,
+    averageMs: samples.length ? Number((total / samples.length).toFixed(1)) : 0,
+    maxMs: Number(max.toFixed(1)),
+    samples,
+  };
+}
+
+function clearClientPerfCounters() {
+  clientPerfCounters.clear();
+  clientPerfLongTaskSamples = [];
+}
+
+function installClientPerfLongTaskObserver() {
+  if (clientPerfLongTaskObserverInstalled || typeof globalThis.PerformanceObserver !== 'function') return;
+  clientPerfLongTaskObserverInstalled = true;
+  try {
+    const observer = new globalThis.PerformanceObserver(list => {
+      for (const entry of list.getEntries?.() || []) {
+        const durationMs = Number(entry.duration || 0);
+        const sample = {ts: new Date().toISOString(), durationMs: Number(durationMs.toFixed(1)), name: String(entry.name || 'longtask')};
+        clientPerfLongTaskSamples.push(sample);
+        if (clientPerfLongTaskSamples.length > clientPerfLongTaskSampleLimit) {
+          clientPerfLongTaskSamples.splice(0, clientPerfLongTaskSamples.length - clientPerfLongTaskSampleLimit);
+        }
+        recordClientPerfCounter('longTask', durationMs);
+      }
+    });
+    observer.observe({entryTypes: ['longtask']});
+  } catch (_) {}
+}
+
+function terminalRemovalLatencyNowMs() {
+  const value = Date.now();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function terminalRemovalLatencyKey(targetKind, target) {
+  return `${String(targetKind || 'target')}:${String(target || '')}`;
+}
+
+function noteTerminalRemovalLatencyStart(targetKind, target, details = {}) {
+  if (!jsDebugCollectionEnabled) return;
+  const key = terminalRemovalLatencyKey(targetKind, target);
+  terminalRemovalLatencyPending.set(key, {
+    targetKind: String(targetKind || 'target'),
+    target: String(target || ''),
+    origin: String(details.origin || 'unknown'),
+    startedAtMs: terminalRemovalLatencyNowMs(),
+    details: {...details},
+  });
+}
+
+function clearTerminalRemovalLatency(targetKind, target) {
+  terminalRemovalLatencyPending.delete(terminalRemovalLatencyKey(targetKind, target));
+}
+
+function completeTerminalRemovalLatency(targetKind, target, details = {}) {
+  if (!jsDebugCollectionEnabled) return null;
+  const key = terminalRemovalLatencyKey(targetKind, target);
+  const pending = terminalRemovalLatencyPending.get(key) || null;
+  const explicitStartedAtMs = Number(details.startedAtMs);
+  const startedAtMs = Number.isFinite(explicitStartedAtMs)
+    ? explicitStartedAtMs
+    : Number(pending?.startedAtMs);
+  if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) return null;
+  terminalRemovalLatencyPending.delete(key);
+  const nowMs = terminalRemovalLatencyNowMs();
+  const durationMs = Math.max(0, nowMs - startedAtMs);
+  const sample = {
+    ts: new Date(nowMs).toISOString(),
+    targetKind: String(targetKind || pending?.targetKind || 'target'),
+    target: String(target || pending?.target || ''),
+    origin: String(details.origin || pending?.origin || 'unknown'),
+    reason: String(details.reason || ''),
+    durationMs: Number(durationMs.toFixed(1)),
+    startedAtMs,
+    removedAtMs: nowMs,
+  };
+  if (Number.isFinite(Number(details.eventAtMs))) sample.eventAtMs = Number(details.eventAtMs);
+  if (details.eventType) sample.eventType = String(details.eventType);
+  if (Number.isFinite(Number(details.closeCode))) sample.closeCode = Number(details.closeCode);
+  if (typeof details.wasClean === 'boolean') sample.wasClean = details.wasClean;
+  terminalRemovalLatencySamples.push(sample);
+  if (terminalRemovalLatencySamples.length > terminalRemovalLatencySampleLimit) {
+    terminalRemovalLatencySamples.splice(0, terminalRemovalLatencySamples.length - terminalRemovalLatencySampleLimit);
+  }
+  recordJsDebugEvent('terminal_removal', {
+    message: `${sample.targetKind} ${sample.target} removed after ${sample.durationMs}ms from ${sample.origin}`,
+    durationMs: sample.durationMs,
+    targetKind: sample.targetKind,
+    target: sample.target,
+    origin: sample.origin,
+    reason: sample.reason,
+    eventType: sample.eventType,
+    closeCode: sample.closeCode,
+    wasClean: sample.wasClean,
+  });
+  return sample;
+}
+
+function completeTerminalRemovalLatencyFromEpochSeconds(targetKind, target, epochSeconds, details = {}) {
+  const eventAtMs = Number(epochSeconds) * 1000;
+  if (!Number.isFinite(eventAtMs) || eventAtMs <= 0) return null;
+  return completeTerminalRemovalLatency(targetKind, target, {
+    ...details,
+    startedAtMs: eventAtMs,
+    eventAtMs,
+  });
+}
+
+function terminalRemovalLatencySummary() {
+  const samples = terminalRemovalLatencySamples.slice();
+  const total = samples.reduce((sum, sample) => sum + Number(sample.durationMs || 0), 0);
+  const max = samples.reduce((value, sample) => Math.max(value, Number(sample.durationMs || 0)), 0);
+  return {
+    count: samples.length,
+    pending: terminalRemovalLatencyPending.size,
+    averageMs: samples.length ? Number((total / samples.length).toFixed(1)) : 0,
+    maxMs: Number(max.toFixed(1)),
+    last: samples.at(-1) || null,
+    samples,
+  };
+}
+
 function clearJsDebugEvents() {
   jsDebugEvents = [];
   jsDebugEventSeq = 0;
+  terminalRemovalLatencyPending.clear();
+  terminalRemovalLatencySamples = [];
+  clearClientPerfCounters();
   if (typeof clearJsDebugGraphData === 'function') clearJsDebugGraphData();
   if (typeof clearJsDebugServerHistory === 'function') clearJsDebugServerHistory();
   if (jsDebugRenderTimer) {
@@ -244,6 +477,7 @@ function enableDebugMode() {
 }
 
 installJsDebugEventCapture();
+installClientPerfLongTaskObserver();
 
 let appViewportOverride = null;
 let appMirrorTransform = {scale: 1, tx: 0, ty: 0};
@@ -1349,7 +1583,30 @@ function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null,
 }
 
 function setFocusedTerminal(session, options = {}) {
+  const perf = clientPerfStart('focusSet');
+  try {
+    return setFocusedTerminalMeasured(session, options);
+  } finally {
+    clientPerfEnd(perf, {sessions: activeSessions.length, user: options.userInitiated === true ? 1 : 0});
+  }
+}
+
+function setFocusedTerminalMeasured(session, options = {}) {
   const previousItem = focusedPanelItem;
+  const alreadyFocused = focusedTerminal === session && focusedPanelItem === session;
+  if (alreadyFocused) {
+    rememberActivePaneItem(session);
+    if (isTmuxSession(session)) lastFocusedTmuxSession = session;
+    if (options.userInitiated === true) {
+      dismissAttentionAlertsForSession(session);
+      acknowledgeTerminalAttentionFromUserAction(session, null, options);
+      if (options.syncFinder !== false) {
+        rememberFileExplorerExplicitSyncSession(session);
+        scheduleFileExplorerActiveTabSync(session, {explicit: true});
+      }
+    }
+    return;
+  }
   if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
@@ -1485,8 +1742,9 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-const disclosureTriangleExpandedGlyph = '▾';
-const disclosureTriangleCollapsedGlyph = '▸';
+const disclosureChevronGlyph = '›';
+const disclosureTriangleExpandedGlyph = disclosureChevronGlyph;
+const disclosureTriangleCollapsedGlyph = disclosureChevronGlyph;
 
 function disclosureTriangleGlyph(expanded) {
   return expanded === true ? disclosureTriangleExpandedGlyph : disclosureTriangleCollapsedGlyph;
@@ -1968,6 +2226,14 @@ async function terminalReferenceProviderLinks(session, term, y) {
 
 const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 90;
 
+function terminalFileReferenceViewportSignature(term) {
+  return [
+    Math.max(0, Math.floor(Number(term?.cols || 0))),
+    Math.max(0, Math.floor(Number(term?.rows || 0))),
+    Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0))),
+  ].join(':');
+}
+
 function terminalFileReferenceKey(reference) {
   const range = reference?.range || {};
   const start = range.start || {};
@@ -2058,6 +2324,17 @@ function updateTerminalFileReferenceUnderlineHover(container, hoverKey = '') {
 }
 
 function renderTerminalFileReferenceUnderlines(term, container, references, options = {}) {
+  let renderedNodes = 0;
+  const perf = clientPerfStart('terminalUnderlineRender');
+  try {
+    renderedNodes = renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options);
+    return renderedNodes;
+  } finally {
+    clientPerfEnd(perf, {nodes: renderedNodes, rows: Math.max(0, Number(term?.rows || 0))});
+  }
+}
+
+function renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options = {}) {
   const layer = terminalFileUnderlineLayer(container);
   if (!layer) return 0;
   const cell = terminalCellDimensions(term, container);
@@ -2100,7 +2377,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   const disposables = [];
   let disposed = false;
   let timer = 0;
+  let renderFrame = 0;
   let sequence = 0;
+  let lastRenderedViewportSignature = '';
   let existingReferenceKeys = new Set();
   const existingReferenceTargets = new Map();
   let hoverKey = '';
@@ -2129,7 +2408,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     }
     existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
     if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    return renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+    return count;
   };
 
   const refresh = async () => {
@@ -2143,7 +2424,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     if (!refs.length) {
       existingReferenceKeys = new Set();
       hoverKey = '';
-      return renderTerminalFileReferenceUnderlines(term, container, []);
+      const count = renderTerminalFileReferenceUnderlines(term, container, []);
+      lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+      return count;
     }
     const targets = await Promise.all(refs.map(ref => (
       Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
@@ -2163,13 +2446,26 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
       .filter(Boolean);
     existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
     if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    return renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+    return count;
   };
 
-  const schedule = () => {
+  const scheduleCachedRender = () => {
     if (disposed) return;
+    if (renderFrame) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = 0;
+      if (!disposed) renderCached();
+    });
+  };
+
+  const schedule = (scheduleOptions = {}) => {
+    if (disposed) return;
+    const viewportSignature = terminalFileReferenceViewportSignature(term);
+    const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
+    if (viewportChanged) scheduleCachedRender();
     if (timer) clearTimeout(timer);
-    renderCached();
     timer = setTimeout(() => {
       timer = 0;
       refresh();
@@ -2180,9 +2476,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     const disposable = typeof term?.[name] === 'function' ? term[name](callback) : null;
     if (disposable?.dispose) disposables.push(disposable);
   };
-  bindTerminalEvent('onScroll', schedule);
-  bindTerminalEvent('onResize', schedule);
-  bindTerminalEvent('onRender', schedule);
+  bindTerminalEvent('onScroll', () => schedule({reason: 'scroll', viewportChanged: true}));
+  bindTerminalEvent('onResize', () => schedule({reason: 'resize', viewportChanged: true}));
+  bindTerminalEvent('onRender', () => schedule({reason: 'render'}));
   container.addEventListener?.('mousemove', updateHover);
   container.addEventListener?.('mouseleave', clearHover);
   disposables.push({
@@ -2200,7 +2496,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
       disposed = true;
       sequence += 1;
       if (timer) clearTimeout(timer);
+      if (renderFrame) cancelAnimationFrame(renderFrame);
       timer = 0;
+      renderFrame = 0;
       disposables.forEach(disposable => {
         try { disposable.dispose(); } catch (_) {}
       });
@@ -3206,6 +3504,9 @@ function showTabContextMenu(item, x, y, options = {}) {
         shortcut: `${appShortcutText('K', {shift: true})} Enter`,
       },
     );
+    if (typeof paneCanPopout === 'function' && paneCanPopout(item)) {
+      appendContextMenuButton(menu, t('tab.popout'), () => openPanePopout(item), closeSessionContextMenu);
+    }
   }
   if (isTmuxSession(item)) {
     if (isPinnableTab(item)) appendContextMenuSeparator(menu);

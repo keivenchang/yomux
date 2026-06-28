@@ -4,6 +4,7 @@ from yolomux_lib import tmux_signals
 from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
 from yolomux_lib.tmux_signals import parse_tmux_signal_snapshot
 from yolomux_lib.tmux_signals import tmux_signal_subscription_commands
+from yolomux_lib.tmux_signals import tmux_signal_hook_command
 from yolomux_lib.tmux_signals import tmux_control_attach_command
 from yolomux_lib.tmux_signals import tmux_control_event_relevant
 from yolomux_lib.tmux_signals import tmux_control_event_type
@@ -177,8 +178,11 @@ def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
 
 def test_tmux_control_event_filter_accepts_signal_notifications():
     assert tmux_control_event_type("%output %1 bytes") == "output"
+    assert tmux_control_event_type("yolomux-tmux-signal-hook:pane-exited:%1") == "pane-exited"
     assert tmux_control_event_relevant("%layout-change @1 layout") is True
     assert tmux_control_event_relevant("%subscription-changed activity 1") is True
+    assert tmux_control_event_relevant("yolomux-tmux-signal-hook:pane-died:%1") is True
+    assert tmux_control_event_relevant("tmux status message") is False
     assert tmux_control_event_relevant("%begin 1 2 3") is False
     assert tmux_control_event_relevant("not a control event") is False
 
@@ -208,4 +212,6 @@ def test_install_tmux_signal_monitoring_scopes_options_and_hooks(monkeypatch):
     assert len(hook_calls) == len(tmux_signals.TMUX_SIGNAL_HOOKS)
     assert all(f"[{tmux_signals.TMUX_SIGNAL_HOOK_INDEX}]" in args[2] for args in hook_calls)
     assert any("client-resized" in args[2] for args in hook_calls)
-    assert all(args[3] == "refresh-client" for args in hook_calls)
+    assert any(args[2].startswith("pane-exited") and args[3] == tmux_signal_hook_command("pane-exited") for args in hook_calls)
+    assert any(args[2].startswith("pane-died") and args[3] == tmux_signal_hook_command("pane-died") for args in hook_calls)
+    assert all(args[3] == tmux_signal_hook_command(args[2].split("[", 1)[0]) for args in hook_calls)

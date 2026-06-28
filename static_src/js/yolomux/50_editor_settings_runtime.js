@@ -232,6 +232,7 @@ function applyEditorThemeMode(options = {}) {
   document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
 
 function setFileEditorThemeMode(mode) {
@@ -762,6 +763,7 @@ function applyGlobalThemeMode(options = {}) {
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
   scheduleShareTopologySnapshot('theme');
   if (typeof scheduleShareAppearancePublish === 'function') {
     scheduleShareAppearancePublish({reason: options.reason || 'theme', topology: false});
@@ -853,6 +855,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
   clientSettingsPayload = payload;
+  clientSettingsMetadataDeferred = payload.deferred_metadata === true;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
   clientSettingsMtimeNs = nextMtime;
@@ -941,6 +944,18 @@ function applySettingsPayload(payload, options = {}) {
     scheduleShareAppearancePublish();
   }
   return true;
+}
+
+function scheduleDeferredSettingsMetadataRefresh() {
+  if (!clientSettingsMetadataDeferred || shareViewMode) return null;
+  if (clientSettingsMetadataRefreshPromise) return clientSettingsMetadataRefreshPromise;
+  if (clientSettingsMetadataRefreshTimer) return null;
+  clientSettingsMetadataRefreshTimer = setTimeout(() => {
+    clientSettingsMetadataRefreshTimer = null;
+    clientSettingsMetadataRefreshPromise = refreshSettings({force: true, silent: true})
+      .finally(() => { clientSettingsMetadataRefreshPromise = null; });
+  }, 0);
+  return null;
 }
 
 async function refreshSettings(options = {}) {

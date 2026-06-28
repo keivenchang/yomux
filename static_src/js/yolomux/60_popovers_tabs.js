@@ -1511,7 +1511,7 @@ function fileDragPreviewMedia(path, entry) {
   if (kind === 'file' && previewMediaKindForPath(path) === 'image') {
     return `<img class="file-drag-thumb" src="${rawFileUrl(path)}" alt="">`;
   }
-  const icon = kind === 'dir' ? '▸' : '📄';
+  const icon = kind === 'dir' ? disclosureTriangleCollapsedGlyph : '📄';
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 

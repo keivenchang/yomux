@@ -685,6 +685,9 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+let clientSettingsMetadataDeferred = clientSettingsPayload.deferred_metadata === true;
+let clientSettingsMetadataRefreshPromise = null;
+let clientSettingsMetadataRefreshTimer = null;
 const SETTING_FALLBACKS = Object.freeze({
   'appearance.date_time_hour_cycle': '24',
   'appearance.editor_font_size': 13,
@@ -832,13 +835,22 @@ function urlFlagEnabled(name) {
   }
 }
 const jsDebugCollectionEnabled = true;
-let debugModeEnabled = urlFlagEnabled('debug');
+const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
+let debugModeEnabled = debugModeExplicitUrlEnabled;
 const jsDebugEventLimit = 200;
 const jsDebugRenderDebounceMs = 500;
 let jsDebugEventSeq = 0;
 let jsDebugEvents = [];
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
+const clientPerfCounterLimit = 80;
+const clientPerfLongTaskSampleLimit = 40;
+const clientPerfCounters = new Map();
+let clientPerfLongTaskSamples = [];
+let clientPerfLongTaskObserverInstalled = false;
+const terminalRemovalLatencyPending = new Map();
+let terminalRemovalLatencySamples = [];
+const terminalRemovalLatencySampleLimit = 40;
 const CLS = Object.freeze({
   active: 'active',
   collapsed: 'collapsed',
@@ -960,6 +972,17 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    canPopout: item => {
+      const path = fileItemPath(item);
+      return Boolean(path && editorPreviewModeAvailable(path, openFiles.get(path)));
+    },
+    popoutDisabledReason: item => fileItemPath(item)
+      ? 'file editor popout needs a preview-capable file'
+      : 'file editor popout needs a file path',
+    openPopout: item => {
+      const path = fileItemPath(item);
+      return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
+    },
     className,
     icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -982,6 +1005,8 @@ const TAB_TYPES = [
     detail: () => t('menu.file.info.detail'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
+    canPopout: true,
+    popoutRenderer: item => panePopoutPanelSnapshot(item),
     renderAttached: () => {
       renderInfoPanel();
     },
@@ -1012,6 +1037,7 @@ const TAB_TYPES = [
     },
     className: () => 'yoagent',
     icon: 'yoagent',
+    popoutDisabledReason: 'interactive YO!agent popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1030,6 +1056,7 @@ const TAB_TYPES = [
     createPanel: () => createFileExplorerPanel(),
     className: () => 'file-explorer',
     icon: 'finder',
+    popoutDisabledReason: 'interactive Finder/Tabber popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1049,6 +1076,7 @@ const TAB_TYPES = [
     renderAttached: () => loadSearchHistoryPanelData({silent: true}),
     className: () => 'search-history-item',
     icon: 'document',
+    popoutDisabledReason: 'interactive Search & Runs popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1065,6 +1093,7 @@ const TAB_TYPES = [
     detail: () => compactHomePath(settingsConfigPath()),
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
+    popoutDisabledReason: 'interactive Preferences popout is disabled in phase 1',
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1083,6 +1112,8 @@ const TAB_TYPES = [
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
+    canPopout: true,
+    popoutRenderer: item => panePopoutPanelSnapshot(item),
     renderAttached: () => {
       enableDebugMode();
       renderDebugPanels();
@@ -1242,8 +1273,13 @@ let transcriptMetaLoading = false;
 let transcriptMetaLoaded = false;
 let transcriptMetaLoadError = '';
 let transcriptMetaRefreshPromise = null;
+let infoPanelRenderPending = false;
+let infoPanelLastRenderSignature = '';
+let infoPanelLastRenderHtml = '';
 let clientEventsSource = null;
 let clientEventsConnected = false;
+const clientPushEventQueue = new Map();
+let clientPushEventFrame = 0;
 let reconnectResyncTimer = null;
 const reconnectResyncDebounceMs = 751;
 let serverVersionReloadHandled = '';
@@ -1342,6 +1378,7 @@ const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
+const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
@@ -1356,6 +1393,8 @@ let pasteUploadInFlight = false;
 let layoutResizeState = null;
 let responsiveLayoutPruneTimer = null;
 let topbarResizeObserver = null;
+const tabStripOverflowCheckSet = new Set();
+let tabStripOverflowCheckFrame = null;
 let latencySamples = [];
 let tabMetaVisible = readStoredTabMetaVisible();
 let authRedirectStarted = false;

@@ -255,11 +255,13 @@ SHARE_DEBUG_PROFILE_EVENT_LIMIT = 100
 SHARE_DEBUG_PROFILE_LOG_DIR = Path(os.environ.get("YOLOMUX_SHARE_DEBUG_DIR", "/tmp/yolomux-share-debug"))
 SHARE_DEBUG_PROFILE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|bearer)", re.I)
 SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
-SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 3.0
+SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 1.5
 SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 AUTO_APPROVE_CACHE_MAX_AGE_SECONDS = 5.003
 SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
+TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
+INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 60 * 60
 STATS_HISTORY_RAW_BUCKET_SECONDS = 1
@@ -546,6 +548,14 @@ class SelfRestartContext:
     env: dict[str, str]
     pid: int
     log_path: str = SELF_RESTART_LOG_PATH
+
+
+@dataclass
+class PendingInputHeartbeat:
+    session: str
+    source: str
+    byte_count: int
+    ts: float
 
 
 def session_files_batch_worker_count(count: int) -> int:
@@ -979,6 +989,13 @@ def resolve_yoagent_backend(backend: str) -> str:
     return yoagent_backends.resolve_yoagent_backend(backend, auth_status=agent_auth_status())
 
 
+def cached_agent_auth_status_snapshot() -> dict[str, dict[str, object]]:
+    try:
+        return agent_auth_status(block=False, allow_stale=True, refresh=True)
+    except TypeError:
+        return agent_auth_status()
+
+
 def tmux_session_name_error(name: str) -> str | None:
     if not name:
         return "session name is required"
@@ -1097,6 +1114,11 @@ class TmuxWebtermApp:
         self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
         self.activity_ledger.load()
         self.activity_heartbeat_next_rotate_at = 0.0
+        self.input_heartbeat_condition = threading.Condition()
+        self.input_heartbeat_pending: dict[tuple[str, str], PendingInputHeartbeat] = {}
+        self.input_heartbeat_flush_active = False
+        self.input_heartbeat_worker_stop = False
+        self.input_heartbeat_worker_thread: threading.Thread | None = None
         self.session_files_cache_lock = threading.RLock()
         self.session_files_cache: dict[tuple[Any, ...], tuple[float, tuple[SessionFilesPayload, HTTPStatus]]] = {}
         self.session_files_refreshing_cache_keys: set[tuple[Any, ...]] = set()
@@ -1174,6 +1196,7 @@ class TmuxWebtermApp:
         self.client_watch_auto_approve_signature: str = ""
         self.client_watch_attention_ack_rev: int = -1
         self.client_watch_tmux_signal_signature: str = ""
+        self.client_watch_tmux_signal_removal_event: dict[str, Any] = {}
         self.client_watch_watched_prs_signature: str = ""
         self.client_watch_context_item_payload_signatures: dict[str, str] = {}
         self.client_watch_session_file_payload_signatures: dict[str, str] = {}
@@ -2279,6 +2302,21 @@ class TmuxWebtermApp:
     def background_owner_status_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         payload = self.background_owner.status_payload()
         payload["perf"] = self.performance_metrics_payload()
+        return payload, HTTPStatus.OK
+
+    def background_owner_claim_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
+        was_owner = self.background_owner.is_owner()
+        ok = self.background_owner.attempt_takeover()
+        status_payload, _status = self.background_owner_status_payload()
+        payload = {
+            "ok": bool(ok),
+            "claimed": bool(ok and not was_owner),
+            "was_owner": bool(was_owner),
+            "status": status_payload,
+        }
+        if not ok:
+            payload["error"] = str(status_payload.get("last_error") or "background owner takeover failed")
+            return payload, HTTPStatus.CONFLICT
         return payload, HTTPStatus.OK
 
     def demote_background_owner(self) -> None:
@@ -3548,14 +3586,34 @@ class TmuxWebtermApp:
     def tmux_signal_signature_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.stable_signature_payload(payload)
 
+    def recent_tmux_signal_removal_event(self, generated_at: Any = None) -> dict[str, Any]:
+        with self.client_watch_lock:
+            event = dict(self.client_watch_tmux_signal_removal_event)
+        event_time = float(event.get("time") or 0.0)
+        if event_time <= 0:
+            return {}
+        reference_time = float(generated_at or 0.0)
+        if reference_time <= 0:
+            reference_time = time.time()
+        if abs(reference_time - event_time) > TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS:
+            return {}
+        return event
+
+    def add_tmux_signal_removal_event_fields(self, payload: dict[str, Any], removed_keys: list[str]) -> dict[str, Any]:
+        if not removed_keys:
+            return payload
+        next_payload = dict(payload)
+        next_payload["removed_window_keys"] = removed_keys
+        removal_event = self.recent_tmux_signal_removal_event(next_payload.get("generated_at"))
+        if removal_event:
+            next_payload["removed_window_event_at"] = removal_event.get("time")
+            next_payload["removed_window_event_type"] = removal_event.get("type")
+        return next_payload
+
     def tmux_signal_patch_payload(self, previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
         previous_windows = previous.get("windows") if isinstance(previous, dict) else None
         current_windows = current.get("windows") if isinstance(current, dict) else None
         if not isinstance(previous_windows, list) or not isinstance(current_windows, list):
-            return {"data": current}
-        previous_meta = {key: value for key, value in self.tmux_signal_signature_payload(previous or {}).items() if key != "windows"}
-        current_meta = {key: value for key, value in self.tmux_signal_signature_payload(current).items() if key != "windows"}
-        if previous_meta != current_meta:
             return {"data": current}
         previous_by_key = {
             key: window
@@ -3574,7 +3632,12 @@ class TmuxWebtermApp:
             if self.stable_client_event_payload_signature(previous_by_key.get(key)) != self.stable_client_event_payload_signature(window):
                 changed_windows.append(window)
         removed_keys = sorted(set(previous_by_key) - current_keys)
-        return {
+        patchable_window_meta_keys = {"windows", "window_count"}
+        previous_meta = {key: value for key, value in self.tmux_signal_signature_payload(previous or {}).items() if key not in patchable_window_meta_keys}
+        current_meta = {key: value for key, value in self.tmux_signal_signature_payload(current).items() if key not in patchable_window_meta_keys}
+        if previous_meta != current_meta:
+            return {"data": self.add_tmux_signal_removal_event_fields(current, removed_keys)}
+        patch = {
             "patch": True,
             "windows": changed_windows,
             "removed_window_keys": removed_keys,
@@ -3583,6 +3646,7 @@ class TmuxWebtermApp:
             "generated_at": current.get("generated_at"),
             "compute_ms": current.get("compute_ms"),
         }
+        return self.add_tmux_signal_removal_event_fields(patch, removed_keys)
 
     def tmux_signal_window_for_target(self, target: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
         raw_target = str(target or "").strip()
@@ -4646,6 +4710,11 @@ class TmuxWebtermApp:
         return ["tmux_signals_changed"]
 
     def handle_tmux_signal_event(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or event.get("event") or "")
+        if event_type in {"pane-exited", "pane-died", "window-close", "sessions-changed"}:
+            event_time = float(event.get("time") or time.time())
+            with self.client_watch_lock:
+                self.client_watch_tmux_signal_removal_event = {"type": event_type, "time": event_time}
         self.tmux_signal_cache.clear()
         with self.client_watch_lock:
             self.client_event_next_tmux_signal_poll_at = 0.0
@@ -6525,6 +6594,29 @@ class TmuxWebtermApp:
         endpoints.sort(key=lambda item: (-int(item.get("payload_bytes_total") or 0), -int(item.get("count") or 0), str(item.get("surface") or "")))
         return endpoints[:8]
 
+    def runtime_top_background_work(self, background_status: dict[str, Any]) -> list[dict[str, Any]]:
+        perf = background_status.get("perf") if isinstance(background_status, dict) else {}
+        if not isinstance(perf, dict):
+            return []
+        rows = perf.get("summary")
+        if not isinstance(rows, list):
+            rows = perf.get("top_payload_bytes")
+        if not isinstance(rows, list):
+            return []
+        background_rows = [
+            dict(row)
+            for row in rows
+            if isinstance(row, dict) and row.get("role") and row.get("role") != "http-endpoint"
+        ]
+        background_rows.sort(key=lambda item: (
+            -float(item.get("compute_ms_max") or 0.0),
+            -int(item.get("payload_bytes_total") or 0),
+            -int(item.get("count") or 0),
+            str(item.get("role") or ""),
+            str(item.get("surface") or ""),
+        ))
+        return background_rows[:12]
+
     def runtime_refresh_state(self, background_status: dict[str, Any]) -> dict[str, Any]:
         with self.session_files_cache_lock:
             session_files_refreshing_count = len(self.session_files_refreshing_cache_keys)
@@ -6590,6 +6682,7 @@ class TmuxWebtermApp:
                 "search_index": self.runtime_cache_dir_stats(file_index.INDEX_DIR),
             },
             "top_endpoints": self.runtime_top_endpoints(status),
+            "top_background_work": self.runtime_top_background_work(status),
             "top_event_types": self.runtime_top_event_types(),
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
@@ -6720,35 +6813,142 @@ class TmuxWebtermApp:
             "summaries": summary_matches,
         }, HTTPStatus.OK
 
-    def active_window_for(self, session: str) -> str | None:
-        """Active window for routing input heartbeats.
-
-        The cached transcript payload is the fast path, but stale/missing pane metadata must not turn
-        a real window heartbeat into a session-only heartbeat.
-        """
-        cached = self.get_transcripts_payload_cache(max_age_seconds=float("inf"), allow_stale=True)
-        if cached:
-            payload = cached[0]
-            info = (payload.get("sessions") or {}).get(session) if isinstance(payload, dict) else None
+    def cached_active_window_for(self, session: str) -> str | None:
+        clean_session = str(session or "").strip()
+        if not clean_session:
+            return None
+        with self.transcripts_payload_cache_lock:
+            cached = self.transcripts_payload_cache
+            payload = cached[1] if cached is not None else None
+            info = (payload.get("sessions") or {}).get(clean_session) if isinstance(payload, dict) else None
             panes = info.get("panes") if isinstance(info, dict) else None
             if isinstance(panes, list):
                 window = active_window_for_panes(panes)
                 if window not in (None, ""):
                     return window
+        return None
+
+    def active_window_for(self, session: str) -> str | None:
+        """Active window for non-hot-path callers; input heartbeats use cached metadata only."""
+        window = self.cached_active_window_for(session)
+        if window not in (None, ""):
+            return window
         result = tmux(["display-message", "-p", "-t", tmux_session_target(session), "#{window_index}"], timeout=1.0)
         if result.returncode != 0:
             return None
         window = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
         return window or None
 
+    def start_input_heartbeat_worker(self) -> None:
+        with self.input_heartbeat_condition:
+            worker = self.input_heartbeat_worker_thread
+            if worker is not None and worker.is_alive():
+                return
+            self.input_heartbeat_worker_stop = False
+            worker = threading.Thread(target=self.input_heartbeat_worker_loop, name="input-heartbeats", daemon=True)
+            self.input_heartbeat_worker_thread = worker
+            worker.start()
+
+    def _take_input_heartbeat_batch_locked(self) -> list[PendingInputHeartbeat]:
+        batch = list(self.input_heartbeat_pending.values())
+        self.input_heartbeat_pending = {}
+        self.input_heartbeat_flush_active = bool(batch)
+        return batch
+
+    def _finish_input_heartbeat_flush(self) -> None:
+        with self.input_heartbeat_condition:
+            self.input_heartbeat_flush_active = False
+            self.input_heartbeat_condition.notify_all()
+
+    def flush_input_heartbeat_batch(self, batch: list[PendingInputHeartbeat]) -> None:
+        if not batch:
+            return
+        by_session_window: dict[tuple[str, str | None, str], PendingInputHeartbeat] = {}
+        window_by_session: dict[str, str | None] = {}
+        needs_cache_refresh = False
+        for item in batch:
+            window = window_by_session.get(item.session)
+            if item.session not in window_by_session:
+                window = self.cached_active_window_for(item.session)
+                window_by_session[item.session] = window
+                if window is None:
+                    needs_cache_refresh = True
+            key = (item.session, window, item.source)
+            existing = by_session_window.get(key)
+            if existing is None:
+                by_session_window[key] = PendingInputHeartbeat(item.session, item.source, item.byte_count, item.ts)
+            else:
+                existing.byte_count += item.byte_count
+                existing.ts = max(existing.ts, item.ts)
+        if needs_cache_refresh:
+            self.start_transcripts_payload_refresh(defer=True)
+        for (session, window, source), item in by_session_window.items():
+            self.activity_ledger.heartbeat(session, window, ts=item.ts, byte_count=item.byte_count, source=source)
+
+    def input_heartbeat_worker_loop(self) -> None:
+        while True:
+            with self.input_heartbeat_condition:
+                while (not self.input_heartbeat_pending or self.input_heartbeat_flush_active) and not self.input_heartbeat_worker_stop:
+                    self.input_heartbeat_condition.wait()
+                if self.input_heartbeat_worker_stop and not self.input_heartbeat_pending:
+                    return
+                self.input_heartbeat_condition.wait(max(0.0, INPUT_HEARTBEAT_COALESCE_SECONDS))
+                while self.input_heartbeat_flush_active and not self.input_heartbeat_worker_stop:
+                    self.input_heartbeat_condition.wait()
+                batch = self._take_input_heartbeat_batch_locked()
+            try:
+                self.flush_input_heartbeat_batch(batch)
+            finally:
+                self._finish_input_heartbeat_flush()
+
+    def flush_input_heartbeats(self, timeout: float = 1.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self.input_heartbeat_condition:
+                while self.input_heartbeat_flush_active:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self.input_heartbeat_condition.wait(remaining)
+                if not self.input_heartbeat_pending:
+                    return True
+                batch = self._take_input_heartbeat_batch_locked()
+            try:
+                self.flush_input_heartbeat_batch(batch)
+            finally:
+                self._finish_input_heartbeat_flush()
+
+    def stop_input_heartbeat_worker(self) -> None:
+        self.flush_input_heartbeats()
+        with self.input_heartbeat_condition:
+            self.input_heartbeat_worker_stop = True
+            self.input_heartbeat_condition.notify_all()
+            worker = self.input_heartbeat_worker_thread
+        if worker is not None:
+            worker.join(timeout=1.0)
+        self.flush_input_heartbeats()
+
     def record_user_input(self, session: str, byte_count: int, source: str = "host", data: str = "") -> None:
-        """One user-input heartbeat from the WS bridge. Read-only viewers are dropped upstream;
-        write-share input passes source="share" so the heartbeat log can distinguish it."""
-        if not session:
+        """Queue one user-input heartbeat from the WS bridge without touching tmux or disk."""
+        clean_session = str(session or "").strip()
+        if not clean_session:
             return
         if data and not terminal_input_counts_as_user_activity(data):
             return
-        self.activity_ledger.heartbeat(session, self.active_window_for(session), byte_count=byte_count, source=source)
+        worker = self.input_heartbeat_worker_thread
+        if worker is None or not worker.is_alive():
+            self.start_input_heartbeat_worker()
+        clean_source = str(source or "host")
+        count = max(0, int(byte_count or 0))
+        with self.input_heartbeat_condition:
+            key = (clean_session, clean_source)
+            pending = self.input_heartbeat_pending.get(key)
+            if pending is None:
+                self.input_heartbeat_pending[key] = PendingInputHeartbeat(clean_session, clean_source, count, time.time())
+            else:
+                pending.byte_count += count
+                pending.ts = time.time()
+            self.input_heartbeat_condition.notify()
 
     def build_activity_payload(self, session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
         session_names, scope_errors, scope = self.activity_session_names(session_scope)
@@ -7532,7 +7732,7 @@ class TmuxWebtermApp:
 
     def agent_auth_payload(self, force: bool = False) -> dict[str, Any]:
         return {
-            "agentAuth": agent_auth_status(force=True) if force else agent_auth_status(),
+            "agentAuth": agent_auth_status(force=True) if force else cached_agent_auth_status_snapshot(),
             "availableAgents": available_agent_commands(),
         }
 
@@ -8181,6 +8381,16 @@ class TmuxWebtermApp:
 
         self.sessions = [item for item in self.sessions if item != session]
         return {"error": f"session no longer exists: {session}"}, HTTPStatus.NOT_FOUND
+
+    def tmux_session_exists_payload(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        clean_session = str(session or "").strip()
+        if not clean_session:
+            return {"error": "session is required", "exists": False}, HTTPStatus.BAD_REQUEST
+        sessions, error = list_tmux_session_names()
+        if error is not None:
+            return {"session": clean_session, "exists": None, "error": error}, HTTPStatus.SERVICE_UNAVAILABLE
+        self.sessions = sessions
+        return {"session": clean_session, "exists": clean_session in sessions, "ok": True}, HTTPStatus.OK
 
     def create_next_session(self, agent: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()

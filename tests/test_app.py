@@ -395,6 +395,61 @@ def test_background_status_includes_performance_summary():
     assert control_response["status"]["perf"]["record_count"] == 1
 
 
+def test_background_owner_claim_payload_reports_claim_noop_and_conflict():
+    class ClaimOwner:
+        def __init__(self, *, owner=False, takeover=True, error="") -> None:
+            self.owner = owner
+            self.takeover = takeover
+            self.error = error
+            self.calls = 0
+
+        def is_owner(self):
+            return self.owner
+
+        def attempt_takeover(self):
+            self.calls += 1
+            if self.takeover:
+                self.owner = True
+            return self.takeover
+
+        def status_payload(self):
+            return {
+                "owner": self.owner,
+                "last_error": self.error,
+                "roles": {
+                    "search-index": {"owner": self.owner, "status": "owner" if self.owner else "follower"},
+                    "stats-sampler": {"owner": self.owner, "status": "owner" if self.owner else "follower"},
+                    "session-files": {"owner": self.owner, "status": "owner" if self.owner else "follower"},
+                },
+            }
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.performance_metrics_payload = lambda: {"record_count": 0}
+
+    webapp.background_owner = ClaimOwner(owner=False, takeover=True)
+    payload, status = webapp.background_owner_claim_payload()
+    assert status == HTTPStatus.OK
+    assert payload["ok"] is True
+    assert payload["claimed"] is True
+    assert payload["was_owner"] is False
+    assert payload["status"]["owner"] is True
+
+    webapp.background_owner = ClaimOwner(owner=True, takeover=True)
+    payload, status = webapp.background_owner_claim_payload()
+    assert status == HTTPStatus.OK
+    assert payload["ok"] is True
+    assert payload["claimed"] is False
+    assert payload["was_owner"] is True
+
+    webapp.background_owner = ClaimOwner(owner=False, takeover=False, error="owner lock is held")
+    payload, status = webapp.background_owner_claim_payload()
+    assert status == HTTPStatus.CONFLICT
+    assert payload["ok"] is False
+    assert payload["claimed"] is False
+    assert payload["was_owner"] is False
+    assert payload["error"] == "owner lock is held"
+
+
 def test_performance_metrics_payload_ranks_response_bytes():
     webapp = app_module.TmuxWebtermApp([])
     try:
@@ -444,6 +499,11 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
         "counters": {"coalesced_refresh_requests": 3},
         "refresh_queue": {"recent_pending_count": 2, "recent_pending_by_role": {"session-files": 2}},
         "perf": {
+            "summary": [
+                {"role": "stats-sampler", "surface": "global-sample", "count": 1, "compute_ms_max": 17.0, "payload_bytes_total": 100},
+                {"role": "session-files", "surface": "cache-entry", "count": 4, "compute_ms_max": 44.0, "payload_bytes_total": 1000},
+                {"role": "http-endpoint", "surface": "GET /api/session-files", "count": 2, "compute_ms_max": 7.0, "payload_bytes_total": 900},
+            ],
             "top_payload_bytes": [
                 {"role": "http-endpoint", "surface": "GET /api/session-files", "count": 2, "payload_bytes_total": 900},
                 {"role": "session-files", "surface": "cache-read", "count": 4, "payload_bytes_total": 1000},
@@ -462,6 +522,8 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
     assert payload["caches"]["session_files"]["bytes"] == 3
     assert payload["caches"]["activity"]["bytes"] == 5
     assert payload["top_endpoints"][0]["surface"] == "GET /api/session-files"
+    assert payload["top_background_work"][0]["role"] == "session-files"
+    assert payload["top_background_work"][0]["surface"] == "cache-entry"
     assert payload["top_event_types"][0] == {"type": "background_refresh_done", "count": 2}
     assert payload["largest_active_transcripts"][0]["path"] == str(large)
     assert payload["largest_active_transcripts"][0]["bytes"] == len("large transcript payload")
@@ -1647,20 +1709,33 @@ def test_session_files_cache_key_ignores_transcript_append_mtime_and_size(tmp_pa
 
 
 def test_client_status_poll_fallbacks_are_interactive_with_jitter(monkeypatch):
-    assert app_module.SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS == pytest.approx(3.0)
-    assert app_module.SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS == pytest.approx(3.0)
+    assert app_module.SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS == pytest.approx(1.5)
+    assert app_module.SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS == pytest.approx(1.5)
     assert app_module.SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS == pytest.approx(0.5)
 
     webapp = app_module.TmuxWebtermApp([])
     try:
         monkeypatch.setattr(app_module.random, "uniform", lambda lower, upper: upper)
-        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(3.5)
-        assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(3.5)
+        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(1.875)
+        assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(1.875)
         monkeypatch.setattr(app_module.random, "uniform", lambda lower, upper: lower)
-        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(2.5)
-        assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(2.5)
+        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(1.125)
+        assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(1.125)
     finally:
         webapp.control_server.stop()
+
+
+def test_tmux_session_exists_payload_is_read_only_and_refreshes_roster(monkeypatch):
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1", "3"], None))
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    try:
+        payload, status = webapp.tmux_session_exists_payload("2")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload == {"session": "2", "exists": False, "ok": True}
+    assert webapp.sessions == ["1", "3"]
 
 
 def test_session_files_memory_cache_is_bounded():
@@ -1844,6 +1919,63 @@ def test_tmux_signal_event_publishes_changed_window_patch(monkeypatch):
         webapp.control_server.stop()
 
     assert events == [("tmux_signals_changed", {"patch": True, "windows": [{"session": "1", "window_index": 0, "active": False}, {"session": "1", "window_index": 1, "active": True}], "removed_window_keys": [], "window_count": 2, "ok": True, "generated_at": 2.0, "compute_ms": None})]
+
+
+def test_tmux_signal_event_publishes_removed_window_origin(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    payloads = [
+        {"ok": True, "window_count": 2, "windows": [{"session": "1", "window_index": 0}, {"session": "1", "window_index": 1}], "generated_at": 10.0},
+        {"ok": True, "window_count": 1, "windows": [{"session": "1", "window_index": 0}], "generated_at": 10.4},
+    ]
+    monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: payloads.pop(0))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.poll_tmux_signals_client_event_once() == []
+        webapp.handle_tmux_signal_event({"type": "pane-exited", "time": 10.25})
+        assert webapp.poll_tmux_signals_client_event_once() == ["tmux_signals_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert events == [("tmux_signals_changed", {
+        "patch": True,
+        "windows": [],
+        "removed_window_keys": ["1:1"],
+        "window_count": 1,
+        "ok": True,
+        "generated_at": 10.4,
+        "compute_ms": None,
+        "removed_window_event_at": 10.25,
+        "removed_window_event_type": "pane-exited",
+    })]
+
+
+def test_tmux_signal_full_snapshot_keeps_removed_window_origin(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    payloads = [
+        {"ok": True, "window_count": 2, "pane_count": 2, "windows": [{"session": "1", "window_index": 0}, {"session": "1", "window_index": 1}], "generated_at": 20.0},
+        {"ok": True, "window_count": 1, "pane_count": 1, "windows": [{"session": "1", "window_index": 0}], "generated_at": 20.4},
+    ]
+    monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: payloads.pop(0))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.poll_tmux_signals_client_event_once() == []
+        webapp.handle_tmux_signal_event({"type": "pane-died", "time": 20.1})
+        assert webapp.poll_tmux_signals_client_event_once() == ["tmux_signals_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert events == [("tmux_signals_changed", {"data": {
+        "ok": True,
+        "window_count": 1,
+        "pane_count": 1,
+        "windows": [{"session": "1", "window_index": 0}],
+        "generated_at": 20.4,
+        "removed_window_keys": ["1:1"],
+        "removed_window_event_at": 20.1,
+        "removed_window_event_type": "pane-died",
+    }})]
 
 
 def test_tmux_signal_event_does_not_force_auto_approve_poll():
@@ -3364,11 +3496,13 @@ def test_activity_recency_records_genuine_just_active_input(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["6"])
     try:
-        webapp.active_window_for = lambda session: "1"
+        webapp.cached_active_window_for = lambda session: "1"
         webapp.activity_ledger.heartbeat("6", "1", ts=1000.0, byte_count=1)
         monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 1012.0)
+        monkeypatch.setattr(app_module.time, "time", lambda: 1012.0)
 
         webapp.record_user_input("6", 1, data="x")
+        assert webapp.flush_input_heartbeats()
         activity = webapp.activity_snapshot_with_recency()
 
         assert 1012.0 - activity["6"]["active_recency_ts"] < 15.0
@@ -3378,10 +3512,68 @@ def test_activity_recency_records_genuine_just_active_input(monkeypatch):
         assert activity["6"]["input_events"] == 2
         assert activity["6:1"]["input_events"] == 2
     finally:
+        webapp.stop_input_heartbeat_worker()
         webapp.control_server.stop()
 
 
-def test_record_user_input_uses_live_tmux_window_when_transcript_cache_has_no_active_window(monkeypatch):
+def test_record_user_input_coalesces_heartbeats_off_hot_path(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    monkeypatch.setattr(app_module, "INPUT_HEARTBEAT_COALESCE_SECONDS", 60.0)
+    times = iter([1012.0, 1012.02])
+    monkeypatch.setattr(app_module.time, "time", lambda: next(times))
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        webapp.cached_active_window_for = lambda session: "1"
+        webapp.activity_ledger.heartbeat("6", "1", ts=1000.0, byte_count=1)
+
+        webapp.record_user_input("6", 1, data="x")
+        webapp.record_user_input("6", 2, data="yy")
+        before_flush = webapp.activity_snapshot_with_recency()
+        assert before_flush["6"]["last_user_input_ts"] == 1000.0
+        assert before_flush["6:1"]["last_user_input_ts"] == 1000.0
+
+        assert webapp.flush_input_heartbeats()
+        activity = webapp.activity_snapshot_with_recency()
+
+        assert activity["6"]["last_user_input_ts"] == 1012.02
+        assert activity["6:1"]["last_user_input_ts"] == 1012.02
+        assert activity["6"]["input_events"] == 2
+        assert activity["6:1"]["input_events"] == 2
+        assert activity["6"]["input_bytes"] == 4
+        assert activity["6:1"]["input_bytes"] == 4
+    finally:
+        webapp.stop_input_heartbeat_worker()
+        webapp.control_server.stop()
+
+
+def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["7777"])
+    refreshes = []
+
+    def fail_tmux(*_args, **_kwargs):
+        raise AssertionError("record_user_input must not call tmux")
+
+    try:
+        webapp.set_transcripts_payload_cache({"sessions": {"7777": {"panes": []}}})
+        monkeypatch.setattr(app_module, "tmux", fail_tmux)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
+        monkeypatch.setattr(app_module.time, "time", lambda: 2000.0)
+
+        webapp.record_user_input("7777", 1, data="x")
+        assert webapp.flush_input_heartbeats()
+        activity = webapp.activity_snapshot_with_recency()
+
+        assert activity["7777"]["last_user_input_ts"] == 2000.0
+        assert "7777:0" not in activity
+        assert refreshes == [(False, True)]
+    finally:
+        webapp.stop_input_heartbeat_worker()
+        webapp.control_server.stop()
+
+
+def test_active_window_for_can_refresh_live_tmux_window_off_input_path(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["7777"])
 
@@ -3390,15 +3582,10 @@ def test_record_user_input_uses_live_tmux_window_when_transcript_cache_has_no_ac
         return app_module.subprocess.CompletedProcess(args, 0, "0\n", "")
 
     try:
-        webapp.get_transcripts_payload_cache = lambda **_kwargs: ({"sessions": {"7777": {"panes": []}}}, True, 0.0)
+        webapp.set_transcripts_payload_cache({"sessions": {"7777": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fake_tmux)
-        monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
 
-        webapp.record_user_input("7777", 1, data="x")
-        activity = webapp.activity_snapshot_with_recency()
-
-        assert activity["7777"]["last_user_input_ts"] == 2000.0
-        assert activity["7777:0"]["last_user_input_ts"] == 2000.0
+        assert webapp.active_window_for("7777") == "0"
     finally:
         webapp.control_server.stop()
 

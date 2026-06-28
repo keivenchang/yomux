@@ -195,6 +195,98 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["apiSseDistance"] >= 120, (theme, item)
 
 
+def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
+    page = tmp_path / "debug-graph-client-work-layout.html"
+    client_perf = """
+      <div class="js-debug-client-perf" data-js-debug-client-perf>
+        <div class="js-debug-client-perf-title">Client work | animations 1 | long tasks 0</div>
+        <div class="js-debug-client-perf-grid">
+          <div class="js-debug-client-perf-row">focusSet n=3 avg=0.2ms</div>
+          <div class="js-debug-client-perf-row">wsSend n=8 avg=0.1ms</div>
+          <div class="js-debug-client-perf-row">renderInfoPanel n=2 avg=3.5ms</div>
+        </div>
+      </div>
+    """
+    chart_shell = """
+      <div class="js-debug-chart-shell">
+        <div class="js-debug-chart-grid" data-js-debug-chart-grid>
+          <section class="js-debug-chart">
+            <div class="js-debug-chart-head"><span class="js-debug-chart-title">Client latency</span></div>
+            <div class="js-debug-chart-body"><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div>
+          </section>
+        </div>
+      </div>
+    """
+    page.write_text(page_html(f"""
+      <section class="js-debug-graph-view">
+        <div id="graph-with-client-work" class="js-debug-graph" data-js-debug-graph>
+          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
+          <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
+          {client_perf}
+          {chart_shell}
+        </div>
+        <div id="graph-without-client-work" class="js-debug-graph" data-js-debug-graph>
+          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
+          <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
+          {chart_shell}
+        </div>
+        <div id="graph-empty-with-client-work" class="js-debug-graph js-debug-graph--empty" data-js-debug-graph>
+          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
+          <div class="js-debug-graph-meta">waiting for server stats</div>
+          {client_perf}
+          <div class="js-debug-graph-empty">No data</div>
+        </div>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
+      .js-debug-graph-view { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; height: 380px; }
+      .js-debug-graph { height: 340px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = selector => {
+          const node = document.querySelector(selector);
+          const item = node.getBoundingClientRect();
+          return {top: item.top, bottom: item.bottom, height: item.height};
+        };
+        const rowGap = graphSelector => {
+          const rows = Array.from(document.querySelectorAll(`${graphSelector} .js-debug-client-perf-row`)).map(node => node.getBoundingClientRect());
+          return rows.length > 1 ? rows[1].top - rows[0].bottom : 0;
+        };
+        return {
+          withClientWork: {
+            graph: rect('#graph-with-client-work'),
+            client: rect('#graph-with-client-work .js-debug-client-perf'),
+            chart: rect('#graph-with-client-work .js-debug-chart-shell'),
+            rowGap: rowGap('#graph-with-client-work'),
+          },
+          withoutClientWork: {
+            graph: rect('#graph-without-client-work'),
+            chart: rect('#graph-without-client-work .js-debug-chart-shell'),
+          },
+          emptyWithClientWork: {
+            graph: rect('#graph-empty-with-client-work'),
+            client: rect('#graph-empty-with-client-work .js-debug-client-perf'),
+            empty: rect('#graph-empty-with-client-work .js-debug-graph-empty'),
+            rowGap: rowGap('#graph-empty-with-client-work'),
+          },
+        };
+        """
+    )
+    with_client = metrics["withClientWork"]
+    assert with_client["client"]["height"] < with_client["graph"]["height"] * 0.4, metrics
+    assert with_client["chart"]["height"] > with_client["graph"]["height"] * 0.45, metrics
+    assert with_client["chart"]["top"] >= with_client["client"]["bottom"], metrics
+    assert with_client["rowGap"] <= 6, metrics
+    without_client = metrics["withoutClientWork"]
+    assert without_client["chart"]["height"] > without_client["graph"]["height"] * 0.55, metrics
+    empty = metrics["emptyWithClientWork"]
+    assert empty["client"]["height"] < empty["graph"]["height"] * 0.4, metrics
+    assert empty["empty"]["height"] > empty["graph"]["height"] * 0.45, metrics
+    assert empty["rowGap"] <= 6, metrics
+
+
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
     page = tmp_path / "debug-graph-bad-connection-overlay.html"
     page.write_text(page_html("""
@@ -629,6 +721,131 @@ def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
     assert green_pixels >= 6, {"greenPixels": green_pixels, "samples": samples, "rect": rect, "metrics": metrics}
 
 
+def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_override(browser, tmp_path):
+    page = tmp_path / "subwindow-status-solid-shapes.html"
+    page.write_text(page_html(f"""
+      <section class="subwindow-glyph-fixture">
+        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
+          <span id="bar-button" class="tab tmux-window-button active">
+            <span class="tmux-window-name-label">
+              {_agent_status_glyph_html("codex", "working", "bar-working")}
+              <span class="tmux-window-name-text">0:codex</span>
+            </span>
+          </span>
+        </div>
+        <div class="tmux-window-bar" data-tmux-window-label-mode="names">
+          <span id="stable-button" class="tab tmux-window-button">
+            <span class="tmux-window-name-label">
+              <span class="agent-window-activity agent-window-activity--working">
+                <span id="stable-working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--working status-indicator--working">●</span>
+              </span>
+              <span class="tmux-window-name-text">3:codex</span>
+            </span>
+          </span>
+        </div>
+        <div class="session-agent-window-block">
+          <div id="popover-row" class="session-agent-row current">
+            {_agent_status_glyph_html("claude", "attention", "popover-attention")}
+          </div>
+        </div>
+        <div class="file-tree-row tabber-row" data-tabber-type="window">
+          <span class="tabber-window-label">
+            {_agent_status_glyph_html("codex", "cooldown", "tabber-cooldown")}
+            <span class="tabber-window-text">1:codex</span>
+          </span>
+        </div>
+        <div class="file-tree-row tabber-row" data-tabber-type="session">
+          <span class="tabber-window-label">
+            {_agent_status_glyph_html("codex", "working", "session-aggregate")}
+          </span>
+        </div>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 32px; background: var(--bg); color: var(--text); font: 16px sans-serif; }
+      .subwindow-glyph-fixture { display: grid; gap: 18px; justify-items: start; }
+      .tmux-window-button,
+      .session-agent-row,
+      .file-tree-row.tabber-row { padding: 6px 10px; background: var(--panel2); }
+      .tmux-window-button.active { background: var(--active-control-bg); }
+      .agent-window-activity { overflow: visible; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const read = id => {
+          const dot = document.getElementById(id + '-dot');
+          const before = getComputedStyle(dot, '::before');
+              const after = getComputedStyle(dot, '::after');
+              const style = getComputedStyle(dot);
+              const button = dot.closest('.tmux-window-button');
+              const rect = dot.getBoundingClientRect();
+              return {
+                color: style.color,
+                textIndent: style.textIndent,
+                fontSize: style.fontSize,
+                overflow: style.overflow,
+                borderRadius: style.borderTopLeftRadius,
+                width: rect.width,
+                height: rect.height,
+                beforeContent: before.content,
+                beforeBackground: before.backgroundColor,
+                beforeBorderStartColor: before.borderInlineStartColor,
+                beforeBorderStartWidth: before.borderInlineStartWidth,
+                beforeBorderTopColor: before.borderTopColor,
+            beforeBorderTopWidth: before.borderTopWidth,
+            beforeFilter: before.filter,
+            afterContent: after.content,
+            afterBackground: after.backgroundColor,
+            afterBorderTopColor: after.borderTopColor,
+            afterBorderTopWidth: after.borderTopWidth,
+            afterFilter: after.filter,
+            buttonColor: button ? getComputedStyle(button).color : '',
+          };
+        };
+        return {
+          bar: read('bar-working'),
+          stable: read('stable-working'),
+          popover: read('popover-attention'),
+          tabber: read('tabber-cooldown'),
+          session: read('session-aggregate'),
+        };
+        """
+    )
+    assert metrics["bar"]["textIndent"] == "0px", metrics
+    assert metrics["bar"]["fontSize"] == "14px", metrics
+    assert metrics["bar"]["color"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["bar"]["overflow"] == "visible", metrics
+    assert metrics["bar"]["borderRadius"] == "0px", metrics
+    assert 13 <= metrics["bar"]["width"] <= 15 and 13 <= metrics["bar"]["height"] <= 17, metrics
+    assert metrics["bar"]["beforeContent"] == '""', metrics
+    assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["color"], metrics
+    assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["buttonColor"], metrics
+    assert metrics["bar"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
+    assert "drop-shadow" in metrics["bar"]["beforeFilter"], metrics
+    stable_width = float(metrics["stable"]["beforeBorderStartWidth"].replace("px", ""))
+    pulsing_width = float(metrics["bar"]["beforeBorderStartWidth"].replace("px", ""))
+    assert 0.75 <= stable_width / pulsing_width <= 0.85, metrics
+    assert metrics["popover"]["beforeContent"] == '""', metrics
+    assert metrics["popover"]["color"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["popover"]["beforeBackground"] != metrics["popover"]["color"], metrics
+    assert metrics["popover"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["popover"]["beforeBorderTopWidth"] == "0px", metrics
+    assert "drop-shadow" in metrics["popover"]["beforeFilter"], metrics
+    assert metrics["tabber"]["beforeContent"] == '""', metrics
+    assert metrics["tabber"]["afterContent"] == '""', metrics
+    assert metrics["tabber"]["color"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["tabber"]["beforeBackground"] != metrics["tabber"]["color"], metrics
+    assert metrics["tabber"]["afterBackground"] != metrics["tabber"]["color"], metrics
+    assert metrics["tabber"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["tabber"]["afterBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["tabber"]["beforeBorderTopWidth"] == "0px", metrics
+    assert metrics["tabber"]["afterBorderTopWidth"] == "0px", metrics
+    assert "drop-shadow" in metrics["tabber"]["beforeFilter"], metrics
+    assert "drop-shadow" in metrics["tabber"]["afterFilter"], metrics
+    assert metrics["session"]["beforeContent"] in ("", "none"), metrics
+    assert metrics["session"]["beforeBackground"] in ("", "rgba(0, 0, 0, 0)"), metrics
+
+
 def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_path):
     page = tmp_path / "agent-status-split-surfaces.html"
     page.write_text(page_html(f"""
@@ -762,14 +979,12 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     assert aggregate_ball_sizes == {"14px"}, metrics
     assert aggregate_dot_font_sizes == {"14px"}, metrics
     for name in subwindow_names:
-        assert "calc(" in metrics[name]["agentStatusBallSize"], (name, metrics)
-        assert 11.0 <= float(metrics[name]["dotFontSize"].replace("px", "")) <= 11.5, (name, metrics)
-        assert metrics[name]["dotWidth"] < min(aggregate_peak_widths), (name, metrics)
-        assert metrics[name]["dotHeight"] < min(aggregate_peak_heights), (name, metrics)
-    assert max(aggregate_peak_widths) - min(aggregate_peak_widths) <= 0.5, metrics
-    assert max(aggregate_peak_heights) - min(aggregate_peak_heights) <= 0.5, metrics
-    assert max(subwindow_peak_widths) - min(subwindow_peak_widths) <= 0.5, metrics
-    assert max(subwindow_peak_heights) - min(subwindow_peak_heights) <= 0.5, metrics
+        assert metrics[name]["agentStatusBallSize"] == "14px", (name, metrics)
+        assert metrics[name]["dotFontSize"] == "14px", (name, metrics)
+    all_peak_widths = aggregate_peak_widths + subwindow_peak_widths
+    all_peak_heights = aggregate_peak_heights + subwindow_peak_heights
+    assert max(all_peak_widths) - min(all_peak_widths) <= 0.5, metrics
+    assert max(all_peak_heights) - min(all_peak_heights) <= 0.5, metrics
     assert len(transforms) == 1, metrics
 
 
@@ -848,10 +1063,10 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
     assert metrics["parent"]["iconSize"] != metrics["child"]["iconSize"], metrics
     assert metrics["parent"]["agentStatusBallSize"] == "14px", metrics
     assert metrics["parent"]["dotFontSize"] == "14px", metrics
-    assert "calc(" in metrics["child"]["agentStatusBallSize"], metrics
-    assert 11.0 <= float(metrics["child"]["dotFontSize"].replace("px", "")) <= 11.5, metrics
-    assert metrics["child"]["width"] < metrics["parent"]["width"], metrics
-    assert metrics["child"]["height"] < metrics["parent"]["height"], metrics
+    assert metrics["child"]["agentStatusBallSize"] == "14px", metrics
+    assert metrics["child"]["dotFontSize"] == "14px", metrics
+    assert abs(metrics["child"]["width"] - metrics["parent"]["width"]) <= 0.5, metrics
+    assert abs(metrics["child"]["height"] - metrics["parent"]["height"]) <= 0.5, metrics
     for side in ("parent", "child"):
         assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
         assert "attention-ring-fade" in metrics[side]["animationName"], metrics
@@ -2263,7 +2478,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                 <section class="fixture-tabber-panel file-explorer-changes-panel">
                   <div class="file-tree" role="tree">
                     <div class="file-tree-row tabber-row kind-dir expanded tabber-active-session" data-tabber-type="session" data-tabber-session="1" role="treeitem" aria-expanded="true" aria-selected="false" aria-current="true" style="padding-left: 8px;">
-                      <span class="file-tree-icon tabber-icon">▾</span>
+                      <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
                       <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">8801</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">tabber session tab styling keeps the date column visible for a deliberately long work description</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
@@ -2281,7 +2496,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                       <span class="file-tree-date">2m ago</span>
                     </div>
                     <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
-                      <span class="file-tree-icon tabber-icon">▾</span>
+                      <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
                       <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
@@ -2416,7 +2631,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert "tmux-pane-tab-token-action" in metrics["active"]["tabClass"], (label, metrics)
         assert metrics["active"]["ariaCurrent"] == "true", (label, metrics)
         assert metrics["active"]["ariaExpanded"] == "true", (label, metrics)
-        assert metrics["active"]["iconText"] == "▾", (label, metrics)
+        assert metrics["active"]["iconText"] == "›", (label, metrics)
         assert "tabber-active-session" not in metrics["inactive"]["rowClass"], (label, metrics)
         assert "active" not in metrics["inactive"]["tabClass"], (label, metrics)
         assert "tmux-pane-tab-token" in metrics["inactive"]["tabClass"], (label, metrics)
@@ -2468,7 +2683,7 @@ def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
             <section class="fixture-tabber-panel file-explorer-changes-panel">
               <div class="file-tree" role="tree">
                 <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="8001" role="treeitem" aria-expanded="true" style="padding-left: 8px;">
-                  <span class="file-tree-icon tabber-icon">▾</span>
+                  <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
                   <span class="file-tree-name">
                     <span id="tabber-tab" class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host popover-open" data-tabber-session-chrome="shared" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 180px;">
                       <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
@@ -4808,7 +5023,7 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
         """
     )
     assert abs(repo_caret_metrics["caretFontSize"] - repo_caret_metrics["titleFontSize"]) <= 0.5, repo_caret_metrics
-    assert repo_caret_metrics["caretWidth"] <= repo_caret_metrics["titleFontSize"] * 1.25, repo_caret_metrics
+    assert repo_caret_metrics["caretWidth"] <= repo_caret_metrics["titleFontSize"] * 1.4, repo_caret_metrics
     assert repo_caret_metrics["titleHeight"] > 0, repo_caret_metrics
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])

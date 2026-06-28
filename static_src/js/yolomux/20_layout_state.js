@@ -1581,6 +1581,8 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (screenKey === 'error') {
     return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
   }
+  const agentWindowCooldown = agentWindowCooldownState(session, info, auto);
+  if (agentWindowCooldown) return agentWindowCooldown;
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
     return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
@@ -1600,6 +1602,30 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
   }
   return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
+}
+
+function agentWindowCooldownState(session, info = null, auto = autoApproveStates.get(session) || {}) {
+  if (
+    typeof sessionAgentWindowStatusPayloads !== 'function'
+    || typeof agentWindowActivityIconForStatusItem !== 'function'
+    || typeof agentWindowActivityOptionsForStatus !== 'function'
+    || typeof agentWindowActivityTone !== 'function'
+  ) return null;
+  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
+  if (!windows.length) return null;
+  let cooldownWindow = null;
+  for (const agent of windows) {
+    const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
+    const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
+    if (!item || item.acknowledged === true) continue;
+    const tone = agentWindowActivityTone(item.state);
+    if (tone === 'attention' || tone === STATE_KEY.working) return null;
+    if (tone === 'cooldown') cooldownWindow = cooldownWindow || {agent, item};
+  }
+  if (!cooldownWindow) return null;
+  const label = String(cooldownWindow.agent?.window_label || cooldownWindow.agent?.window || cooldownWindow.agent?.kind || '').trim();
+  const reason = label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown');
+  return stateValue('cooldown', reason, {agentWindowState: 'cooldown'});
 }
 
 function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
@@ -2113,7 +2139,7 @@ function globalActivityStatusLineHtml() {
 }
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
-  const activityToneClass = tone === STATE_KEY.working ? 'agent-window-activity--working' : tone === 'attention' ? 'agent-window-activity--attention' : 'agent-window-activity--cooldown';
+  const activityToneClass = typeof agentWindowActivityToneWrapperClass === 'function' ? agentWindowActivityToneWrapperClass(tone) : '';
   return `
     <span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-count', extraClass, count ? 'active' : ''))}">
       <span class="topbar-activity-count-number">${esc(String(count))}</span>
@@ -2168,6 +2194,71 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSum
   return lines.filter(Boolean).join('\n');
 }
 
+function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
+  if (!payload || typeof payload !== 'object' || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return [];
+  return [
+    {...backgroundOwnerSearchIndexSummary(payload), label: 'IDX'},
+    {...backgroundOwnerStatsSummary(payload), label: 'STATS'},
+    {...backgroundOwnerSessionFilesSummary(payload), label: 'SESS'},
+  ];
+}
+
+function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusPayload) {
+  const summaries = topbarOwnerStatusSummaries(payload).filter(item => item && typeof item === 'object');
+  return Boolean(summaries.length) && summaries.every(item => item.ownsRole === true || item.ownsIndex === true);
+}
+
+function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusPayload, nowSeconds = Date.now() / 1000) {
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : {};
+  const latest = data.latest_generation && typeof data.latest_generation === 'object' ? data.latest_generation : {};
+  if (owner.generation_id && latest.generation_id && owner.generation_id === latest.generation_id) return true;
+  const heartbeat = Number(owner.last_heartbeat || 0);
+  return Number.isFinite(heartbeat) && heartbeat > 0 && Number(nowSeconds) - heartbeat <= 10;
+}
+
+async function claimBackgroundOwnerLeader() {
+  try {
+    const result = await apiFetchJson('/api/background/claim', {method: 'POST'});
+    if (result?.status && typeof applyBackgroundOwnerStatusPayload === 'function') {
+      applyBackgroundOwnerStatusPayload(result.status, {render: false});
+    }
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      await refreshBackgroundOwnerStatus({force: true, render: false});
+    }
+    statusOk(localizedHtml(result?.was_owner ? 'status.backgroundOwnerAlreadyLeader' : 'status.backgroundOwnerClaimed'));
+  } catch (error) {
+    statusErr(localizedHtml('status.backgroundOwnerClaimFailed', {error}));
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      refreshBackgroundOwnerStatus({force: true, render: false}).catch(refreshError => console.warn('background-owner status refresh failed', refreshError));
+    }
+  }
+}
+
+function showBackgroundOwnerContextMenu(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu background-owner-context-menu';
+  menu.setAttribute('role', 'menu');
+  const alreadyLeader = backgroundOwnerOwnsAllRoles();
+  if (alreadyLeader || readOnlyMode) {
+    appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
+  } else {
+    appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
+      const payload = backgroundOwnerStatusPayload && typeof backgroundOwnerStatusPayload === 'object' ? backgroundOwnerStatusPayload : {};
+      const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
+      if (backgroundOwnerCurrentOwnerLive(payload)) {
+        const label = backgroundServerLabel(owner, t('common.unknown'));
+        const message = t('backgroundOwner.takeoverConfirm', {server: label});
+        if (typeof window.confirm === 'function' && !window.confirm(message)) return;
+      }
+      claimBackgroundOwnerLeader();
+    }, () => backgroundOwnerContextMenu.close());
+  }
+  backgroundOwnerContextMenu.open(menu, event.clientX, event.clientY);
+}
+
 function topbarOwnerStatusHtml() {
   if (shareViewMode) return '';
   if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
@@ -2176,15 +2267,7 @@ function topbarOwnerStatusHtml() {
   if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
   }
-  if (!backgroundOwnerStatusPayload || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return '';
-  const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
-  const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
-  const sessionSummary = backgroundOwnerSessionFilesSummary(backgroundOwnerStatusPayload);
-  return topbarOwnerStatusCombinedHtml([
-    {...indexSummary, label: 'IDX'},
-    {...statsSummary, label: 'STATS'},
-    {...sessionSummary, label: 'SESS'},
-  ]);
+  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusPayload));
 }
 
 function createTopbarOwnerStatus() {
@@ -2199,6 +2282,7 @@ function createTopbarOwnerStatus() {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
     }
   };
+  button.addEventListener('contextmenu', showBackgroundOwnerContextMenu);
   return button;
 }
 
@@ -2210,10 +2294,9 @@ function updateTopbarOwnerStatus() {
   node.hidden = !html;
   node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
   node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
-  if (backgroundOwnerStatusPayload && typeof backgroundOwnerSearchIndexSummary === 'function' && typeof backgroundOwnerStatsSummary === 'function' && typeof backgroundOwnerSessionFilesSummary === 'function') {
-    const indexSummary = backgroundOwnerSearchIndexSummary(backgroundOwnerStatusPayload);
-    const statsSummary = backgroundOwnerStatsSummary(backgroundOwnerStatusPayload);
-    const sessionSummary = backgroundOwnerSessionFilesSummary(backgroundOwnerStatusPayload);
+  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
+  if (summaries.length) {
+    const [indexSummary, statsSummary, sessionSummary] = summaries;
     node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || 'Refresh connected server ownership status';
   } else if (backgroundOwnerStatusError) {
     node.title = backgroundOwnerStatusError;
@@ -3085,7 +3168,7 @@ function fileQuickOpenItem(path, options = {}) {
     key: `file:${path}`,
     path,
     mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
-    iconText: isDir ? '▸' : fileIconFor(label),
+    iconText: isDir ? disclosureTriangleCollapsedGlyph : fileIconFor(label),
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
@@ -3140,7 +3223,7 @@ function fileQuickOpenOpenFolderItem() {
     label: t('palette.openFolder', {name: fileExplorerLabel()}),
     detail: compactHomePath(target),
     key: `open-folder:${target}`,
-    iconText: '▸',
+    iconText: disclosureTriangleCollapsedGlyph,
     keybinding: appShortcutText('Enter'),
     pinTop: true,
     searchFields: ['open folder', target],
@@ -4298,6 +4381,16 @@ function bindTopbarMetrics() {
   topbarResizeObserver.observe(topbar);
 }
 
+function flushScheduledTabStripOverflowChecks() {
+  const strips = Array.from(tabStripOverflowCheckSet);
+  tabStripOverflowCheckSet.clear();
+  tabStripOverflowCheckFrame = null;
+  for (const strip of strips) {
+    if (!strip?.isConnected) continue;
+    strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
+  }
+}
+
 function scheduleTabStripOverflowCheck(strip) {
   if (!strip) return;
   if (strip === sessionButtons || strip.classList?.contains('pane-tabs')) {
@@ -4306,9 +4399,9 @@ function scheduleTabStripOverflowCheck(strip) {
     return;
   }
   strip.classList.remove('tabs-overflowing');
-  requestAnimationFrame(() => {
-    strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
-  });
+  tabStripOverflowCheckSet.add(strip);
+  if (tabStripOverflowCheckFrame) return;
+  tabStripOverflowCheckFrame = requestAnimationFrame(flushScheduledTabStripOverflowChecks);
 }
 
 function scheduleAllTabStripOverflowChecks() {

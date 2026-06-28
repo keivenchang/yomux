@@ -49,16 +49,17 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     git(repo, "add", "app.py")
     git(repo, "commit", "-m", "base")
     target.write_text("new\n", encoding="utf-8")
+    now = time.time()
+    event_ts = datetime.fromtimestamp(now, timezone.utc).isoformat()
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text(
         "\n".join([
-            json.dumps({"timestamp": "2026-05-31T12:00:00Z", "payload": {"type": "user_message", "message": "Fix editor colors"}}),
+            json.dumps({"timestamp": event_ts, "payload": {"type": "user_message", "message": "Fix editor colors"}}),
             "*** Update File: app.py",
-            json.dumps({"timestamp": "2026-05-31T12:00:01Z", "payload": {"type": "agent_message", "message": "Editing app.py"}}),
+            json.dumps({"timestamp": event_ts, "payload": {"type": "agent_message", "message": "Editing app.py"}}),
         ]),
         encoding="utf-8",
     )
-    now = time.time()
     info = SessionInfo(
         session="5",
         panes=[
@@ -175,8 +176,9 @@ def test_recent_agents_payload_uses_transcript_activity_and_running_state(tmp_pa
         json.dumps({"timestamp": datetime.fromtimestamp(now, timezone.utc).isoformat(), "payload": {"type": "agent_message_delta", "message": "working"}}) + "\n",
         encoding="utf-8",
     )
+    old_event = datetime(2026, 5, 31, 12, 0, 0, tzinfo=timezone.utc)
     old_transcript.write_text(
-        json.dumps({"timestamp": "2026-05-31T12:00:00Z", "payload": {"type": "task_complete"}}) + "\n",
+        json.dumps({"timestamp": old_event.isoformat(), "payload": {"type": "task_complete"}}) + "\n",
         encoding="utf-8",
     )
     os.utime(active_transcript, (now, now))
@@ -271,7 +273,7 @@ def test_recent_agents_payload_uses_transcript_activity_and_running_state(tmp_pa
     assert rows[0]["state"] == "working"
     assert rows[0]["sort_ts"] == pytest.approx(now)
     assert rows[1]["running"] is False
-    assert rows[1]["last_used_ts"] == pytest.approx(old)
+    assert rows[1]["last_used_ts"] == pytest.approx(old_event.timestamp())
 
 
 def test_yoagent_prompt_and_deterministic_reply_use_activity_context():

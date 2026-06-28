@@ -79,6 +79,24 @@ TRANSCRIPT_APPROVAL_RECENCY_SECONDS = 20.0
 CLAUDE_TERMINAL_STOP_REASONS = {"end_turn", "stop_sequence", "max_tokens", "stop"}
 TRANSCRIPT_BASH_TOOL_NAMES = {"bash", "shell", "sh", "exec", "exec_command", "run_command", "terminal"}
 TRANSCRIPT_FILE_TOOL_NAMES = {"write", "edit", "multiedit", "notebookedit", "apply_patch", "patch"}
+TRANSCRIPT_METADATA_ONLY_TYPES = {"last-prompt", "ai-title", "mode", "permission-mode", "pr-link"}
+TRANSCRIPT_ACTIVITY_EVENT_TYPES = {
+    "agent_message",
+    "agent_message_delta",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "function_call",
+    "function_call_output",
+    "input_message",
+    "item.delta",
+    "message",
+    "message.delta",
+    "patch_apply_end",
+    "task_complete",
+    "task_started",
+    "user_message",
+}
+TRANSCRIPT_ACTIVITY_MESSAGE_ROLES = {"assistant", "tool", "user"}
 
 
 def transcript_activity_state_from_text(text: str, kind: str = "") -> dict[str, Any]:
@@ -325,14 +343,14 @@ def newest_transcript_timestamp(text: str) -> datetime | None:
             newest = timestamp
     return newest
 
-def transcript_activity_is_recent(path: Path, text: str, now: datetime | None = None, recency_seconds: float = TRANSCRIPT_ACTIVITY_RECENCY_SECONDS) -> bool:
+def transcript_activity_is_recent(path: Path, text: str, now: datetime | None = None, recency_seconds: float = TRANSCRIPT_ACTIVITY_RECENCY_SECONDS, kind: str = "") -> bool:
     current = now or datetime.now(timezone.utc)
     try:
         mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
     except OSError:
         mtime = None
-    newest = newest_transcript_timestamp(text)
-    timestamps = [value for value in (mtime, newest) if value is not None]
+    newest = newest_transcript_activity_timestamp(text, kind)
+    timestamps = [newest] if newest is not None else [mtime] if mtime is not None else []
     return any(abs((current - value).total_seconds()) <= recency_seconds for value in timestamps)
 
 def transcript_activity_state(path: Path | str | None, kind: str = "") -> dict[str, Any]:
@@ -346,7 +364,7 @@ def transcript_activity_state(path: Path | str | None, kind: str = "") -> dict[s
     state = transcript_activity_state_from_text(text, kind)
     if state.get("key") != "working":
         return state
-    if not transcript_activity_is_recent(transcript_path, text):
+    if not transcript_activity_is_recent(transcript_path, text, kind=kind):
         return {"key": "idle", "text": ""}
     return state
 
@@ -536,6 +554,97 @@ def parse_transcript_timestamp(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+def normalized_transcript_type(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+def transcript_record_is_metadata_only(raw_item: dict[str, Any]) -> bool:
+    entry_type = normalized_transcript_type(raw_item.get("type"))
+    if entry_type in TRANSCRIPT_METADATA_ONLY_TYPES:
+        return True
+    payload = raw_item.get("payload")
+    payload_type = normalized_transcript_type(payload.get("type")) if isinstance(payload, dict) else ""
+    if payload_type in TRANSCRIPT_METADATA_ONLY_TYPES:
+        return True
+    metadata_types = {"metadata", "session_metadata", "meta"}
+    if entry_type in metadata_types or payload_type in metadata_types:
+        for container in (raw_item, payload if isinstance(payload, dict) else None):
+            if not isinstance(container, dict):
+                continue
+            for key in ("key", "name", "field", "subtype"):
+                if normalized_transcript_type(container.get(key)) in TRANSCRIPT_METADATA_ONLY_TYPES:
+                    return True
+    if entry_type not in TRANSCRIPT_ACTIVITY_EVENT_TYPES:
+        for key in ("key", "name", "field"):
+            if normalized_transcript_type(raw_item.get(key)) in TRANSCRIPT_METADATA_ONLY_TYPES:
+                return True
+    return False
+
+def transcript_string_field_has_text(payload: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+def transcript_content_has_activity(content: Any, role: str) -> bool:
+    if extract_content_blocks(content, role):
+        return True
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}:
+            return True
+    return False
+
+def transcript_record_counts_as_activity(raw_item: dict[str, Any], kind: str = "") -> bool:
+    del kind
+    if transcript_record_is_metadata_only(raw_item):
+        return False
+    entry_type = normalized_transcript_type(raw_item.get("type"))
+    message = raw_item.get("message")
+    if isinstance(message, dict):
+        role = normalized_transcript_type(message.get("role") or entry_type)
+        if role in TRANSCRIPT_ACTIVITY_MESSAGE_ROLES and transcript_content_has_activity(message.get("content"), role):
+            return True
+        stop_reason = normalized_transcript_type(message.get("stop_reason") or raw_item.get("stop_reason"))
+        if role == "assistant" and stop_reason in CLAUDE_TERMINAL_STOP_REASONS:
+            return True
+    payload = raw_item.get("payload")
+    if not isinstance(payload, dict) and entry_type in TRANSCRIPT_ACTIVITY_EVENT_TYPES:
+        payload = raw_item
+    if isinstance(payload, dict):
+        payload_type = normalized_transcript_type(payload.get("type") or entry_type)
+        if payload_type in {"function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output", "patch_apply_end"}:
+            return True
+        if payload_type in {"task_started", "task_complete"}:
+            return True
+        if payload_type in {"agent_message_delta", "message.delta", "item.delta"}:
+            return True
+        if payload_type in {"agent_message", "user_message", "input_message"}:
+            return transcript_string_field_has_text(payload, "message", "text", "content", "input", "prompt", "last_agent_message")
+        if payload_type == "message":
+            role = normalized_transcript_type(payload.get("role") or "message")
+            return transcript_content_has_activity(payload.get("content"), role)
+    return entry_type in {"agent_message_delta", "message.delta", "item.delta"}
+
+def newest_transcript_activity_timestamp(text: str, kind: str = "") -> datetime | None:
+    newest = None
+    for raw_line in text.splitlines():
+        try:
+            raw_item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+        timestamp = parse_transcript_timestamp(raw_item.get("timestamp"))
+        if not timestamp:
+            continue
+        if not transcript_record_counts_as_activity(raw_item, kind):
+            continue
+        if newest is None or timestamp > newest:
+            newest = timestamp
+    return newest
 
 def transcript_items_from_raw_line(raw_line: str) -> list[dict[str, str]]:
     try:
