@@ -1215,23 +1215,29 @@ body.theme-light .js-debug-graph-view {
   font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .preferences-setting-advisory {
+  --preferences-advisory-text: #f7e7b9;
+  --preferences-advisory-bg: color-mix(in srgb, var(--accent-gold) 14%, var(--panel2));
+  --preferences-advisory-border: color-mix(in srgb, var(--accent-gold) 54%, var(--line));
+  --preferences-advisory-code-text: #fff4c7;
+  --preferences-advisory-code-bg: rgb(var(--overlay-slate-rgb) / 0.38);
+  --preferences-advisory-code-border: color-mix(in srgb, var(--accent-gold) 42%, var(--line));
   grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  color: #2a1e00;
-  background: #ffe7a3;
-  border: 1px solid #c8941e;
+  color: var(--preferences-advisory-text);
+  background: var(--preferences-advisory-bg);
+  border: 1px solid var(--preferences-advisory-border);
   border-radius: var(--radius-control);
   font: var(--ui-font-size-xs)/1.3 var(--ui-font);
 }
 .preferences-setting-advisory code {
   padding: 2px 4px;
-  color: var(--lt-text);
-  background: rgba(255, 255, 255, 0.45);
-  border: 1px solid rgba(42, 30, 0, 0.2);
+  color: var(--preferences-advisory-code-text);
+  background: var(--preferences-advisory-code-bg);
+  border: 1px solid var(--preferences-advisory-code-border);
   border-radius: 3px;
   font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
@@ -1712,6 +1718,19 @@ body.theme-light .info-refresh:focus-visible {
 }
 body.theme-light .changes-error {
   color: var(--danger-strong-hover);
+}
+body.theme-light .preferences-setting-advisory {
+  --preferences-advisory-text: #372707;
+  --preferences-advisory-bg: #fff0b3;
+  --preferences-advisory-border: #c98f13;
+  --preferences-advisory-code-text: var(--lt-text);
+  --preferences-advisory-code-bg: #fffaf0;
+  --preferences-advisory-code-border: #d0a43a;
+}
+body.theme-light .preferences-setting-advisory .preferences-inline-action {
+  color: var(--good);
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--good) 46%, var(--line));
 }
 body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,

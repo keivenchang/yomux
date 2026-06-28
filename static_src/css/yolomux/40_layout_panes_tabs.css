@@ -1820,10 +1820,11 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .session-agent-row .agent-window-status-dot,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot {
   --subwindow-status-attention-fill: var(--danger-strong);
-  --subwindow-status-cooldown-fill: #ffd633;
+  --subwindow-status-cooldown-fill: var(--agent-status-cooldown);
   --subwindow-status-acknowledged-fill: color-mix(in srgb, var(--muted) 82%, var(--text) 18%);
   --subwindow-status-glyph-scale: 0.8;
   --subwindow-status-glyph-fill: currentColor;
+  --subwindow-status-glyph-glow-rgb: 82 210 115;
   --subwindow-status-glyph-border-color: color-mix(in srgb, var(--text) 84%, var(--bg) 16%);
   --subwindow-status-glyph-border-color-active: var(--active-control-text);
   --subwindow-status-cooldown-outline-color: color-mix(in srgb, var(--bg) 88%, #000 12%);
@@ -1837,6 +1838,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
     drop-shadow(-1px 0 0 var(--subwindow-status-glyph-border-color))
     drop-shadow(0 1px 0 var(--subwindow-status-glyph-border-color))
     drop-shadow(0 -1px 0 var(--subwindow-status-glyph-border-color));
+  --subwindow-status-glyph-base-filter: var(--subwindow-status-glyph-outline-filter);
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1870,18 +1872,22 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .session-agent-row .agent-window-status-dot.status-indicator--working,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--working {
   --subwindow-status-glyph-fill: var(--pr-status-passing);
+  --subwindow-status-glyph-glow-rgb: 82 210 115;
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--attention,
 .session-agent-row .agent-window-status-dot.status-indicator--attention,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--attention {
   --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
+  --subwindow-status-glyph-glow-rgb: 220 38 38;
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--cooldown,
 .session-agent-row .agent-window-status-dot.status-indicator--cooldown,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--cooldown {
   --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
+  --subwindow-status-glyph-glow-rgb: var(--agent-status-cooldown-rgb);
+  --subwindow-status-glyph-base-filter: var(--subwindow-status-cooldown-outline-filter);
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.agent-window-status-dot--acknowledged,
@@ -1902,7 +1908,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: block;
   text-indent: 0;
   transform: translate(-50%, -50%);
-  filter: var(--subwindow-status-glyph-outline-filter);
+  filter: var(--subwindow-status-glyph-base-filter);
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--working::before,
 .session-agent-row .agent-window-status-dot.status-indicator--working::before,
@@ -1933,7 +1939,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
   border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.06));
   background: var(--subwindow-status-glyph-fill, currentColor);
-  filter: var(--subwindow-status-cooldown-outline-filter);
+  filter: var(--subwindow-status-glyph-base-filter);
 }
 .tmux-window-button .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
 .session-agent-row .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
@@ -1951,10 +1957,12 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   0%, 100% {
     opacity: 1;
     transform: translate(-50%, -50%) scale(0.92);
+    filter: var(--subwindow-status-glyph-base-filter) drop-shadow(0 0 3px rgb(var(--subwindow-status-glyph-glow-rgb) / 0.36));
   }
   50% {
     opacity: 1;
-    transform: translate(-50%, -50%) scale(1.04);
+    transform: translate(-50%, -50%) scale(1.08);
+    filter: var(--subwindow-status-glyph-base-filter) drop-shadow(0 0 8px rgb(var(--subwindow-status-glyph-glow-rgb) / 0.82));
   }
 }
 @media (prefers-reduced-motion: reduce) {

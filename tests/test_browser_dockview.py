@@ -2111,6 +2111,7 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
                 beforeAnimationDuration: beforeStyle?.animationDuration || '',
                 beforeAnimationDelay: beforeStyle?.animationDelay || '',
                 beforeAnimationTiming: beforeStyle?.animationTimingFunction || '',
+                beforeFilter: beforeStyle?.filter || '',
                 animationCurrentTime: Number(animation?.currentTime || 0),
               };
             };
@@ -2185,11 +2186,15 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
     assert yellow_case["tab"]["toneWorking"] is True, yellow_case
     assert yellow_case["tab"]["segmentClass"] == "agent-window-status-dot--cooldown-working", yellow_case
     assert "conic-gradient" in yellow_case["tab"]["backgroundImage"], yellow_case
+    assert "255, 214, 51" in yellow_case["tab"]["backgroundImage"], yellow_case
+    assert "245, 197, 66" not in yellow_case["tab"]["backgroundImage"], yellow_case
     assert yellow_case["tab"]["statusOnly"] is True, yellow_case
     assert yellow_case["tab"]["hasIcon"] is False, yellow_case
     assert yellow_case["tab"]["animationName"] == "agent-status-transition-pulse", yellow_case
     assert yellow_case["codex"]["animationName"] == "none", yellow_case
     assert yellow_case["codex"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", yellow_case
+    assert "82, 210, 115" in yellow_case["claude"]["beforeFilter"], yellow_case
+    assert "255, 214, 51" in yellow_case["codex"]["beforeFilter"], yellow_case
     assert yellow_case["tab"]["animationDuration"] == yellow_case["codex"]["beforeAnimationDuration"], yellow_case
     assert yellow_case["tab"]["animationTiming"] == yellow_case["codex"]["beforeAnimationTiming"], yellow_case
     assert yellow_case["tab"]["delay"] == yellow_case["codex"]["delay"], yellow_case

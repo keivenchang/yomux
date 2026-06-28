@@ -736,6 +736,73 @@ def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
     assert green_pixels >= 6, {"greenPixels": green_pixels, "samples": samples, "rect": rect, "metrics": metrics}
 
 
+def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, tmp_path):
+    page = tmp_path / "pane-tab-cooldown-vibrant-yellow.html"
+    page.write_text(page_html("""
+      <section class="status-ball-vibrancy-fixture">
+        <button id="tab" class="pane-tab active">
+          <span class="pane-tab-core">
+            <span class="session-agent-activity-marker">
+              <span class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay: 0s">
+                <span id="tab-dot" class="status-indicator status-indicator--dot status-indicator--cooldown heartbeat-pulse attention-pulse agent-window-status-dot">●</span>
+              </span>
+            </span>
+            <span class="session-button-prefix">8001</span>
+          </span>
+        </button>
+        <span id="reference-dot" class="status-indicator status-indicator--dot status-indicator--cooldown agent-window-status-dot">●</span>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 64px; background: #111820; color: #e8eef8; font: 18px sans-serif; }
+      .status-ball-vibrancy-fixture { display: flex; align-items: center; gap: 32px; }
+      #tab { min-width: 160px; min-height: 34px; }
+      #reference-dot { font-size: 14px; line-height: 1; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const dot = document.getElementById('tab-dot');
+        for (const animation of dot.getAnimations()) {
+          const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+          if (duration > 0) {
+            animation.pause();
+            animation.currentTime = 0;
+          }
+        }
+        const rect = id => {
+          const value = document.getElementById(id).getBoundingClientRect();
+          return {left: value.left, top: value.top, width: value.width, height: value.height};
+        };
+        const style = getComputedStyle(dot);
+        return {
+          tab: rect('tab-dot'),
+          reference: rect('reference-dot'),
+          tabFilter: style.filter,
+          tabAnimation: style.animationName,
+          canonicalCooldown: getComputedStyle(document.documentElement).getPropertyValue('--agent-status-cooldown').trim(),
+        };
+        """
+    )
+    assert "brightness(1)" in metrics["tabFilter"], metrics
+    assert "attention-ring-fade" in metrics["tabAnimation"], metrics
+    assert metrics["canonicalCooldown"] == "#ffd633", metrics
+
+    screenshot = browser_screenshot_rgb(browser)
+    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+
+    def center_pixel(rect):
+        x = min(screenshot.width - 1, max(0, round((rect["left"] + rect["width"] / 2) * dpr)))
+        y = min(screenshot.height - 1, max(0, round((rect["top"] + rect["height"] / 2) * dpr)))
+        return screenshot.getpixel((x, y))
+
+    tab_pixel = center_pixel(metrics["tab"])
+    reference_pixel = center_pixel(metrics["reference"])
+    assert tab_pixel[0] >= 245 and tab_pixel[1] >= 200 and tab_pixel[2] <= 70, {"tab": tab_pixel, "reference": reference_pixel, "metrics": metrics}
+    # The status ring's slight saturation boost can lower the blue channel by a few points, but
+    # it must not bring back the old dim 82%-brightness resting color.
+    assert max(abs(tab_pixel[index] - reference_pixel[index]) for index in range(3)) <= 8, {"tab": tab_pixel, "reference": reference_pixel, "metrics": metrics}
+
+
 def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_override(browser, tmp_path):
     page = tmp_path / "subwindow-status-solid-shapes.html"
     page.write_text(page_html(f"""
@@ -885,6 +952,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["buttonColor"], metrics
     assert metrics["bar"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
     assert "drop-shadow" in metrics["bar"]["beforeFilter"], metrics
+    assert "82, 210, 115" in metrics["bar"]["beforeFilter"], metrics
     stable_width = float(metrics["stable"]["beforeBorderStartWidth"].replace("px", ""))
     pulsing_width = float(metrics["bar"]["beforeBorderStartWidth"].replace("px", ""))
     stale_pause_width = float(metrics["staleCooldown"]["beforeInlineSize"].replace("px", ""))
@@ -908,6 +976,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["popover"]["beforeOpacity"] == "1", metrics
     assert metrics["popover"]["beforeBorderTopWidth"] == "0px", metrics
     assert "drop-shadow" in metrics["popover"]["beforeFilter"], metrics
+    assert "220, 38, 38" in metrics["popover"]["beforeFilter"], metrics
     assert metrics["tabber"]["beforeContent"] == '""', metrics
     assert metrics["tabber"]["afterContent"] == '""', metrics
     assert metrics["tabber"]["color"] == "rgba(0, 0, 0, 0)", metrics
@@ -923,6 +992,8 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["tabber"]["afterBorderTopWidth"] == "0px", metrics
     assert "drop-shadow" in metrics["tabber"]["beforeFilter"], metrics
     assert "drop-shadow" in metrics["tabber"]["afterFilter"], metrics
+    assert "255, 214, 51" in metrics["tabber"]["beforeFilter"], metrics
+    assert "255, 214, 51" in metrics["tabber"]["afterFilter"], metrics
     for key in ("tabber", "staleCooldown", "activeStaleCooldown"):
         before_left = float(metrics[key]["beforeInsetInlineStart"].replace("px", ""))
         after_left = float(metrics[key]["afterInsetInlineStart"].replace("px", ""))
@@ -4283,12 +4354,9 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # themes — i.e. NOT white-on-white. This is the check that was missing before: the prior browser test
     # measured tab BACKGROUNDS but never the nested .session-button-* TEXT color, so a near-white dir text
     # on a near-white light tab went uncaught. Compare relative luminance of text vs bg.
-    def _lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
-        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
     for th in ("light", "dark"):
-        text_lum = _lum(theme_metrics[th]["inactiveDirColor"])
-        bg_lum = _lum(theme_metrics[th]["inactiveTabBg"])
+        text_lum = _css_luminance_255(theme_metrics[th]["inactiveDirColor"])
+        bg_lum = _css_luminance_255(theme_metrics[th]["inactiveTabBg"])
         assert abs(text_lum - bg_lum) > 80, (
             f"{th}: inactive-tab dir text ({theme_metrics[th]['inactiveDirColor']}) must contrast with the "
             f"tab bg ({theme_metrics[th]['inactiveTabBg']}) — not white-on-white"
@@ -6645,6 +6713,11 @@ LIGHT_MODE_SURFACES = """
   <div class="preferences-global-reset-title" id="gr-title">Reset</div>
   <div class="preferences-global-reset-warning" id="gr-warn">warn</div>
 </div>
+<div class="preferences-setting-advisory" id="pref-adv">
+  <span id="pref-adv-text">Large browser uploads are buffered in memory.</span>
+  <code id="pref-adv-code">rsync -avz &lt;local-path&gt; host:/path/</code>
+  <button type="button" class="preferences-inline-action" id="pref-adv-copy">Copy rsync example</button>
+</div>
 <span class="agent-icon codex" id="agent-ico">A</span>
 <span class="session-state-badge" id="badge-neutral">run</span>
 <span class="session-yolo-marker inactive" id="ym-inactive">YO</span>
@@ -6693,15 +6766,28 @@ def light_mode_surfaces_fixture_html(body_class):
     """
 
 
+def _css_rgb_triplet(css_color):
+    nums = [float(n) for n in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", css_color)[:3]]
+    assert len(nums) == 3, f"expected an RGB-ish CSS color, got {css_color!r}"
+    if css_color.strip().startswith("color(srgb"):
+        nums = [n * 255 for n in nums]
+    return tuple(max(0.0, min(255.0, n)) for n in nums)
+
+
+def _css_luminance_255(css_color):
+    r, g, b = _css_rgb_triplet(css_color)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
 def _contrast_ratio(rgb_a, rgb_b):
-    def rel_lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
+    def rel_lum(css_color):
+        r, g, b = _css_rgb_triplet(css_color)
 
         def chan(c):
             c = c / 255.0
             return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
 
-        return 0.2126 * chan(nums[0]) + 0.7152 * chan(nums[1]) + 0.0722 * chan(nums[2])
+        return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
 
     la, lb = rel_lum(rgb_a), rel_lum(rgb_b)
     hi, lo = max(la, lb), min(la, lb)
@@ -6730,12 +6816,8 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     )
 
     # (a) Surfaces that were dark boxes must now have LIGHT backgrounds (luminance high).
-    def _lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
-        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
-
-    for box in ("cp-dlg", "ks-dlg", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre", "info-pane", "info-content", "info-tree-summary"):
-        assert _lum(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
+    for box in ("cp-dlg", "ks-dlg", "pref-adv", "pref-adv-code", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre", "info-pane", "info-content", "info-tree-summary"):
+        assert _css_luminance_255(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
     assert style["bodyVars"]["infoTreeBorder"] == "#8793a3", style["bodyVars"]
     assert style["bodyVars"]["infoTreeLine"] == "rgb(100 116 139 / 0.16)", style["bodyVars"]
     assert style["bodyVars"]["infoRecordBorder"] == style["bodyVars"]["infoTreeLine"], style["bodyVars"]
@@ -6745,7 +6827,7 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     page_white = "rgb(255, 255, 255)"
     text_checks = {
         "cp-row": "cp-dlg", "cp-grp": "cp-dlg", "cp-det": "cp-dlg", "cp-kb": "cp-dlg",
-        "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "agent-ico": None,
+        "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "pref-adv-text": "pref-adv", "pref-adv-code": "pref-adv-code", "pref-adv-copy": "pref-adv-copy", "agent-ico": None,
         "badge-neutral": "badge-neutral", "ym-inactive": "ym-inactive",
         "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
         "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
@@ -6760,6 +6842,49 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
             bg = page_white
         ratio = _contrast_ratio(style[eid]["color"], bg)
         assert ratio >= 3.0, f"{eid}: text {style[eid]['color']} on {bg} contrast {ratio:.1f} < 3.0 (dark-box/invisible)"
+
+
+def test_preferences_upload_advisory_matches_dark_theme_and_light_readability(browser, tmp_path):
+    page = tmp_path / "preferences-advisory.html"
+    page.write_text(light_mode_surfaces_fixture_html("theme-dark"), encoding="utf-8")
+    browser.get(page.as_uri())
+    dark = browser.execute_script(
+        """
+        const read = id => {
+          const s = getComputedStyle(document.getElementById(id));
+          return {color: s.color, bg: s.backgroundColor, border: s.borderTopColor};
+        };
+        return {
+          advisory: read('pref-adv'),
+          code: read('pref-adv-code'),
+          copy: read('pref-adv-copy'),
+          panel2: getComputedStyle(document.body).getPropertyValue('--panel2').trim(),
+        };
+        """
+    )
+    page.write_text(light_mode_surfaces_fixture_html("theme-light"), encoding="utf-8")
+    browser.get(page.as_uri())
+    light = browser.execute_script(
+        """
+        const read = id => {
+          const s = getComputedStyle(document.getElementById(id));
+          return {color: s.color, bg: s.backgroundColor, border: s.borderTopColor};
+        };
+        return {advisory: read('pref-adv'), code: read('pref-adv-code'), copy: read('pref-adv-copy')};
+        """
+    )
+
+    assert _css_luminance_255(dark["advisory"]["bg"]) < 85, dark
+    assert _css_luminance_255(dark["code"]["bg"]) < 95, dark
+    assert dark["advisory"]["bg"] != "rgb(255, 231, 163)", dark
+    assert _contrast_ratio(dark["advisory"]["color"], dark["advisory"]["bg"]) >= 3.0, dark
+    assert _contrast_ratio(dark["code"]["color"], dark["code"]["bg"]) >= 4.5, dark
+    assert _contrast_ratio(dark["copy"]["color"], dark["copy"]["bg"]) >= 3.0, dark
+    assert _css_luminance_255(light["advisory"]["bg"]) > 180, light
+    assert _css_luminance_255(light["code"]["bg"]) > 225, light
+    assert _contrast_ratio(light["advisory"]["color"], light["advisory"]["bg"]) >= 4.5, light
+    assert _contrast_ratio(light["code"]["color"], light["code"]["bg"]) >= 7.0, light
+    assert _contrast_ratio(light["copy"]["color"], light["copy"]["bg"]) >= 3.0, light
 
 
 def test_light_editor_image_backdrop_is_light(browser, tmp_path):
@@ -6777,12 +6902,8 @@ def test_light_editor_image_backdrop_is_light(browser, tmp_path):
         " img: getComputedStyle(document.getElementById('img')).backgroundColor};"
     )
 
-    def _lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
-        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
-
-    assert _lum(style["panel"]) > 180, f"editor-light image panel must be light, got {style['panel']}"
-    assert _lum(style["img"]) > 180, f"editor-light image backdrop must be light, got {style['img']}"
+    assert _css_luminance_255(style["panel"]) > 180, f"editor-light image panel must be light, got {style['panel']}"
+    assert _css_luminance_255(style["img"]) > 180, f"editor-light image backdrop must be light, got {style['img']}"
 
 
 def codemirror_search_panel_fixture_html():

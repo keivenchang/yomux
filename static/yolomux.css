@@ -63,6 +63,8 @@
   --brand-green-dark: #3f6f00;
   --about-brand-red: #ef4444;
   --accent-gold: #f5c542;
+  --agent-status-cooldown: #ffd633;
+  --agent-status-cooldown-rgb: 255 214 51;
   --menu-accent: var(--accent);
   --icon-code: #7dd3fc;
   --icon-doc: #facc15;
@@ -612,6 +614,8 @@ body.theme-light {
   --brand-green: #5f9800;
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
+  --agent-status-cooldown: #ffd633;
+  --agent-status-cooldown-rgb: 255 214 51;
   --accent: #2563eb;
   --menu-accent: #1d4ed8;
   --icon-code: #0369a1;
@@ -2148,7 +2152,9 @@ body.theme-light .latency-meter {
 .status-indicator--dot.heartbeat-pulse {
   --attention-pulse-saturate-rest: 1.04;
   --attention-pulse-saturate-peak: 1.42;
-  --attention-pulse-brightness-rest: 0.82;
+  /* Keep the status fill at its canonical color between glow peaks. A dim resting frame made
+     pane-tab balls look washed out beside the same static balls in the activity summary. */
+  --attention-pulse-brightness-rest: 1;
   --attention-pulse-brightness-peak: 1.34;
   --attention-ring-border-rest-alpha: 0.56;
   --attention-ring-border-peak-alpha: 1;
@@ -2164,8 +2170,8 @@ body.theme-light .latency-meter {
   --attention-ring-rgb: 82 210 115;
 }
 .status-indicator--cooldown {
-  color: var(--accent-gold);
-  --attention-ring-rgb: 245 197 66;
+  color: var(--agent-status-cooldown);
+  --attention-ring-rgb: var(--agent-status-cooldown-rgb);
 }
 .status-indicator--active {
   color: var(--file-tree-recency-max-contrast, var(--text));
@@ -2193,7 +2199,7 @@ body.theme-light .latency-meter {
 .status-indicator--dot.status-indicator--working.heartbeat-pulse {
   --attention-pulse-saturate-rest: 1;
   --attention-pulse-saturate-peak: 1.08;
-  --attention-pulse-brightness-rest: 0.96;
+  --attention-pulse-brightness-rest: 1;
   --attention-pulse-brightness-peak: 1.06;
   --attention-ring-border-rest-alpha: 0.18;
   --attention-ring-border-peak-alpha: 0.42;
@@ -2235,7 +2241,7 @@ body.theme-light .latency-meter {
   color: var(--bad);
 }
 .status-indicator--dot.status-indicator--cooldown {
-  color: var(--accent-gold);
+  color: var(--agent-status-cooldown);
   border: 1px solid transparent;
 }
 .agent-window-activity {
@@ -2270,7 +2276,7 @@ body.theme-light .latency-meter {
 }
 .status-indicator--dot.agent-window-status-dot--segmented {
   --agent-status-segment-attention: var(--bad);
-  --agent-status-segment-cooldown: var(--accent-gold);
+  --agent-status-segment-cooldown: var(--agent-status-cooldown);
   --agent-status-segment-working: var(--pr-status-passing);
   display: inline-block;
   height: 1em;
@@ -4348,23 +4354,29 @@ body.theme-light .js-debug-graph-view {
   font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .preferences-setting-advisory {
+  --preferences-advisory-text: #f7e7b9;
+  --preferences-advisory-bg: color-mix(in srgb, var(--accent-gold) 14%, var(--panel2));
+  --preferences-advisory-border: color-mix(in srgb, var(--accent-gold) 54%, var(--line));
+  --preferences-advisory-code-text: #fff4c7;
+  --preferences-advisory-code-bg: rgb(var(--overlay-slate-rgb) / 0.38);
+  --preferences-advisory-code-border: color-mix(in srgb, var(--accent-gold) 42%, var(--line));
   grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  color: #2a1e00;
-  background: #ffe7a3;
-  border: 1px solid #c8941e;
+  color: var(--preferences-advisory-text);
+  background: var(--preferences-advisory-bg);
+  border: 1px solid var(--preferences-advisory-border);
   border-radius: var(--radius-control);
   font: var(--ui-font-size-xs)/1.3 var(--ui-font);
 }
 .preferences-setting-advisory code {
   padding: 2px 4px;
-  color: var(--lt-text);
-  background: rgba(255, 255, 255, 0.45);
-  border: 1px solid rgba(42, 30, 0, 0.2);
+  color: var(--preferences-advisory-code-text);
+  background: var(--preferences-advisory-code-bg);
+  border: 1px solid var(--preferences-advisory-code-border);
   border-radius: 3px;
   font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
@@ -4845,6 +4857,19 @@ body.theme-light .info-refresh:focus-visible {
 }
 body.theme-light .changes-error {
   color: var(--danger-strong-hover);
+}
+body.theme-light .preferences-setting-advisory {
+  --preferences-advisory-text: #372707;
+  --preferences-advisory-bg: #fff0b3;
+  --preferences-advisory-border: #c98f13;
+  --preferences-advisory-code-text: var(--lt-text);
+  --preferences-advisory-code-bg: #fffaf0;
+  --preferences-advisory-code-border: #d0a43a;
+}
+body.theme-light .preferences-setting-advisory .preferences-inline-action {
+  color: var(--good);
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--good) 46%, var(--line));
 }
 body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
@@ -7004,10 +7029,11 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .session-agent-row .agent-window-status-dot,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot {
   --subwindow-status-attention-fill: var(--danger-strong);
-  --subwindow-status-cooldown-fill: #ffd633;
+  --subwindow-status-cooldown-fill: var(--agent-status-cooldown);
   --subwindow-status-acknowledged-fill: color-mix(in srgb, var(--muted) 82%, var(--text) 18%);
   --subwindow-status-glyph-scale: 0.8;
   --subwindow-status-glyph-fill: currentColor;
+  --subwindow-status-glyph-glow-rgb: 82 210 115;
   --subwindow-status-glyph-border-color: color-mix(in srgb, var(--text) 84%, var(--bg) 16%);
   --subwindow-status-glyph-border-color-active: var(--active-control-text);
   --subwindow-status-cooldown-outline-color: color-mix(in srgb, var(--bg) 88%, #000 12%);
@@ -7021,6 +7047,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
     drop-shadow(-1px 0 0 var(--subwindow-status-glyph-border-color))
     drop-shadow(0 1px 0 var(--subwindow-status-glyph-border-color))
     drop-shadow(0 -1px 0 var(--subwindow-status-glyph-border-color));
+  --subwindow-status-glyph-base-filter: var(--subwindow-status-glyph-outline-filter);
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -7054,18 +7081,22 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .session-agent-row .agent-window-status-dot.status-indicator--working,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--working {
   --subwindow-status-glyph-fill: var(--pr-status-passing);
+  --subwindow-status-glyph-glow-rgb: 82 210 115;
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--attention,
 .session-agent-row .agent-window-status-dot.status-indicator--attention,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--attention {
   --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
+  --subwindow-status-glyph-glow-rgb: 220 38 38;
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--cooldown,
 .session-agent-row .agent-window-status-dot.status-indicator--cooldown,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--cooldown {
   --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
+  --subwindow-status-glyph-glow-rgb: var(--agent-status-cooldown-rgb);
+  --subwindow-status-glyph-base-filter: var(--subwindow-status-cooldown-outline-filter);
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.agent-window-status-dot--acknowledged,
@@ -7086,7 +7117,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: block;
   text-indent: 0;
   transform: translate(-50%, -50%);
-  filter: var(--subwindow-status-glyph-outline-filter);
+  filter: var(--subwindow-status-glyph-base-filter);
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--working::before,
 .session-agent-row .agent-window-status-dot.status-indicator--working::before,
@@ -7117,7 +7148,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
   border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.06));
   background: var(--subwindow-status-glyph-fill, currentColor);
-  filter: var(--subwindow-status-cooldown-outline-filter);
+  filter: var(--subwindow-status-glyph-base-filter);
 }
 .tmux-window-button .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
 .session-agent-row .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
@@ -7135,10 +7166,12 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   0%, 100% {
     opacity: 1;
     transform: translate(-50%, -50%) scale(0.92);
+    filter: var(--subwindow-status-glyph-base-filter) drop-shadow(0 0 3px rgb(var(--subwindow-status-glyph-glow-rgb) / 0.36));
   }
   50% {
     opacity: 1;
-    transform: translate(-50%, -50%) scale(1.04);
+    transform: translate(-50%, -50%) scale(1.08);
+    filter: var(--subwindow-status-glyph-base-filter) drop-shadow(0 0 8px rgb(var(--subwindow-status-glyph-glow-rgb) / 0.82));
   }
 }
 @media (prefers-reduced-motion: reduce) {

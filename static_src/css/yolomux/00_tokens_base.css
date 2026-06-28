@@ -62,6 +62,8 @@
   --brand-green-dark: #3f6f00;
   --about-brand-red: #ef4444;
   --accent-gold: #f5c542;
+  --agent-status-cooldown: #ffd633;
+  --agent-status-cooldown-rgb: 255 214 51;
   --menu-accent: var(--accent);
   --icon-code: #7dd3fc;
   --icon-doc: #facc15;
@@ -611,6 +613,8 @@ body.theme-light {
   --brand-green: #5f9800;
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
+  --agent-status-cooldown: #ffd633;
+  --agent-status-cooldown-rgb: 255 214 51;
   --accent: #2563eb;
   --menu-accent: #1d4ed8;
   --icon-code: #0369a1;
