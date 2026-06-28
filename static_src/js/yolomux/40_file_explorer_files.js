@@ -2206,7 +2206,12 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (dirCount.nextElementSibling !== status) row.insertBefore(status, dirCount.nextElementSibling);
   if (status.nextElementSibling !== date) row.insertBefore(date, status.nextElementSibling);
   setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
-  if (icon.textContent !== iconText) icon.textContent = iconText;
+  if (options.disclosureExpanded === true || options.disclosureExpanded === false) {
+    setDisclosureTriangleElement(icon, options.disclosureExpanded === true);
+  } else {
+    delete icon.dataset.disclosureExpanded;
+    if (icon.textContent !== iconText) icon.textContent = iconText;
+  }
   if (options.nameHtml) {
     if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
     if (!name.children?.length && name.textContent !== nameText) name.textContent = nameText;
@@ -2287,7 +2292,7 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     : [];
   const icon = options.iconText != null
     ? String(options.iconText)
-    : (entry.kind === 'dir' ? (options.expanded === true ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·'));
+    : (entry.kind === 'dir' ? disclosureTriangleGlyph(options.expanded === true) : (entry.kind === 'file' ? fileIconFor(entry.name) : '·'));
   return {
     changedAncestor,
     changedFile,
@@ -2299,7 +2304,8 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     contentOptions: {
       gitStatus,
       gitStatusTitle: entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus),
-      iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
+      iconClass: [fileIconClassFor(entry.name, entry.kind), entry.kind === 'dir' ? 'ui-disclosure-triangle' : '', indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
+      disclosureExpanded: entry.kind === 'dir' ? options.expanded === true : undefined,
       nameHtml: differMode ? null : displayName.html,
       dateText: options.dateText || '',
       diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
@@ -3977,7 +3983,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
-  const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '');
+  const icon = expandable ? disclosureTriangleGlyph(expanded) : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
   const description = data.description ? compactHomePath(data.description) : '';
@@ -4002,7 +4008,8 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
   updateFileTreeRowContents(row, icon, label, {
-    iconClass: 'tabber-icon',
+    iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
+    disclosureExpanded: expandable ? expanded : undefined,
     nameHtml,
     dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
     dateHtml: data.dateHtml || '',

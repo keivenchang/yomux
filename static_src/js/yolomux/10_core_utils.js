@@ -1485,6 +1485,27 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+const disclosureTriangleExpandedGlyph = '▾';
+const disclosureTriangleCollapsedGlyph = '▸';
+
+function disclosureTriangleGlyph(expanded) {
+  return expanded === true ? disclosureTriangleExpandedGlyph : disclosureTriangleCollapsedGlyph;
+}
+
+function disclosureTriangleHtml(expanded, className = '', attrs = '') {
+  const classes = ['ui-disclosure-triangle', className].filter(Boolean).join(' ');
+  const extraAttrs = attrs ? ` ${attrs}` : '';
+  return `<span class="${esc(classes)}" data-disclosure-expanded="${expanded === true ? 'true' : 'false'}" aria-hidden="true"${extraAttrs}>${esc(disclosureTriangleGlyph(expanded))}</span>`;
+}
+
+function setDisclosureTriangleElement(element, expanded) {
+  if (!element) return;
+  element.classList?.add?.('ui-disclosure-triangle');
+  element.dataset.disclosureExpanded = expanded === true ? 'true' : 'false';
+  element.setAttribute?.('aria-hidden', 'true');
+  element.textContent = disclosureTriangleGlyph(expanded);
+}
+
 function stripTrailingEllipsisText(value) {
   return String(value ?? '').replace(/\s*(?:\.{3}|…)+\s*$/u, '').trimEnd();
 }

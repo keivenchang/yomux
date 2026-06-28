@@ -3638,30 +3638,30 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-name {
   color: var(--tabber-level1-color);
   font-weight: 700;
 }
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level1-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level1-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-path-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-detail-color);
   font-style: italic;
 }

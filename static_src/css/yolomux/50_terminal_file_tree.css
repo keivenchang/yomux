@@ -1575,21 +1575,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   content: '';
 }
 .yoagent-message-details summary::before {
-  content: '';
-  flex: 0 0 auto;
-  width: 0;
-  height: 0;
-  margin-top: 0.45em;
-  border-block-start: 4px solid transparent;
-  border-block-end: 4px solid transparent;
-  border-inline-start: 6px solid currentColor;
-  opacity: 0.75;
-  transform-origin: 45% 50%;
-  transition: transform 120ms ease, opacity 120ms ease;
+  content: "▸";
+  margin-top: 0.15em;
+  opacity: 0.9;
+  transition: color 120ms ease, opacity 120ms ease;
 }
 .yoagent-message-details[open] summary::before {
-  transform: rotate(90deg);
-  opacity: 0.95;
+  content: "▾";
+  opacity: 1;
 }
 .yoagent-message-details summary > span:first-child {
   flex: 0 0 auto;
@@ -2030,7 +2023,6 @@ body.theme-light .yoagent-global .markdown-body pre code {
   --info-tree-children-gap: 0px;
   --info-tree-summary-connector-y: 13px;
   --info-tree-record-connector-y: 13px;
-  --info-tree-disclosure-color: var(--neutral-text-cool);
   --info-tree-tab-color: var(--pane-tab-active-bg);
   --info-tree-tab-color-hover: var(--pane-tab-active-border);
   --info-tree-tmux-window-color: var(--pane-tab-active-bg);
@@ -2107,8 +2099,6 @@ body.theme-light .info-tree {
 }
 .info-tree-group summary::before {
   content: "▾";
-  color: var(--info-tree-disclosure-color);
-  font: 900 var(--ui-font-size-2xl)/1 var(--mono-font);
 }
 .info-tree-group:not([open]) summary::before {
   content: "▸";
@@ -3502,14 +3492,14 @@ body.app-vw-lte-980 .tabs {
   color: var(--git-transcript-badge);
 }
 .file-tree-row.kind-dir > .file-tree-icon {
-  font-size: 1.18em;
+  font-size: 1em;
   font-weight: 800;
   line-height: 1;
-  color: var(--text-muted-strong);
+  color: var(--disclosure-triangle-collapsed-color);
 }
 .file-tree-row.kind-dir.expanded > .file-tree-icon,
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
-  color: var(--brand-green);
+  color: var(--disclosure-triangle-expanded-color);
 }
 .file-tree-row.kind-dir.loading-children > .file-tree-icon {
   position: relative;
@@ -3806,11 +3796,11 @@ body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
   color: rgb(var(--overlay-slate-rgb) / 0.36);
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
-  color: var(--git-transcript-badge);
+  color: var(--disclosure-triangle-collapsed-color);
 }
 body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
 body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
-  color: var(--brand-green);
+  color: var(--disclosure-triangle-expanded-color);
 }
 body.theme-light .file-tree-row.kind-dir.loading-children > .file-tree-icon {
   color: var(--good);

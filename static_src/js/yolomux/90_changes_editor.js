@@ -1558,7 +1558,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     }
     head.dataset.changesRepoToggle = repo;
     head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    head.innerHTML = `<span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
+    head.innerHTML = `${disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
     // Update "Comparing FROM TO" refs row (per-repo, only for git repos)
     let refsRow = section.querySelector(':scope > .changes-repo-refs');
     if (hasGit && !collapsed) {

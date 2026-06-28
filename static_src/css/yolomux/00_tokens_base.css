@@ -164,6 +164,8 @@
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
   --active-terminal-cursor-rgb: var(--active-accent-rgb);
   --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
+  --disclosure-triangle-expanded-color: var(--active-control-bg);
+  --disclosure-triangle-collapsed-color: var(--text-muted-strong);
   --agent-inactive-marker-text: #f8fafc;
   --agent-inactive-marker-bg: #050608;
   --agent-inactive-marker-border: #cfd8e3;
@@ -526,6 +528,8 @@ body.theme-light {
   --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
   --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
+  --disclosure-triangle-expanded-color: var(--active-control-bg);
+  --disclosure-triangle-collapsed-color: var(--text-muted-strong);
   --pane-scrollbar-thumb: rgba(82, 98, 116, 0.52);
   --pane-scrollbar-thumb-hover: var(--active-control-scrollbar-thumb);
   --pane-scrollbar-track: rgba(15, 23, 42, 0.045);

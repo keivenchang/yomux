@@ -603,7 +603,7 @@ function preferencesPanelHtml() {
       return `
         <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
           <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.title)}" aria-expanded="${collapsed ? 'false' : 'true'}">
-            <span class="preferences-section-caret" aria-hidden="true"></span>
+            ${disclosureTriangleHtml(!collapsed, 'preferences-section-caret')}
             <span class="preferences-section-title">${esc(section.title)}</span>
             <span class="preferences-section-count">${count}</span>
           </button>
@@ -897,6 +897,7 @@ function bindPreferencesPanel(panel) {
       if (section) {
         section.classList.toggle(CLS.collapsed, collapsed);
         sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        setDisclosureTriangleElement(sectionToggle.querySelector('.preferences-section-caret'), !collapsed);
         const settings = section.querySelector('.preferences-settings');
         if (settings) settings.hidden = collapsed;
       } else {

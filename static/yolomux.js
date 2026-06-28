@@ -3157,6 +3157,27 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+const disclosureTriangleExpandedGlyph = '▾';
+const disclosureTriangleCollapsedGlyph = '▸';
+
+function disclosureTriangleGlyph(expanded) {
+  return expanded === true ? disclosureTriangleExpandedGlyph : disclosureTriangleCollapsedGlyph;
+}
+
+function disclosureTriangleHtml(expanded, className = '', attrs = '') {
+  const classes = ['ui-disclosure-triangle', className].filter(Boolean).join(' ');
+  const extraAttrs = attrs ? ` ${attrs}` : '';
+  return `<span class="${esc(classes)}" data-disclosure-expanded="${expanded === true ? 'true' : 'false'}" aria-hidden="true"${extraAttrs}>${esc(disclosureTriangleGlyph(expanded))}</span>`;
+}
+
+function setDisclosureTriangleElement(element, expanded) {
+  if (!element) return;
+  element.classList?.add?.('ui-disclosure-triangle');
+  element.dataset.disclosureExpanded = expanded === true ? 'true' : 'false';
+  element.setAttribute?.('aria-hidden', 'true');
+  element.textContent = disclosureTriangleGlyph(expanded);
+}
+
 function stripTrailingEllipsisText(value) {
   return String(value ?? '').replace(/\s*(?:\.{3}|…)+\s*$/u, '').trimEnd();
 }
@@ -13003,7 +13024,12 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (dirCount.nextElementSibling !== status) row.insertBefore(status, dirCount.nextElementSibling);
   if (status.nextElementSibling !== date) row.insertBefore(date, status.nextElementSibling);
   setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
-  if (icon.textContent !== iconText) icon.textContent = iconText;
+  if (options.disclosureExpanded === true || options.disclosureExpanded === false) {
+    setDisclosureTriangleElement(icon, options.disclosureExpanded === true);
+  } else {
+    delete icon.dataset.disclosureExpanded;
+    if (icon.textContent !== iconText) icon.textContent = iconText;
+  }
   if (options.nameHtml) {
     if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
     if (!name.children?.length && name.textContent !== nameText) name.textContent = nameText;
@@ -13084,7 +13110,7 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     : [];
   const icon = options.iconText != null
     ? String(options.iconText)
-    : (entry.kind === 'dir' ? (options.expanded === true ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·'));
+    : (entry.kind === 'dir' ? disclosureTriangleGlyph(options.expanded === true) : (entry.kind === 'file' ? fileIconFor(entry.name) : '·'));
   return {
     changedAncestor,
     changedFile,
@@ -13096,7 +13122,8 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     contentOptions: {
       gitStatus,
       gitStatusTitle: entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus),
-      iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
+      iconClass: [fileIconClassFor(entry.name, entry.kind), entry.kind === 'dir' ? 'ui-disclosure-triangle' : '', indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
+      disclosureExpanded: entry.kind === 'dir' ? options.expanded === true : undefined,
       nameHtml: differMode ? null : displayName.html,
       dateText: options.dateText || '',
       diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
@@ -14774,7 +14801,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
-  const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '');
+  const icon = expandable ? disclosureTriangleGlyph(expanded) : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
   const description = data.description ? compactHomePath(data.description) : '';
@@ -14799,7 +14826,8 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
   updateFileTreeRowContents(row, icon, label, {
-    iconClass: 'tabber-icon',
+    iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
+    disclosureExpanded: expandable ? expanded : undefined,
     nameHtml,
     dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
     dateHtml: data.dateHtml || '',
@@ -20655,7 +20683,7 @@ function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
   row.classList.toggle('loading-children', loading);
   row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   const icon = row.querySelector('.file-tree-icon');
-  if (icon) icon.textContent = expanded ? '▾' : '▸';
+  if (icon) setDisclosureTriangleElement(icon, expanded);
 }
 
 async function expandDirectoryRow(row, fullPath, options = {}) {
@@ -32128,7 +32156,7 @@ function preferencesPanelHtml() {
       return `
         <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
           <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.title)}" aria-expanded="${collapsed ? 'false' : 'true'}">
-            <span class="preferences-section-caret" aria-hidden="true"></span>
+            ${disclosureTriangleHtml(!collapsed, 'preferences-section-caret')}
             <span class="preferences-section-title">${esc(section.title)}</span>
             <span class="preferences-section-count">${count}</span>
           </button>
@@ -32422,6 +32450,7 @@ function bindPreferencesPanel(panel) {
       if (section) {
         section.classList.toggle(CLS.collapsed, collapsed);
         sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        setDisclosureTriangleElement(sectionToggle.querySelector('.preferences-section-caret'), !collapsed);
         const settings = section.querySelector('.preferences-settings');
         if (settings) settings.hidden = collapsed;
       } else {
@@ -36141,7 +36170,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     }
     head.dataset.changesRepoToggle = repo;
     head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    head.innerHTML = `<span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
+    head.innerHTML = `${disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
     // Update "Comparing FROM TO" refs row (per-repo, only for git repos)
     let refsRow = section.querySelector(':scope > .changes-repo-refs');
     if (hasGit && !collapsed) {

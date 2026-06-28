@@ -13,7 +13,7 @@ function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
   row.classList.toggle('loading-children', loading);
   row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   const icon = row.querySelector('.file-tree-icon');
-  if (icon) icon.textContent = expanded ? '▾' : '▸';
+  if (icon) setDisclosureTriangleElement(icon, expanded);
 }
 
 async function expandDirectoryRow(row, fullPath, options = {}) {

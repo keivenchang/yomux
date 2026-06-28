@@ -3717,7 +3717,7 @@ def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
                   <div id="previous-record" class="info-tree-record info-tree-item info-tree-item-last">
                     <div class="info-tree-record-main">
                       <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span class="info-tree-field-value">/repo/previous</span></div>
-                      <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><span id="leak-sentinel" style="color: #80ff00; font: 900 18px/1 var(--mono-font);">LEAKGREENLEAKGREENLEAKGREEN</span></span></div>
+                      <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span class="info-tree-field-value"><span id="leak-sentinel" style="color: #ff00ff; font: 900 18px/1 var(--mono-font);">LEAKMAGENTALEAKMAGENTALEAKMAGENTA</span></span></div>
                     </div>
                   </div>
                 </div>
@@ -3793,13 +3793,13 @@ def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
     x1 = min(image.width - 1, round((rect["right"] - 18) * dpr))
     y0 = max(0, round((rect["top"] + 2) * dpr))
     y1 = min(image.height - 1, round((rect["top"] + min(metrics["maskHeight"] - 3, metrics["nextTopDelta"] - 3)) * dpr))
-    green_pixels = 0
+    leak_pixels = 0
     for y in range(y0, max(y0 + 1, y1), 2):
         for x in range(x0, max(x0 + 1, x1), 2):
             r, g, b = image.getpixel((x, y))[:3]
-            if g >= 130 and g - r >= 50 and g - b >= 50:
-                green_pixels += 1
-    assert green_pixels == 0, {"greenPixels": green_pixels, **metrics}
+            if r >= 130 and b >= 130 and r - g >= 50 and b - g >= 50:
+                leak_pixels += 1
+    assert leak_pixels == 0, {"leakPixels": leak_pixels, **metrics}
 
 
 @pytest.mark.parametrize("width, expected_rows", [(860, [3, 3]), (493, [1, 2, 2, 1])])
@@ -4774,16 +4774,16 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
         const title = document.querySelector('#modified-files-repo-head .changes-repo-title');
         const caretStyle = getComputedStyle(caret);
         const titleStyle = getComputedStyle(title);
-        return {
-          caretFontSize: parseFloat(caretStyle.fontSize),
-          titleFontSize: parseFloat(titleStyle.fontSize),
-          caretWidth: caret.getBoundingClientRect().width,
-          titleHeight: title.getBoundingClientRect().height,
-        };
+          return {
+            caretFontSize: parseFloat(caretStyle.fontSize),
+            titleFontSize: parseFloat(titleStyle.fontSize),
+            caretWidth: caret.getBoundingClientRect().width,
+            titleHeight: title.getBoundingClientRect().height,
+          };
         """
     )
-    assert repo_caret_metrics["caretFontSize"] > repo_caret_metrics["titleFontSize"], repo_caret_metrics
-    assert repo_caret_metrics["caretWidth"] >= 16, repo_caret_metrics
+    assert abs(repo_caret_metrics["caretFontSize"] - repo_caret_metrics["titleFontSize"]) <= 0.5, repo_caret_metrics
+    assert repo_caret_metrics["caretWidth"] <= repo_caret_metrics["titleFontSize"] * 1.25, repo_caret_metrics
     assert repo_caret_metrics["titleHeight"] > 0, repo_caret_metrics
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
@@ -5713,7 +5713,7 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
         """
     )
     assert tree_metrics["collapsedColor"] != tree_metrics["expandedColor"]
-    assert tree_metrics["iconSize"] > tree_metrics["nameSize"]
+    assert abs(tree_metrics["iconSize"] - tree_metrics["nameSize"]) <= 0.5
     repo_row_metrics = browser.execute_script(
         """
         const name = document.querySelector('#repo-dir .file-tree-name');
