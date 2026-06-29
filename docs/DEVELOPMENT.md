@@ -4,18 +4,21 @@ Conventions, architecture, build/test workflow, restart workflow, and API notes 
 
 ## Setup
 
-```bash
-pip install -r requirements.txt
-pip install -r requirements-dev.txt   # adds pytest-xdist for parallel test runs
-```
-
-Optional YO!agent managed Claude/Codex SDK transports need the extra SDK package set:
+Standard install via the Makefile (wraps `pip install -e .` + xterm.js assets + the static bundle build):
 
 ```bash
-pip install -r requirements-yoagent-managed.txt
+make setup        # pip install -e ".[yoagent]"  +  npm install (xterm.js)  +  python3 tools/static_build.py
+make dev          # same, plus dev/test deps (pytest-xdist) — see `make help`
 ```
 
-On externally managed system Python installs, create a virtual environment first instead of forcing `--break-system-packages`.
+`pyproject.toml` is the source of truth for Python deps and the floor (`requires-python = ">=3.9"`), so pip checks the Python version and resolves the `yoagent` / `dev` extras. The `requirements*.txt` files are kept for `pip install -r` workflows and are referenced by `boot.sh`/provisioning, but mirror the same packages. Plain pip equivalents:
+
+```bash
+pip install -e ".[yoagent,dev]"      # deps + the `yolomux` command + agent SDKs + pytest-xdist
+# or the legacy split: pip install -r requirements.txt -r requirements-dev.txt -r requirements-yoagent-managed.txt
+```
+
+On externally managed system Python installs (PEP 668), create and activate a virtual environment first (`python3 -m venv .venv && . .venv/bin/activate`) instead of forcing `--break-system-packages`.
 
 ## Project Conventions
 

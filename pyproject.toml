@@ -1,0 +1,42 @@
+# Standard Python project metadata. `pip install -e ".[yoagent]"` installs YOLOmux's deps and
+# the `yolomux` command; pip itself enforces `requires-python` and resolves the dependency groups,
+# so Python-version and dependency prerequisites are checked by the standard tooling (not ad-hoc).
+# The web-terminal assets (xterm.js, via npm) and the served bundle are a separate build step —
+# see `make setup` / the Makefile, which wraps this plus `npm install` + `tools/static_build.py`.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yolomux"
+description = "Browser tools for watching, driving, and summarizing tmux sessions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "PolyForm-Noncommercial-1.0.0" }
+authors = [{ name = "Keiven Chang" }]
+dynamic = ["version"]
+dependencies = [
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+# YO!agent backends (Claude / Codex SDKs) — needed for the in-app agent features.
+yoagent = [
+  "claude-code-sdk==0.0.25",
+  "openai-codex==0.1.0b3",
+]
+# Test / dev tooling.
+dev = [
+  "pytest-xdist",
+]
+
+[project.scripts]
+yolomux = "yolomux_lib.cli:main"
+
+[tool.setuptools]
+packages = ["yolomux_lib"]
+
+# Single source of truth for the version: read YOLOMUX_VERSION from yolomux_lib/common.py
+# (a plain string literal, so setuptools extracts it statically without importing the module).
+[tool.setuptools.dynamic]
+version = { attr = "yolomux_lib.common.YOLOMUX_VERSION" }

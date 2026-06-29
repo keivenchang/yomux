@@ -29,10 +29,12 @@ Recommended local run: HTTPS, login-gated, all tmux sessions visible, and YOLO-e
 ```bash
 git clone https://github.com/keivenchang/yolomux.git
 cd yolomux
-pip install -r requirements.txt
+make setup          # pip install -e ".[yoagent]" + xterm.js assets + build the bundle  (run `make help` for more)
 tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
-python3 yolomux.py --self-signed --dang
+python3 yolomux.py --self-signed --dang   # or: make run
 ```
+
+On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Not using `make`? `pip install -e ".[yoagent]"` installs the deps + the `yolomux` command (pip enforces Python 3.9+), then `npm install` for local xterm.js assets.
 
 Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
 
