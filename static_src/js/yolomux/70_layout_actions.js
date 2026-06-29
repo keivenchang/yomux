@@ -1269,7 +1269,13 @@ function showRepoChipMenu(session, x, y) {
   delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
     const root = row.dataset.repoChipOpen || '';
     repoChipContextMenu.close();
-    if (root) openFileExplorerAt(root);
+    if (!root) return;
+    // Pick this repo as the Info Bar's displayed repo (the <N/M>) and refresh — same effect as
+    // cycling with the < / > arrows, but jumps straight to the chosen repo.
+    sessionRepoDisplayRoot.set(session, root);
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    renderSessionButtons();
+    renderPaneTabStrips();
   });
   repoChipContextMenu.open(menu, x, y);
 }

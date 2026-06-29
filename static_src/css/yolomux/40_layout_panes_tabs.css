@@ -839,6 +839,11 @@ body.theme-light .drop-slot.drag-over {
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
+/* When the Info Bar leads with the sub-window button bar (order:-1), sit it flush-left —
+   drop the leading inset so the first window button hugs the panel edge. */
+.panel-detail-row:has(.tmux-window-bar) {
+  padding-inline-start: 0;
+}
 .panel-detail-close {
   flex: 0 0 14px;
   width: 14px;
@@ -1732,11 +1737,13 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 }
 .pane-info-bar .tmux-window-bar,
 .panel-detail-row .tmux-window-bar {
+  order: -1;
   flex: 0 0 auto;
   min-width: max-content;
   max-width: none;
-  margin-inline-start: auto;
-  justify-content: flex-end;
+  margin-inline-start: 0;
+  margin-inline-end: 8px;
+  justify-content: flex-start;
   overflow: visible;
 }
 .tmux-window-button {
@@ -1755,6 +1762,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   flex: 0 0 auto;
   max-width: none;
   overflow: visible;
+  /* Info Bar sub-window buttons are fully square — no rounded corners (overrides the .tab 5px). */
+  border-radius: 0;
   color: var(--pane-ctl-fg, var(--pc-control-fg));
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
@@ -2163,7 +2172,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tabs .pane-detail-toggle::after {
   width: 6px;
   height: 1.3px;
-  transform: translate(-50%, calc(-50% + 2px));
+  transform: translate(-50%, calc(-50% - 2px));
 }
 .tabs .pane-expand::before {
   transform: translate(-50%, -50%) rotate(0deg);

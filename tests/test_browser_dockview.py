@@ -2084,6 +2084,7 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
         const row = panel.querySelector('.panel-detail-row');
         const bar = row.querySelector('.tmux-window-bar');
         const close = row.querySelector('.panel-detail-close');
+        const firstWindowButton = bar?.querySelector('.tmux-window-button');
         const headerTerminal = document.querySelector('.dockview-pane-header-actions .terminal-tab');
         const pane = panel.querySelector('#terminal-pane-1');
         const xterm = panel.querySelector('#term-1 .xterm');
@@ -2100,7 +2101,8 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
         return {
           row: rectFor(row),
           bar: rectFor(bar),
-          close: rectFor(close),
+          closePresent: Boolean(close),
+          firstWindowButtonRadius: firstWindowButton ? getComputedStyle(firstWindowButton).borderTopLeftRadius : '',
           headerTerminalText: headerTerminal?.textContent.trim() || '',
           headerTerminalTitle: headerTerminal?.getAttribute('title') || '',
           pane: rectFor(pane),
@@ -2159,8 +2161,9 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
     )
     assert before["headerTerminalText"] == "Term"
     assert before["headerTerminalTitle"] == "terminal: claude"
-    assert 0 <= before["close"]["left"] - before["bar"]["right"] <= 8
-    assert before["row"]["right"] - before["close"]["right"] <= 8
+    assert before["closePresent"] is False
+    assert abs(before["bar"]["left"] - before["row"]["left"]) <= 1
+    assert before["firstWindowButtonRadius"] == "0px"
     assert before["rowDisplay"] == "flex"
     assert before["xterm"]["top"] >= before["row"]["bottom"] - 1
     assert after["rowDisplay"] == "none"

@@ -24365,7 +24365,13 @@ function showRepoChipMenu(session, x, y) {
   delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
     const root = row.dataset.repoChipOpen || '';
     repoChipContextMenu.close();
-    if (root) openFileExplorerAt(root);
+    if (!root) return;
+    // Pick this repo as the Info Bar's displayed repo (the <N/M>) and refresh — same effect as
+    // cycling with the < / > arrows, but jumps straight to the chosen repo.
+    sessionRepoDisplayRoot.set(session, root);
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    renderSessionButtons();
+    renderPaneTabStrips();
   });
   repoChipContextMenu.open(menu, x, y);
 }
@@ -27984,15 +27990,20 @@ function hideDockviewInnerPaneTabs(panel) {
   if (!panel || !dockviewLayoutEnabled()) return false;
   panel.classList.remove('dockview-inner-head-collapsed');
   const head = panel.querySelector('.panel-head');
-  const strip = head?.querySelector('.pane-tabs');
-  if (!strip) return true;
+  if (!head) return true;
+  // Collapse the inner head for every non-file-explorer terminal panel — even one without a
+  // .pane-tabs strip — so the dockview tab bar is the only tab row and NO pane keeps the head's
+  // min-height as an inconsistent buffer above the Info Bar. (file-explorer heads keep their head.)
   if (!head.classList.contains('file-explorer-head')) {
     head.hidden = true;
     head.classList.add('dockview-inner-head-hidden');
     panel.classList.add('dockview-inner-head-collapsed');
   }
-  strip.hidden = true;
-  strip.replaceChildren();
+  const strip = head.querySelector('.pane-tabs');
+  if (strip) {
+    strip.hidden = true;
+    strip.replaceChildren();
+  }
   return true;
 }
 function domBuilderDataAttributeName(key) {
@@ -50205,7 +50216,6 @@ function createPanel(session) {
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
         ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
         <div id="term-${session}" class="terminal"></div>

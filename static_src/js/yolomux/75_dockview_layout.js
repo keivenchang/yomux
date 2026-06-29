@@ -1690,14 +1690,19 @@ function hideDockviewInnerPaneTabs(panel) {
   if (!panel || !dockviewLayoutEnabled()) return false;
   panel.classList.remove('dockview-inner-head-collapsed');
   const head = panel.querySelector('.panel-head');
-  const strip = head?.querySelector('.pane-tabs');
-  if (!strip) return true;
+  if (!head) return true;
+  // Collapse the inner head for every non-file-explorer terminal panel — even one without a
+  // .pane-tabs strip — so the dockview tab bar is the only tab row and NO pane keeps the head's
+  // min-height as an inconsistent buffer above the Info Bar. (file-explorer heads keep their head.)
   if (!head.classList.contains('file-explorer-head')) {
     head.hidden = true;
     head.classList.add('dockview-inner-head-hidden');
     panel.classList.add('dockview-inner-head-collapsed');
   }
-  strip.hidden = true;
-  strip.replaceChildren();
+  const strip = head.querySelector('.pane-tabs');
+  if (strip) {
+    strip.hidden = true;
+    strip.replaceChildren();
+  }
   return true;
 }
