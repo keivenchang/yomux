@@ -375,12 +375,29 @@ restart_port() {
   verify_port_stable "$port"
 }
 
+ensure_xterm_assets() {
+  # yolomux serves /static/{xterm.js,xterm.css,xterm-addon-unicode11.js} by resolving @xterm/*
+  # from node_modules (see yolomux_lib/common.py XTERM_ASSET_ROOTS). On a dev machine it can
+  # borrow them from an installed IDE bundle, but a headless host has none — so install the
+  # declared deps (package.json) once. Skipped when already present; warns (never fails) on miss.
+  [[ -f "$repo_root/node_modules/@xterm/xterm/lib/xterm.js" ]] && return 0
+  if ! command -v npm >/dev/null 2>&1; then
+    printf 'warn: npm not found; web terminal xterm.js will 404 (install Node.js, then run `npm install` in %s)\n' "$repo_root" >&2
+    return 0
+  fi
+  printf 'boot.sh: installing web-terminal assets (npm install) in %s ...\n' "$repo_root" >&2
+  ( cd "$repo_root" && npm install --no-audit --no-fund --silent ) \
+    || printf 'warn: npm install failed; web terminal xterm.js may 404 (see npm output above)\n' >&2
+}
+
 if [[ "$print_command" -eq 1 ]]; then
   for port in "${ports[@]}"; do
     print_launch_command "$port"
   done
   exit 0
 fi
+
+ensure_xterm_assets
 
 for port in "${ports[@]}"; do
   restart_port "$port"
