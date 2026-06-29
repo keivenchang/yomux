@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shlex
 import threading
@@ -26,6 +27,8 @@ from .tmux_utils import tmux
 TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 # Newest-by-name rollout files to consider per cwd lookup (bounds work on a large tree).
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
+CODEX_LSOF_TIMEOUT_SECONDS = 1.0
+CODEX_LSOF_CACHE_SECONDS = 15.0
 # the shared TtlCache instead of a hand-rolled dict+lock+TTL. get_or_miss() preserves the
 # _CACHE_MISS-vs-cached-None distinction the callers rely on.
 _TRANSCRIPT_LOOKUP_CACHE = TtlCache(ttl_seconds=TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS)
@@ -39,8 +42,14 @@ def cached_transcript_lookup(kind: str, root: Path, needle: str) -> Path | None 
     return _TRANSCRIPT_LOOKUP_CACHE.get_or_miss(transcript_lookup_cache_key(kind, root, needle))
 
 
-def set_cached_transcript_lookup(kind: str, root: Path, needle: str, path: Path | None) -> Path | None:
-    _TRANSCRIPT_LOOKUP_CACHE.set(transcript_lookup_cache_key(kind, root, needle), path)
+def set_cached_transcript_lookup(
+    kind: str,
+    root: Path,
+    needle: str,
+    path: Path | None,
+    ttl: float | None = None,
+) -> Path | None:
+    _TRANSCRIPT_LOOKUP_CACHE.set(transcript_lookup_cache_key(kind, root, needle), path, ttl=ttl)
     return path
 
 
@@ -360,18 +369,30 @@ def path_mtime(path: Path) -> float:
         return 0.0
 
 
+def newest_codex_transcript(paths: list[Path]) -> Path | None:
+    if not paths:
+        return None
+    if len(paths) == 1:
+        return paths[0]
+    return max(paths, key=path_mtime)
+
+
 def find_codex_transcript_in_candidates(files: list[Path], cwd: str) -> Path | None:
+    header_matches: list[Path] = []
     for path in files:
         if codex_transcript_header_cwd(path) == cwd:
-            return path
+            header_matches.append(path)
+    if header_matches:
+        return newest_codex_transcript(header_matches)
+    tail_matches: list[Path] = []
     for path in files:
         try:
             tail = tail_file_lines(path, 300)
         except OSError:
             continue
         if codex_transcript_tail_matches_cwd(tail, cwd):
-            return path
-    return None
+            tail_matches.append(path)
+    return newest_codex_transcript(tail_matches)
 
 
 def codex_transcript_tail_matches_cwd(tail: str, cwd: str) -> bool:
@@ -438,19 +459,9 @@ def path_is_under(path: Path, root: Path) -> bool:
     return resolved_path == resolved_root or resolved_path.is_relative_to(resolved_root)
 
 
-def codex_transcript_from_process_fd(pid: int, root: Path | None = None, fd_dir: Path | None = None) -> Path | None:
-    root = root or Path.home() / ".codex" / "sessions"
-    fd_dir = fd_dir or Path(f"/proc/{pid}/fd")
-    try:
-        entries = list(fd_dir.iterdir())
-    except OSError:
-        return None
+def codex_rollout_paths(path_texts: list[str], root: Path) -> list[Path]:
     candidates: list[Path] = []
-    for entry in entries:
-        try:
-            target = os.readlink(entry)
-        except OSError:
-            continue
+    for target in path_texts:
         if target.endswith(" (deleted)"):
             target = target[: -len(" (deleted)")]
         path = Path(target).expanduser()
@@ -458,8 +469,58 @@ def codex_transcript_from_process_fd(pid: int, root: Path | None = None, fd_dir:
             continue
         if path.name.startswith("rollout-") and path.suffix == ".jsonl" and path_is_under(path, root):
             candidates.append(path)
-    candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
-    return candidates[0] if candidates else None
+    return candidates
+
+
+def lsof_paths_for_process(pid: int, descriptor: str | None = None, runner: Any = None) -> list[str]:
+    args = ["lsof", "-p", str(pid)]
+    if descriptor:
+        args.extend(["-a", "-d", descriptor])
+    args.append("-Fn")
+    try:
+        result = (runner or run_cmd)(args, timeout=CODEX_LSOF_TIMEOUT_SECONDS)
+    except OSError:
+        return []
+    if result.returncode != 0:
+        return []
+    return [line[1:] for line in result.stdout.splitlines() if line.startswith("n") and len(line) > 1]
+
+
+def codex_transcript_from_lsof(pid: int, root: Path, runner: Any = None) -> Path | None:
+    cached = cached_transcript_lookup("codex-lsof-pid", root, str(pid))
+    if cached is not _CACHE_MISS:
+        return cached
+    candidates = codex_rollout_paths(lsof_paths_for_process(pid, runner=runner), root)
+    return set_cached_transcript_lookup(
+        "codex-lsof-pid",
+        root,
+        str(pid),
+        newest_codex_transcript(candidates),
+        ttl=CODEX_LSOF_CACHE_SECONDS,
+    )
+
+
+def codex_transcript_from_process_fd(
+    pid: int,
+    root: Path | None = None,
+    fd_dir: Path | None = None,
+    lsof_runner: Any = None,
+) -> Path | None:
+    root = root or Path.home() / ".codex" / "sessions"
+    if fd_dir is None and platform.system() == "Darwin":
+        return codex_transcript_from_lsof(pid, root, runner=lsof_runner)
+    fd_dir = fd_dir or Path(f"/proc/{pid}/fd")
+    try:
+        entries = list(fd_dir.iterdir())
+    except OSError:
+        return codex_transcript_from_lsof(pid, root, runner=lsof_runner)
+    targets: list[str] = []
+    for entry in entries:
+        try:
+            targets.append(os.readlink(entry))
+        except OSError:
+            continue
+    return newest_codex_transcript(codex_rollout_paths(targets, root))
 
 
 def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
@@ -481,11 +542,15 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
     )
 
 
-def process_cwd(pid: int) -> str | None:
+def process_cwd(pid: int, lsof_runner: Any = None) -> str | None:
+    if platform.system() == "Darwin":
+        paths = lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
+        return paths[0] if paths else None
     try:
         return os.readlink(f"/proc/{pid}/cwd")
     except OSError:
-        return None
+        paths = lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
+        return paths[0] if paths else None
 
 
 def pane_sort_key(pane: PaneInfo) -> tuple[str, int, int]:

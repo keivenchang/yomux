@@ -158,6 +158,31 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
     assert incremental["history"]["records"] == []
 
 
+def test_stats_history_wide_token_history_is_server_aggregated(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    now = 200000.0
+    monkeypatch.setattr(app_module.time, "time", lambda: now)
+    try:
+        with webapp.stats_history_lock:
+            for offset in range(0, 60 * 60, 60):
+                webapp.stats_history_merge_record_locked({
+                    "start": now - (2 * 60 * 60) + offset,
+                    "tokens_per_agent_total": 10,
+                    "agent_token_samples": 1,
+                    "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 10, "samples": 1, "tokens": 100, "seconds": 60, "source": "transcript"}],
+                }, now, fields=app_module.STATS_HISTORY_SERVER_FIELDS, client_id=None)
+            history = webapp.stats_history_payload_locked(0, token_since=0, token_resolution_seconds=300)
+    finally:
+        webapp.control_server.stop()
+
+    token_history = history["agent_token_history"]
+    assert token_history["snapshot"] is True
+    assert token_history["resolution_seconds"] == 300
+    assert len(token_history["records"]) < 20
+    assert sum(item["tokens"] for record in token_history["records"] for item in record["agent_token_rates"]) == 6000
+    assert all(record["duration"] == 300 for record in token_history["records"])
+
+
 def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     now = 200000.0

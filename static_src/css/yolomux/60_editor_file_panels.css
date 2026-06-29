@@ -1476,6 +1476,10 @@ body.resizing-file-explorer-changes {
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 0 5px 5px;
 }
+/* Differ timestamps are supporting metadata, smaller than the changed-file names. */
+.file-explorer-changes-panel .file-tree-date {
+  font-size: 70%;
+}
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
   --pane-bar-bg: var(--pane-tab-strip-bg);
@@ -2207,25 +2211,11 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
-  width: 17ch;
-}
-.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input[data-diff-ref-to],
-.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input[data-diff-ref-to] {
   width: 9ch;
 }
 @container (min-width: 900px) {
   .file-editor-diff-ref-panel {
     max-width: min(72vw, 620px);
-  }
-  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
-  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
-    width: clamp(17ch, 18vw, 34ch);
-    max-width: min(34ch, 32vw);
-  }
-  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input[data-diff-ref-to],
-  .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input[data-diff-ref-to] {
-    width: clamp(12ch, 14vw, 28ch);
-    max-width: min(28ch, 28vw);
   }
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset {

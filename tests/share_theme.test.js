@@ -99,6 +99,12 @@ async function runShareThemeSuite() {
     assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>3<\/span>/.test(repoHead), 'repo disclosure header shows repo name, tracked +added, -removed, and file count');
     assert.equal(/Behind|Ahead/.test(repoHead), false, 'ahead/behind stays out of the repo disclosure header');
     assert.ok(changesHtml.includes('1 repo, 3 files changed in &#39;1&#39;'), 'Finder diff summary names repo count, file count, and session explicitly');
+    assert.ok(changesHtml.includes('Compare:'), 'Differ labels the inline ref controls as Compare');
+    api.setSessionFilesLoadingForTest(true);
+    const inlineLoadingHtml = api.fileExplorerChangesPanelHtml();
+    assert.equal(inlineLoadingHtml.includes('class="changes-comparison-head"'), false, 'ref-change loading does not replace the Compare row with a top-level status');
+    assert.match(inlineLoadingHtml, /changes-repo-refs-main[\s\S]*diff-ref-inline[\s\S]*diff-ref-inline-reset[\s\S]*changes-repo-refs-detail[\s\S]*changes-repo-inline-loading[\s\S]*changes-loading/, 'ref-change loading appears directly below the Compare and Reset row');
+    api.setSessionFilesLoadingForTest(false);
     const comparisonSummaryStart = changesHtml.indexOf('class="changes-comparison-summary"');
     const comparisonSummary = changesHtml.slice(comparisonSummaryStart, changesHtml.indexOf('</div>', comparisonSummaryStart));
     assert.equal(/changes-summary-totals|changes-diff-add|changes-diff-remove|changes-repo-count/.test(comparisonSummary), false, 'Finder diff summary does not repeat global +line/-line/file totals');
@@ -226,7 +232,7 @@ async function runShareThemeSuite() {
         {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/touched-only.py', abs_path: '/repo/app/src/touched-only.py', mtime: 300, added: 0, removed: 0, source: 'transcript'},
       ],
     });
-    assert.ok(/changes-repo-refs[\s\S]*changes-repo-compare-title[\s\S]*Comparing[\s\S]*data-diff-ref-from[\s\S]*to[\s\S]*data-diff-ref-to/.test(changesHtml), 'Finder diff shows a per-repo comparison row with inline FROM/TO controls');
+    assert.ok(/changes-repo-refs[\s\S]*changes-repo-compare-title[\s\S]*Compare:[\s\S]*data-diff-ref-from[\s\S]*to[\s\S]*data-diff-ref-to/.test(changesHtml), 'Finder diff shows a per-repo Compare row with inline FROM/TO controls');
     assert.equal((changesHtml.match(/repo, 3 files changed in &#39;1&#39;/g) || []).length, 1, '#24: the repo/file-count summary appears exactly once (in the comparison card), not duplicated in the toolbar');
     assert.equal(changesHtml.includes('class="changes-summary"'), false, '#24: the standalone toolbar summary duplicate is removed');
     assert.ok(changesHtml.includes('class="changes-comparison-summary"'), '#24: the summary lives in the comparison card');
@@ -333,7 +339,7 @@ async function runShareThemeSuite() {
     assert.deepEqual(api.diffRefPopoverItems('origin/main', {compact: true, suggestions: collapsedHeadRefs}).map(item => item.short), ['abc123d/HEAD origin/main main'], 'Differ ref popup searches same-commit branch aliases');
     assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: collapsedHeadRefs, showAll: true}).some(item => item.short === 'abc123d'), false, 'Differ ref popup does not keep the duplicate short-SHA row for HEAD');
     const collapsedDifferHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD origin\/main main")[^>]*>/.test(collapsedDifferHtml), 'Differ comparison row shows the collapsed short-SHA/HEAD label and same-commit branch aliases');
+    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="HEAD")[^>]*>/.test(collapsedDifferHtml), 'Differ comparison row keeps HEAD concise while its picker carries same-commit branch aliases');
     const historyHeadPath = '/repo/app/src/history-head.md';
     api.setOpenFileStateForTest(historyHeadPath, {
       kind: 'text',
@@ -346,19 +352,21 @@ async function runShareThemeSuite() {
       ],
     });
     const collapsedEditorRefs = api.diffRefControlsHtml({compact: true, repo: '/repo/app', path: historyHeadPath});
-    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="abc123d\/HEAD origin\/main main")[^>]*>/.test(collapsedEditorRefs), 'Diff Editor ref toolbar shows the same collapsed short-SHA/HEAD label and same-commit branch aliases');
-    assert.equal((collapsedEditorRefs.match(/abc123d(?!\/HEAD)/g) || []).length, 0, 'Diff Editor ref toolbar does not show a separate duplicate short-SHA label for HEAD');
+    assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*value="HEAD")[^>]*>/.test(collapsedEditorRefs), 'Diff Editor ref toolbar keeps the collapsed HEAD label concise');
+    assert.equal(collapsedEditorRefs.includes('/HEAD origin/main main'), false, 'Diff Editor ref toolbar does not show branch aliases in the selected control');
+    assert.deepEqual(api.diffRefPopoverSubjectPartsForTest(collapsedHeadRefs[0]), {description: '[origin/main] [main] current head commit', pr: ''}, 'HEAD picker descriptions expose all same-commit branch aliases as bracketed labels');
     const manyDiffRefs = Array.from({length: 120}, (_, index) => ({ref: `${String(index).padStart(7, 'a')}abcdef`, short: `r${index}`, subject: `commit ${index}`}));
     const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));
     assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: manyDiffRefs, showAll: true}).length, 12, 'compact diff-ref popups are capped to avoid huge menus');
     assert.equal(api.diffRefPopoverItems('', {compact: false, suggestions: manyDiffRefs, showAll: true}).length, 18, 'full diff-ref popups are capped to a compact menu size');
     assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
-    assert.ok(/function diffRefComparisonLineHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'Editor and Differ FROM/TO rows share the same reset button helper');
+    assert.ok(/function diffRefComparisonLineHtml[\s\S]*diffRefResetButtonHtml\(refs,\s*'diff-ref-inline-reset'\)/.test(changedFilesSource), 'Differ uses the shared reset button helper with its right-aligned row class');
     assert.ok(/function diffRefControlsHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'compact Editor FROM/TO controls use the shared reset button helper');
     assert.ok(/function diffRefResetButtonHtml[\s\S]*t\('pref\.reset\.row'\)[\s\S]*<\/button>/.test(changedFilesSource), 'Diff reset button visibly says Reset');
     assert.equal(/function diffRefResetButtonHtml[\s\S]*>⇤<\/button>/.test(changedFilesSource), false, 'Diff reset button does not use a glyph-only label');
     assert.equal(/function diffRefResetButtonHtml[\s\S]*>↺<\/button>/.test(changedFilesSource), false, 'Diff reset button does not use the reload-looking circular arrow');
+    assert.ok(/diffRefReset\.closest\('\[data-diff-ref-controls\]'\)[\s\S]*diffRefReset\.parentElement\?\.querySelector/.test(changedFilesSource), 'Differ reset continues to resolve its sibling controls after right alignment');
     assert.ok(/function commitDiffRefControls[\s\S]*dataset\?\.diffRefPath[\s\S]*setRepoDiffRefs\(repo, fromInput\?\.value, toInput\?\.value, \{path\}\)/.test(changedFilesSource), 'editor diff ref commits carry the file path so no-history files do not fall back to repo history');
     assert.ok(/function syncDiffRefControlValues[\s\S]*dataset\?\.diffRefPath[\s\S]*diffRefFromSuggestions\(repo, path\)[\s\S]*diffRefToSuggestions\(refs\.from, repo, path\)/.test(changedFilesSource), 'editor diff ref sync keeps using file-scoped history after rerenders');
     assert.ok(/status\.textContent !== statusText[\s\S]*date\.textContent !== dateText/.test(changedFilesSource), 'Differ/Finder metadata slots avoid rewriting unchanged status/date text');
@@ -367,8 +375,8 @@ async function runShareThemeSuite() {
     // changes panel and the file-editor diff-ref toolbar) instead of two inline copies.
     assert.ok(/function openDiffRefPickerForInput\([^)]*\)\s*\{[\s\S]*?showDiffRefPicker\(input, \{showAll: true\}\)/.test(changedFilesSource), 'clicking/focusing a filled ref input still shows available options (via shared openDiffRefPickerForInput)');
     assert.ok(changedFilesSource.includes('openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('), 'changes panel routes ref-input focus/pointer through the shared picker-open helper');
-    assert.ok(/const minWidth = Math\.min\(compact \? 880 : 960, viewportWidth - 16\)/.test(changedFilesSource), 'diff-ref popup is wide enough for normal 80-char commit subjects');
-    assert.ok(/const maxWidth = compact \? 1040 : 1120/.test(changedFilesSource), 'diff-ref popup can expand beyond the old narrow 620px cap');
+    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup uses the available viewport width with an edge inset');
+    assert.ok(/const width = availableWidth/.test(changedFilesSource), 'diff-ref popup gives commit and branch descriptions all available horizontal space');
     assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
@@ -1873,10 +1881,11 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*var\(--z-sticky-pane-head\)[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
     assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
     assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
-    assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*grid-template-columns:\s*minmax\(18ch,\s*32ch\)\s*minmax\(0,\s*1fr\)\s*16ch\s*minmax\(8ch,\s*18ch\)/.test(preferencesCss), 'diff-ref popup aligns ref, subject, date, and author as separate columns');
+    assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*grid-template-columns:\s*8ch\s*minmax\(0,\s*1fr\)\s*max-content\s*max-content/.test(preferencesCss), 'diff-ref popup reserves its flexible width for the subject while date and author size to content');
+    assert.ok(/\.changes-repo-refs \.diff-ref-inline-reset\s*\{[^}]*margin-inline-start:\s*auto[^}]*margin-inline-end:\s*-4px/.test(preferencesCss), 'Differ Reset sits near the right pane edge on the Compare row');
     assert.ok(changedFilesSource.includes('diff-ref-suggestion-date') && changedFilesSource.includes('diff-ref-suggestion-author'), 'diff-ref popup renders date and author in separate cells so both columns line up');
-    assert.ok(/const minWidth = Math\.min\(compact \? 880 : 960, viewportWidth - 16\)/.test(changedFilesSource), 'diff-ref popup reserves enough width for normal 80-character commit subjects');
-    assert.ok(/const maxWidth = compact \? 1040 : 1120/.test(changedFilesSource), 'diff-ref popup width is capped for the viewport without truncating normal subjects');
+    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup uses the available viewport width with an edge inset');
+    assert.ok(/const width = availableWidth/.test(changedFilesSource), 'diff-ref popup gives commit and branch descriptions all available horizontal space');
     assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in dark mode');
     assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in light mode');
     assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');

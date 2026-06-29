@@ -1475,8 +1475,48 @@ class TmuxWebtermApp:
             })
         return sorted(records, key=lambda item: (item["start"], item["duration"], item["sequence"]))
 
-    def stats_history_payload_locked(self, since: int = 0, client_id: str = "") -> dict[str, Any]:
-        return {
+    def stats_history_agent_token_records_locked(self, since: int = 0, client_id: str = "", resolution_seconds: int = 0) -> list[dict[str, Any]]:
+        resolution = max(int(STATS_AGENT_TOKEN_BUCKET_SECONDS), int(resolution_seconds or 0))
+        grouped: dict[int, dict[str, Any]] = {}
+        for record in self.stats_history_records_locked(0, client_id=client_id):
+            start = int(record["start"] // resolution * resolution)
+            target = grouped.setdefault(start, {
+                "start": start,
+                "duration": resolution,
+                "sequence": 0,
+                "tokens_per_agent_total": 0.0,
+                "agent_token_samples": 0.0,
+                "agent_token_rates": {},
+            })
+            target["sequence"] = max(int(target["sequence"]), int(record["sequence"]))
+            target["tokens_per_agent_total"] += float(record["tokens_per_agent_total"] or 0.0)
+            target["agent_token_samples"] += float(record["agent_token_samples"] or 0.0)
+            for item in record["agent_token_rates"]:
+                key = item["key"]
+                existing = target["agent_token_rates"].setdefault(key, {
+                    "key": key,
+                    "label": item["label"],
+                    "total": 0.0,
+                    "samples": 0.0,
+                    "tokens": 0.0,
+                    "seconds": 0.0,
+                    "source": item["source"],
+                })
+                for field in ("total", "samples", "tokens", "seconds"):
+                    existing[field] += float(item[field] or 0.0)
+                if item["source"]:
+                    existing["source"] = item["source"]
+        return [
+            {
+                **record,
+                "agent_token_rates": [record["agent_token_rates"][key] for key in sorted(record["agent_token_rates"])],
+            }
+            for _start, record in sorted(grouped.items())
+            if int(record["sequence"]) > since
+        ]
+
+    def stats_history_payload_locked(self, since: int = 0, client_id: str = "", token_since: int = 0, token_resolution_seconds: int = 0) -> dict[str, Any]:
+        payload = {
             "sequence": self.stats_history_sequence,
             "records": self.stats_history_records_locked(since, client_id=client_id),
             "retention_seconds": STATS_HISTORY_RETENTION_SECONDS,
@@ -1484,6 +1524,15 @@ class TmuxWebtermApp:
             "rollup_bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS,
             "client_id": stats_history_client_id(client_id),
         }
+        if token_resolution_seconds > 0:
+            resolution = max(int(STATS_AGENT_TOKEN_BUCKET_SECONDS), int(token_resolution_seconds))
+            payload["agent_token_history"] = {
+                "sequence": self.stats_history_sequence,
+                "records": self.stats_history_agent_token_records_locked(token_since, client_id=client_id, resolution_seconds=resolution),
+                "resolution_seconds": resolution,
+                "snapshot": token_since == 0,
+            }
+        return payload
 
     def tmux_ai_status_empty(self) -> dict[str, Any]:
         return {
@@ -2224,7 +2273,7 @@ class TmuxWebtermApp:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
 
-    def stats_sample_payload(self, since: int = 0, client_id: str = "", token_consumer: bool = False) -> dict[str, Any]:
+    def stats_sample_payload(self, since: int = 0, client_id: str = "", token_consumer: bool = False, token_since: int = 0, token_resolution_seconds: int = 0) -> dict[str, Any]:
         shared_enabled = self.stats_history_uses_shared_status()
         if shared_enabled and token_consumer:
             consumer_until = time.time() + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS
@@ -2240,7 +2289,7 @@ class TmuxWebtermApp:
                 sample, _record_cpu_sample = self.current_stats_sample()
             with self.stats_history_lock:
                 self.stats_history_compact_locked(float(sample.get("time") or time.time()))
-                history = self.stats_history_payload_locked(max(0, since), client_id=client_id)
+                history = self.stats_history_payload_locked(max(0, since), client_id=client_id, token_since=max(0, token_since), token_resolution_seconds=max(0, token_resolution_seconds))
             return {
                 "ok": True,
                 **sample,
@@ -2256,7 +2305,7 @@ class TmuxWebtermApp:
         sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer)
         with self.stats_history_lock:
             self.stats_history_compact_locked(float(sample.get("time") or time.time()))
-            history = self.stats_history_payload_locked(max(0, since), client_id=client_id)
+            history = self.stats_history_payload_locked(max(0, since), client_id=client_id, token_since=max(0, token_since), token_resolution_seconds=max(0, token_resolution_seconds))
         return {
             "ok": True,
             **sample,

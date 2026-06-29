@@ -1,4 +1,5 @@
 import signal
+from types import SimpleNamespace
 
 from yolomux_lib import tmux_signals
 from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
@@ -144,6 +145,32 @@ def test_control_client_parent_death_signal_requests_sigterm(monkeypatch):
     tmux_signals.set_control_client_parent_death_signal()
 
 
+def test_macos_orphaned_control_client_reaper_is_platform_scoped(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tmux_signals.sys, "platform", "linux")
+    monkeypatch.setattr(tmux_signals.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Linux must not inspect macOS orphan clients")))
+
+    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == []
+
+    monkeypatch.setattr(tmux_signals.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        tmux_signals.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "101 1 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
+                "102 999 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
+                "103 1 tmux attach-session -t 1:\n"
+            ),
+        ),
+    )
+    monkeypatch.setattr(tmux_signals.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+
+    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == [101]
+    assert calls == [(101, signal.SIGTERM)]
+
+
 def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
     # run_control_client must spawn the control client with the parent-death preexec hook so the
     # leaked-orphan-on-hard-kill path is closed at the source, not mopped up later.
@@ -187,6 +214,12 @@ def test_tmux_control_event_filter_accepts_signal_notifications():
     assert tmux_control_event_relevant("not a control event") is False
 
 
+def test_tmux_pane_exit_hook_never_writes_into_a_terminal():
+    assert tmux_signal_hook_command("pane-exited") == "refresh-client"
+    assert tmux_signal_hook_command("pane-died") == "refresh-client"
+    assert "display-message" not in tmux_signal_hook_command("pane-exited")
+
+
 def test_tmux_signal_subscriptions_cover_activity_and_layout_formats():
     commands = tmux_signal_subscription_commands()
 
@@ -212,6 +245,6 @@ def test_install_tmux_signal_monitoring_scopes_options_and_hooks(monkeypatch):
     assert len(hook_calls) == len(tmux_signals.TMUX_SIGNAL_HOOKS)
     assert all(f"[{tmux_signals.TMUX_SIGNAL_HOOK_INDEX}]" in args[2] for args in hook_calls)
     assert any("client-resized" in args[2] for args in hook_calls)
-    assert any(args[2].startswith("pane-exited") and args[3] == tmux_signal_hook_command("pane-exited") for args in hook_calls)
-    assert any(args[2].startswith("pane-died") and args[3] == tmux_signal_hook_command("pane-died") for args in hook_calls)
+    assert any(args[2].startswith("pane-exited") and args[3] == "refresh-client" for args in hook_calls)
+    assert any(args[2].startswith("pane-died") and args[3] == "refresh-client" for args in hook_calls)
     assert all(args[3] == tmux_signal_hook_command(args[2].split("[", 1)[0]) for args in hook_calls)

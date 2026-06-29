@@ -12,6 +12,8 @@ let jsDebugStatsPollInFlight = false;
 let jsDebugStatsHistoryFlushTimer = null;
 let jsDebugStatsHistoryFlushInFlight = false;
 let jsDebugStatsServerSequence = 0;
+let jsDebugStatsAgentTokenSequence = 0;
+let jsDebugStatsAgentTokenResolutionSeconds = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
@@ -73,6 +75,7 @@ const jsDebugGraphAgentTokenColors = Object.freeze([
 ]);
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
+const jsDebugGraphAgentTokenBuckets = new Map();
 const jsDebugGraphEventBuckets = new Map();
 const jsDebugGraphEventResponseBytes = new Map();
 const jsDebugGraphEventRefTimes = new Map();
@@ -766,6 +769,7 @@ function recordJsDebugStatsSample(payload = {}) {
   );
   if (serverChanged) {
     jsDebugStatsServerSequence = 0;
+    resetDebugGraphAgentTokenHistory();
     jsDebugGraphPendingServerBuckets.clear();
   }
   if (Number.isFinite(Number(payload.uptime_seconds))) jsDebugStatsServerUptimeSeconds = Math.max(0, Number(payload.uptime_seconds));
@@ -793,6 +797,7 @@ function recordJsDebugStatsSample(payload = {}) {
 function clearJsDebugGraphData() {
   jsDebugGraphRawBuckets.clear();
   jsDebugGraphRollupBuckets.clear();
+  resetDebugGraphAgentTokenHistory();
   jsDebugGraphEventBuckets.clear();
   jsDebugGraphEventResponseBytes.clear();
   jsDebugGraphEventRefTimes.clear();
@@ -877,7 +882,40 @@ function debugGraphApplyServerHistory(history = {}) {
   if (Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
+  debugGraphApplyServerAgentTokenHistory(history.agent_token_history);
   compactJsDebugGraphBuckets();
+}
+
+function debugGraphApplyServerAgentTokenHistory(history = {}) {
+  if (!history || typeof history !== 'object') return;
+  const resolutionSeconds = Number(history.resolution_seconds);
+  if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return;
+  if (history.snapshot || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds) jsDebugGraphAgentTokenBuckets.clear();
+  jsDebugStatsAgentTokenResolutionSeconds = resolutionSeconds;
+  const sequence = Number(history.sequence);
+  if (Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
+  const records = Array.isArray(history.records) ? history.records : [];
+  for (const record of records) {
+    const startSeconds = Number(record?.start);
+    const durationSeconds = Number(record?.duration);
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) continue;
+    const bucket = debugGraphBucket(jsDebugGraphAgentTokenBuckets, Math.floor(startSeconds * 1000), durationSeconds * 1000);
+    bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
+    bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
+    debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
+  }
+}
+
+function debugGraphAgentTokenResolution(nowMs = Date.now()) {
+  const rangeSeconds = debugGraphDomain(nowMs).rangeSeconds;
+  if (rangeSeconds < 4 * 60 * 60) return 0;
+  return rangeSeconds >= 16 * 60 * 60 ? 5 * 60 : 2 * 60;
+}
+
+function resetDebugGraphAgentTokenHistory() {
+  jsDebugStatsAgentTokenSequence = 0;
+  jsDebugStatsAgentTokenResolutionSeconds = 0;
+  jsDebugGraphAgentTokenBuckets.clear();
 }
 
 function debugGraphAggregateBucket(map, source, scaleMs) {
@@ -914,6 +952,17 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGrap
     if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
+}
+
+function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
+  const resolutionSeconds = debugGraphAgentTokenResolution(nowMs);
+  if (!resolutionSeconds || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds || !jsDebugGraphAgentTokenBuckets.size) {
+    return debugGraphDisplayBuckets(nowMs, jsDebugGraphAgentTokenBucketSeconds, jsDebugGraphRangeSeconds);
+  }
+  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
+  return [...jsDebugGraphAgentTokenBuckets.values()]
+    .filter(bucket => debugGraphBucketInRange(bucket, domain.startMs, domain.endMs))
+    .sort((a, b) => a.startMs - b.startMs);
 }
 
 function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
@@ -1648,6 +1697,7 @@ function debugGraphChartAxisMax(group, rawMax) {
 }
 
 function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now()) {
+  if (group?.key === 'agentTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
     return debugGraphDisplayBuckets(nowMs, bucketSeconds, jsDebugGraphRangeSeconds);
@@ -1734,6 +1784,8 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   return {
     rawBuckets: jsDebugGraphRawBuckets.size,
     rollupBuckets: jsDebugGraphRollupBuckets.size,
+    agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
+    agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
     displayBuckets: buckets.length,
     eventRefs: jsDebugGraphEventBuckets.size,
     scaleSeconds: jsDebugGraphScaleSeconds,
@@ -1781,7 +1833,12 @@ async function pollJsDebugStatsSample() {
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
-    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}`, {cache: 'no-store'});
+    const tokenResolution = debugGraphAgentTokenResolution();
+    if (tokenResolution !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
+    const tokenHistory = tokenResolution
+      ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
+      : '';
+    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}${tokenHistory}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {
@@ -2037,6 +2094,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
+  if (debugGraphAgentTokenResolution() !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
   if (!render) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     graph.className = debugGraphClassName();

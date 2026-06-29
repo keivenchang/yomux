@@ -699,7 +699,7 @@ body.theme-light .js-debug-graph-view {
 }
 .diff-ref-controls.compact .diff-ref-input,
 .diff-ref-controls.compact .diff-ref-control input {
-  width: clamp(17ch, 9vw, 19ch);
+  width: 9ch;
   height: 20px;
 }
 .diff-ref-reset {
@@ -732,7 +732,7 @@ body.theme-light .js-debug-graph-view {
   min-width: min(520px, 90vw);
   max-height: min(320px, 42vh);
   overflow: auto;
-  padding: 4px;
+  padding: 4px 12px 4px 4px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel2);
@@ -751,7 +751,7 @@ body.theme-light .js-debug-graph-view {
   min-width: 0;
   height: 24px;
   display: grid;
-  grid-template-columns: minmax(18ch, 32ch) minmax(0, 1fr) 16ch minmax(8ch, 18ch);
+  grid-template-columns: 8ch minmax(0, 1fr) max-content max-content;
   align-items: center;
   gap: 8px;
   padding: 0 6px;
@@ -785,8 +785,22 @@ body.theme-light .js-debug-graph-view {
 }
 .diff-ref-suggestion-subject {
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
   color: var(--muted);
+  white-space: nowrap;
+}
+.diff-ref-suggestion-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diff-ref-suggestion-pr {
+  flex: 0 0 auto;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--text);
 }
 .diff-ref-suggestion-date,
 .diff-ref-suggestion-author {
@@ -934,15 +948,28 @@ body.theme-light .js-debug-graph-view {
 }
 /* C6: per-repo FROM/TO controls + comparison title row, directly under each repo header. */
 .changes-repo-refs {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 8px;
+  display: grid;
+  gap: 3px;
   padding: 4px 8px;
   background: var(--panel);
   border-top: 1px solid var(--line);
   font-size: var(--ui-font-size-xs);
   color: var(--muted);
+}
+.changes-repo-refs-main,
+.changes-repo-refs-detail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.changes-repo-refs-detail {
+  min-height: 16px;
+}
+.changes-repo-inline-loading {
+  display: inline-flex;
+  align-items: center;
 }
 .changes-repo-compare-title {
   color: var(--muted);
@@ -953,6 +980,13 @@ body.theme-light .js-debug-graph-view {
 }
 .changes-repo-refs .diff-ref-controls {
   margin-inline-start: 0;
+}
+.changes-repo-refs .changes-repo-compare-meta {
+  margin-inline-start: 0;
+}
+.changes-repo-refs .diff-ref-inline-reset {
+  margin-inline-start: auto;
+  margin-inline-end: -4px;
 }
 .changes-file-list {
   display: grid;

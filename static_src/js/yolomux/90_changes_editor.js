@@ -344,6 +344,17 @@ function diffRefDisplayShort(item) {
   return `${base}/${aliases[0]}${aliases.length > 1 ? ` ${aliases.slice(1).join(' ')}` : ''}`;
 }
 
+// Keep the selected control to a stable short-SHA width; aliases are available in the popup.
+function diffRefCompactDisplay(item) {
+  const ref = cleanDiffRef(item?.ref, '');
+  if (ref === 'HEAD' || ref === 'current') return ref;
+  const commit = diffRefItemCommitId(item);
+  if (commit) return commit.slice(0, 7);
+  const short = cleanDiffRef(item?.short, '') || ref;
+  const sha = short.match(/\b[0-9a-f]{7,40}\b/i);
+  return sha ? sha[0].slice(0, 7) : short.split(/[\s/]/)[0];
+}
+
 function diffRefOptionLabel(item, separator = ' - ') {
   return [diffRefDisplayShort(item), item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
 }
@@ -470,7 +481,21 @@ function diffRefToSuggestions(fromRef = diffRefFrom, repo, path = '') {
 function diffRefInputDisplayValue(value, suggestions) {
   const ref = cleanDiffRef(value, '');
   const match = (Array.isArray(suggestions) ? suggestions : []).find(item => diffRefOptionMatches(ref, item));
-  return match ? diffRefDisplayShort(match) : ref;
+  return match ? diffRefCompactDisplay(match) : ref;
+}
+
+function diffRefPopoverSubjectParts(item) {
+  const subject = String(item?.subject || item?.ref || '').trim();
+  const explicitNumber = Number(item?.pr_number || item?.prNumber || 0);
+  const match = subject.match(/^(.*?)(?:\s*\(\s*(?:PR\s*)?#(\d+)\s*\)|\s+(?:PR\s*)?#(\d+))\s*$/i);
+  const number = explicitNumber > 0 ? explicitNumber : Number(match?.[2] || match?.[3] || 0);
+  const commitDescription = match?.[1].trim() || subject;
+  const branchAliases = item?.ref === 'HEAD'
+    ? diffRefDisplayAliases(item).filter(alias => alias !== 'HEAD')
+    : [];
+  const aliasesText = branchAliases.map(alias => `[${alias}]`).join(' ');
+  const description = [aliasesText, commitDescription].filter(Boolean).join(' ');
+  return {description, pr: number > 0 ? `(#${number})` : ''};
 }
 
 function diffRefInputHtml(options = {}) {
@@ -550,10 +575,10 @@ function positionDiffRefPopover(input, compact) {
   const viewport = appViewport();
   const viewportWidth = effectiveViewportWidth(viewport);
   const viewportHeight = Math.max(240, viewport.height || 720);
-  const minWidth = Math.min(compact ? 880 : 960, viewportWidth - 16);
-  const maxWidth = compact ? 1040 : 1120;
-  const width = Math.min(maxWidth, viewportWidth - 16, Math.max(minWidth, rect.width));
-  const left = Math.max(8, Math.min(rect.left, viewportWidth - width - 8));
+  const edgePadding = 24;
+  const availableWidth = Math.max(280, viewportWidth - edgePadding * 2);
+  const width = availableWidth;
+  const left = Math.max(edgePadding, Math.min(rect.left, viewportWidth - width - edgePadding));
   const top = Math.min(rect.bottom + 4, viewportHeight - 48);
   popover.style.width = `${Math.round(width)}px`;
   popover.style.left = `${Math.round(left)}px`;
@@ -579,12 +604,14 @@ function renderDiffRefPopover(input, options = {}) {
   }
   popover.innerHTML = items.map((item, index) => {
     const active = index === diffRefPopoverActiveIndex;
-    const ref = diffRefDisplayShort(item) || item?.ref || '';
-    const subject = item?.subject || item?.ref || '';
-    const label = diffRefOptionLabel(item);
+    const ref = diffRefCompactDisplay(item) || item?.ref || '';
+    const subject = diffRefPopoverSubjectParts(item);
+    const subjectText = [subject.description, subject.pr].filter(Boolean).join(' ');
+    const label = [diffRefDisplayShort(item), subjectText].filter(Boolean).join(' - ') || item?.ref || '';
     const dateText = diffRefItemDateText(item);
     const authorText = diffRefItemAuthorText(item);
-    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span><span class="diff-ref-suggestion-date">${esc(dateText)}</span><span class="diff-ref-suggestion-author">${esc(authorText)}</span></button>`;
+    const pr = subject.pr ? `<span class="diff-ref-suggestion-pr">${esc(subject.pr)}</span>` : '';
+    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject" title="${esc(subjectText)}"><span class="diff-ref-suggestion-description">${esc(subject.description)}</span>${pr}</span><span class="diff-ref-suggestion-date">${esc(dateText)}</span><span class="diff-ref-suggestion-author">${esc(authorText)}</span></button>`;
   }).join('');
   positionDiffRefPopover(input, context.compact);
   popover.hidden = false;
@@ -678,11 +705,12 @@ function diffRefControlsHtml(options = {}) {
   </span>`;
 }
 
-function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
+function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   const isDefault = refs.from === 'HEAD' && refs.to === 'current';
   const resetHidden = isDefault ? ' hidden' : '';
   const label = esc(t('diff.ref.reset'));
-  return `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('pref.reset.row'))}</button>`;
+  const className = `diff-ref-reset${extraClass ? ` ${extraClass}` : ''}`;
+  return `<button type="button" class="${className}" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('pref.reset.row'))}</button>`;
 }
 
 function invalidateSessionFilesCaches() {
@@ -1334,7 +1362,7 @@ function diffRefComparisonLineHtml(repo) {
   const body = esc(t('diff.comparing', {from: '{{FROM}}', to: '{{TO}}'}))
     .replace('{{FROM}}', fromInput)
     .replace('{{TO}}', toInput);
-  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}${diffRefResetButtonHtml(refs)}</span>`;
+  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}</span>${diffRefResetButtonHtml(refs, 'diff-ref-inline-reset')}`;
 }
 
 // C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
@@ -1428,6 +1456,7 @@ function payloadHasRenderableRepoSections(payload) {
 function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
+  if (loading && options.inlineLoading === true) return '';
   if (options.compact) {
     if (loading) return `<section class="changes-comparison-head compact">${changesLoadingHtml(payload?.session || '')}</section>`;
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
@@ -1591,7 +1620,12 @@ function renderChangesGroups(groupsEl, files, options = {}) {
         refsRow.className = compact ? 'changes-repo-refs compact' : 'changes-repo-refs';
         head.after(refsRow);
       }
-      refsRow.innerHTML = `${diffRefComparisonLineHtml(repo)}${repoComparisonErrorHtml(repoInfo)}${changesRepoMetaHtml(repoInfo, {hideZero: compact})}`;
+      const details = [
+        options.loading === true ? `<span class="changes-repo-inline-loading">${changesLoadingHtml(payload.session || '')}</span>` : '',
+        repoComparisonErrorHtml(repoInfo),
+        changesRepoMetaHtml(repoInfo, {hideZero: compact}),
+      ].filter(Boolean).join('');
+      refsRow.innerHTML = `<div class="changes-repo-refs-main">${diffRefComparisonLineHtml(repo)}</div>${details ? `<div class="changes-repo-refs-detail">${details}</div>` : ''}`;
       refsRow.hidden = false;
     } else if (refsRow) {
       refsRow.hidden = true;
@@ -1705,7 +1739,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       </div>
-      ${changesComparisonHeaderHtml(payload, files, {loading})}
+      ${changesComparisonHeaderHtml(payload, files, {loading, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
       ${errorHtml}
       ${warningHtml}
       ${empty ? empty : '<div class="changes-groups"></div>'}`;
@@ -1720,7 +1754,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
-    ${changesComparisonHeaderHtml(payload, files, {loading, compact: true})}
+    ${changesComparisonHeaderHtml(payload, files, {loading, compact: true, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
     ${errorHtml}
     ${warningHtml}
     ${empty ? empty : '<div class="changes-groups"></div>'}`;
@@ -1789,7 +1823,8 @@ function fileExplorerChangesPanelHtml() {
   const groupsHtml = changesGroupsSnapshotHtml(files, {
     payload: fileExplorerSessionFilesPayload,
     compact: fileExplorerMode !== 'diff',
-    includeEmptyRepoSections: fileExplorerMode === 'diff' && !loading,
+    loading,
+    includeEmptyRepoSections: fileExplorerMode === 'diff' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesPayload)),
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
@@ -2083,7 +2118,8 @@ function bindChangesPanel(panel) {
     const diffRefReset = event.target.closest('[data-diff-ref-reset]');
     if (diffRefReset && panel.contains(diffRefReset)) {
       event.preventDefault();
-      const controls = diffRefReset.closest('[data-diff-ref-controls]');
+      const controls = diffRefReset.closest('[data-diff-ref-controls]')
+        || diffRefReset.parentElement?.querySelector?.('[data-diff-ref-controls]');
       const repo = controls?.dataset?.diffRefRepo || '';
       const path = controls?.dataset?.diffRefPath || '';
       setRepoDiffRefs(repo, 'HEAD', 'current', {path});
@@ -2727,6 +2763,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
       {
         payload: fileExplorerSessionFilesPayload,
         compact: fileExplorerMode !== 'diff',
+        loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, fileExplorerDifferFiles()),
         includeEmptyRepoSections: fileExplorerMode === 'diff',
       },
       {force: options.force === true},

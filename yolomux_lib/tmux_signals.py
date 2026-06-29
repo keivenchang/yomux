@@ -9,8 +9,10 @@ without attaching clients, so it cannot resize user windows.
 from __future__ import annotations
 
 import ctypes
+import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -131,7 +133,6 @@ TMUX_SIGNAL_HOOKS = (
     "client-resized",
     "window-resized",
 )
-TMUX_SIGNAL_PANE_EXIT_HOOKS = frozenset({"pane-exited", "pane-died"})
 TMUX_SIGNAL_HOOK_EVENT_PREFIX = "yolomux-tmux-signal-hook:"
 TMUX_SIGNAL_HOOK_INDEX = 7717
 TMUX_SIGNAL_MONITOR_SILENCE_SECONDS = 60
@@ -176,13 +177,61 @@ def set_control_client_parent_death_signal() -> None:
         _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
 
 
+def reap_macos_orphaned_tmux_control_clients() -> list[int]:
+    """Terminate monitor clients left behind by a crashed macOS YOLOmux process.
+
+    Linux uses PR_SET_PDEATHSIG above, but macOS has no equivalent. Limit the
+    sweep to orphaned (PPID 1) read-only, ignore-size control clients so it
+    cannot affect an interactive tmux attach or another live server's monitor.
+    """
+    if sys.platform != "darwin":
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-eww", "-o", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    reaped: list[int] = []
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            pid, parent_pid = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        if parent_pid != 1:
+            continue
+        args = fields[2].split()
+        if not args or os.path.basename(args[0]) != "tmux":
+            continue
+        if "-C" not in args or "attach-session" not in args or "read-only,ignore-size" not in args:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        reaped.append(pid)
+    return reaped
+
+
 def tmux_signal_subscription_commands() -> list[list[str]]:
     return [["refresh-client", "-B", f"{name}:{fmt}"] for name, fmt in TMUX_SIGNAL_SUBSCRIPTIONS]
 
 
-def tmux_signal_hook_command(hook: str) -> str:
-    if hook in TMUX_SIGNAL_PANE_EXIT_HOOKS:
-        return f'display-message -p "{TMUX_SIGNAL_HOOK_EVENT_PREFIX}{hook}:#{{hook_pane}}" ; refresh-client'
+def tmux_signal_hook_command(_hook: str) -> str:
+    # `display-message -p` writes to whichever tmux client executes a global
+    # hook. That can be an interactive browser-backed attach, leaking the
+    # internal event token into a visible terminal. Existing control-mode
+    # subscriptions observe the refresh without terminal output.
     return "refresh-client"
 
 
@@ -254,6 +303,7 @@ class TmuxSignalEventWatcher:
         with self.lock:
             if self.thread is not None and self.thread.is_alive():
                 return False
+            reap_macos_orphaned_tmux_control_clients()
             self.stop_event.clear()
             self.thread = threading.Thread(target=self.run, name="tmux-signal-events", daemon=True)
             self.thread.start()

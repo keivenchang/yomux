@@ -166,6 +166,7 @@ async function runEditorPreviewSuite() {
     const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
     const paneTabsCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
     const treeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const changesCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
     const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const settingsRuntimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
@@ -320,6 +321,7 @@ async function runEditorPreviewSuite() {
     assert.equal(/metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), false, 'metadata pulse no longer has a fixed iteration count');
     assert.equal(/900ms ease-in-out infinite alternate|metadata-badge-pulse 1\.4s/.test(sessionsCss), false, 'old hardcoded pulse durations are gone from session/popover CSS');
     assert.ok(/\.file-tree-date\s*\{[\s\S]*border:\s*1px solid transparent[\s\S]*border-radius:\s*5px/.test(treeCss), 'recency date cells have a visible border target for the shared attention-ring animation');
+    assert.ok(/\.file-explorer-changes-panel \.file-tree-date\s*\{[^}]*font-size:\s*70%/.test(changesCss), 'Differ relative timestamps are 70% of the filename font size');
     assert.equal(/file-tree-recency-pulse/.test(treeCss + activitySource), false, 'the old standalone file-tree recency pulse is gone');
     assert.equal(/10s ease-out/.test(treeCss), false, 'recency no longer uses the old one-shot ten-second pulse');
     assert.ok((tokensCss.match(/--file-tree-recency-hot:\s*var\(--file-tree-recency-max-contrast\);/g) || []).length >= 2, 'plain hot recency uses the shared max-contrast token in dark and light themes');
@@ -2392,6 +2394,33 @@ async function runEditorPreviewSuite() {
     assert.ok(xValues[0] > 550, `one-hour-old data stays near the right edge of the 24h graph, got ${xValues[0]}`);
     assert.ok(xValues[1] > xValues[0] && xValues[1] <= 600, `newer data stays later in the selected 24h graph, got ${xValues.join(',')}`);
     assert.equal(html.includes('10s buckets | 24h'), false, 'graph omits the redundant bottom scale footer');
+  });
+
+  test('YO!stats uses server-aggregated token points for wide time ranges', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(86400);
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 40,
+      records: [],
+      agent_token_history: {
+        sequence: 40,
+        resolution_seconds: 300,
+        snapshot: true,
+        records: Array.from({length: 12}, (_item, index) => ({
+          start: Math.floor((now - (60 * 60 * 1000) + index * 300000) / 1000 / 300) * 300,
+          duration: 300,
+          sequence: 29 + index,
+          agent_token_samples: 1,
+          agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 10, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
+        })),
+      },
+    });
+    const summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.agentTokenResolutionSeconds, 300, '24-hour token history retains the server-selected five-minute resolution');
+    assert.equal(summary.agentTokenBuckets, 12, 'wide token history stores only server-aggregated points');
+    assert.equal(api.debugGraphAgentTokenDisplayBucketsForTest(now).length, 12, 'Agent tokens/min chart reads the downsampled server point series');
   });
 
   test('YO!stats split charts render deterministic Y-axis max labels with units', () => {
@@ -6236,9 +6265,10 @@ async function runEditorPreviewSuite() {
       assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
       assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');
       assert.equal(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*38px/.test(css), false, 'editor info bar: compact diff refs are not hard-capped before the /HEAD suffix');
-      assert.ok(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*clamp\(17ch,\s*18vw,\s*34ch\)/.test(css), 'editor info bar: compact diff refs can show sha/HEAD labels');
+      assert.ok(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*9ch/.test(css), 'editor info bar: compact diff refs reserve only a short-SHA width');
+      assert.equal(css.includes('clamp(17ch, 18vw, 34ch)'), false, 'editor info bar: compact diff refs do not expand to show branch aliases');
       assert.ok(/\.file-editor-toolbar\s*\{[^}]*container-type:\s*inline-size/.test(css), 'editor info bar: FROM/TO/reset expansion keys off toolbar width, not the browser viewport');
-      assert.ok(/@container \(min-width: 900px\)\s*\{[\s\S]*\.file-editor-diff-ref-panel\s*\{[^}]*max-width:\s*min\(72vw,\s*620px\)/.test(css), 'editor info bar: FROM/TO/reset panel has enough width for branch aliases on desktop toolbars');
+      assert.ok(/@container \(min-width: 900px\)\s*\{[\s\S]*\.file-editor-diff-ref-panel\s*\{[^}]*max-width:\s*min\(72vw,\s*620px\)/.test(css), 'editor info bar: the compact comparison panel remains bounded on desktop toolbars');
       assert.ok(/\.file-tab-parent\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'duplicate file-tab parent suffix is styled as compact muted metadata');
       assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*start/.test(css), 'Preferences selects/text inputs are left-aligned from the shared inset');
       assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(css), 'Preferences number inputs are left-aligned from the shared inset');
@@ -7031,6 +7061,12 @@ async function runEditorPreviewSuite() {
     assert.ok(/changes-repo-refs compact[\s\S]*data-diff-ref-from[\s\S]*data-diff-ref-to/.test(panel), '#121/C15: the FROM/TO text pickers are present inline on the repo comparison line');
     assert.ok(panel.includes(`aria-label="${zhHant['diff.ref.from.aria']}"`), '#121: the FROM picker aria-label is localized');
     assert.ok(panel.includes(zhHant['changes.ahead.one'].replace('{count}', '1')), '#121: the Ahead-N-commit meta is localized (tPlural)');
+    api.setDiffRefsByRepoForTest('/repo/app', {from: 'abc123def456', to: 'current'});
+    const compactPanel = api.fileExplorerChangesPanelHtml();
+    assert.match(compactPanel, /data-diff-ref-from[^>]*value="abc123d"|value="abc123d"[^>]*data-diff-ref-from/, '#121/C15: selected refs render as a short SHA without branch aliases');
+    assert.deepEqual(api.diffRefPopoverSubjectPartsForTest({subject: 'Fix graph update (#123)'}), {description: 'Fix graph update', pr: '(#123)'}, '#121/C15: the picker keeps a PR number visible beside the description');
+    assert.deepEqual(api.diffRefPopoverSubjectPartsForTest({ref: 'HEAD', aliases: ['HEAD', 'origin/main', 'main', 'keivenc/some-branch'], subject: 'Fix graph update (#123)'}), {description: '[origin/main] [main] [keivenc/some-branch] Fix graph update', pr: '(#123)'}, '#121/C15: the HEAD picker row shows all same-commit branch aliases as bracketed labels before its commit description');
+    assert.equal(api.diffRefCompactDisplayForTest({ref: 'abc123def456', short: 'abc123d/HEAD main', commit: 'abc123def456'}), 'abc123d', '#121/C15: compact ref display omits /HEAD and branch aliases');
     // No bare English leaks in the localized Modified-files panel.
     assert.ok(!/>Modified files<|>Refresh<|>FROM <|>TO <|Ahead 1 commit|Comparing /.test(panel), '#121: no English leaks in the localized Modified-files panel');
     // Source guards: the menu/changes builders carry no bare English literals (all via t()).

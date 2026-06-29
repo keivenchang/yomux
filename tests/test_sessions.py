@@ -105,16 +105,34 @@ def test_find_recent_codex_transcript_orders_by_name_without_stat_storm(tmp_path
     cwd = "/repo/project"
     older = day / "rollout-2026-06-01T08-00-00-aaaa.jsonl"
     newer = day / "rollout-2026-06-01T10-00-00-bbbb.jsonl"
-    for path in (older, newer):
-        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": cwd}}), encoding="utf-8")
+    older.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/repo/other"}}), encoding="utf-8")
+    newer.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": cwd}}), encoding="utf-8")
 
     stat_calls: list[Path] = []
     original_stat = Path.stat
     monkeypatch.setattr(Path, "stat", lambda self, *args, **kwargs: (stat_calls.append(self) or original_stat(self, *args, **kwargs)))
 
-    # Newest-by-name wins, and ordering issues no per-rollout-file stat() (no syscall storm).
+    # A single matching rollout still avoids per-rollout-file stat() calls.
     assert sessions.find_recent_codex_transcript(cwd, root=root) == newer
     assert [path for path in stat_calls if path.name.startswith("rollout-")] == []
+
+
+def test_find_recent_codex_transcript_prefers_newest_mtime_among_same_cwd_matches(tmp_path):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    cwd = "/repo/resumed"
+    old_day = root / "2026" / "06" / "08"
+    new_day = root / "2026" / "06" / "12"
+    old_day.mkdir(parents=True)
+    new_day.mkdir(parents=True)
+    resumed = old_day / "rollout-2026-06-08T08-00-00-old.jsonl"
+    stale = new_day / "rollout-2026-06-12T10-00-00-new.jsonl"
+    for path in (resumed, stale):
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": cwd}}), encoding="utf-8")
+    os.utime(stale, (1000, 1000))
+    os.utime(resumed, (5000, 5000))
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == resumed
 
 
 def test_find_recent_codex_transcript_falls_back_to_mtime_for_resumed_old_file(tmp_path):
@@ -197,6 +215,62 @@ def test_codex_transcript_from_process_fd_accepts_deleted_suffix(tmp_path, monke
     monkeypatch.setattr(sessions.os, "readlink", fake_readlink)
 
     assert sessions.codex_transcript_from_process_fd(123, root=root, fd_dir=fd_dir) == transcript
+
+
+def test_codex_transcript_from_process_fd_uses_darwin_lsof_and_caches_result(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    old = root / "2026" / "05" / "rollout-old.jsonl"
+    live = root / "2026" / "06" / "rollout-live.jsonl"
+    outside = tmp_path / "outside" / "rollout-other.jsonl"
+    for path in (old, live, outside):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+    os.utime(old, (1000, 1000))
+    os.utime(live, (5000, 5000))
+    calls = []
+
+    def lsof_runner(args, timeout):
+        calls.append((args, timeout))
+        return subprocess.CompletedProcess(args, 0, f"p123\nf4\nn{old}\nf5\nn{outside}\nf6\nn{live}\n", "")
+
+    monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
+
+    assert sessions.codex_transcript_from_process_fd(123, root=root, lsof_runner=lsof_runner) == live
+    assert sessions.codex_transcript_from_process_fd(123, root=root, lsof_runner=lsof_runner) == live
+    assert calls == [(["lsof", "-p", "123", "-Fn"], sessions.CODEX_LSOF_TIMEOUT_SECONDS)]
+
+
+def test_codex_transcript_from_process_fd_keeps_linux_proc_path(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    transcript = root / "2026" / "05" / "rollout-owned.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+    fd_dir = tmp_path / "fd"
+    fd_dir.mkdir()
+    (fd_dir / "4").symlink_to(transcript)
+    monkeypatch.setattr(sessions.platform, "system", lambda: "Linux")
+
+    def unexpected_lsof(*_args, **_kwargs):
+        raise AssertionError("Linux /proc lookup must not call lsof")
+
+    assert sessions.codex_transcript_from_process_fd(123, root=root, fd_dir=fd_dir, lsof_runner=unexpected_lsof) == transcript
+
+
+def test_process_cwd_uses_darwin_lsof(tmp_path, monkeypatch):
+    expected = tmp_path / "repo"
+    expected.mkdir()
+    calls = []
+
+    def lsof_runner(args, timeout):
+        calls.append((args, timeout))
+        return subprocess.CompletedProcess(args, 0, f"p123\nfwd\nn{expected}\n", "")
+
+    monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
+
+    assert sessions.process_cwd(123, lsof_runner=lsof_runner) == str(expected)
+    assert calls == [(["lsof", "-p", "123", "-a", "-d", "cwd", "-Fn"], sessions.CODEX_LSOF_TIMEOUT_SECONDS)]
 
 
 def test_codex_transcript_session_id_reads_session_meta_payload_id(tmp_path):

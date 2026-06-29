@@ -99,7 +99,7 @@
   "dialog.staleStatus": "changed on disk; saving will ask what to keep",
   "dialog.unableLoadDisk": "unable to load disk version",
   "dialog.unsavedChanges": "This editor has unsaved changes.",
-  "diff.comparing": "Comparing {from} to {to}",
+  "diff.comparing": "Compare: {from} to {to}",
   "diff.ref.base": "Base",
   "diff.ref.defaultBase": "Default base",
   "diff.ref.from": "FROM",

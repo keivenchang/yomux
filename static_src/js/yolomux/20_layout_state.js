@@ -1939,6 +1939,23 @@ function browserFaviconRoundedRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
+// Favicon background follows the user's Active color preference and the theme (no hardcoded
+// hex): it reads --active-accent, which flips with the theme and the active_color choice
+// (green/blue/orange/yellow/purple/white), falling back to the legacy green if the var is
+// unavailable (e.g. before CSS loads). The "Y" glyph stays a fixed dark color (below) — it
+// reads fine on every (bright) accent and keeps the original look.
+function browserFaviconAccentColors() {
+  const fallbackBg = '#99d441';
+  try {
+    const root = document.documentElement;
+    if (!root || typeof getComputedStyle !== 'function') return {bg: fallbackBg};
+    const bg = (getComputedStyle(root).getPropertyValue('--active-accent') || '').trim();
+    return {bg: bg || fallbackBg};
+  } catch (_) {
+    return {bg: fallbackBg};
+  }
+}
+
 function renderBrowserFaviconDataUrl(count) {
   const canvas = document.createElement('canvas');
   canvas.width = 64;
@@ -1946,9 +1963,10 @@ function renderBrowserFaviconDataUrl(count) {
   const ctx = canvas.getContext?.('2d');
   if (!ctx || typeof canvas.toDataURL !== 'function') return '';
 
+  const faviconAccent = browserFaviconAccentColors();
   ctx.clearRect(0, 0, 64, 64);
   browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10);
-  ctx.fillStyle = '#99d441';
+  ctx.fillStyle = faviconAccent.bg;
   ctx.fill();
 
   const label = browserFaviconBadgeLabel(count);
@@ -1992,13 +2010,17 @@ function browserFaviconLink() {
 
 function updateBrowserFavicon(options = {}) {
   const count = browserFaviconBadgeCount();
-  if (!options.force && browserFaviconLastBadge === count) return false;
+  // Include the accent in the dedupe signature so a theme/active-color change re-renders
+  // on the next refresh tick even when the badge count is unchanged.
+  const accent = browserFaviconAccentColors();
+  const signature = `${count}|${accent.bg}`;
+  if (!options.force && browserFaviconLastBadge === signature) return false;
   const dataUrl = renderBrowserFaviconDataUrl(count);
   if (!dataUrl) return false;
   const link = browserFaviconLink();
   if (!link) return false;
   link.href = dataUrl;
-  browserFaviconLastBadge = count;
+  browserFaviconLastBadge = signature;
   return true;
 }
 

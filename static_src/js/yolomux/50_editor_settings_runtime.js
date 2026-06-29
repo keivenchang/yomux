@@ -676,6 +676,7 @@ function applyActiveColor(value) {
   const preset = ACTIVE_COLOR_PRESETS[value];
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    updateBrowserFavicon({force: true});
     return;
   }
   const light = document.body.classList.contains(themeResolvedBodyClass('light'));
@@ -689,6 +690,8 @@ function applyActiveColor(value) {
     style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
     style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
   }
+  // keep the browser-tab favicon background/glyph in sync with the chosen accent + theme
+  updateBrowserFavicon({force: true});
 }
 
 function applySeparatorColor(value) {

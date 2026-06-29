@@ -7185,6 +7185,23 @@ function browserFaviconRoundedRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
+// Favicon background follows the user's Active color preference and the theme (no hardcoded
+// hex): it reads --active-accent, which flips with the theme and the active_color choice
+// (green/blue/orange/yellow/purple/white), falling back to the legacy green if the var is
+// unavailable (e.g. before CSS loads). The "Y" glyph stays a fixed dark color (below) — it
+// reads fine on every (bright) accent and keeps the original look.
+function browserFaviconAccentColors() {
+  const fallbackBg = '#99d441';
+  try {
+    const root = document.documentElement;
+    if (!root || typeof getComputedStyle !== 'function') return {bg: fallbackBg};
+    const bg = (getComputedStyle(root).getPropertyValue('--active-accent') || '').trim();
+    return {bg: bg || fallbackBg};
+  } catch (_) {
+    return {bg: fallbackBg};
+  }
+}
+
 function renderBrowserFaviconDataUrl(count) {
   const canvas = document.createElement('canvas');
   canvas.width = 64;
@@ -7192,9 +7209,10 @@ function renderBrowserFaviconDataUrl(count) {
   const ctx = canvas.getContext?.('2d');
   if (!ctx || typeof canvas.toDataURL !== 'function') return '';
 
+  const faviconAccent = browserFaviconAccentColors();
   ctx.clearRect(0, 0, 64, 64);
   browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10);
-  ctx.fillStyle = '#99d441';
+  ctx.fillStyle = faviconAccent.bg;
   ctx.fill();
 
   const label = browserFaviconBadgeLabel(count);
@@ -7238,13 +7256,17 @@ function browserFaviconLink() {
 
 function updateBrowserFavicon(options = {}) {
   const count = browserFaviconBadgeCount();
-  if (!options.force && browserFaviconLastBadge === count) return false;
+  // Include the accent in the dedupe signature so a theme/active-color change re-renders
+  // on the next refresh tick even when the badge count is unchanged.
+  const accent = browserFaviconAccentColors();
+  const signature = `${count}|${accent.bg}`;
+  if (!options.force && browserFaviconLastBadge === signature) return false;
   const dataUrl = renderBrowserFaviconDataUrl(count);
   if (!dataUrl) return false;
   const link = browserFaviconLink();
   if (!link) return false;
   link.href = dataUrl;
-  browserFaviconLastBadge = count;
+  browserFaviconLastBadge = signature;
   return true;
 }
 
@@ -21049,6 +21071,7 @@ function applyActiveColor(value) {
   const preset = ACTIVE_COLOR_PRESETS[value];
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    updateBrowserFavicon({force: true});
     return;
   }
   const light = document.body.classList.contains(themeResolvedBodyClass('light'));
@@ -21062,6 +21085,8 @@ function applyActiveColor(value) {
     style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
     style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
   }
+  // keep the browser-tab favicon background/glyph in sync with the chosen accent + theme
+  updateBrowserFavicon({force: true});
 }
 
 function applySeparatorColor(value) {
@@ -33330,6 +33355,8 @@ let jsDebugStatsPollInFlight = false;
 let jsDebugStatsHistoryFlushTimer = null;
 let jsDebugStatsHistoryFlushInFlight = false;
 let jsDebugStatsServerSequence = 0;
+let jsDebugStatsAgentTokenSequence = 0;
+let jsDebugStatsAgentTokenResolutionSeconds = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
@@ -33391,6 +33418,7 @@ const jsDebugGraphAgentTokenColors = Object.freeze([
 ]);
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
+const jsDebugGraphAgentTokenBuckets = new Map();
 const jsDebugGraphEventBuckets = new Map();
 const jsDebugGraphEventResponseBytes = new Map();
 const jsDebugGraphEventRefTimes = new Map();
@@ -34084,6 +34112,7 @@ function recordJsDebugStatsSample(payload = {}) {
   );
   if (serverChanged) {
     jsDebugStatsServerSequence = 0;
+    resetDebugGraphAgentTokenHistory();
     jsDebugGraphPendingServerBuckets.clear();
   }
   if (Number.isFinite(Number(payload.uptime_seconds))) jsDebugStatsServerUptimeSeconds = Math.max(0, Number(payload.uptime_seconds));
@@ -34111,6 +34140,7 @@ function recordJsDebugStatsSample(payload = {}) {
 function clearJsDebugGraphData() {
   jsDebugGraphRawBuckets.clear();
   jsDebugGraphRollupBuckets.clear();
+  resetDebugGraphAgentTokenHistory();
   jsDebugGraphEventBuckets.clear();
   jsDebugGraphEventResponseBytes.clear();
   jsDebugGraphEventRefTimes.clear();
@@ -34195,7 +34225,40 @@ function debugGraphApplyServerHistory(history = {}) {
   if (Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
+  debugGraphApplyServerAgentTokenHistory(history.agent_token_history);
   compactJsDebugGraphBuckets();
+}
+
+function debugGraphApplyServerAgentTokenHistory(history = {}) {
+  if (!history || typeof history !== 'object') return;
+  const resolutionSeconds = Number(history.resolution_seconds);
+  if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return;
+  if (history.snapshot || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds) jsDebugGraphAgentTokenBuckets.clear();
+  jsDebugStatsAgentTokenResolutionSeconds = resolutionSeconds;
+  const sequence = Number(history.sequence);
+  if (Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
+  const records = Array.isArray(history.records) ? history.records : [];
+  for (const record of records) {
+    const startSeconds = Number(record?.start);
+    const durationSeconds = Number(record?.duration);
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) continue;
+    const bucket = debugGraphBucket(jsDebugGraphAgentTokenBuckets, Math.floor(startSeconds * 1000), durationSeconds * 1000);
+    bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
+    bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
+    debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
+  }
+}
+
+function debugGraphAgentTokenResolution(nowMs = Date.now()) {
+  const rangeSeconds = debugGraphDomain(nowMs).rangeSeconds;
+  if (rangeSeconds < 4 * 60 * 60) return 0;
+  return rangeSeconds >= 16 * 60 * 60 ? 5 * 60 : 2 * 60;
+}
+
+function resetDebugGraphAgentTokenHistory() {
+  jsDebugStatsAgentTokenSequence = 0;
+  jsDebugStatsAgentTokenResolutionSeconds = 0;
+  jsDebugGraphAgentTokenBuckets.clear();
 }
 
 function debugGraphAggregateBucket(map, source, scaleMs) {
@@ -34232,6 +34295,17 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGrap
     if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
+}
+
+function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
+  const resolutionSeconds = debugGraphAgentTokenResolution(nowMs);
+  if (!resolutionSeconds || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds || !jsDebugGraphAgentTokenBuckets.size) {
+    return debugGraphDisplayBuckets(nowMs, jsDebugGraphAgentTokenBucketSeconds, jsDebugGraphRangeSeconds);
+  }
+  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
+  return [...jsDebugGraphAgentTokenBuckets.values()]
+    .filter(bucket => debugGraphBucketInRange(bucket, domain.startMs, domain.endMs))
+    .sort((a, b) => a.startMs - b.startMs);
 }
 
 function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
@@ -34966,6 +35040,7 @@ function debugGraphChartAxisMax(group, rawMax) {
 }
 
 function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now()) {
+  if (group?.key === 'agentTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
     return debugGraphDisplayBuckets(nowMs, bucketSeconds, jsDebugGraphRangeSeconds);
@@ -35052,6 +35127,8 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   return {
     rawBuckets: jsDebugGraphRawBuckets.size,
     rollupBuckets: jsDebugGraphRollupBuckets.size,
+    agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
+    agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
     displayBuckets: buckets.length,
     eventRefs: jsDebugGraphEventBuckets.size,
     scaleSeconds: jsDebugGraphScaleSeconds,
@@ -35099,7 +35176,12 @@ async function pollJsDebugStatsSample() {
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
-    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}`, {cache: 'no-store'});
+    const tokenResolution = debugGraphAgentTokenResolution();
+    if (tokenResolution !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
+    const tokenHistory = tokenResolution
+      ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
+      : '';
+    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}${tokenHistory}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {
@@ -35355,6 +35437,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
+  if (debugGraphAgentTokenResolution() !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
   if (!render) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     graph.className = debugGraphClassName();
@@ -35963,6 +36046,17 @@ function diffRefDisplayShort(item) {
   return `${base}/${aliases[0]}${aliases.length > 1 ? ` ${aliases.slice(1).join(' ')}` : ''}`;
 }
 
+// Keep the selected control to a stable short-SHA width; aliases are available in the popup.
+function diffRefCompactDisplay(item) {
+  const ref = cleanDiffRef(item?.ref, '');
+  if (ref === 'HEAD' || ref === 'current') return ref;
+  const commit = diffRefItemCommitId(item);
+  if (commit) return commit.slice(0, 7);
+  const short = cleanDiffRef(item?.short, '') || ref;
+  const sha = short.match(/\b[0-9a-f]{7,40}\b/i);
+  return sha ? sha[0].slice(0, 7) : short.split(/[\s/]/)[0];
+}
+
 function diffRefOptionLabel(item, separator = ' - ') {
   return [diffRefDisplayShort(item), item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
 }
@@ -36089,7 +36183,21 @@ function diffRefToSuggestions(fromRef = diffRefFrom, repo, path = '') {
 function diffRefInputDisplayValue(value, suggestions) {
   const ref = cleanDiffRef(value, '');
   const match = (Array.isArray(suggestions) ? suggestions : []).find(item => diffRefOptionMatches(ref, item));
-  return match ? diffRefDisplayShort(match) : ref;
+  return match ? diffRefCompactDisplay(match) : ref;
+}
+
+function diffRefPopoverSubjectParts(item) {
+  const subject = String(item?.subject || item?.ref || '').trim();
+  const explicitNumber = Number(item?.pr_number || item?.prNumber || 0);
+  const match = subject.match(/^(.*?)(?:\s*\(\s*(?:PR\s*)?#(\d+)\s*\)|\s+(?:PR\s*)?#(\d+))\s*$/i);
+  const number = explicitNumber > 0 ? explicitNumber : Number(match?.[2] || match?.[3] || 0);
+  const commitDescription = match?.[1].trim() || subject;
+  const branchAliases = item?.ref === 'HEAD'
+    ? diffRefDisplayAliases(item).filter(alias => alias !== 'HEAD')
+    : [];
+  const aliasesText = branchAliases.map(alias => `[${alias}]`).join(' ');
+  const description = [aliasesText, commitDescription].filter(Boolean).join(' ');
+  return {description, pr: number > 0 ? `(#${number})` : ''};
 }
 
 function diffRefInputHtml(options = {}) {
@@ -36169,10 +36277,10 @@ function positionDiffRefPopover(input, compact) {
   const viewport = appViewport();
   const viewportWidth = effectiveViewportWidth(viewport);
   const viewportHeight = Math.max(240, viewport.height || 720);
-  const minWidth = Math.min(compact ? 880 : 960, viewportWidth - 16);
-  const maxWidth = compact ? 1040 : 1120;
-  const width = Math.min(maxWidth, viewportWidth - 16, Math.max(minWidth, rect.width));
-  const left = Math.max(8, Math.min(rect.left, viewportWidth - width - 8));
+  const edgePadding = 24;
+  const availableWidth = Math.max(280, viewportWidth - edgePadding * 2);
+  const width = availableWidth;
+  const left = Math.max(edgePadding, Math.min(rect.left, viewportWidth - width - edgePadding));
   const top = Math.min(rect.bottom + 4, viewportHeight - 48);
   popover.style.width = `${Math.round(width)}px`;
   popover.style.left = `${Math.round(left)}px`;
@@ -36198,12 +36306,14 @@ function renderDiffRefPopover(input, options = {}) {
   }
   popover.innerHTML = items.map((item, index) => {
     const active = index === diffRefPopoverActiveIndex;
-    const ref = diffRefDisplayShort(item) || item?.ref || '';
-    const subject = item?.subject || item?.ref || '';
-    const label = diffRefOptionLabel(item);
+    const ref = diffRefCompactDisplay(item) || item?.ref || '';
+    const subject = diffRefPopoverSubjectParts(item);
+    const subjectText = [subject.description, subject.pr].filter(Boolean).join(' ');
+    const label = [diffRefDisplayShort(item), subjectText].filter(Boolean).join(' - ') || item?.ref || '';
     const dateText = diffRefItemDateText(item);
     const authorText = diffRefItemAuthorText(item);
-    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span><span class="diff-ref-suggestion-date">${esc(dateText)}</span><span class="diff-ref-suggestion-author">${esc(authorText)}</span></button>`;
+    const pr = subject.pr ? `<span class="diff-ref-suggestion-pr">${esc(subject.pr)}</span>` : '';
+    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject" title="${esc(subjectText)}"><span class="diff-ref-suggestion-description">${esc(subject.description)}</span>${pr}</span><span class="diff-ref-suggestion-date">${esc(dateText)}</span><span class="diff-ref-suggestion-author">${esc(authorText)}</span></button>`;
   }).join('');
   positionDiffRefPopover(input, context.compact);
   popover.hidden = false;
@@ -36297,11 +36407,12 @@ function diffRefControlsHtml(options = {}) {
   </span>`;
 }
 
-function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
+function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   const isDefault = refs.from === 'HEAD' && refs.to === 'current';
   const resetHidden = isDefault ? ' hidden' : '';
   const label = esc(t('diff.ref.reset'));
-  return `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('pref.reset.row'))}</button>`;
+  const className = `diff-ref-reset${extraClass ? ` ${extraClass}` : ''}`;
+  return `<button type="button" class="${className}" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('pref.reset.row'))}</button>`;
 }
 
 function invalidateSessionFilesCaches() {
@@ -36953,7 +37064,7 @@ function diffRefComparisonLineHtml(repo) {
   const body = esc(t('diff.comparing', {from: '{{FROM}}', to: '{{TO}}'}))
     .replace('{{FROM}}', fromInput)
     .replace('{{TO}}', toInput);
-  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}${diffRefResetButtonHtml(refs)}</span>`;
+  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}</span>${diffRefResetButtonHtml(refs, 'diff-ref-inline-reset')}`;
 }
 
 // C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
@@ -37047,6 +37158,7 @@ function payloadHasRenderableRepoSections(payload) {
 function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
+  if (loading && options.inlineLoading === true) return '';
   if (options.compact) {
     if (loading) return `<section class="changes-comparison-head compact">${changesLoadingHtml(payload?.session || '')}</section>`;
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
@@ -37210,7 +37322,12 @@ function renderChangesGroups(groupsEl, files, options = {}) {
         refsRow.className = compact ? 'changes-repo-refs compact' : 'changes-repo-refs';
         head.after(refsRow);
       }
-      refsRow.innerHTML = `${diffRefComparisonLineHtml(repo)}${repoComparisonErrorHtml(repoInfo)}${changesRepoMetaHtml(repoInfo, {hideZero: compact})}`;
+      const details = [
+        options.loading === true ? `<span class="changes-repo-inline-loading">${changesLoadingHtml(payload.session || '')}</span>` : '',
+        repoComparisonErrorHtml(repoInfo),
+        changesRepoMetaHtml(repoInfo, {hideZero: compact}),
+      ].filter(Boolean).join('');
+      refsRow.innerHTML = `<div class="changes-repo-refs-main">${diffRefComparisonLineHtml(repo)}</div>${details ? `<div class="changes-repo-refs-detail">${details}</div>` : ''}`;
       refsRow.hidden = false;
     } else if (refsRow) {
       refsRow.hidden = true;
@@ -37324,7 +37441,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       </div>
-      ${changesComparisonHeaderHtml(payload, files, {loading})}
+      ${changesComparisonHeaderHtml(payload, files, {loading, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
       ${errorHtml}
       ${warningHtml}
       ${empty ? empty : '<div class="changes-groups"></div>'}`;
@@ -37339,7 +37456,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
-    ${changesComparisonHeaderHtml(payload, files, {loading, compact: true})}
+    ${changesComparisonHeaderHtml(payload, files, {loading, compact: true, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
     ${errorHtml}
     ${warningHtml}
     ${empty ? empty : '<div class="changes-groups"></div>'}`;
@@ -37408,7 +37525,8 @@ function fileExplorerChangesPanelHtml() {
   const groupsHtml = changesGroupsSnapshotHtml(files, {
     payload: fileExplorerSessionFilesPayload,
     compact: fileExplorerMode !== 'diff',
-    includeEmptyRepoSections: fileExplorerMode === 'diff' && !loading,
+    loading,
+    includeEmptyRepoSections: fileExplorerMode === 'diff' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesPayload)),
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
@@ -37702,7 +37820,8 @@ function bindChangesPanel(panel) {
     const diffRefReset = event.target.closest('[data-diff-ref-reset]');
     if (diffRefReset && panel.contains(diffRefReset)) {
       event.preventDefault();
-      const controls = diffRefReset.closest('[data-diff-ref-controls]');
+      const controls = diffRefReset.closest('[data-diff-ref-controls]')
+        || diffRefReset.parentElement?.querySelector?.('[data-diff-ref-controls]');
       const repo = controls?.dataset?.diffRefRepo || '';
       const path = controls?.dataset?.diffRefPath || '';
       setRepoDiffRefs(repo, 'HEAD', 'current', {path});
@@ -38346,6 +38465,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
       {
         payload: fileExplorerSessionFilesPayload,
         compact: fileExplorerMode !== 'diff',
+        loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, fileExplorerDifferFiles()),
         includeEmptyRepoSections: fileExplorerMode === 'diff',
       },
       {force: options.force === true},
