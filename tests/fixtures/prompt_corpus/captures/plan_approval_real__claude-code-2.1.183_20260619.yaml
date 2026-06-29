@@ -1,0 +1,145 @@
+agent: claude
+capture_date: '2026-06-19'
+capture_date_position: end
+capture_mode: converted_real_text_capture
+captured_at: '2026-06-19T20:47:19.547266+00:00'
+case_name: plan_approval_real
+claude_version: 2.1.183 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.183 (Claude Code)
+client_version_slug: claude-code-2.1.183
+codex_version: ''
+cursor:
+  character: ❯
+  current_command: claude
+  pane_in_mode: false
+  x: 3
+  y: 34
+expected:
+  action: option1
+  agent: claude
+  approval_visible: true
+  ask: true
+  command: null
+  confidence_min: 0.9
+  option_labels:
+  - Yes, and use auto mode
+  - Yes, manually approve edits
+  - Tell Claude what to change
+  prompt_kind: plan-approval
+  prompt_type: plan
+  question_text: Claude has written up a plan and is ready to execute. Would you like to proceed?
+  screen_key: approval
+  selected_option: 1
+  yes_selected: true
+expected_promoted:
+  agent_kind: claude
+  approval_type: plan
+  approval_visible: true
+  attention_kind: approval
+  attention_label: YOLO?
+  composer_key: empty
+  reason_code: approval
+  screen_key: approval
+expected_screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: plan_approval_real__claude-code-2.1.183_20260619
+fixture_scenario: plan_approval_real
+height: 40
+id: plan_approval_real__claude-code-2.1.183_20260619
+operations: []
+raw_capture: |2
+     research; the only consideration is how to run it given harness constraints.
+
+     Approach
+
+     - The harness blocks foreground sleep. So run it as a background Bash command:
+     sleep 10 with run_in_background: true. The command detaches, runs for 10 seconds,
+     and re-invokes me on exit.
+     - No files are changed. No follow-up actions.
+
+     Verification
+
+     - Confirm the background command exits cleanly (exit code 0) after ~10 seconds.
+    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+
+
+    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────
+     Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+     ❯ 1. Yes, and use auto mode
+       2. Yes, manually approve edits
+
+       3. Tell Claude what to change
+
+          shift+tab to approve with this feedback
+
+     ctrl+g to edit in  VS Code  · ~/.claude/plans/run-sleep-10-squishy-meerkat.md
+source: real capture
+source_fixture_id: claude-real-plan-approval-2-1-183
+source_text_file: claude_real_plan_approval_2_1_183.txt
+styled_capture: |2
+     research; the only consideration is how to run it given harness constraints.
+
+     Approach
+
+     - The harness blocks foreground sleep. So run it as a background Bash command:
+     sleep 10 with run_in_background: true. The command detaches, runs for 10 seconds,
+     and re-invokes me on exit.
+     - No files are changed. No follow-up actions.
+
+     Verification
+
+     - Confirm the background command exits cleanly (exit code 0) after ~10 seconds.
+    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+
+
+    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────
+     Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+     ❯ 1. Yes, and use auto mode
+       2. Yes, manually approve edits
+
+       3. Tell Claude what to change
+
+          shift+tab to approve with this feedback
+
+     ctrl+g to edit in  VS Code  · ~/.claude/plans/run-sleep-10-squishy-meerkat.md
+visible_text: |2
+     research; the only consideration is how to run it given harness constraints.
+
+     Approach
+
+     - The harness blocks foreground sleep. So run it as a background Bash command:
+     sleep 10 with run_in_background: true. The command detaches, runs for 10 seconds,
+     and re-invokes me on exit.
+     - No files are changed. No follow-up actions.
+
+     Verification
+
+     - Confirm the background command exits cleanly (exit code 0) after ~10 seconds.
+    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+
+
+    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ──────────────────────────────────────────
+     Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+     ❯ 1. Yes, and use auto mode
+       2. Yes, manually approve edits
+
+       3. Tell Claude what to change
+
+          shift+tab to approve with this feedback
+
+     ctrl+g to edit in  VS Code  · ~/.claude/plans/run-sleep-10-squishy-meerkat.md
+width: 200

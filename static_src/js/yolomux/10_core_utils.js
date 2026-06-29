@@ -10,18 +10,21 @@ async function apiFetch(url, options = {}) {
       requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
     }
   }
-  const startedAt = jsDebugPerformanceNow();
-  const method = jsDebugRequestMethod(requestOptions);
-  const requestBytes = jsDebugRequestBytes(url, requestOptions);
+  const apiDebugEnabled = jsDebugCollectionEnabled;
+  const startedAt = apiDebugEnabled ? jsDebugPerformanceNow() : 0;
+  const method = apiDebugEnabled ? jsDebugRequestMethod(requestOptions) : '';
+  const requestBytes = apiDebugEnabled ? jsDebugRequestBytes(url, requestOptions) : 0;
   let response;
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
-    recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
+    if (apiDebugEnabled) recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
-  const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
-  recordApiDebugResponseBytes(event, response);
+  if (apiDebugEnabled) {
+    const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
+    recordApiDebugResponseBytes(event, response);
+  }
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -31,6 +34,31 @@ async function apiFetch(url, options = {}) {
 
 async function apiFetchJson(url, options = {}) {
   const response = await apiFetch(url, options);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.statusText = response.statusText || '';
+    error.payload = payload || {};
+    error.response = response;
+    throw error;
+  }
+  return payload;
+}
+
+async function apiFetchJsonQuiet(url, options = {}) {
+  const requestOptions = {...options};
+  if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
+  if (shareToken) {
+    if (typeof Headers === 'function') {
+      const headers = new Headers(requestOptions.headers || {});
+      if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
+      requestOptions.headers = headers;
+    } else {
+      requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
+    }
+  }
+  const response = await fetch(url, requestOptions);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
@@ -79,7 +107,7 @@ async function redirectToLogin(response) {
 }
 
 function jsDebugPerformanceNow() {
-  if (!debugModeEnabled) return 0;
+  if (!jsDebugCollectionEnabled) return 0;
   const value = globalThis.performance?.now?.();
   return Number.isFinite(value) ? value : Date.now();
 }
@@ -95,7 +123,7 @@ function jsDebugByteLength(text) {
 }
 
 function jsDebugRequestBytes(url, options = {}) {
-  if (!debugModeEnabled) return 0;
+  if (!jsDebugCollectionEnabled) return 0;
   let bytes = jsDebugByteLength(jsDebugUrlText(url));
   const body = options?.body;
   if (typeof body === 'string') bytes += jsDebugByteLength(body);
@@ -105,7 +133,7 @@ function jsDebugRequestBytes(url, options = {}) {
 }
 
 function jsDebugDurationMs(startedAt) {
-  if (!debugModeEnabled || !Number.isFinite(startedAt)) return null;
+  if (!jsDebugCollectionEnabled || !Number.isFinite(startedAt)) return null;
   const duration = jsDebugPerformanceNow() - startedAt;
   return Number.isFinite(duration) ? Number(duration.toFixed(1)) : null;
 }
@@ -125,7 +153,7 @@ function jsDebugErrorText(error) {
 }
 
 function recordApiDebugEvent(url, method, startedAt, result = {}) {
-  if (!debugModeEnabled) return null;
+  if (!jsDebugCollectionEnabled) return null;
   const payload = {
     method,
     url: jsDebugUrlText(url),
@@ -139,21 +167,24 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
 }
 
 function recordApiDebugResponseBytes(event, response) {
-  if (!debugModeEnabled || !event || !response) return;
+  if (!jsDebugCollectionEnabled || !event || !response) return;
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
+    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, headerBytes);
     scheduleJsDebugPanelRefresh();
     return;
   }
+  if (typeof response.clone !== 'function') return;
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
+    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
     scheduleJsDebugPanelRefresh();
   }).catch(() => {});
 }
 
 function recordJsDebugEvent(type, payload = {}) {
-  if (!debugModeEnabled) return null;
+  if (!jsDebugCollectionEnabled) return null;
   const event = {
     id: ++jsDebugEventSeq,
     ts: new Date().toISOString(),
@@ -161,6 +192,7 @@ function recordJsDebugEvent(type, payload = {}) {
     ...payload,
   };
   jsDebugEvents.push(event);
+  if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
   if (jsDebugEvents.length > jsDebugEventLimit) {
     jsDebugEvents.splice(0, jsDebugEvents.length - jsDebugEventLimit);
   }
@@ -168,9 +200,241 @@ function recordJsDebugEvent(type, payload = {}) {
   return event;
 }
 
+function clientPerfNow() {
+  const value = globalThis.performance?.now?.();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function clientPerfMark(name) {
+  if (!name || typeof globalThis.performance?.mark !== 'function') return '';
+  const mark = `yolomux:${String(name)}`;
+  try {
+    globalThis.performance.mark(mark);
+    return mark;
+  } catch (_) {
+    return '';
+  }
+}
+
+function clientPerfMeasureSinceMark(counterName, markName, details = {}) {
+  if (!counterName || !markName) return null;
+  const endMark = clientPerfMark(`${counterName}:end`);
+  let durationMs = null;
+  if (typeof globalThis.performance?.measure === 'function' && endMark) {
+    try {
+      const measure = globalThis.performance.measure(`yolomux:${counterName}`, markName, endMark);
+      durationMs = Number(measure?.duration);
+      globalThis.performance.clearMeasures?.(`yolomux:${counterName}`);
+    } catch (_) {}
+  }
+  if (!Number.isFinite(durationMs)) {
+    const entries = typeof globalThis.performance?.getEntriesByName === 'function'
+      ? globalThis.performance.getEntriesByName(markName)
+      : [];
+    const startedAt = Number(entries?.at?.(-1)?.startTime);
+    if (Number.isFinite(startedAt)) durationMs = clientPerfNow() - startedAt;
+  }
+  globalThis.performance?.clearMarks?.(markName);
+  if (endMark) globalThis.performance?.clearMarks?.(endMark);
+  return recordClientPerfCounter(counterName, durationMs, details);
+}
+
+function clientPerfActiveAnimationCount() {
+  const animations = typeof document?.getAnimations === 'function' ? document.getAnimations({subtree: true}) : [];
+  return animations.filter(animation => animation?.playState === 'running').length;
+}
+
+function recordClientPerfCounter(name, durationMs = null, details = {}) {
+  const key = String(name || '').trim();
+  if (!key) return null;
+  let counter = clientPerfCounters.get(key);
+  if (!counter) {
+    counter = {name: key, count: 0, totalMs: 0, maxMs: 0, lastMs: null, lastAt: '', rows: 0, nodes: 0, bytes: 0, skipped: 0};
+    clientPerfCounters.set(key, counter);
+    if (clientPerfCounters.size > clientPerfCounterLimit) {
+      clientPerfCounters.delete(clientPerfCounters.keys().next().value);
+    }
+  }
+  counter.count += 1;
+  const duration = Number(durationMs);
+  if (Number.isFinite(duration) && duration >= 0) {
+    const rounded = Number(duration.toFixed(2));
+    counter.totalMs = Number((counter.totalMs + rounded).toFixed(2));
+    counter.maxMs = Number(Math.max(counter.maxMs, rounded).toFixed(2));
+    counter.lastMs = rounded;
+  }
+  for (const field of ['rows', 'nodes', 'bytes', 'skipped']) {
+    const value = Number(details?.[field]);
+    if (Number.isFinite(value) && value > 0) counter[field] += value;
+  }
+  counter.lastAt = new Date().toISOString();
+  counter.lastDetails = {...details};
+  if (typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible()) scheduleJsDebugPanelRefresh();
+  return counter;
+}
+
+function clientPerfStart(name) {
+  return {name: String(name || ''), startedAt: clientPerfNow()};
+}
+
+function clientPerfEnd(token, details = {}) {
+  if (!token?.name) return null;
+  return recordClientPerfCounter(token.name, clientPerfNow() - Number(token.startedAt || 0), details);
+}
+
+function clientPerfMeasure(name, fn, details = {}) {
+  const token = clientPerfStart(name);
+  try {
+    return fn();
+  } finally {
+    clientPerfEnd(token, typeof details === 'function' ? details() : details);
+  }
+}
+
+function clientPerfSummary() {
+  return Array.from(clientPerfCounters.values()).map(counter => ({
+    ...counter,
+    avgMs: counter.count ? Number((counter.totalMs / counter.count).toFixed(2)) : 0,
+  }));
+}
+
+function clientPerfLongTaskSummary() {
+  const samples = clientPerfLongTaskSamples.slice();
+  const total = samples.reduce((sum, sample) => sum + Number(sample.durationMs || 0), 0);
+  const max = samples.reduce((value, sample) => Math.max(value, Number(sample.durationMs || 0)), 0);
+  return {
+    count: samples.length,
+    averageMs: samples.length ? Number((total / samples.length).toFixed(1)) : 0,
+    maxMs: Number(max.toFixed(1)),
+    samples,
+  };
+}
+
+function clearClientPerfCounters() {
+  clientPerfCounters.clear();
+  clientPerfLongTaskSamples = [];
+}
+
+function installClientPerfLongTaskObserver() {
+  if (clientPerfLongTaskObserverInstalled || typeof globalThis.PerformanceObserver !== 'function') return;
+  clientPerfLongTaskObserverInstalled = true;
+  try {
+    const observer = new globalThis.PerformanceObserver(list => {
+      for (const entry of list.getEntries?.() || []) {
+        const durationMs = Number(entry.duration || 0);
+        const sample = {ts: new Date().toISOString(), durationMs: Number(durationMs.toFixed(1)), name: String(entry.name || 'longtask')};
+        clientPerfLongTaskSamples.push(sample);
+        if (clientPerfLongTaskSamples.length > clientPerfLongTaskSampleLimit) {
+          clientPerfLongTaskSamples.splice(0, clientPerfLongTaskSamples.length - clientPerfLongTaskSampleLimit);
+        }
+        recordClientPerfCounter('longTask', durationMs);
+      }
+    });
+    observer.observe({entryTypes: ['longtask']});
+  } catch (_) {}
+}
+
+function terminalRemovalLatencyNowMs() {
+  const value = Date.now();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function terminalRemovalLatencyKey(targetKind, target) {
+  return `${String(targetKind || 'target')}:${String(target || '')}`;
+}
+
+function noteTerminalRemovalLatencyStart(targetKind, target, details = {}) {
+  if (!jsDebugCollectionEnabled) return;
+  const key = terminalRemovalLatencyKey(targetKind, target);
+  terminalRemovalLatencyPending.set(key, {
+    targetKind: String(targetKind || 'target'),
+    target: String(target || ''),
+    origin: String(details.origin || 'unknown'),
+    startedAtMs: terminalRemovalLatencyNowMs(),
+    details: {...details},
+  });
+}
+
+function clearTerminalRemovalLatency(targetKind, target) {
+  terminalRemovalLatencyPending.delete(terminalRemovalLatencyKey(targetKind, target));
+}
+
+function completeTerminalRemovalLatency(targetKind, target, details = {}) {
+  if (!jsDebugCollectionEnabled) return null;
+  const key = terminalRemovalLatencyKey(targetKind, target);
+  const pending = terminalRemovalLatencyPending.get(key) || null;
+  const explicitStartedAtMs = Number(details.startedAtMs);
+  const startedAtMs = Number.isFinite(explicitStartedAtMs)
+    ? explicitStartedAtMs
+    : Number(pending?.startedAtMs);
+  if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) return null;
+  terminalRemovalLatencyPending.delete(key);
+  const nowMs = terminalRemovalLatencyNowMs();
+  const durationMs = Math.max(0, nowMs - startedAtMs);
+  const sample = {
+    ts: new Date(nowMs).toISOString(),
+    targetKind: String(targetKind || pending?.targetKind || 'target'),
+    target: String(target || pending?.target || ''),
+    origin: String(details.origin || pending?.origin || 'unknown'),
+    reason: String(details.reason || ''),
+    durationMs: Number(durationMs.toFixed(1)),
+    startedAtMs,
+    removedAtMs: nowMs,
+  };
+  if (Number.isFinite(Number(details.eventAtMs))) sample.eventAtMs = Number(details.eventAtMs);
+  if (details.eventType) sample.eventType = String(details.eventType);
+  if (Number.isFinite(Number(details.closeCode))) sample.closeCode = Number(details.closeCode);
+  if (typeof details.wasClean === 'boolean') sample.wasClean = details.wasClean;
+  terminalRemovalLatencySamples.push(sample);
+  if (terminalRemovalLatencySamples.length > terminalRemovalLatencySampleLimit) {
+    terminalRemovalLatencySamples.splice(0, terminalRemovalLatencySamples.length - terminalRemovalLatencySampleLimit);
+  }
+  recordJsDebugEvent('terminal_removal', {
+    message: `${sample.targetKind} ${sample.target} removed after ${sample.durationMs}ms from ${sample.origin}`,
+    durationMs: sample.durationMs,
+    targetKind: sample.targetKind,
+    target: sample.target,
+    origin: sample.origin,
+    reason: sample.reason,
+    eventType: sample.eventType,
+    closeCode: sample.closeCode,
+    wasClean: sample.wasClean,
+  });
+  return sample;
+}
+
+function completeTerminalRemovalLatencyFromEpochSeconds(targetKind, target, epochSeconds, details = {}) {
+  const eventAtMs = Number(epochSeconds) * 1000;
+  if (!Number.isFinite(eventAtMs) || eventAtMs <= 0) return null;
+  return completeTerminalRemovalLatency(targetKind, target, {
+    ...details,
+    startedAtMs: eventAtMs,
+    eventAtMs,
+  });
+}
+
+function terminalRemovalLatencySummary() {
+  const samples = terminalRemovalLatencySamples.slice();
+  const total = samples.reduce((sum, sample) => sum + Number(sample.durationMs || 0), 0);
+  const max = samples.reduce((value, sample) => Math.max(value, Number(sample.durationMs || 0)), 0);
+  return {
+    count: samples.length,
+    pending: terminalRemovalLatencyPending.size,
+    averageMs: samples.length ? Number((total / samples.length).toFixed(1)) : 0,
+    maxMs: Number(max.toFixed(1)),
+    last: samples.at(-1) || null,
+    samples,
+  };
+}
+
 function clearJsDebugEvents() {
   jsDebugEvents = [];
   jsDebugEventSeq = 0;
+  terminalRemovalLatencyPending.clear();
+  terminalRemovalLatencySamples = [];
+  clearClientPerfCounters();
+  if (typeof clearJsDebugGraphData === 'function') clearJsDebugGraphData();
+  if (typeof clearJsDebugServerHistory === 'function') clearJsDebugServerHistory();
   if (jsDebugRenderTimer) {
     clearTimeout(jsDebugRenderTimer);
     jsDebugRenderTimer = null;
@@ -179,7 +443,7 @@ function clearJsDebugEvents() {
 }
 
 function scheduleJsDebugPanelRefresh() {
-  if (!debugModeEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
+  if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
   if (jsDebugRenderTimer) return;
   jsDebugRenderTimer = setTimeout(() => {
     jsDebugRenderTimer = null;
@@ -188,7 +452,7 @@ function scheduleJsDebugPanelRefresh() {
 }
 
 function installJsDebugEventCapture() {
-  if (!debugModeEnabled || jsDebugEventCaptureInstalled || !window?.addEventListener) return;
+  if (!jsDebugCollectionEnabled || jsDebugEventCaptureInstalled || !window?.addEventListener) return;
   jsDebugEventCaptureInstalled = true;
   window.addEventListener('error', event => {
     recordJsDebugEvent('error', {
@@ -205,7 +469,15 @@ function installJsDebugEventCapture() {
   });
 }
 
+function enableDebugMode() {
+  debugModeEnabled = true;
+  installJsDebugEventCapture();
+  if (typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
+  scheduleJsDebugPanelRefresh();
+}
+
 installJsDebugEventCapture();
+installClientPerfLongTaskObserver();
 
 let appViewportOverride = null;
 let appMirrorTransform = {scale: 1, tx: 0, ty: 0};
@@ -227,6 +499,16 @@ function nativeViewport() {
 
 function appViewport() {
   return appViewportOverride ? normalizeAppViewport(appViewportOverride, nativeViewport()) : nativeViewport();
+}
+
+const MIN_VIEWPORT_WIDTH_PX = 320;
+const DEFAULT_VIEWPORT_WIDTH_PX = 1200;
+const OFFSCREEN_POSITION_PX = -10000;
+
+function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIEWPORT_WIDTH_PX) {
+  const width = Number(viewport?.width ?? viewport?.w);
+  const fallbackWidth = Number(fallback) || DEFAULT_VIEWPORT_WIDTH_PX;
+  return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
 }
 
 const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720];
@@ -338,6 +620,30 @@ function agentLabel(kind) {
   return String(kind || '');
 }
 
+const sessionFileLookbackDefaultHours = 24;
+const sessionFileLookbackHourValues = Object.freeze([
+  0.5, 1, 2, 4, 8, 12, 24, 48, 72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,
+]);
+
+function normalizeSessionFileLookbackHours(value, fallback = sessionFileLookbackDefaultHours) {
+  const parsed = Number(value);
+  const candidate = Number.isFinite(parsed) ? parsed : Number(fallback);
+  if (sessionFileLookbackHourValues.includes(candidate)) return candidate;
+  if (sessionFileLookbackHourValues.includes(Number(fallback))) return Number(fallback);
+  return sessionFileLookbackDefaultHours;
+}
+
+function sessionFileLookbackLabel(hours) {
+  const value = Number(hours);
+  if (value < 1) return t('share.duration.minute', {count: Math.round(value * 60)});
+  if (value < 24) return tPlural('duration.hour', value);
+  return tPlural('duration.day', value / 24);
+}
+
+function sessionFileLookbackOptions() {
+  return sessionFileLookbackHourValues.map(hours => ({hours, label: sessionFileLookbackLabel(hours)}));
+}
+
 // localStorage can throw (privacy mode, blocked, quota) — these swallow failures so a blocked store
 // never breaks the page. storageGet returns the raw string (or `fallback` when absent/blocked);
 // storageSet coerces to string and no-ops on failure. Every readStored*/writeStored* builds on these.
@@ -355,6 +661,30 @@ function storageSet(key, value) {
     window.localStorage?.setItem(key, String(value));
   } catch (_) {}
 }
+
+function readStoredInfoLookbackHours() {
+  return normalizeSessionFileLookbackHours(storageGet(infoLookbackHoursStorageKey));
+}
+
+function writeStoredInfoLookbackHours(hours) {
+  const normalized = normalizeSessionFileLookbackHours(hours);
+  storageSet(infoLookbackHoursStorageKey, normalized);
+  return normalized;
+}
+
+let infoSessionFileLookbackHours = readStoredInfoLookbackHours();
+
+function readStoredTabberLookbackHours() {
+  return normalizeSessionFileLookbackHours(storageGet(fileExplorerTabberLookbackHoursStorageKey));
+}
+
+function writeStoredTabberLookbackHours(hours) {
+  const normalized = normalizeSessionFileLookbackHours(hours);
+  storageSet(fileExplorerTabberLookbackHoursStorageKey, normalized);
+  return normalized;
+}
+
+let tabberSessionFileLookbackHours = readStoredTabberLookbackHours();
 
 function sessionStorageGet(key, fallback = null) {
   try {
@@ -456,8 +786,9 @@ function primaryOpenPathForFileIdentity(identity) {
   const text = String(identity || '').trim();
   if (!text) return '';
   const mapped = openFilePathByIdentity.get(text);
-  if (mapped && openFiles.has(mapped)) return mapped;
+  if (mapped && openFiles.has(mapped) && fileStateFor(mapped)?.externalMissing !== true) return mapped;
   for (const [path, state] of openFiles.entries()) {
+    if (state?.externalMissing === true) continue;
     if (physicalFileIdentityFromPayload(state) === text) {
       openFilePathByIdentity.set(text, path);
       return path;
@@ -681,12 +1012,8 @@ function selectedSessionRepo(session, info) {
   return index >= 0 ? repos[index] : null;
 }
 
-function displayedSessionGit(session, info) {
-  const project = info?.project || {};
-  const git = project.git || null;
-  const repo = selectedSessionRepo(session, info);
-  if (!repo) return git;
-  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+function gitFromRepoSummary(repo) {
+  if (!repo) return null;
   return {
     root: repo.root || '',
     cwd: repo.cwd || repo.root || '',
@@ -696,8 +1023,19 @@ function displayedSessionGit(session, info) {
     dirty_count: repo.dirty_count,
     activity_ts: repo.activity_ts,
     activity_source: repo.activity_source || '',
+    github_repo: repo.github_repo || null,
+    other_branches: repo.other_branches || null,
     worktree: repo.worktree || null,
   };
+}
+
+function displayedSessionGit(session, info) {
+  const project = info?.project || {};
+  const git = project.git || null;
+  const repo = selectedSessionRepo(session, info);
+  if (!repo) return git;
+  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+  return gitFromRepoSummary(repo);
 }
 
 function cycleSessionRepoDisplay(session, info, direction) {
@@ -740,7 +1078,7 @@ function writeStoredTabMetaVisible(value) {
   storageSet(tabMetaStorageKey, value ? '1' : '0');
 }
 
-// persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
+// Legacy share/deeplink marker from the old merged YO!info/YO!agent pane.
 function normalizedInfoSubTab(value) {
   return value === 'yoagent' ? 'yoagent' : 'info';
 }
@@ -770,7 +1108,7 @@ function writeStoredEditorLineNumbers(value) {
 }
 
 function defaultCollapsedPreferenceSections() {
-  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads']);
+  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads/Downloads']);
 }
 
 function readStoredCollapsedPreferenceSections() {
@@ -886,8 +1224,26 @@ function nestedSetting(source, path, fallback) {
   return current === undefined || current === null ? fallback : current;
 }
 
+function settingFallback(path, fallback) {
+  if (arguments.length >= 2) return fallback;
+  return Object.prototype.hasOwnProperty.call(SETTING_FALLBACKS, path) ? SETTING_FALLBACKS[path] : undefined;
+}
+
 function initialSetting(path, fallback) {
-  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, fallback));
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, defaultValue));
+}
+
+function themeBodyClass(mode) {
+  return THEME_CLASS_BY_MODE[mode] || THEME_CLASS_BY_MODE.dark;
+}
+
+function themeResolvedBodyClass(mode) {
+  return THEME_RESOLVED_CLASS_BY_MODE[mode] || THEME_RESOLVED_CLASS_BY_MODE.dark;
+}
+
+function editorThemeBodyClass(mode) {
+  return EDITOR_THEME_CLASS_BY_MODE[mode] || EDITOR_THEME_CLASS_BY_MODE.dark;
 }
 
 function mergeSettingObjects(base, patch) {
@@ -913,6 +1269,14 @@ function writeStoredFileExplorerRootMode(mode) {
 
 function normalizeFileExplorerMode(mode) {
   return mode === 'diff' || mode === 'tabber' ? mode : 'files';
+}
+
+function fileExplorerModeFromUrlParam(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'finder' || mode === 'files') return 'files';
+  if (mode === 'differ' || mode === 'diff') return 'diff';
+  if (mode === 'tabber') return 'tabber';
+  return '';
 }
 
 function readStoredFileExplorerMode() {
@@ -1107,7 +1471,7 @@ function syncFileExplorerTreeDateButton(button) {
   if (!button) return;
   const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
   const active = mode !== 'none';
-  button.classList.toggle('active', active);
+  button.classList.toggle(CLS.active, active);
   button.dataset.dateMode = mode;
   button.setAttribute('aria-pressed', active ? 'true' : 'false');
   button.textContent = fileExplorerTreeDateModeButtonLabel(mode);
@@ -1198,8 +1562,51 @@ function seedVisualActivePaneItem(preferredItems = []) {
   return item || null;
 }
 
+function attentionAcknowledgeDelayMsFromOptions(options = {}) {
+  return Number.isFinite(Number(options.acknowledgeAgentWindowDelayMs))
+    ? Math.max(0, Number(options.acknowledgeAgentWindowDelayMs))
+    : (typeof agentWindowActivityAcknowledgeDelayMs === 'number' ? agentWindowActivityAcknowledgeDelayMs : 0);
+}
+
+function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null, options = {}) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || !isTmuxSession(sessionKey)) return false;
+  const acknowledgeDelayMs = attentionAcknowledgeDelayMsFromOptions(options);
+  let acknowledged = false;
+  if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
+    acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
+  }
+  if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
+    acknowledged = acknowledgeAgentWindowActivity(sessionKey, windowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
+  }
+  return acknowledged;
+}
+
 function setFocusedTerminal(session, options = {}) {
+  const perf = clientPerfStart('focusSet');
+  try {
+    return setFocusedTerminalMeasured(session, options);
+  } finally {
+    clientPerfEnd(perf, {sessions: activeSessions.length, user: options.userInitiated === true ? 1 : 0});
+  }
+}
+
+function setFocusedTerminalMeasured(session, options = {}) {
   const previousItem = focusedPanelItem;
+  const alreadyFocused = focusedTerminal === session && focusedPanelItem === session;
+  if (alreadyFocused) {
+    rememberActivePaneItem(session);
+    if (isTmuxSession(session)) lastFocusedTmuxSession = session;
+    if (options.userInitiated === true) {
+      dismissAttentionAlertsForSession(session);
+      acknowledgeTerminalAttentionFromUserAction(session, null, options);
+      if (options.syncFinder !== false) {
+        rememberFileExplorerExplicitSyncSession(session);
+        scheduleFileExplorerActiveTabSync(session, {explicit: true});
+      }
+    }
+    return;
+  }
   if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
@@ -1212,6 +1619,7 @@ function setFocusedTerminal(session, options = {}) {
   updatePanelInactiveOverlays();
   sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
+    acknowledgeTerminalAttentionFromUserAction(session, null, options);
     rememberFileExplorerExplicitSyncSession(session);
     scheduleFileExplorerActiveTabSync(session, {explicit: true});
     recordFocusNavTransition(previousItem, session);
@@ -1244,6 +1652,7 @@ function setFocusedPanelItem(item, options = {}) {
   updatePanelInactiveOverlays();
   sharePublish('focus', {item});
   if (options.userInitiated === true) {
+    if (isTmuxSession(item)) acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
     if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
     if (isFileEditorItem(item)) {
       activeFile = fileItemPath(item);
@@ -1279,12 +1688,16 @@ function clearPendingFileEditorFocusExcept(item) {
 
 function focusTerminalWhenAutoFocus(session, delay = 0) {
   if (!autoFocusEnabled) return;
-  setTimeout(() => terminals.get(session)?.term?.focus?.(), delay);
+  focusTerminalDom(session, delay);
 }
 
 function focusTerminalFromUserAction(session, delay = 0) {
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true});
+  focusTerminalDom(session, delay);
+}
+
+function focusTerminalDom(session, delay = 0) {
   const run = () => terminals.get(session)?.term?.focus?.();
   if (delay > 0) setTimeout(run, delay);
   else run();
@@ -1299,7 +1712,7 @@ function clearFocusForInactiveLayout() {
 }
 
 function terminalPaneIsActive(session) {
-  return document.getElementById(`terminal-pane-${session}`)?.classList.contains('active') === true;
+  return document.getElementById(`terminal-pane-${session}`)?.classList.contains(CLS.active) === true;
 }
 
 function selectPanelOnHover(item) {
@@ -1327,6 +1740,28 @@ function updatePanelInactiveOverlays() {
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+const disclosureChevronGlyph = '›';
+const disclosureTriangleExpandedGlyph = disclosureChevronGlyph;
+const disclosureTriangleCollapsedGlyph = disclosureChevronGlyph;
+
+function disclosureTriangleGlyph(expanded) {
+  return expanded === true ? disclosureTriangleExpandedGlyph : disclosureTriangleCollapsedGlyph;
+}
+
+function disclosureTriangleHtml(expanded, className = '', attrs = '') {
+  const classes = ['ui-disclosure-triangle', className].filter(Boolean).join(' ');
+  const extraAttrs = attrs ? ` ${attrs}` : '';
+  return `<span class="${esc(classes)}" data-disclosure-expanded="${expanded === true ? 'true' : 'false'}" aria-hidden="true"${extraAttrs}>${esc(disclosureTriangleGlyph(expanded))}</span>`;
+}
+
+function setDisclosureTriangleElement(element, expanded) {
+  if (!element) return;
+  element.classList?.add?.('ui-disclosure-triangle');
+  element.dataset.disclosureExpanded = expanded === true ? 'true' : 'false';
+  element.setAttribute?.('aria-hidden', 'true');
+  element.textContent = disclosureTriangleGlyph(expanded);
 }
 
 function stripTrailingEllipsisText(value) {
@@ -1484,7 +1919,8 @@ function wsUrl(session) {
     const params = new URLSearchParams({session, token: shareToken, viewer: shareViewerId});
     return `${scheme}//${location.host}/ws/share-view?${params.toString()}`;
   }
-  return `${scheme}//${location.host}/ws?session=${encodeURIComponent(session)}`;
+  const params = new URLSearchParams({session, client: shareClientId});
+  return `${scheme}//${location.host}/ws?${params.toString()}`;
 }
 
 function renderTransportWarning() {
@@ -1507,7 +1943,7 @@ function stripTerminalQueryResponses(data) {
 }
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
-const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)(?::([1-9]\d{0,6}))?/g;
+const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)|(?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+\.[A-Za-z0-9][A-Za-z0-9+_-]{0,31}))(?::([1-9]\d{0,6}))?/g;
 const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
@@ -1612,7 +2048,7 @@ function terminalTextReferences(lineText, rangeForOffsets, y = null) {
 }
 
 function terminalTextLinks(lineText, rangeForOffsets, y = null) {
-  return terminalTextReferences(lineText, rangeForOffsets, y).filter(ref => ref.type === 'url');
+  return terminalTextReferences(lineText, rangeForOffsets, y);
 }
 
 function terminalLineLinks(lineText, y) {
@@ -1763,18 +2199,320 @@ function terminalWrappedLineReferences(term, y) {
   return terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
 }
 
-function installTerminalLinkProvider(term) {
+function terminalReferenceXtermLink(reference) {
+  if (!reference?.range) return null;
+  return {
+    range: reference.range,
+    text: reference.text || reference.href || '',
+    activate: () => {},
+    decorations: {underline: true, pointerCursor: false},
+  };
+}
+
+async function terminalReferenceProviderLinks(session, term, y) {
+  const refs = terminalWrappedLineReferences(term, y);
+  const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
+  const fileRefs = refs.filter(ref => ref.type === 'file');
+  if (!fileRefs.length) return links;
+  const fileTargets = await Promise.all(fileRefs.map(ref => terminalFileReferenceTarget(session, ref, {fresh: false, user: true})));
+  fileRefs.forEach((ref, index) => {
+    if (fileTargets[index]) {
+      const link = terminalReferenceXtermLink(ref);
+      if (link) links.push(link);
+    }
+  });
+  return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
+}
+
+const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 90;
+
+function terminalFileReferenceViewportSignature(term) {
+  return [
+    Math.max(0, Math.floor(Number(term?.cols || 0))),
+    Math.max(0, Math.floor(Number(term?.rows || 0))),
+    Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0))),
+  ].join(':');
+}
+
+function terminalFileReferenceKey(reference) {
+  const range = reference?.range || {};
+  const start = range.start || {};
+  const end = range.end || {};
+  return [
+    reference?.path || '',
+    reference?.line || '',
+    reference?.text || '',
+    start.x || 0,
+    start.y || 0,
+    end.x || 0,
+    end.y || 0,
+  ].join('\x1f');
+}
+
+function terminalFileReferenceCacheKey(session, reference) {
+  return [
+    terminalFileReferenceAbsolutePath(session, reference) || reference?.path || '',
+    reference?.line || '',
+    reference?.path || '',
+    reference?.text || '',
+  ].join('\x1f');
+}
+
+function terminalVisibleFileReferences(term) {
+  const rows = Math.max(0, Math.floor(Number(term?.rows || 0)));
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  const refs = [];
+  const seen = new Set();
+  for (let screenRow = 1; screenRow <= rows; screenRow += 1) {
+    for (const ref of terminalWrappedLineReferences(term, viewportY + screenRow)) {
+      if (ref.type !== 'file') continue;
+      const key = terminalFileReferenceKey(ref);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      refs.push(ref);
+    }
+  }
+  return refs;
+}
+
+function terminalFileReferenceUnderlineSegments(term, reference) {
+  const range = reference?.range;
+  if (!range?.start || !range?.end) return [];
+  const cols = Math.max(0, Math.floor(Number(term?.cols || 0)));
+  const rows = Math.max(0, Math.floor(Number(term?.rows || 0)));
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  if (!rows) return [];
+  const firstY = Math.max(range.start.y, viewportY + 1);
+  const lastY = Math.min(range.end.y, viewportY + rows);
+  const segments = [];
+  for (let y = firstY; y <= lastY; y += 1) {
+    let startX = y === range.start.y ? range.start.x : 1;
+    let endX = y === range.end.y ? range.end.x : cols;
+    startX = Math.max(1, Math.floor(Number(startX) || 1));
+    endX = Math.floor(Number(endX) || 0);
+    if (cols > 0) endX = Math.min(cols, endX);
+    if (endX < startX) continue;
+    segments.push({x: startX, y, cells: endX - startX + 1});
+  }
+  return segments;
+}
+
+function terminalFileUnderlineLayer(container) {
+  if (!container) return null;
+  let layer = container.querySelector?.(':scope > .terminal-file-link-underlines') || null;
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'terminal-file-link-underlines';
+    layer.setAttribute('aria-hidden', 'true');
+    container.appendChild(layer);
+  }
+  return layer;
+}
+
+function clearTerminalFileReferenceUnderlines(container) {
+  const layer = container?.querySelector?.(':scope > .terminal-file-link-underlines') || null;
+  layer?.replaceChildren?.();
+  return 0;
+}
+
+function updateTerminalFileReferenceUnderlineHover(container, hoverKey = '') {
+  const layer = container?.querySelector?.(':scope > .terminal-file-link-underlines') || null;
+  const nodes = layer?.querySelectorAll?.('.terminal-file-link-underline') || [];
+  for (const node of nodes) {
+    node.classList?.toggle?.('terminal-file-link-underline--hover', Boolean(hoverKey) && node.dataset.referenceKey === hoverKey);
+  }
+}
+
+function renderTerminalFileReferenceUnderlines(term, container, references, options = {}) {
+  let renderedNodes = 0;
+  const perf = clientPerfStart('terminalUnderlineRender');
+  try {
+    renderedNodes = renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options);
+    return renderedNodes;
+  } finally {
+    clientPerfEnd(perf, {nodes: renderedNodes, rows: Math.max(0, Number(term?.rows || 0))});
+  }
+}
+
+function renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options = {}) {
+  const layer = terminalFileUnderlineLayer(container);
+  if (!layer) return 0;
+  const cell = terminalCellDimensions(term, container);
+  const screen = terminalScreenElement(container);
+  const screenRect = screen?.getBoundingClientRect?.();
+  const containerRect = container?.getBoundingClientRect?.();
+  const cellWidth = Number(cell.width || 0);
+  const cellHeight = Number(cell.height || 0);
+  if (!screenRect || !containerRect || !(cellWidth > 0) || !(cellHeight > 0)) {
+    return clearTerminalFileReferenceUnderlines(container);
+  }
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  const leftOrigin = screenRect.left - containerRect.left;
+  const topOrigin = screenRect.top - containerRect.top;
+  const nodes = [];
+  for (const reference of references || []) {
+    const key = terminalFileReferenceKey(reference);
+    for (const segment of terminalFileReferenceUnderlineSegments(term, reference)) {
+      const screenRow = segment.y - viewportY;
+      if (screenRow < 1) continue;
+      const line = document.createElement('div');
+      line.className = 'terminal-file-link-underline';
+      line.dataset.path = reference.targetPath || reference.path || '';
+      line.dataset.text = reference.text || '';
+      line.dataset.referenceKey = key;
+      if (key && key === options.hoverKey) line.classList.add('terminal-file-link-underline--hover');
+      line.style.left = `${leftOrigin + ((segment.x - 1) * cellWidth)}px`;
+      line.style.top = `${topOrigin + (screenRow * cellHeight) - 2}px`;
+      line.style.width = `${segment.cells * cellWidth}px`;
+      nodes.push(line);
+    }
+  }
+  layer.replaceChildren(...nodes);
+  return nodes.length;
+}
+
+function installTerminalFileReferenceUnderlines(session, term, container, options = {}) {
+  if (!session || !term || !container) return null;
+  const targetResolver = options.targetResolver || terminalFileReferenceTarget;
+  const disposables = [];
+  let disposed = false;
+  let timer = 0;
+  let renderFrame = 0;
+  let sequence = 0;
+  let lastRenderedViewportSignature = '';
+  let existingReferenceKeys = new Set();
+  const existingReferenceTargets = new Map();
+  let hoverKey = '';
+
+  const setHoverKey = nextKey => {
+    const normalizedKey = nextKey && existingReferenceKeys.has(nextKey) ? nextKey : '';
+    if (normalizedKey === hoverKey) return;
+    hoverKey = normalizedKey;
+    updateTerminalFileReferenceUnderlineHover(container, hoverKey);
+  };
+
+  const updateHover = event => {
+    if (disposed) return;
+    const reference = terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
+    setHoverKey(reference?.type === 'file' ? terminalFileReferenceKey(reference) : '');
+  };
+
+  const clearHover = () => setHoverKey('');
+
+  const renderCached = () => {
+    const existingRefs = [];
+    for (const ref of terminalVisibleFileReferences(term)) {
+      const key = terminalFileReferenceCacheKey(session, ref);
+      const targetPath = existingReferenceTargets.get(key);
+      if (targetPath) existingRefs.push({...ref, targetPath});
+    }
+    existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
+    if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
+    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+    return count;
+  };
+
+  const refresh = async () => {
+    if (disposed) return 0;
+    if (timer) {
+      clearTimeout(timer);
+      timer = 0;
+    }
+    const currentSequence = ++sequence;
+    const refs = terminalVisibleFileReferences(term);
+    if (!refs.length) {
+      existingReferenceKeys = new Set();
+      hoverKey = '';
+      const count = renderTerminalFileReferenceUnderlines(term, container, []);
+      lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+      return count;
+    }
+    const targets = await Promise.all(refs.map(ref => (
+      Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
+    )));
+    if (disposed || currentSequence !== sequence) return 0;
+    const existingRefs = refs
+      .map((ref, index) => {
+        const cacheKey = terminalFileReferenceCacheKey(session, ref);
+        if (!targets[index]) {
+          existingReferenceTargets.delete(cacheKey);
+          return null;
+        }
+        const targetPath = targets[index].path || ref.path || '';
+        existingReferenceTargets.set(cacheKey, targetPath);
+        return {...ref, targetPath};
+      })
+      .filter(Boolean);
+    existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
+    if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
+    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
+    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
+    return count;
+  };
+
+  const scheduleCachedRender = () => {
+    if (disposed) return;
+    if (renderFrame) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = 0;
+      if (!disposed) renderCached();
+    });
+  };
+
+  const schedule = (scheduleOptions = {}) => {
+    if (disposed) return;
+    const viewportSignature = terminalFileReferenceViewportSignature(term);
+    const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
+    if (viewportChanged) scheduleCachedRender();
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = 0;
+      refresh();
+    }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+  };
+
+  const bindTerminalEvent = (name, callback) => {
+    const disposable = typeof term?.[name] === 'function' ? term[name](callback) : null;
+    if (disposable?.dispose) disposables.push(disposable);
+  };
+  bindTerminalEvent('onScroll', () => schedule({reason: 'scroll', viewportChanged: true}));
+  bindTerminalEvent('onResize', () => schedule({reason: 'resize', viewportChanged: true}));
+  bindTerminalEvent('onRender', () => schedule({reason: 'render'}));
+  container.addEventListener?.('mousemove', updateHover);
+  container.addEventListener?.('mouseleave', clearHover);
+  disposables.push({
+    dispose() {
+      container.removeEventListener?.('mousemove', updateHover);
+      container.removeEventListener?.('mouseleave', clearHover);
+    },
+  });
+  schedule();
+
+  return {
+    schedule,
+    refresh,
+    dispose() {
+      disposed = true;
+      sequence += 1;
+      if (timer) clearTimeout(timer);
+      if (renderFrame) cancelAnimationFrame(renderFrame);
+      timer = 0;
+      renderFrame = 0;
+      disposables.forEach(disposable => {
+        try { disposable.dispose(); } catch (_) {}
+      });
+      clearTerminalFileReferenceUnderlines(container);
+      container.querySelector?.(':scope > .terminal-file-link-underlines')?.remove?.();
+    },
+  };
+}
+
+function installTerminalLinkProvider(session, term) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
-      try {
-        // Terminal references are context-menu actions only. Returning no xterm links prevents
-        // accidental left-click activation while the context menu still uses terminalWrappedLineReferences.
-        void y;
-        callback([]);
-      } catch (_) {
-        callback([]);
-      }
+      terminalReferenceProviderLinks(session, term, y).then(callback).catch(() => callback([]));
     },
   });
 }
@@ -1858,7 +2596,7 @@ function dedentSelectionText(value) {
 async function copyTextToClipboard(text) {
   const clipboard = globalThis.navigator?.clipboard;
   const value = String(text ?? '');
-  if (clipboard?.writeText) {
+  if (globalThis.isSecureContext !== false && clipboard?.writeText) {
     try {
       await clipboard.writeText(value);
       return;
@@ -1867,12 +2605,13 @@ async function copyTextToClipboard(text) {
       // but reject writes on self-signed or permission-limited pages.
     }
   }
+  if (copyTextToClipboardViaCopyEvent(value)) return;
   const textarea = document.createElement('textarea');
   textarea.value = value;
   textarea.setAttribute('readonly', '');
   textarea.style.position = 'fixed';
-  textarea.style.left = '-10000px';
-  textarea.style.top = '-10000px';
+  textarea.style.left = `${OFFSCREEN_POSITION_PX}px`;
+  textarea.style.top = `${OFFSCREEN_POSITION_PX}px`;
   document.body.appendChild(textarea);
   textarea.select();
   const copied = document.execCommand?.('copy') === true;
@@ -2008,12 +2747,49 @@ function delegate(parent, type, selector, handler, options = {}) {
   if (!parent || typeof handler !== 'function') return null;
   const listener = event => {
     const target = event.target?.closest?.(selector);
-    if (!target || !parent.contains(target)) return;
+    if (!target || (typeof parent.contains === 'function' && !parent.contains(target))) return;
     handler(event, target);
   };
   parent.addEventListener(type, listener, options);
   return listener;
 }
+
+function copyPathButtonValue(button) {
+  return String(button?.dataset?.copyPath || '');
+}
+
+function copyPathButtonStopEvent(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation?.();
+}
+
+function activateCopyPathButton(event, button) {
+  copyPathButtonStopEvent(event);
+  const path = copyPathButtonValue(button);
+  if (!path) return;
+  copyTextToClipboard(path)
+    .then(() => { statusOk(localizedHtml('status.copied')); })
+    .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+}
+
+function handleCopyPathPointerUp(event, button) {
+  button.__yolomuxCopyPointerHandled = true;
+  activateCopyPathButton(event, button);
+}
+
+function handleCopyPathClick(event, button) {
+  const pointerHandled = button.__yolomuxCopyPointerHandled === true;
+  button.__yolomuxCopyPointerHandled = false;
+  if (pointerHandled && event.detail !== 0) {
+    copyPathButtonStopEvent(event);
+    return;
+  }
+  activateCopyPathButton(event, button);
+}
+
+delegate(document, 'pointerup', '[data-copy-path]', handleCopyPathPointerUp, {capture: true});
+delegate(document, 'click', '[data-copy-path]', handleCopyPathClick, {capture: true});
 
 // One owner for the per-session/-item DOM id scheme. Both the element that sets the id and every
 // getElementById/querySelector that looks it up route through these, so the prefix lives in one place
@@ -2052,8 +2828,10 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   const buttonHtml = iconHtml || shortcutHtml
     ? `<span class="context-menu-line">${iconHtml ? `<span class="context-menu-icon">${iconHtml}</span>` : ''}<span class="context-menu-label">${esc(label)}</span>${shortcutHtml}</span>`
     : undefined;
+  const className = ['control-active-hover', options.className || ''].filter(Boolean).join(' ');
   const button = makeButton({
     ...options,
+    className,
     html: buttonHtml,
     label: buttonHtml ? undefined : label,
     ariaLabel: options.ariaLabel || label,
@@ -2348,28 +3126,53 @@ function terminalContextMenuSelection(session, term, container = null, presetSel
   return appSelection ? {text: appSelection, source: 'app-clipboard'} : {text: '', source: 'none'};
 }
 
-function terminalFileReferenceAbsolutePath(session, reference) {
+function terminalFileReferenceCandidatePaths(session, reference) {
   const raw = String(reference?.path || '').trim();
-  if (!raw || raw.includes('\0') || /[\r\n]/.test(raw)) return '';
-  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return '';
-  if (raw === '~') return normalizeDirectoryPath(homePath || '/');
-  if (raw.startsWith('~/')) return homePath ? joinAndNormalize(homePath, raw.slice(2)) : '';
-  if (raw.startsWith('/')) return normalizeDirectoryPath(raw);
-  const base = terminalCurrentPath(session) || sessionTranscriptInfo(session).gitRoot || homePath || '/';
-  return joinAndNormalize(base, raw);
+  if (!raw || raw.includes('\0') || /[\r\n]/.test(raw)) return [];
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return [];
+  if (raw === '~') return homePath ? [normalizeDirectoryPath(homePath)] : [];
+  if (raw.startsWith('~/')) return homePath ? [joinAndNormalize(homePath, raw.slice(2))] : [];
+  if (raw.startsWith('/')) return [normalizeDirectoryPath(raw)];
+  const info = sessionTranscriptInfo(session);
+  const selectedRepo = selectedSessionRepo(session, info.info);
+  const bases = [
+    terminalCurrentPath(session),
+    info.selectedPath,
+    info.gitCwd,
+    selectedRepo?.cwd,
+    selectedRepo?.root,
+    info.gitRoot,
+    homePath,
+  ];
+  const paths = [];
+  for (const base of bases) {
+    const normalizedBase = normalizeDirectoryPath(base || '');
+    const candidate = normalizedBase ? joinAndNormalize(normalizedBase, raw) : '';
+    if (!candidate || paths.includes(candidate)) continue;
+    paths.push(candidate);
+  }
+  return paths;
 }
 
-async function terminalFileReferenceTarget(session, reference) {
+function terminalFileReferenceAbsolutePath(session, reference) {
+  return terminalFileReferenceCandidatePaths(session, reference)[0] || '';
+}
+
+async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
-  const path = terminalFileReferenceAbsolutePath(session, reference);
-  if (!path) return null;
-  try {
-    const info = await fetchFilePathInfo(path, {user: true, fresh: true});
-    if (!info || info.kind !== 'file') return null;
-    return {path, info, line: reference.line || null, text: reference.text || path};
-  } catch (_error) {
-    return null;
+  const fetchOptions = {
+    user: options.user !== false,
+    fresh: options.fresh !== false,
+  };
+  for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
+    try {
+      const info = await fetchFilePathInfo(path, fetchOptions);
+      if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
+    } catch (_error) {
+      // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+    }
   }
+  return null;
 }
 
 function requestFileEditorLineTarget(item, line) {
@@ -2594,9 +3397,7 @@ function terminalTmuxWindowShortcutDirection(event) {
 
 function terminalTmuxWindowShortcutItem(session) {
   const activeItem = visualActivePaneItem();
-  const sessionSlot = slotForItem(session);
-  if (activeItem && sessionSlot && slotForItem(activeItem) === sessionSlot) return activeItem;
-  return session;
+  return activeItem || session;
 }
 
 function handleTerminalTmuxWindowShortcutKeydown(session, event) {
@@ -2703,6 +3504,9 @@ function showTabContextMenu(item, x, y, options = {}) {
         shortcut: `${appShortcutText('K', {shift: true})} Enter`,
       },
     );
+    if (typeof paneCanPopout === 'function' && paneCanPopout(item)) {
+      appendContextMenuButton(menu, t('tab.popout'), () => openPanePopout(item), closeSessionContextMenu);
+    }
   }
   if (isTmuxSession(item)) {
     if (isPinnableTab(item)) appendContextMenuSeparator(menu);
@@ -2710,7 +3514,8 @@ function showTabContextMenu(item, x, y, options = {}) {
     for (const command of tmuxSessionActionCommands(item, {renameAction, includeKill: false})) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
     }
-    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== 'Pane details');
+    const paneInfoBarLabel = t('menu.tmux.paneDetails');
+    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== paneInfoBarLabel);
     for (const command of viewItems) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,

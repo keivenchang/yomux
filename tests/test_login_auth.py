@@ -1,6 +1,10 @@
 import base64
+import io
 import json
+import os
+import re
 import threading
+import zipfile
 from http import HTTPStatus
 from http.client import HTTPConnection
 from types import SimpleNamespace
@@ -10,6 +14,7 @@ from urllib.parse import urlparse
 import pytest
 
 from yolomux_lib import common
+from yolomux_lib import filesystem
 from yolomux_lib import server_auth
 from yolomux_lib import web
 from yolomux_lib.server import Handler
@@ -262,6 +267,22 @@ def test_preview_popout_placeholder_route_returns_same_origin_shell():
     assert "<body></body>" in written["html"]
 
 
+def test_pane_popout_placeholder_route_returns_same_origin_shell():
+    written = {}
+    handler = SimpleNamespace(
+        write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
+    )
+
+    Handler.handle_pane_popout_placeholder(
+        handler,
+        urlparse(f"/pane-popout?{urlencode({'item': '__info__'})}"),
+    )
+
+    assert written["html_status"] == HTTPStatus.OK
+    assert "<title>__info__ popout</title>" in written["html"]
+    assert "<body></body>" in written["html"]
+
+
 def test_html_preview_route_accepts_logged_in_cookie(monkeypatch, tmp_path):
     target = tmp_path / "preview.html"
     target.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
@@ -487,7 +508,7 @@ def test_plaintext_on_tls_server_serves_http_share_readonly_apis(monkeypatch, tm
         verify_share_token=lambda token: record if token == "valid-share-token" else None,
         share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == shared_path,
         share_status_payload=lambda token, **kwargs: calls.append(("share", token, kwargs)) or ({"ok": True, "token": token}, HTTPStatus.OK),
-        activity_payload=lambda: ({"activity": {"6:0": {"session": "6", "window": 0}}}, HTTPStatus.OK),
+        activity_payload=lambda **_kwargs: ({"activity": {"6:0": {"session": "6", "window": 0}}}, HTTPStatus.OK),
         session_files_payload=lambda session, hours, **kwargs: ({"session": session, "loaded": True, "files": [], "repos": [], "errors": []}, HTTPStatus.OK),
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())
@@ -913,5 +934,125 @@ def test_fs_raw_download_sets_attachment_header(monkeypatch, tmp_path):
         assert status == HTTPStatus.OK
         assert body == b"hello"
         assert headers["Content-Disposition"] == 'attachment; filename="report _a__.txt"'
+    finally:
+        stop_server(server, thread)
+
+
+def test_fs_zip_download_sets_timestamped_attachment_and_contains_folder(monkeypatch, tmp_path):
+    folder = tmp_path / "calvin"
+    nested = folder / "nested"
+    nested.mkdir(parents=True)
+    (folder / "a.txt").write_text("alpha", encoding="utf-8")
+    (nested / "b.txt").write_text("bravo", encoding="utf-8")
+    os.mkfifo(folder / "pipe")
+    os_symlink = getattr(os, "symlink", None)
+    if os_symlink:
+        os_symlink(folder / "a.txt", folder / "a-link.txt")
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, headers, body = request(
+            port,
+            "GET",
+            f"/api/fs/zip?{urlencode({'path': str(folder)})}",
+            headers=auth_header("keivenc", "random-password"),
+        )
+
+        assert status == HTTPStatus.OK
+        assert headers["Content-Type"] == "application/zip"
+        assert re.fullmatch(r'attachment; filename="calvin\.\d{8}-\d{6}\.zip"', headers["Content-Disposition"])
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            names = sorted(archive.namelist())
+            assert "calvin/" in names
+            assert "calvin/nested/" in names
+            assert "calvin/a.txt" in names
+            assert "calvin/nested/b.txt" in names
+            assert "calvin/pipe" not in names
+            assert "calvin/a-link.txt" not in names
+            assert archive.read("calvin/a.txt") == b"alpha"
+            assert archive.read("calvin/nested/b.txt") == b"bravo"
+    finally:
+        stop_server(server, thread)
+
+
+def test_fs_count_returns_recursive_file_count(monkeypatch, tmp_path):
+    folder = tmp_path / "counted"
+    nested = folder / "nested"
+    nested.mkdir(parents=True)
+    (folder / "a.txt").write_text("alpha", encoding="utf-8")
+    (nested / "b.txt").write_text("bravo", encoding="utf-8")
+    os.mkfifo(folder / "pipe")
+    os_symlink = getattr(os, "symlink", None)
+    if os_symlink:
+        os_symlink(folder / "a.txt", folder / "a-link.txt")
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, headers, body = request(
+            port,
+            "GET",
+            f"/api/fs/count?{urlencode({'path': str(folder)})}",
+            headers=auth_header("keivenc", "random-password"),
+        )
+        payload = json.loads(body.decode("utf-8"))
+
+        assert status == HTTPStatus.OK
+        assert headers["Content-Type"] == "application/json; charset=utf-8"
+        assert payload == {"path": str(folder), "kind": "dir", "files": 2, "recursive": True}
+    finally:
+        stop_server(server, thread)
+
+
+def test_fs_zip_download_rejects_large_folder_with_json_error(monkeypatch, tmp_path):
+    folder = tmp_path / "big"
+    folder.mkdir()
+    (folder / "payload.bin").write_bytes(b"abcd")
+    app = SimpleNamespace(sessions=[], dangerously_yolo=False, file_transfer_max_bytes=lambda: 3)
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, headers, body = request(
+            port,
+            "GET",
+            f"/api/fs/zip?{urlencode({'path': str(folder)})}",
+            headers=auth_header("keivenc", "random-password"),
+        )
+        payload = json.loads(body.decode("utf-8"))
+
+        assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        assert headers["Content-Type"] == "application/json; charset=utf-8"
+        assert "4 bytes" in payload["error"]
+        assert "0.0 MB (3 bytes) file transfer size cap" in payload["error"]
+        assert "Please zip it yourself" in payload["error"]
+    finally:
+        stop_server(server, thread)
+
+
+def test_fs_zip_download_is_admin_only_and_uses_fs_roots(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, _headers, _body = request(
+            port,
+            "GET",
+            f"/api/fs/zip?{urlencode({'path': str(allowed)})}",
+            headers=auth_header("guest", "guest"),
+        )
+        assert status == HTTPStatus.FORBIDDEN
+
+        status, _headers, body = request(
+            port,
+            "GET",
+            f"/api/fs/zip?{urlencode({'path': str(outside)})}",
+            headers=auth_header("keivenc", "random-password"),
+        )
+        payload = json.loads(body.decode("utf-8"))
+        assert status == HTTPStatus.FORBIDDEN
+        assert "outside configured filesystem roots" in payload["error"]
     finally:
         stop_server(server, thread)

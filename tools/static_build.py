@@ -24,6 +24,79 @@ SOURCE_LOCALE = "en"
 PSEUDO_LOCALE = "en-XA"
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 RAW_TOKEN_LITERAL_IGNORED_VALUES = {"#ffffff"}
+RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {
+    "#ffffff": "shared white paint in fixed light documents, text, and light-theme mixes",
+    "#ffe7a3": "paired YO!agent tool-call warning colors",
+    "#ffe27a": "paired warning/status accent colors",
+    "#ffd8dc": "paired danger text colors",
+    "#ff9f1c": "paired warning/orange component colors",
+    "#f7d2d8": "paired disconnected-share colors",
+    "#f4f7fb": "paired light tree surface colors",
+    "#ef4444": "paired about-brand / error accent colors",
+    "#eef6ff": "paired YO!agent light action-code surfaces",
+    "#eef1f5": "paired muted editor surface colors",
+    "#e8f0fb": "paired info-card surface colors",
+    "#e7ebf1": "paired muted popover/button text colors",
+    "#dfe7f2": "paired topbar popover text colors",
+    "#d81f32": "paired diff/compare removed colors",
+    "#c8941e": "paired warning borders",
+    "#b98c24": "paired file-hover warning borders",
+    "#aab4c4": "paired muted popover border colors",
+    "#9fb0c4": "paired preferences preview muted text colors",
+    "#8ff2a7": "paired green status sample colors",
+    "#8c959f": "paired markdown quote border colors",
+    "#8ab4f8": "paired YO!agent action-code borders",
+    "#7c2d12": "paired conflict prompt warning colors",
+    "#7a2e3d": "paired disconnected-share dark text colors",
+    "#586072": "paired muted tree/popover text colors",
+    "#3b0a0a": "paired conflict compare removed text colors",
+    "#3a2b00": "paired warning dark text colors",
+    "#2b3242": "paired status label dark surface colors",
+    "#2a1e00": "paired warning dark surface colors",
+    "#273140": "paired preferences/topbar dark preview colors",
+    "#263044": "paired tree/popover dark surface colors",
+    "#166534": "paired light success text colors",
+    "#161d29": "paired popover dark surface colors",
+    "#14171d": "paired file-tree warning dark surface colors",
+    "#10151d": "paired topbar dark surface colors",
+    "#0f4c81": "paired YO!agent action heading colors",
+    "#0b1017": "paired preferences dark preview colors",
+    "#0645ad": "paired editor vanilla link colors",
+    "#051408": "paired green status dark surface colors",
+    "#00a152": "paired diff/compare added colors",
+}
+I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT = 10
+I18N_ALLOWED_IDENTICAL_TERMS = {
+    "apache", "api", "ci", "claude", "cli", "codex", "css", "git", "github", "gitlab", "head", "html", "http",
+    "graph", "id", "ip", "javascript", "json", "linkedin", "markdown", "mit", "ok", "openai",
+    "polyform", "pr", "readme", "sse", "ssh", "tmux", "url", "websocket", "worktree", "yaml", "yo!agent",
+    "yo!info", "yo!share", "yo!stats", "yolo", "yolomux",
+}
+I18N_IDENTICAL_KEY_PATTERNS = (
+    re.compile(r"^brand\."),
+    re.compile(r"^pref\.yoagent\.(?:claude|codex)_model\."),
+    re.compile(r"^state\.short\."),
+)
+I18N_UNTRANSLATED_BASELINE: dict[str, int] = {
+    "ar": 393,
+    "de": 342,
+    "es": 327,
+    "fr": 347,
+    "he": 393,
+    "hi": 461,
+    "it": 851,
+    "ja": 309,
+    "ko": 393,
+    "nl": 862,
+    "pl": 851,
+    "pt-BR": 409,
+    "ru": 393,
+    "th": 840,
+    "tr": 844,
+    "vi": 763,
+    "zh-Hans": 0,
+    "zh-Hant": 0,
+}
 _PSEUDO_ACCENTS = str.maketrans({
     "a": "á", "b": "ƀ", "c": "ç", "d": "đ", "e": "é", "f": "ƒ", "g": "ǧ", "h": "ĥ", "i": "í",
     "j": "ĵ", "k": "ķ", "l": "ł", "m": "ɱ", "n": "ñ", "o": "ó", "p": "ƥ", "q": "ɋ", "r": "ř",
@@ -36,19 +109,35 @@ _PSEUDO_ACCENTS = str.maketrans({
 ASSETS: dict[str, list[str]] = {
     "yolomux.js": [
         "static_src/js/yolomux/00_bootstrap_state.js",
+        "static_src/js/yolomux/02_timing.js",
         "static_src/js/yolomux/05_i18n.js",
         "static_src/js/yolomux/10_core_utils.js",
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
         "static_src/js/yolomux/40_file_explorer_files.js",
+        "static_src/js/yolomux/45_agent_window_activity.js",
         "static_src/js/yolomux/45_file_explorer_actions.js",
+        "static_src/js/yolomux/46_file_drop_actions.js",
         "static_src/js/yolomux/50_editor_settings_runtime.js",
         "static_src/js/yolomux/60_popovers_tabs.js",
         "static_src/js/yolomux/70_layout_actions.js",
         "static_src/js/yolomux/75_dockview_layout.js",
-        "static_src/js/yolomux/80_panes_preferences.js",
+        "static_src/js/yolomux/78_panel_dom_actions.js",
+        "static_src/js/yolomux/78_panel_shell.js",
+        "static_src/js/yolomux/80_info_panel.js",
+        "static_src/js/yolomux/81_yoagent_panel.js",
+        "static_src/js/yolomux/82_preferences_panel.js",
+        "static_src/js/yolomux/83_debug_panel.js",
         "static_src/js/yolomux/90_changes_editor.js",
+        "static_src/js/yolomux/92_editor_nav.js",
+        "static_src/js/yolomux/93_markdown_preview.js",
+        "static_src/js/yolomux/94_preview_renderers.js",
+        "static_src/js/yolomux/96_pane_popout.js",
+        "static_src/js/yolomux/94_preview_popout.js",
         "static_src/js/yolomux/95_codemirror_editor.js",
+        "static_src/js/yolomux/96_share_state.js",
+        "static_src/js/yolomux/97_share_replay.js",
+        "static_src/js/yolomux/98_share_admin.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ],
     "yolomux.css": [
@@ -153,7 +242,6 @@ LIGHT_LINT_ALLOWLIST: dict[str, str] = {
     # Fixed state-badge / marker / warning colors — theme-independent (light text sits on the colored
     # badge in both themes; red attention banners are red in both).
     ".session-state-disconnected": "fixed state-badge color",
-    ".session-state-working": "fixed state-badge color",
     ".session-state-needs-approval": "fixed red attention-badge color",
     ".session-state-needs-input": "fixed red attention-badge color",
     ".session-state-blocked": "fixed red attention-badge color",
@@ -370,6 +458,71 @@ def locale_key_errors(catalogs: dict[str, dict]) -> list[str]:
     return errors
 
 
+def i18n_value_intentionally_identical(key: str, value: str) -> bool:
+    """Return true for strings that should stay identical across locales."""
+    text = str(value or "").strip()
+    if not text:
+        return True
+    # Placeholders, shortcuts, punctuation, counts, and glyph-only labels do not need translation.
+    without_tokens = re.sub(r"\{\w+\}", "", text)
+    if not re.search(r"[A-Za-z]", without_tokens):
+        return True
+    normalized = re.sub(r"[^A-Za-z0-9!+.#_-]+", " ", without_tokens).strip().lower()
+    if not normalized:
+        return True
+    parts = [part.strip(".…:;!?") for part in normalized.split() if part.strip(".…:;!?")]
+    if parts and all(part in I18N_ALLOWED_IDENTICAL_TERMS for part in parts):
+        return True
+    if normalized in {"a-z", "z-a"}:
+        return True
+    if normalized == "keiven chang":
+        return True
+    if any(pattern.search(key) for pattern in I18N_IDENTICAL_KEY_PATTERNS):
+        return True
+    # Brand/legal strings are intentionally stable but may contain version numbers or spaces.
+    if re.fullmatch(r"(?:polyform noncommercial license|apache license|mit license)(?: [0-9.]+)?", normalized):
+        return True
+    if key.endswith(".shortcut") or key.endswith(".key"):
+        return True
+    return False
+
+
+def i18n_untranslated_entries(catalogs: dict[str, dict]) -> dict[str, list[str]]:
+    """Keys whose localized value is still byte-identical to the English source."""
+    source = catalogs.get(SOURCE_LOCALE) or {}
+    result: dict[str, list[str]] = {}
+    for locale, catalog in sorted(catalogs.items()):
+        if locale == SOURCE_LOCALE:
+            continue
+        entries: list[str] = []
+        for key, english_value in sorted(source.items()):
+            value = catalog.get(key)
+            if value != english_value:
+                continue
+            if i18n_value_intentionally_identical(key, str(english_value)):
+                continue
+            entries.append(key)
+        result[locale] = entries
+    return result
+
+
+def i18n_untranslated_report(catalogs: dict[str, dict] | None = None, sample_limit: int | None = I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT) -> tuple[list[str], list[str]]:
+    """Return warning lines plus baseline-regression errors for untranslated values."""
+    entries = i18n_untranslated_entries(catalogs or source_catalogs())
+    warnings: list[str] = []
+    errors: list[str] = []
+    for locale, keys in entries.items():
+        count = len(keys)
+        baseline = I18N_UNTRANSLATED_BASELINE.get(locale)
+        if count:
+            shown = keys if sample_limit is None else keys[:max(0, sample_limit)]
+            suffix = "" if sample_limit is None or len(keys) <= sample_limit else f" (+{len(keys) - sample_limit} more)"
+            warnings.append(f"WARNING: i18n untranslated values in {locale}.json: {count}; keys: {', '.join(shown)}{suffix}")
+        if baseline is not None and count > baseline:
+            errors.append(f"{locale}.json untranslated-value count regressed: {count} > baseline {baseline}")
+    return warnings, errors
+
+
 def pseudo_value(value: str) -> str:
     """Accent the letters (keep {tokens} intact) and pad ~40% to surface overflow / missed strings."""
     segments = re.split(r"(\{\w+\})", str(value))
@@ -498,6 +651,35 @@ def lint_raw_literal_equals_token() -> list[str]:
     return errors
 
 
+def lint_repeated_raw_component_literals() -> list[str]:
+    """New repeated component hex colors must become tokens or get a reviewed allowlist reason."""
+    occurrences: dict[str, list[str]] = defaultdict(list)
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            text = read_text(path)
+        except FileNotFoundError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if "var(" in line:
+                continue
+            for match in re.finditer(r"#[0-9a-fA-F]{6}\b", line):
+                literal = match.group(0).lower()
+                occurrences[literal].append(f"{part}:{line_no}")
+    errors: list[str] = []
+    for literal, locations in sorted(occurrences.items()):
+        if len(locations) < 2:
+            continue
+        if literal in RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST:
+            continue
+        shown = ", ".join(locations[:4])
+        suffix = "" if len(locations) <= 4 else f" (+{len(locations) - 4} more)"
+        errors.append(f"raw component color {literal} repeats in {shown}{suffix}; move it to a CSS token or add a reviewed allowlist reason")
+    return errors
+
+
 def lint_raw_window_viewport_reads() -> list[str]:
     """Every JS viewport read must go through appViewport(); the one owner line is marked."""
     errors: list[str] = []
@@ -594,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="fail if generated static files are stale")
     parser.add_argument("--watch", action="store_true", help="rebuild on source change (mtime poll) until interrupted")
     parser.add_argument("--lint-light", action="store_true", help="report dark/extreme literal colors lacking a body.theme-light override")
+    parser.add_argument("--i18n-untranslated-report", action="store_true", help="print every non-allowlisted locale value that still equals en.json")
     args = parser.parse_args(argv)
 
     assets = args.assets or sorted(ASSETS)
@@ -603,6 +786,13 @@ def main(argv: list[str] | None = None) -> int:
             print(line, file=sys.stderr)
         print(f"{len(violations)} light-mode pairing issue(s)", file=sys.stderr)
         return 1 if violations else 0
+    if args.i18n_untranslated_report:
+        warnings, errors = i18n_untranslated_report(sample_limit=None)
+        for line in warnings:
+            print(line)
+        for line in errors:
+            print(line, file=sys.stderr)
+        return 1 if errors else 0
     if args.watch:
         return watch_loop(assets)
     try:
@@ -617,9 +807,14 @@ def main(argv: list[str] | None = None) -> int:
                 lint_duplicate_functions()
                 + lint_undefined_css_vars()
                 + lint_raw_literal_equals_token()
+                + lint_repeated_raw_component_literals()
                 + lint_raw_window_viewport_reads()
                 + lint_light_mode_pairs()
             )
+            i18n_warnings, i18n_errors = i18n_untranslated_report()
+            for warning in i18n_warnings:
+                print(warning, file=sys.stderr)
+            lint_errors += i18n_errors
             for err in lint_errors:
                 print(err, file=sys.stderr)
             if stale or lint_errors:

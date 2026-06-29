@@ -1,3 +1,5 @@
+import sqlite3
+
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
@@ -70,6 +72,39 @@ def test_build_persists_to_disk_and_reloads(tmp_path, monkeypatch):
     reloaded = file_index.ensure_index(tmp_path, SEARCH_SKIP_DIRS)
     assert reloaded.ready
     assert any(name == "deep_target.md" for _p, name, _r, _s, _m in reloaded.entries)
+
+
+def test_build_persists_sqlite_without_large_json_payload(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    built = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    db_path = file_index._index_disk_path(tmp_path)
+
+    assert built.ready is True
+    assert db_path.suffix == ".sqlite3"
+    assert db_path.exists()
+    assert not file_index._legacy_index_json_path(tmp_path).exists()
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    assert count >= 2
+
+
+def test_unchanged_search_index_refresh_skips_entry_rewrite(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    built = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    rewrite_calls = []
+
+    def fail_entry_rewrite(*_args, **_kwargs):
+        rewrite_calls.append(True)
+        raise AssertionError("unchanged search-index refresh must not rewrite entries")
+
+    monkeypatch.setattr(file_index, "_replace_sqlite_entries", fail_entry_rewrite)
+    file_index._persist(built, SEARCH_SKIP_DIRS)
+
+    assert rewrite_calls == []
 
 
 def test_search_files_uses_index_to_find_deep_file(tmp_path, monkeypatch):

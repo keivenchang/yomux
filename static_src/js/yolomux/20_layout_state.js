@@ -637,19 +637,198 @@ function readableParamComponentDecode(value) {
   }
 }
 
-// a bookmarked ?…=yoagent / __yoagent__ (or legacy __yosup__) URL opens the merged pane on
-// the YO!agent sub-tab. The aliases resolve to __info__ during normalization (losing the yoagent intent),
-// so detect them in the raw params here and pre-select the sub-tab before the layout is built.
+// Legacy compatibility: old share snapshots may still carry the merged-pane sub-tab marker. New
+// yoagent/yosup URL tokens resolve directly to the standalone YO!agent tab through TAB_TYPES.
 function maybeAdoptYoagentDeepLink(params) {
   const raw = [params.get('tabs') || '', params.get('sessions') || '', params.get('active') || ''].join(',');
   const referencesYoagent = raw
     .split(/[,:|]/)
     .map(value => value.trim())
-    .some(value => tabTypeForParam(value)?.key === 'info' && value !== 'info' && value !== infoItemId);
+    .some(value => tabTypeForParam(value)?.key === 'yoagent');
   if (referencesYoagent) {
     infoPanelSubTab = 'yoagent';
     writeStoredInfoSubTab('yoagent');
   }
+}
+
+function maybeAdoptFileExplorerModeDeepLink(params) {
+  const mode = fileExplorerModeFromUrlParam(params.get('finder'));
+  if (!mode) return;
+  fileExplorerMode = mode;
+  writeStoredFileExplorerMode(fileExplorerMode);
+}
+
+function layoutUrlStateFromParams(params) {
+  const raw = params?.get?.('state') || '';
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function layoutUrlStringArray(values, limit = 1000) {
+  if (!Array.isArray(values)) return [];
+  const out = [];
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text) continue;
+    out.push(text);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function layoutUrlReplaceSet(target, values, limit = 1000) {
+  if (!target?.clear) return;
+  target.clear();
+  for (const value of layoutUrlStringArray(values, limit)) target.add(value);
+}
+
+function applyLayoutUrlFinderSeed(finder = {}) {
+  if (!finder || typeof finder !== 'object') return;
+  if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
+  if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
+  if ('root' in finder) {
+    const root = String(finder.root || '').trim();
+    if (root) fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+  }
+  if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
+    fileExplorerChangesSelectedSession = String(finder.session || '').trim();
+    fileExplorerExplicitSyncSession = fileExplorerChangesSelectedSession;
+  }
+  if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
+  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
+  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
+  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
+  if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
+  if ('diffRefsByRepo' in finder) {
+    diffRefsByRepo = typeof shareCleanDiffRefsByRepo === 'function'
+      ? shareCleanDiffRefsByRepo(finder.diffRefsByRepo)
+      : {};
+  }
+  if ('expanded' in finder) layoutUrlReplaceSet(fileExplorerExpanded, finder.expanded);
+  if ('selectedPaths' in finder) layoutUrlReplaceSet(fileExplorerSelectedPaths, finder.selectedPaths);
+  if ('selectionAnchor' in finder) fileExplorerSelectionAnchor = String(finder.selectionAnchor || '');
+  if ('selectionLead' in finder) fileExplorerSelectionLead = String(finder.selectionLead || '');
+  if ('changesFolderCollapsed' in finder) layoutUrlReplaceSet(changesFolderCollapsed, finder.changesFolderCollapsed);
+  if ('changesRepoCollapsed' in finder) layoutUrlReplaceSet(changesRepoCollapsed, finder.changesRepoCollapsed);
+  if ('tabberCollapsed' in finder) layoutUrlReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
+}
+
+function applyLayoutUrlEditorSeed(editor = {}) {
+  if (!editor || typeof editor !== 'object') return;
+  if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
+  if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
+  if ('themeMode' in editor) fileEditorThemeMode = normalizeEditorThemeMode(editor.themeMode);
+  if ('previewDisplayMode' in editor) fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(editor.previewDisplayMode);
+  if ('wrapEnabled' in editor) fileEditorWrapEnabled = editor.wrapEnabled === true;
+  if ('lineNumbersEnabled' in editor) fileEditorLineNumbersEnabled = editor.lineNumbersEnabled === true;
+  if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
+  if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
+  if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
+  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) {
+    if (typeof shareApplyEditorModeEntry === 'function') shareApplyEditorModeEntry(entry);
+  }
+}
+
+function applyLayoutUrlPreferencesSeed(preferences = {}) {
+  if (!preferences || typeof preferences !== 'object') return;
+  if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
+  if (Array.isArray(preferences.collapsedSections)) {
+    collapsedPreferenceSections = new Set(layoutUrlStringArray(preferences.collapsedSections, 200));
+  }
+  if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
+}
+
+function applyLayoutUrlStateSeed(state) {
+  if (!state || typeof state !== 'object') return false;
+  applyLayoutUrlFinderSeed(state.finder || {});
+  applyLayoutUrlEditorSeed(state.editor || {});
+  applyLayoutUrlPreferencesSeed(state.preferences || {});
+  layoutUrlStateFromQuery = state;
+  layoutUrlStateApplied = false;
+  return true;
+}
+
+function maybeAdoptLayoutStateDeepLink(params) {
+  const state = layoutUrlStateFromParams(params);
+  if (!state) return;
+  applyLayoutUrlStateSeed(state);
+}
+
+function layoutUrlCaptureCurrentPaneState() {
+  for (const item of paneItems(layoutSlots)) {
+    capturePaneViewStateForItemIfPresent(item);
+  }
+}
+
+function layoutUrlStateSnapshot() {
+  layoutUrlCaptureCurrentPaneState();
+  const state = {v: 1};
+  if (paneItems(layoutSlots).some(isFileExplorerItem) && typeof shareFinderStateSnapshot === 'function') {
+    state.finder = shareFinderStateSnapshot({compact: false});
+  }
+  if (typeof shareEditorStateSnapshot === 'function') {
+    const editor = shareEditorStateSnapshot({compact: false});
+    if (editor?.modes?.length) state.editor = editor;
+  }
+  if (paneItems(layoutSlots).includes(prefsItemId) && typeof sharePreferencesStateSnapshot === 'function') {
+    state.preferences = sharePreferencesStateSnapshot({compact: false});
+  }
+  if (typeof shareScrollStateSnapshot === 'function') {
+    const scroll = shareScrollStateSnapshot();
+    if (scroll.length) state.scroll = scroll;
+  }
+  return Object.keys(state).length > 1 ? state : null;
+}
+
+function layoutUrlStateParamValue() {
+  const state = layoutUrlStateSnapshot();
+  if (!state) return '';
+  try {
+    return readableParamComponent(JSON.stringify(state));
+  } catch (_) {
+    return '';
+  }
+}
+
+function applyPendingLayoutUrlState() {
+  if (layoutUrlStateApplied) return false;
+  const state = layoutUrlStateFromQuery;
+  if (!state || typeof state !== 'object') {
+    layoutUrlStateApplied = true;
+    return false;
+  }
+  if (Array.isArray(state.scroll) && typeof applyShareScrollSnapshot === 'function') {
+    applyShareScrollSnapshot(state.scroll);
+    requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));
+    setTimeout(() => applyShareScrollSnapshot(state.scroll), 0);
+  }
+  layoutUrlStateApplied = true;
+  return true;
+}
+
+function schedulePendingLayoutUrlStateApply() {
+  if (!layoutUrlStateFromQuery || layoutUrlStateApplied) return;
+  requestAnimationFrame(applyPendingLayoutUrlState);
+  setTimeout(applyPendingLayoutUrlState, 0);
+}
+
+function scheduleLayoutUrlStateRefresh() {
+  if (shareViewMode) return;
+  if (layoutUrlStateRefreshTimer) return;
+  layoutUrlStateRefreshTimer = setTimeout(() => {
+    layoutUrlStateRefreshTimer = null;
+    updateActiveSessionParam();
+  }, 250);
+}
+
+function refreshLayoutUrlStateSoon() {
+  scheduleLayoutUrlStateRefresh();
 }
 
 function shareBootstrapLayoutParams() {
@@ -669,11 +848,13 @@ function shareBootstrapLayoutParams() {
 function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
+  if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
+  if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return layoutWithDebugPaneActive(layoutFromUrl);
+  if (layoutFromUrl) return layoutFromUrl;
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -682,30 +863,8 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutWithDebugPaneActive(layoutFromSessionList(selected));
-  return layoutWithDebugPaneActive(defaultLayoutSlots());
-}
-
-function debugPanePreferredSlot(slots) {
-  const keys = layoutSlotKeys(slots);
-  return keys.find(slot => paneTabs(slot, slots).includes(infoItemId) || paneTabs(slot, slots).includes(prefsItemId))
-    || keys.find(slot => {
-      const active = activeItemForSide(slot, slots);
-      return active && !isFileExplorerItem(active);
-    })
-    || keys[0]
-    || 'left';
-}
-
-function layoutWithDebugPaneActive(slots) {
-  if (!debugModeEnabled || !isLayoutItem(debugPaneItemId)) return slots;
-  const next = cloneLayoutSlots(slots);
-  const existingSlot = layoutSlotKeys(next).find(slot => paneTabs(slot, next).includes(debugPaneItemId));
-  const slot = existingSlot || debugPanePreferredSlot(next);
-  const tabs = paneTabs(slot, next).filter(item => item !== debugPaneItemId);
-  next[slot] = paneStateWithTabs([...tabs, debugPaneItemId], debugPaneItemId);
-  if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(slot);
-  return compactLayoutSlots(next);
+  if (selected.length) return layoutFromSessionList(selected);
+  return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
@@ -934,12 +1093,72 @@ function openFileEditorItems() {
   return items;
 }
 
+const pendingTmuxSessionGraceMs = 30000;
+
+function pruneExpiredPendingTmuxSessions(now = Date.now()) {
+  let changed = false;
+  for (const [session, expiresAt] of pendingTmuxSessions.entries()) {
+    if (Number(expiresAt) <= now) {
+      pendingTmuxSessions.delete(session);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function pendingTmuxSessionNames() {
+  pruneExpiredPendingTmuxSessions();
+  return Array.from(pendingTmuxSessions.keys());
+}
+
+function isPendingTmuxSession(session) {
+  const key = String(session || '').trim();
+  if (!key) return false;
+  pruneExpiredPendingTmuxSessions();
+  return pendingTmuxSessions.has(key);
+}
+
+function markPendingTmuxSession(session) {
+  const key = String(session || '').trim();
+  if (!key) return '';
+  pendingTmuxSessions.set(key, Date.now() + pendingTmuxSessionGraceMs);
+  layoutItems = computeLayoutItems();
+  return key;
+}
+
+function clearPendingTmuxSession(session) {
+  const key = String(session || '').trim();
+  if (!key || !pendingTmuxSessions.delete(key)) return false;
+  layoutItems = computeLayoutItems();
+  return true;
+}
+
+function clearConfirmedPendingTmuxSessions(nextSessions = []) {
+  let changed = false;
+  for (const session of nextSessions) {
+    if (pendingTmuxSessions.delete(session)) changed = true;
+  }
+  return changed;
+}
+
+function sessionOrderIncludingPending(nextSessions = []) {
+  const next = normalizedSessionOrder(nextSessions) || [];
+  for (const session of pendingTmuxSessionNames()) {
+    if (!next.includes(session)) next.push(session);
+  }
+  return next;
+}
+
 function computeLayoutItems() {
-  return [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions];
+  const items = [];
+  for (const item of [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions, ...pendingTmuxSessionNames()]) {
+    if (!items.includes(item)) items.push(item);
+  }
+  return items;
 }
 
 function isTmuxSession(item) {
-  return sessions.includes(item);
+  return sessions.includes(item) || pendingTmuxSessions.has(item);
 }
 
 function isLayoutItem(item) {
@@ -953,6 +1172,7 @@ const paneScrollContainerSelector = [
   '.summary-preview',
   '.event-list',
   '.info-list',
+  '.search-history-scroll',
   '.yoagent-chat-history',
   '.file-explorer-tree-panel',
   '.file-explorer-changes-panel',
@@ -1049,6 +1269,7 @@ function schedulePaneViewStateCapture(item, panel) {
     pendingPaneViewStateCaptures.delete(item);
     const currentPanel = panelNodes.get(item) || panel;
     capturePaneViewState(item, currentPanel);
+    refreshLayoutUrlStateSoon();
   });
 }
 
@@ -1127,7 +1348,7 @@ function itemLabel(item) {
 function itemSortNumber(item) {
   const type = tabTypeForItem(item);
   if (type) return type.sortRank;
-  const label = Number(sessionLabel(item));
+  const label = Number(sessionShortcutLabel(item));
   return Number.isFinite(label) ? label : Number.MAX_SAFE_INTEGER;
 }
 
@@ -1138,17 +1359,20 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  'needs-approval': {label: 'Needs approval', short: 'EXEC?', priority: 0, attention: true},
+  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: '', priority: 0, attention: true},
   'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  'needs-input': {label: 'Needs input', short: 'QUES?', priority: 1, attention: true},
-  blocked: {label: 'Blocked', short: 'BLK', priority: 2, attention: true},
+  [STATE_KEY.needsInput]: {label: 'Needs input', short: '', priority: 1, attention: true},
+  [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
   'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
-  working: {label: 'Working', short: 'RUN', priority: 6, attention: false},
-  idle: {label: 'Idle', short: 'IDLE', priority: 7, attention: false},
-  done: {label: 'Done', short: 'DONE', priority: 8, attention: false},
+  [STATE_KEY.working]: {label: 'Working', short: '', priority: 6, attention: false},
+  [STATE_KEY.idle]: {label: 'Idle', short: '', priority: 7, attention: false},
+  done: {label: 'Done', short: '', priority: 8, attention: false},
 };
+const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
+const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
+const AGENT_WINDOW_APPROVAL_STATES = new Set([STATE_KEY.approval, STATE_KEY.needsApproval]);
 
 function stateReason(key, params = {}) {
   return t(`state.reason.${key}`, params);
@@ -1157,8 +1381,132 @@ function stateReason(key, params = {}) {
 function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
-  const resolvedKey = stateDefs[key] ? key : 'idle';
-  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
+  const resolvedKey = stateDefs[key] ? key : STATE_KEY.idle;
+  const base = stateDefs[resolvedKey];
+  return {...base, label: t(`state.${resolvedKey}`), short: base.short ? t(`state.short.${resolvedKey}`) : ''};
+}
+
+function attentionAcknowledgementKey(parts = []) {
+  return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
+}
+
+function attentionAcknowledgementKeysFromPayload(payload = {}) {
+  const keys = payload?.attention_acks?.keys;
+  return Array.isArray(keys) ? keys.map(key => String(key || '')).filter(Boolean) : [];
+}
+
+function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
+  const value = String(key || '');
+  if (!value) return false;
+  if (promptAttentionClears.has(value)) return true;
+  if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
+  return false;
+}
+
+function recordAttentionAcknowledgementKey(key) {
+  const value = String(key || '');
+  if (!value) return false;
+  setLimitedMapEntry(promptAttentionClears, value, Date.now(), 1024);
+  return true;
+}
+
+function applyAttentionAcknowledgementResponse(payload = {}) {
+  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
+  for (const key of keys) recordAttentionAcknowledgementKey(key);
+  if (payload?.auto_approve && typeof applyAutoApprovePayload === 'function') {
+    applyAutoApprovePayload(payload.auto_approve);
+  } else {
+    const sessionsToRefresh = new Set();
+    for (const key of keys) {
+      try {
+        const parts = JSON.parse(String(key || ''));
+        if (Array.isArray(parts) && parts[1]) sessionsToRefresh.add(String(parts[1]));
+      } catch (_) {}
+    }
+    for (const session of sessionsToRefresh) refreshTrackedSessionChrome(session);
+    updateTopbarActivityStatus();
+    syncTerminalAttentionHighlights();
+  }
+}
+
+function postAttentionAcknowledgementKeys(keys, options = {}) {
+  const unique = Array.from(new Set((Array.isArray(keys) ? keys : [keys]).map(key => String(key || '')).filter(Boolean)));
+  if (!unique.length) return false;
+  if (options.localOnly === true || typeof apiFetchJson !== 'function') {
+    applyAttentionAcknowledgementResponse({acknowledged: unique});
+    return true;
+  }
+  apiFetchJson('/api/attention-ack', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({keys: unique}),
+  })
+    .then(applyAttentionAcknowledgementResponse)
+    .catch(error => {
+      console.warn('attention acknowledgement failed', error);
+    });
+  return true;
+}
+
+function acknowledgeAttentionKeys(keys, options = {}) {
+  const unique = Array.from(new Set((Array.isArray(keys) ? keys : [keys]).map(key => String(key || '')).filter(Boolean)));
+  if (!unique.length) return false;
+  const delayMs = Math.max(0, Number(options.delayMs) || 0);
+  if (delayMs > 0) {
+    for (const key of unique) {
+      const existing = attentionAcknowledgementTimers.get(key);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        attentionAcknowledgementTimers.delete(key);
+        postAttentionAcknowledgementKeys([key], {...options, delayMs: 0});
+      }, delayMs);
+      attentionAcknowledgementTimers.set(key, timer);
+    }
+    return true;
+  }
+  return postAttentionAcknowledgementKeys(unique, options);
+}
+
+function promptAttentionClearKey(session, signature, payload = null) {
+  return String(payload?.prompt_attention_key || payload?.prompt?.attention_key || '') || attentionAcknowledgementKey(['prompt', session, signature]);
+}
+
+function promptAttentionPayloadSignature(payload = {}) {
+  const prompt = payload?.prompt || {};
+  const screen = payload?.screen || {};
+  if (prompt.visible === true) {
+    return String(prompt.signature || prompt.hash || prompt.question_text || prompt.text || prompt.command || '');
+  }
+  if (ATTENTION_SCREEN_KEYS.has(String(screen.key || ''))) {
+    return String(screen.signature || screen.hash || screen.question_text || screen.text || screen.key || '');
+  }
+  return '';
+}
+
+function promptAttentionIsCleared(session, signature, payload = null) {
+  return Boolean(signature) && attentionAcknowledgementKeyIsRecorded(promptAttentionClearKey(session, signature, payload), payload);
+}
+
+function promptAttentionExtra(session, payload = {}) {
+  const signature = promptAttentionPayloadSignature(payload);
+  const clearKey = promptAttentionClearKey(session, signature, payload);
+  const cleared = promptAttentionIsCleared(session, signature, payload);
+  return {
+    session,
+    promptSignature: signature,
+    promptAttentionKey: clearKey,
+    promptAttentionCleared: cleared,
+    attention: !cleared,
+    showBadge: !cleared,
+  };
+}
+
+function clearPromptAttentionForSession(session, options = {}) {
+  const payload = autoApproveStates.get(session) || {};
+  const signature = promptAttentionPayloadSignature(payload);
+  if (!signature) return false;
+  const key = promptAttentionClearKey(session, signature, payload);
+  return acknowledgeAttentionKeys([key], options);
 }
 
 function terminalDisconnected(session) {
@@ -1169,7 +1517,7 @@ function terminalDisconnected(session) {
 }
 
 function sessionState(session, info = transcriptMeta.sessions?.[session]) {
-  if (!isTmuxSession(session)) return {key: 'idle', ...stateDef('idle'), reason: t('state.notTmux')};
+  if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
   const approvalPrompt = auto.prompt || {};
@@ -1204,41 +1552,42 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('disconnected', disconnectedReason);
   }
   if (/blocked|denied|rejected/.test(lastAction)) {
-    return stateValue('blocked', stateReason('yoloBlockedApproval'));
-  }
-  if (approvalPromptVisible && approvalYesSelected && autoEnabled) {
-    return stateValue('yolo-approval', stateReason('yoloWillPressEnter'));
+    return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
   }
   if (approvalPromptVisible && approvalYesSelected) {
-    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
+    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
   if (approvalPromptVisible) {
-    return stateValue('needs-input', stateReason('approvalYesNotSelected'));
+    return stateValue(STATE_KEY.needsInput, stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
   }
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
-    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
+    return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'));
   }
-  if (screenKey === 'approval') {
-    return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'));
+  if (screenKey === STATE_KEY.approval) {
+    return stateValue(STATE_KEY.needsApproval, screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
+  const agentWindowAttention = agentWindowAttentionState(session, info, auto);
+  if (agentWindowAttention) return agentWindowAttention;
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
     return tmuxSignalStateForSession;
   }
-  if (screenKey === 'working') {
-    return stateValue('working', screenText || stateReason('agentWorking'));
+  if (screenKey === STATE_KEY.working) {
+    return stateValue(STATE_KEY.working, screenText || stateReason('agentWorking'));
   }
-  if (screenKey === 'needs-input') {
-    return stateValue('needs-input', screenText || stateReason('agentWaitingInput'));
+  if (screenKey === STATE_KEY.needsInput) {
+    return stateValue(STATE_KEY.needsInput, screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
   }
   if (screenKey === 'error') {
-    return stateValue('blocked', screenText || stateReason('agentScreenFailed'));
+    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
   }
+  const agentWindowCooldown = agentWindowCooldownState(session, info, auto);
+  if (agentWindowCooldown) return agentWindowCooldown;
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
-    return stateValue('needs-input', stateReason('agentWaitingInput'));
+    return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
   if (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText)) {
-    return stateValue('blocked', stateReason('agentErrorBlocker'));
+    return stateValue(STATE_KEY.blocked, stateReason('agentErrorBlocker'));
   }
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
     return stateValue('tests-running', stateReason('testsActive'));
@@ -1250,9 +1599,45 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('done', stateReason('agentComplete'));
   }
   if (agents.length || panes.some(pane => pane.active) || terminals.get(session)?.socket?.readyState === WebSocket.OPEN) {
-    return stateValue('working', stateReason('agentActivePaneDetected'));
+    return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
   }
-  return stateValue('idle', stateReason('noActiveAgent'));
+  return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
+}
+
+function agentWindowCooldownState(session, info = null, auto = autoApproveStates.get(session) || {}) {
+  if (
+    typeof sessionAgentWindowStatusPayloads !== 'function'
+    || typeof agentWindowActivityIconForStatusItem !== 'function'
+    || typeof agentWindowActivityOptionsForStatus !== 'function'
+    || typeof agentWindowActivityTone !== 'function'
+  ) return null;
+  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
+  if (!windows.length) return null;
+  let cooldownWindow = null;
+  for (const agent of windows) {
+    const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
+    const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
+    if (!item || item.acknowledged === true) continue;
+    const tone = agentWindowActivityTone(item.state);
+    if (tone === 'attention' || tone === STATE_KEY.working) return null;
+    if (tone === 'cooldown') cooldownWindow = cooldownWindow || {agent, item};
+  }
+  if (!cooldownWindow) return null;
+  const label = String(cooldownWindow.agent?.window_label || cooldownWindow.agent?.window || cooldownWindow.agent?.kind || '').trim();
+  const reason = label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown');
+  return stateValue('cooldown', reason, {agentWindowState: 'cooldown'});
+}
+
+function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
+  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
+  const agent = windows.find(item => AGENT_WINDOW_ATTENTION_STATES.has(String(item?.state || '')));
+  if (!agent) return null;
+  const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
+  const windowLabel = String(agent.window_label || agent.window || agent.kind || '').trim();
+  const reasonText = String(agent.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
+  const reason = windowLabel ? `${windowLabel}: ${reasonText}` : reasonText;
+  return stateValue(stateKey, reason, promptAttentionExtra(session, auto));
 }
 
 function agentErrorIsBlocking(error) {
@@ -1278,25 +1663,40 @@ function autoApproveEnabledForSession(payload) {
   return autoApproveEnabledHere(payload) || autoApproveEnabledElsewhere(payload);
 }
 
-function yoloWorkingSessions() {
-  return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session)));
+function autoApproveScreenIsWorking(payload) {
+  return String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
-function autoApproveScreenIsWorking(payload) {
-  return String(payload?.screen?.key || '') === 'working';
+function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return false;
+  return sessionAgentWindowStatusPayloads(session, info, payload)
+    .some(agent => String(agent?.state || '').toLowerCase() === STATE_KEY.working);
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  // Spin the YO ball whenever the agent is working, regardless of auto-approve state.
-  return autoApproveScreenIsWorking(payload);
+  // Spin the YO ball whenever any Claude/Codex tmux sub-window is working, even when that sub-window is hidden.
+  return sessionHasWorkingAgentWindow(session, payload) || autoApproveScreenIsWorking(payload);
+}
+
+function yoloWorkingSessions() {
+  return sessions.filter(session => sessionYoloIsWorking(session));
 }
 
 function runningAgentCount() {
   return yoloWorkingSessions().length;
 }
 
+function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.get(session) || {}) {
+  if (payload?.prompt?.visible === true) return true;
+  const key = String(payload?.screen?.key || '');
+  if (key && key !== STATE_KEY.idle) return true;
+  if (autoApproveEnabledForSession(payload)) return true;
+  const info = transcriptMeta.sessions?.[session];
+  return typeof sessionAgentWindowStatusPayloads === 'function' && sessionAgentWindowStatusPayloads(session, info, payload).length > 0;
+}
+
 function sessionCountsAsRunning(session, stateKey = '') {
-  if (autoApproveScreenIsWorking(autoApproveStates.get(session))) return true;
+  if (sessionYoloIsWorking(session)) return true;
   return ['tests-running', 'yolo-approval'].includes(String(stateKey || ''));
 }
 
@@ -1331,6 +1731,14 @@ function tmuxSignalWindowSession(windowRecord) {
   return String(windowRecord?.session || windowRecord?.session_name || '').trim();
 }
 
+function tmuxSignalWindowKey(windowRecord) {
+  const key = String(windowRecord?.key || '').trim();
+  if (key) return key;
+  const session = tmuxSignalWindowSession(windowRecord);
+  const index = String(windowRecord?.window_index ?? windowRecord?.window ?? '').trim();
+  return session && index ? `${session}:${index}` : '';
+}
+
 function tmuxSignalWindowActivityTs(windowRecord) {
   const value = Number(windowRecord?.activity_ts ?? windowRecord?.window_activity ?? 0);
   return Number.isFinite(value) ? value : 0;
@@ -1357,6 +1765,15 @@ function tmuxSignalPaneIsAgent(pane) {
   return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
 }
 
+function tmuxSignalWindowAgentPanes(windowRecord) {
+  const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  return panes.filter(tmuxSignalPaneIsAgent);
+}
+
+function tmuxSignalWindowHasAgentPane(windowRecord) {
+  return tmuxSignalWindowAgentPanes(windowRecord).length > 0;
+}
+
 function tmuxSignalPaneTarget(pane) {
   return String(pane?.target || pane?.pane_id || '').trim();
 }
@@ -1366,13 +1783,19 @@ function tmuxSignalPaneSession(pane) {
 }
 
 function tmuxSignalPaneWindowKey(pane) {
-  return String(pane?.window_key || pane?._tmux_window?.key || `${tmuxSignalPaneSession(pane)}:${pane?.window_index || ''}`).trim();
+  const key = String(pane?.window_key || '').trim();
+  if (key) return key;
+  const windowKey = tmuxSignalWindowKey(pane?._tmux_window);
+  if (windowKey) return windowKey;
+  const session = tmuxSignalPaneSession(pane);
+  const index = String(pane?.window_index ?? '').trim();
+  return session && index ? `${session}:${index}` : '';
 }
 
 function tmuxSignalWindowForPane(pane) {
   if (pane?._tmux_window) return pane._tmux_window;
   const key = tmuxSignalPaneWindowKey(pane);
-  return tmuxSignalWindows().find(windowRecord => String(windowRecord?.key || '') === key) || null;
+  return tmuxSignalWindows().find(windowRecord => tmuxSignalWindowKey(windowRecord) === key) || null;
 }
 
 function tmuxSignalWindowsForSession(session) {
@@ -1399,7 +1822,9 @@ function tmuxSignalSessionActivityTs(session) {
 
 function tmuxSignalActivePaneForSession(session) {
   const windows = tmuxSignalWindowsForSession(session);
-  const windowRecord = windows.find(item => item?.active === true) || windows[0] || null;
+  const override = typeof tmuxWindowActiveIndexOverride === 'function' ? tmuxWindowActiveIndexOverride(session) : undefined;
+  const overrideWindow = override !== undefined && override !== '__pending__' ? tmuxSignalWindowForSessionIndex(session, override) : null;
+  const windowRecord = overrideWindow || windows.find(item => item?.active === true) || windows[0] || null;
   const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   return panes.find(pane => pane?.active === true) || panes[0] || null;
 }
@@ -1407,6 +1832,14 @@ function tmuxSignalActivePaneForSession(session) {
 function tmuxSignalPanePathForSession(session) {
   const path = String(tmuxSignalActivePaneForSession(session)?.current_path || '').trim();
   return path ? normalizeDirectoryPath(path) : '';
+}
+
+// An alternate-screen pane is a mouse-owning TUI (claude, codex, vim, less): it has its own
+// scroll view and its tmux pane carries no scrollback (history_size stays 0), so routing the
+// wheel into tmux copy-mode is a dead end. Callers use this to let xterm forward the wheel to
+// the app instead of hijacking it.
+function sessionPaneIsAlternateScreen(session) {
+  return tmuxSignalActivePaneForSession(session)?.alternate_on === true;
 }
 
 function tmuxSignalPaneForTarget(target) {
@@ -1451,15 +1884,29 @@ function tmuxSignalDeadText(pane) {
   return 'agent exited';
 }
 
+function tmuxSignalPaneTitle(pane) {
+  return String(pane?.title || pane?.pane_title || '').trim();
+}
+
+function tmuxSignalPaneActionRequired(pane) {
+  return /\[\s*[!.]\s*\]\s*action required/i.test(tmuxSignalPaneTitle(pane));
+}
+
 function tmuxSignalAgentStateForSession(session) {
-  const panes = tmuxSignalAgentPanesForSession(session);
+  const sessionText = String(session || '').trim();
+  const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
+  const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
+  if (actionRequiredPane) {
+    return stateValue(STATE_KEY.needsInput, 'tmux agent action required', {tmuxSignal: 'action-required'});
+  }
+  const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
   if (!panes.length) return null;
   const livePanes = panes.filter(pane => pane?.dead !== true);
   const deadPanes = panes.filter(pane => pane?.dead === true);
   const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
   const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
   if (bellWindow) {
-    return stateValue('needs-input', 'tmux bell alert', {tmuxSignal: 'bell'});
+    return stateValue(STATE_KEY.needsInput, 'tmux bell alert', {tmuxSignal: 'bell'});
   }
   const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
   if (quietWindow && livePanes.length) {
@@ -1472,7 +1919,7 @@ function tmuxSignalAgentStateForSession(session) {
   if (runningPane) {
     const command = tmuxSignalPaneCommand(runningPane);
     const mode = runningPane?.alternate_on === true ? 'alternate screen' : 'process';
-    return stateValue('working', `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
+    return stateValue(STATE_KEY.working, `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
   }
   return null;
 }
@@ -1492,6 +1939,28 @@ function browserFaviconRoundedRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
+// Favicon background AND the "Y" follow the user's Active color preference + theme (no
+// hardcoded hex): the background is --active-accent and the "Y" is its theme-aware contrast
+// color --active-accent-text (dark glyph on light accents like green/yellow/white, light
+// glyph on dark accents like blue/purple). Both flip with the active_color choice and the
+// dark/light theme — and the favicon repaints on either change because applyActiveColor()
+// (called on active-color change AND on every theme switch) forces a refresh. Falls back to
+// the legacy lime background / dark glyph if the vars aren't ready (e.g. before CSS loads).
+function browserFaviconAccentColors() {
+  const fallbackBg = '#99d441';
+  const fallbackText = '#111111';
+  try {
+    const root = document.documentElement;
+    if (!root || typeof getComputedStyle !== 'function') return {bg: fallbackBg, text: fallbackText};
+    const cs = getComputedStyle(root);
+    const bg = (cs.getPropertyValue('--active-accent') || '').trim();
+    const text = (cs.getPropertyValue('--active-accent-text') || '').trim();
+    return {bg: bg || fallbackBg, text: text || fallbackText};
+  } catch (_) {
+    return {bg: fallbackBg, text: fallbackText};
+  }
+}
+
 function renderBrowserFaviconDataUrl(count) {
   const canvas = document.createElement('canvas');
   canvas.width = 64;
@@ -1499,15 +1968,16 @@ function renderBrowserFaviconDataUrl(count) {
   const ctx = canvas.getContext?.('2d');
   if (!ctx || typeof canvas.toDataURL !== 'function') return '';
 
+  const faviconAccent = browserFaviconAccentColors();
   ctx.clearRect(0, 0, 64, 64);
   browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10);
-  ctx.fillStyle = '#99d441';
+  ctx.fillStyle = faviconAccent.bg;
   ctx.fill();
 
   const label = browserFaviconBadgeLabel(count);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#111111';
+  ctx.fillStyle = faviconAccent.text;
   ctx.font = '900 86px Arial, sans-serif';
   ctx.save();
   ctx.translate(25, 39);
@@ -1545,13 +2015,17 @@ function browserFaviconLink() {
 
 function updateBrowserFavicon(options = {}) {
   const count = browserFaviconBadgeCount();
-  if (!options.force && browserFaviconLastBadge === count) return false;
+  // Include the accent in the dedupe signature so a theme/active-color change re-renders
+  // on the next refresh tick even when the badge count is unchanged.
+  const accent = browserFaviconAccentColors();
+  const signature = `${count}|${accent.bg}|${accent.text}`;
+  if (!options.force && browserFaviconLastBadge === signature) return false;
   const dataUrl = renderBrowserFaviconDataUrl(count);
   if (!dataUrl) return false;
   const link = browserFaviconLink();
   if (!link) return false;
   link.href = dataUrl;
-  browserFaviconLastBadge = count;
+  browserFaviconLastBadge = signature;
   return true;
 }
 
@@ -1570,50 +2044,137 @@ function updateDocumentTitle() {
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
-// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/QUES/BLK.
+// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 working/attention/blocked.
 function globalActivityCounts() {
+  const agentWindowCounts = globalActivityCountsFromAgentWindows();
+  if (agentWindowCounts) return agentWindowCounts;
   const signalWindows = tmuxSignalWindows();
   let running = 0;
-  let questions = 0;
+  let ask = 0;
   let blocked = 0;
-  const signalSessions = new Set(signalWindows.map(tmuxSignalWindowSession).filter(Boolean));
+  const countedSignalSessions = new Set();
+  const countedSignalWindows = new Set();
   const runningSignalSessions = new Set();
   const bellSignalWindows = new Set();
+  const actionRequiredSignalWindows = new Set();
+  const signalAttentionSessions = new Set();
   for (const windowRecord of signalWindows) {
-    if (windowRecord?.bell_flag === true) {
-      bellSignalWindows.add(String(windowRecord?.key || `${tmuxSignalWindowSession(windowRecord)}:${windowRecord?.window_index || ''}`));
+    const signalSession = tmuxSignalWindowSession(windowRecord);
+    const signalKey = tmuxSignalWindowKey(windowRecord);
+    const signalPayload = signalSession ? (autoApproveStates.get(signalSession) || {}) : {};
+    const signalPromptSignature = signalSession ? promptAttentionPayloadSignature(signalPayload) : '';
+    const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature, signalPayload) : false;
+    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+    const hasAgentPane = tmuxSignalWindowHasAgentPane(windowRecord);
+    const hasActionRequiredPane = panes.some(tmuxSignalPaneActionRequired);
+    if (windowRecord?.bell_flag === true && hasAgentPane && !signalPromptCleared) {
+      if (signalKey) bellSignalWindows.add(signalKey);
+      if (signalSession) signalAttentionSessions.add(signalSession);
     }
+    if (hasActionRequiredPane && !signalPromptCleared) {
+      if (signalKey) actionRequiredSignalWindows.add(signalKey);
+      if (signalSession) signalAttentionSessions.add(signalSession);
+    }
+    if (signalKey && (hasAgentPane || hasActionRequiredPane)) countedSignalWindows.add(signalKey);
+    if (signalSession && (hasAgentPane || hasActionRequiredPane)) countedSignalSessions.add(signalSession);
+    if (!hasAgentPane) continue;
     if (!tmuxSignalWindowIsRecentlyActive(windowRecord)) continue;
     running += 1;
-    const session = tmuxSignalWindowSession(windowRecord);
-    if (session) runningSignalSessions.add(session);
+    if (signalSession) runningSignalSessions.add(signalSession);
   }
-  questions += bellSignalWindows.size;
-  const countedSessions = new Set([...sessions, ...autoApproveStates.keys()].map(value => String(value || '')).filter(Boolean));
+  ask += new Set([...bellSignalWindows, ...actionRequiredSignalWindows]).size;
+  const countedSessions = new Set([...autoApproveStates.keys()]
+    .map(value => String(value || ''))
+    .filter(session => session && autoApprovePayloadCountsInTopbar(session, autoApproveStates.get(session) || {})));
   for (const session of countedSessions) {
     if (!isTmuxSession(session)) continue;
-    const key = String(autoApproveStates.get(session)?.screen?.key || '');
-    if (key === 'working' && !runningSignalSessions.has(session)) running += 1;
-    else if (key === 'needs-input') questions += 1;
-    else if (key === 'blocked') blocked += 1;
+    const payload = autoApproveStates.get(session) || {};
+    const key = String(payload?.screen?.key || '');
+    const promptVisible = payload?.prompt?.visible === true;
+    const promptAttentionKey = promptVisible
+      ? (payload?.prompt?.yes_selected === true ? STATE_KEY.needsApproval : STATE_KEY.needsInput)
+      : key;
+    const promptSignature = promptAttentionPayloadSignature(payload);
+    const promptCleared = promptAttentionIsCleared(session, promptSignature, payload);
+    if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
+    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
+    else if (key === STATE_KEY.blocked) blocked += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
-  const total = signalWindows.length
-    ? signalWindows.length + [...countedSessions].filter(session => isTmuxSession(session) && !signalSessions.has(session)).length
+  const total = countedSignalWindows.size
+    ? countedSignalWindows.size + [...countedSessions].filter(session => isTmuxSession(session) && !countedSignalSessions.has(session)).length
     : fallbackTotal;
-  const attention = questions + blocked;
-  return {running, questions, blocked, attention, idle: Math.max(0, total - running - attention), total};
+  const attention = ask + blocked;
+  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+}
+
+function globalActivityCountSessions() {
+  if (typeof tabberOrderedSessions === 'function') return tabberOrderedSessions();
+  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
+  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const seen = new Set();
+  const sessions = [];
+  for (const value of [...order, ...all]) {
+    const session = String(value || '').trim();
+    if (!session || seen.has(session) || !isTmuxSession(session)) continue;
+    seen.add(session);
+    sessions.push(session);
+  }
+  return sessions;
+}
+
+function globalActivityCountsFromAgentWindows() {
+  if (
+    typeof sessionAgentWindowStatusPayloads !== 'function'
+    || typeof agentWindowActivityIconForStatusItem !== 'function'
+    || typeof agentWindowActivityOptionsForStatus !== 'function'
+    || typeof agentWindowKind !== 'function'
+  ) return null;
+  let running = 0;
+  let ask = 0;
+  let blocked = 0;
+  let total = 0;
+  for (const session of globalActivityCountSessions()) {
+    const info = transcriptMeta.sessions?.[session] || {};
+    const autoPayload = autoApproveStates.get(session) || {};
+    const rows = sessionAgentWindowStatusPayloads(session, info, autoPayload);
+    for (const agent of rows) {
+      if (!agentWindowKind(agent?.kind)) continue;
+      const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
+      const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
+      total += 1;
+      if (!item || item.acknowledged === true) continue;
+      if (item.state === STATE_KEY.working) running += 1;
+      else if (item.state === 'attention') ask += 1;
+      else if (item.state === 'cooldown') blocked += 1;
+    }
+  }
+  if (!total) return null;
+  const attention = ask + blocked;
+  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
 }
 
 function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
   const parts = [];
-  parts.push(`<span class="topbar-activity-run${counts.running ? ' active' : ''}">${counts.running} RUN</span>`);
-  parts.push(`<span class="topbar-activity-ques${counts.questions ? ' topbar-activity-attn' : ''}">${counts.questions} QUES?</span>`);
-  parts.push(`<span class="topbar-activity-blk${counts.blocked ? ' topbar-activity-attn' : ''}">${counts.blocked} BLK</span>`);
-  parts.push(`<span class="topbar-activity-idle">${counts.idle} idle</span>`);
+  parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
+  parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
+}
+
+function topbarActivityCountBallHtml(count, tone, extraClass = '') {
+  const activityToneClass = typeof agentWindowActivityToneWrapperClass === 'function' ? agentWindowActivityToneWrapperClass(tone) : '';
+  return `
+    <span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-count', extraClass, count ? 'active' : ''))}">
+      <span class="topbar-activity-count-number">${esc(String(count))}</span>
+      <span class="${esc(['agent-window-activity', 'agent-window-activity--status-only', activityToneClass, 'topbar-activity-ball'].join(' '))}" aria-hidden="true">
+        <span class="${esc(statusIndicatorDotClasses(tone, 'agent-window-status-dot', {pulse: false}))}">●</span>
+      </span>
+    </span>
+  `;
 }
 
 function createTopbarActivityStatus() {
@@ -1623,7 +2184,7 @@ function createTopbarActivityStatus() {
   button.className = 'topbar-activity';
   button.title = 'Open the cross-session AI activity summary';
   button.setAttribute('aria-label', 'AI activity summary across all sessions');
-  button.onclick = () => openInfoSubTab('yoagent');
+  button.onclick = () => selectSession(yoagentItemId, {userInitiated: true});
   return button;
 }
 
@@ -1635,46 +2196,292 @@ function updateTopbarActivityStatus() {
   node.innerHTML = html;
   node.hidden = !html;
   node.classList.toggle('has-attention', counts.attention > 0);
+  if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
-function yoloRotationDelay(now = Date.now()) {
-  const duration = Math.max(0, Number(yoloRotateMs) || 0);
-  if (duration <= 0) return '0s';
+function topbarOwnerStatusCombinedHtml(summaries = []) {
+  const activeSummaries = summaries.filter(item => item && typeof item === 'object');
+  if (!activeSummaries.length) return '';
+  const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
+  const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
+  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(state)}</span></span>`;
+}
+
+function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
+  const lines = [
+    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || 'this server'}`,
+    indexSummary.ownerLabel ? `IDX leader: ${indexSummary.ownerLabel}` : '',
+    statsSummary.ownerLabel ? `STATS leader: ${statsSummary.ownerLabel}` : '',
+    sessionSummary.ownerLabel ? `SESS leader: ${sessionSummary.ownerLabel}` : '',
+    indexSummary.status ? `Index status: ${indexSummary.status}` : '',
+    statsSummary.status ? `YO!stats status: ${statsSummary.status}` : '',
+    sessionSummary.status ? `Session files status: ${sessionSummary.status}` : '',
+    indexSummary.error || statsSummary.error || sessionSummary.error || '',
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
+  if (!payload || typeof payload !== 'object' || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return [];
+  return [
+    {...backgroundOwnerSearchIndexSummary(payload), label: 'IDX'},
+    {...backgroundOwnerStatsSummary(payload), label: 'STATS'},
+    {...backgroundOwnerSessionFilesSummary(payload), label: 'SESS'},
+  ];
+}
+
+function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusPayload) {
+  const summaries = topbarOwnerStatusSummaries(payload).filter(item => item && typeof item === 'object');
+  return Boolean(summaries.length) && summaries.every(item => item.ownsRole === true || item.ownsIndex === true);
+}
+
+function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusPayload, nowSeconds = Date.now() / 1000) {
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : {};
+  const latest = data.latest_generation && typeof data.latest_generation === 'object' ? data.latest_generation : {};
+  if (owner.generation_id && latest.generation_id && owner.generation_id === latest.generation_id) return true;
+  const heartbeat = Number(owner.last_heartbeat || 0);
+  return Number.isFinite(heartbeat) && heartbeat > 0 && Number(nowSeconds) - heartbeat <= 10;
+}
+
+async function claimBackgroundOwnerLeader() {
+  try {
+    const result = await apiFetchJson('/api/background/claim', {method: 'POST'});
+    if (result?.status && typeof applyBackgroundOwnerStatusPayload === 'function') {
+      applyBackgroundOwnerStatusPayload(result.status, {render: false});
+    }
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      await refreshBackgroundOwnerStatus({force: true, render: false});
+    }
+    statusOk(localizedHtml(result?.was_owner ? 'status.backgroundOwnerAlreadyLeader' : 'status.backgroundOwnerClaimed'));
+  } catch (error) {
+    statusErr(localizedHtml('status.backgroundOwnerClaimFailed', {error}));
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      refreshBackgroundOwnerStatus({force: true, render: false}).catch(refreshError => console.warn('background-owner status refresh failed', refreshError));
+    }
+  }
+}
+
+function showBackgroundOwnerContextMenu(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu background-owner-context-menu';
+  menu.setAttribute('role', 'menu');
+  const alreadyLeader = backgroundOwnerOwnsAllRoles();
+  if (alreadyLeader || readOnlyMode) {
+    appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
+  } else {
+    appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
+      const payload = backgroundOwnerStatusPayload && typeof backgroundOwnerStatusPayload === 'object' ? backgroundOwnerStatusPayload : {};
+      const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
+      if (backgroundOwnerCurrentOwnerLive(payload)) {
+        const label = backgroundServerLabel(owner, t('common.unknown'));
+        const message = t('backgroundOwner.takeoverConfirm', {server: label});
+        if (typeof window.confirm === 'function' && !window.confirm(message)) return;
+      }
+      claimBackgroundOwnerLeader();
+    }, () => backgroundOwnerContextMenu.close());
+  }
+  backgroundOwnerContextMenu.open(menu, event.clientX, event.clientY);
+}
+
+function topbarOwnerStatusHtml() {
+  if (shareViewMode) return '';
+  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
+    return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="loading"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">...</span></span>';
+  }
+  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
+    return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
+  }
+  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusPayload));
+}
+
+function createTopbarOwnerStatus() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'topbarOwnerStatus';
+  button.className = 'topbar-owner-status';
+  button.title = 'Refresh connected server ownership status';
+  button.setAttribute('aria-label', 'Connected server ownership status');
+  button.onclick = () => {
+    if (typeof refreshBackgroundOwnerStatus === 'function') {
+      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+    }
+  };
+  button.addEventListener('contextmenu', showBackgroundOwnerContextMenu);
+  return button;
+}
+
+function updateTopbarOwnerStatus() {
+  const node = document.getElementById('topbarOwnerStatus');
+  if (!node) return;
+  const html = topbarOwnerStatusHtml();
+  node.innerHTML = html;
+  node.hidden = !html;
+  node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
+  node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
+  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
+  if (summaries.length) {
+    const [indexSummary, statsSummary, sessionSummary] = summaries;
+    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || 'Refresh connected server ownership status';
+  } else if (backgroundOwnerStatusError) {
+    node.title = backgroundOwnerStatusError;
+  } else {
+    node.title = 'Refresh connected server ownership status';
+  }
+}
+
+const attentionAnimationDelayProperty = '--attention-animation-delay';
+
+function attentionAnimationDurationMs(durationMs = agentStatusPulsePeriodMs) {
+  const duration = Math.max(1, Number(durationMs) || Number(agentStatusPulsePeriodMs) || 1);
+  return duration;
+}
+
+function statusPulseAnimationEnabled() {
+  return typeof globalThis !== 'undefined' && globalThis.yolomuxEnableBroadStatusPulse === true;
+}
+
+function attentionAnimationPhaseMs(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
+  const duration = attentionAnimationDurationMs(durationMs);
+  return ((Number(now) || 0) % duration + duration) % duration;
+}
+
+function attentionAnimationDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
+  const duration = attentionAnimationDurationMs(durationMs);
   return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
-function attentionAnimationDelay(now = Date.now()) {
-  return `${-((now % redReminderMs) / 1000).toFixed(3)}s`;
+function attentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
+  const current = document?.documentElement?.style?.getPropertyValue?.(attentionAnimationDelayProperty)?.trim();
+  return current || setAttentionAnimationClockDelay(now, durationMs);
 }
 
-function attentionAnimationStyle() {
-  return `--attention-animation-delay: ${attentionAnimationDelay()}`;
+function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulsePeriodMs, property = attentionAnimationDelayProperty) {
+  const value = property === attentionAnimationDelayProperty
+    ? attentionAnimationClockDelay(now, durationMs)
+    : attentionAnimationDelay(now, durationMs);
+  return `${property}: ${value}`;
+}
+
+function setAttentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
+  const delay = attentionAnimationDelay(now, durationMs);
+  document?.documentElement?.style?.setProperty?.(attentionAnimationDelayProperty, delay);
+  return delay;
 }
 
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
-  if (active) {
-    if (!node.style.getPropertyValue('--attention-animation-delay')) {
-      node.style.setProperty('--attention-animation-delay', attentionAnimationDelay());
-    }
+  const enabled = active === true && statusPulseAnimationEnabled();
+  node.classList?.toggle?.('attention-pulse', enabled);
+  node.classList?.toggle?.('heartbeat-pulse', enabled);
+  if (enabled) {
+    attentionAnimationClockDelay();
+    node.style.removeProperty(attentionAnimationDelayProperty);
   } else {
-    node.style.removeProperty('--attention-animation-delay');
+    node.style.removeProperty(attentionAnimationDelayProperty);
   }
 }
 
-function stateBadgeHtml(key, short, title) {
+function statusIndicatorClassItems(...classes) {
+  const items = [];
+  classes.forEach(item => {
+    if (Array.isArray(item)) items.push(...statusIndicatorClassItems(...item));
+    else if (item) items.push(item);
+  });
+  return items;
+}
+
+function statusIndicatorClasses(...classes) {
+  return ['status-indicator', ...statusIndicatorClassItems(...classes)].join(' ');
+}
+
+function statusIndicatorToneClasses(tone, options = {}) {
+  const pulseEnabled = options.pulse !== false && statusPulseAnimationEnabled();
+  if (tone === 'positive') return ['status-indicator--positive'];
+  if (tone === STATE_KEY.working) return ['status-indicator--working', pulseEnabled ? 'heartbeat-pulse' : ''];
+  if (tone === 'cooldown') return ['status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'attention') return ['status-indicator--attention', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'active') return ['status-indicator--active'];
+  if (tone === 'settled') return ['status-indicator--settled'];
+  if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
+  return [];
+}
+
+function statusIndicatorToneStyle(tone, options = {}) {
+  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+}
+
+function statusIndicatorExtractOptions(classes) {
+  const last = classes.length ? classes[classes.length - 1] : null;
+  if (!last || typeof last !== 'object' || Array.isArray(last)) return {};
+  if (!Object.prototype.hasOwnProperty.call(last, 'pulse') && !Object.prototype.hasOwnProperty.call(last, 'modifierPosition')) return {};
+  classes.pop();
+  return last;
+}
+
+function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
+  const items = statusIndicatorClassItems(classes);
+  const toneClasses = statusIndicatorToneClasses(tone, options);
+  if (options.modifierPosition === 'after-all') return statusIndicatorClasses(items, toneClasses, modifier);
+  if (!items.length) return statusIndicatorClasses(modifier, toneClasses);
+  return statusIndicatorClasses(items[0], modifier, items.slice(1), toneClasses);
+}
+
+function statusIndicatorTextClasses(tone, ...classes) {
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--text', tone, classes, options);
+}
+
+function statusIndicatorLabelClasses(tone, ...classes) {
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--label', tone, classes, options);
+}
+
+function statusIndicatorDotClasses(tone, ...classes) {
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes, options);
+}
+
+function statusIndicatorInlineClasses(tone, ...classes) {
+  const options = statusIndicatorExtractOptions(classes);
+  return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {...options, modifierPosition: 'after-all'});
+}
+
+function statusIndicatorLabelHtml(text, tone, ...classes) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const options = statusIndicatorExtractOptions(classes);
+  const style = statusIndicatorToneStyle(tone, options);
+  const optionArgs = Object.keys(options).length ? [options] : [];
+  return `<span class="${esc(statusIndicatorLabelClasses(tone, ...classes, ...optionArgs))}"${style}>${esc(value)}</span>`;
+}
+
+function stateBadgeHtml(key, short, title, options = {}) {
   const classes = ['session-state-badge', 'tab-symbol', `session-state-${key}`];
   const attention = stateDef(key).attention;
+  const tone = attention ? 'attention' : '';
   if (attention) classes.push('session-state-reminder');
-  const style = attention ? ` style="${attentionAnimationStyle()}"` : '';
-  return `<span class="${esc(classes.join(' '))}"${style} title="${esc(title)}">${esc(short)}</span>`;
+  const style = statusIndicatorToneStyle(tone);
+  const clearable = options.clearable === true && options.session && options.promptSignature;
+  const attrs = clearable
+    ? ` role="button" tabindex="0" data-prompt-attention-clear="1" data-session="${esc(options.session)}" data-prompt-signature="${esc(options.promptSignature)}" aria-label="${esc(t('state.clearAsk'))}"`
+    : '';
+  return `<span class="${esc(statusIndicatorTextClasses(tone, classes))}"${style} title="${esc(title)}"${attrs}>${esc(short)}</span>`;
 }
 
 function sessionStateHtml(state) {
   // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
-  if (!state || (!state.showBadge && ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
-  return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`);
+  if (state?.promptAttentionCleared) return '';
+  if ([STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state?.key)) return '';
+  if (!state || [STATE_KEY.working, 'done'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
+  return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
+    clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
+    session: state.session,
+    promptSignature: state.promptSignature,
+  });
 }
 
 function inactiveTabItems() {
@@ -1779,11 +2586,14 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
       {label: t('share.title'), keys: appShortcutText('K')},
+      {label: 'Open YO!agent in a right pane', keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
+      {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
     {section: t('shortcuts.section.terminal'), items: [
+      {label: 'Copy visible terminal selection', keys: appShortcutText('C')},
       {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
     ]},
@@ -1803,17 +2613,71 @@ function keyboardShortcutCatalog() {
     ]},
     {section: t('shortcuts.section.tabsPanes'), items: [
       {label: t('shortcuts.pinTab'), keys: t('shortcuts.keys.pinTab', {k: appShortcutText('K', {shift: true})})},
-      {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: appShortcutText('Backspace')})},
+      {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}`})},
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
-      {label: t('shortcuts.closeMenu'), keys: 'Esc'},
+    ]},
+    {section: `${fileExplorerLabel()} / Differ`, items: [
+      {label: 'Move selection', keys: '↑ / ↓ / Home / End'},
+      {label: 'Extend selection', keys: 'Shift+↑ / ↓ / Home / End'},
+      {label: 'Expand / collapse folders', keys: '→ / ←'},
+      {label: 'Rename selected file', keys: 'Return'},
+      {label: 'Open selected file or folder', keys: appShortcutText('↓')},
+      {label: 'Open enclosing folder', keys: appShortcutText('↑')},
+      {label: 'Quick preview', keys: 'Space'},
+      {label: 'Select all rows', keys: appShortcutText('A')},
+      {label: 'Delete selected rows', keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
+    ]},
+    {section: 'Menus, palettes, and pickers', items: [
+      {label: 'Move through menus or results', keys: '↑ / ↓'},
+      {label: 'Open submenu or move across menu bar', keys: '← / →'},
+      {label: 'Run focused command', keys: 'Enter / Space'},
+      {label: 'Open selected quick-open file in a split', keys: appShortcutText('Enter')},
+      {label: 'Close menu, palette, or picker', keys: 'Esc'},
+      {label: 'Choose numbered Tabber, drop, or paste item', keys: '1-9'},
     ]},
   ];
 }
 
-function keyboardShortcutsHtml() {
-  return keyboardShortcutCatalog().map(section => `
-    <section class="keyboard-shortcuts-section">
+function keyboardLegendStatusSample(kind, text = '●') {
+  if (kind === 'working') return `<span class="status-indicator status-indicator--dot status-indicator--working">${esc(text)}</span>`;
+  if (kind === 'cooldown') return `<span class="status-indicator status-indicator--dot status-indicator--cooldown">${esc(text)}</span>`;
+  if (kind === 'attention') return `<span class="status-indicator status-indicator--dot status-indicator--attention">${esc(text)}</span>`;
+  if (kind === 'idle') return `<span class="status-indicator status-indicator--dot status-indicator--idle">${esc(text)}</span>`;
+  return `<span class="keyboard-legend-swatch keyboard-legend-swatch-${esc(kind)}" aria-hidden="true"></span>`;
+}
+
+function keyboardLegendCatalog() {
+  return [
+    {section: 'Color meanings', items: [
+      {sampleHtml: keyboardLegendStatusSample('working'), label: 'Green', detail: 'Working, passing, healthy, or active. Agent balls use green for active work.'},
+      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: 'Yellow', detail: 'Recent attention transition or cooldown glow. It is less urgent than red.'},
+      {sampleHtml: keyboardLegendStatusSample('attention'), label: 'Red', detail: 'Needs input, needs approval, blocked, disconnected, failing CI, or another user-visible problem.'},
+      {sampleHtml: keyboardLegendStatusSample('merged'), label: 'Purple', detail: 'Merged GitHub PR. Purple is reserved for merged state.'},
+      {sampleHtml: keyboardLegendStatusSample('closed'), label: 'Gray', detail: 'Closed, done, idle, inactive, or unavailable state.'},
+      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: 'Metadata colors', detail: 'YO!info and Info Bars tint Path, Git BRANCH, Linear, GitHub PR, Tab, and AI fields so repeated rows scan by type.'},
+    ]},
+    {section: 'Icon meanings', items: [
+      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: 'YO!info branch, PR, Linear, Tab, AI, and path map.'},
+      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: 'YO!agent chat, skills, jobs, waits, and handoffs.'},
+      {sampleHtml: appMenuUiIcon('gear'), label: 'Gear', detail: 'Preferences and configurable settings.'},
+      {sampleHtml: appMenuUiIcon('tab-meta'), label: 'Tab metadata', detail: 'Metadata/debug surfaces and the tab metadata toggle.'},
+      {sampleHtml: appMenuUiIcon('share'), label: 'Share', detail: 'YO!share link and viewer controls.'},
+      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: 'Pin', detail: 'Pinned tabs stay at the front and are protected from tab eviction.'},
+    ]},
+    {section: 'YO button meanings', items: [
+      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: 'Inactive YO', detail: 'YOLO auto-approval is off for this tmux session, or not owned here.'},
+      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: 'Active YO', detail: 'YOLO auto-approval is enabled for this session.'},
+      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: 'Working YO', detail: 'YOLO is enabled while an agent window is working.'},
+      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: 'Locked YO', detail: 'Another YOLOmux process owns the auto-approval lock for that target.'},
+    ]},
+  ];
+}
+
+function keyboardHelpSectionHtml(section, className = '') {
+  const extraClass = className ? ` ${className}` : '';
+  return `
+    <section class="keyboard-shortcuts-section${extraClass}">
       <h3>${esc(section.section)}</h3>
       <div class="keyboard-shortcuts-list">
         ${section.items.map(item => `
@@ -1822,7 +2686,52 @@ function keyboardShortcutsHtml() {
             <kbd>${esc(item.keys)}</kbd>
           </div>`).join('')}
       </div>
-    </section>`).join('');
+    </section>`;
+}
+
+function keyboardLegendSectionHtml(section) {
+  return `
+    <section class="keyboard-shortcuts-section keyboard-legends-section">
+      <h3>${esc(section.section)}</h3>
+      <div class="keyboard-shortcuts-list keyboard-legends-list">
+        ${section.items.map(item => `
+          <div class="keyboard-legend-row">
+            <span class="keyboard-legend-sample">${item.sampleHtml || ''}</span>
+            <span class="keyboard-legend-text">
+              <span class="keyboard-legend-label">${esc(item.label)}</span>
+              <span class="keyboard-legend-detail">${esc(item.detail)}</span>
+            </span>
+          </div>`).join('')}
+      </div>
+    </section>`;
+}
+
+function keyboardShortcutsSectionWeight(section, isLegend = false) {
+  const itemWeight = isLegend ? 1.35 : 1;
+  return 1 + (Array.isArray(section?.items) ? section.items.length * itemWeight : 0);
+}
+
+function keyboardShortcutsHtml() {
+  const sections = [
+    ...keyboardShortcutCatalog().map(section => ({
+      html: keyboardHelpSectionHtml(section),
+      weight: keyboardShortcutsSectionWeight(section, false),
+    })),
+    ...keyboardLegendCatalog().map(section => ({
+      html: keyboardLegendSectionHtml(section),
+      weight: keyboardShortcutsSectionWeight(section, true),
+    })),
+  ];
+  const columns = Array.from({length: 4}, () => ({html: [], weight: 0}));
+  for (const section of sections) {
+    const column = columns.reduce((best, current) => current.weight < best.weight ? current : best);
+    column.html.push(section.html);
+    column.weight += section.weight;
+  }
+  return columns.map(column => `
+    <div class="keyboard-shortcuts-column">
+      ${column.html.join('')}
+    </div>`).join('');
 }
 
 function ensureKeyboardShortcutsOverlay() {
@@ -1854,14 +2763,14 @@ function openKeyboardShortcutsOverlay() {
   const body = node.querySelector('.keyboard-shortcuts-body');
   if (body) body.innerHTML = keyboardShortcutsHtml();
   node.hidden = false;
-  node.classList.add('open');
+  node.classList.add(CLS.open);
   node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
 }
 
 function closeKeyboardShortcutsOverlay() {
   if (!keyboardShortcutsNode) return;
   keyboardShortcutsNode.hidden = true;
-  keyboardShortcutsNode.classList.remove('open');
+  keyboardShortcutsNode.classList.remove(CLS.open);
 }
 
 function commandPaletteAllTabItems() {
@@ -1983,7 +2892,10 @@ function commandPaletteCommandItems() {
     mtime: commandPalettePaneMtime(item),
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
-    run: () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})),
+    run: () => {
+      if (isFileExplorerItem(item)) return selectSession(item, {userInitiated: true});
+      return activateTabInExistingPane(item, {preferFocused: true, userInitiated: true});
+    },
     ...extra,
   });
   const fileGroups = new Map();   // path -> [items], in discovery order
@@ -2283,7 +3195,7 @@ function fileQuickOpenItem(path, options = {}) {
     key: `file:${path}`,
     path,
     mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
-    iconText: isDir ? '▸' : fileIconFor(label),
+    iconText: isDir ? disclosureTriangleCollapsedGlyph : fileIconFor(label),
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
@@ -2338,7 +3250,7 @@ function fileQuickOpenOpenFolderItem() {
     label: t('palette.openFolder', {name: fileExplorerLabel()}),
     detail: compactHomePath(target),
     key: `open-folder:${target}`,
-    iconText: '▸',
+    iconText: disclosureTriangleCollapsedGlyph,
     keybinding: appShortcutText('Enter'),
     pinTop: true,
     searchFields: ['open folder', target],
@@ -2808,7 +3720,7 @@ function openCommandPalette(options = {}) {
   commandPaletteQuery = '';
   commandPaletteIndex = 0;
   node.hidden = false;
-  node.classList.add('open');
+  node.classList.add(CLS.open);
   const input = node.querySelector('.command-palette-input');
   input.value = '';
   // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
@@ -2830,7 +3742,7 @@ function openFileQuickOpen() {
 function closeCommandPalette() {
   if (!commandPaletteNode) return;
   commandPaletteNode.hidden = true;
-  commandPaletteNode.classList.remove('open');
+  commandPaletteNode.classList.remove(CLS.open);
   if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
   fileQuickOpenDebounce = null;
 }
@@ -2860,7 +3772,7 @@ function scheduleFileQuickOpenSearch(options = {}) {
     if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
   };
   if (options.immediate) run();
-  else fileQuickOpenDebounce = setTimeout(run, 160);
+  else fileQuickOpenDebounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
 function abortFileQuickOpenSearch() {
@@ -2960,8 +3872,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
 }
 
 function shouldNotifyTransitionKey(key) {
-  const configured = initialSetting('notifications.notify_transitions', ['needs-input', 'needs-approval', 'blocked']);
-  const transitions = Array.isArray(configured) ? configured : ['needs-input', 'needs-approval', 'blocked'];
+  const defaultTransitions = [STATE_KEY.needsInput, STATE_KEY.needsApproval, STATE_KEY.blocked];
+  const configured = initialSetting('notifications.notify_transitions', defaultTransitions);
+  const transitions = Array.isArray(configured) ? configured : defaultTransitions;
   return transitions.includes(key);
 }
 
@@ -3265,8 +4178,14 @@ function compactNotificationTitle(scope, message) {
   return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
 }
 
+function sessionNotificationScope(session) {
+  const label = sessionLabel(session);
+  const desc = sessionTabDescription(session, transcriptMeta.sessions?.[session]);
+  return desc ? `${label} ${desc}` : label;
+}
+
 function sessionNotificationTitle(session, state) {
-  return compactNotificationTitle(sessionLabel(session), state?.label || '');
+  return compactNotificationTitle(sessionNotificationScope(session), state?.label || '');
 }
 
 function hostNotificationTitle(message) {
@@ -3489,6 +4408,16 @@ function bindTopbarMetrics() {
   topbarResizeObserver.observe(topbar);
 }
 
+function flushScheduledTabStripOverflowChecks() {
+  const strips = Array.from(tabStripOverflowCheckSet);
+  tabStripOverflowCheckSet.clear();
+  tabStripOverflowCheckFrame = null;
+  for (const strip of strips) {
+    if (!strip?.isConnected) continue;
+    strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
+  }
+}
+
 function scheduleTabStripOverflowCheck(strip) {
   if (!strip) return;
   if (strip === sessionButtons || strip.classList?.contains('pane-tabs')) {
@@ -3497,9 +4426,9 @@ function scheduleTabStripOverflowCheck(strip) {
     return;
   }
   strip.classList.remove('tabs-overflowing');
-  requestAnimationFrame(() => {
-    strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
-  });
+  tabStripOverflowCheckSet.add(strip);
+  if (tabStripOverflowCheckFrame) return;
+  tabStripOverflowCheckFrame = requestAnimationFrame(flushScheduledTabStripOverflowChecks);
 }
 
 function scheduleAllTabStripOverflowChecks() {
@@ -3519,18 +4448,25 @@ function normalizedSessionOrder(nextSessions) {
 }
 
 function setSessionOrder(next) {
-  sessions = next;
+  const authoritative = normalizedSessionOrder(next) || [];
+  sessions = sessionOrderIncludingPending(authoritative);
   visibleSessions = sessions.slice(0, maxSessionTabs);
   layoutItems = computeLayoutItems();
 }
 
-function updateSessionList(nextSessions) {
+function updateSessionList(nextSessions, options = {}) {
   const next = normalizedSessionOrder(nextSessions);
   if (!next) return false;
-  const changed = next.length !== sessions.length || next.some((session, index) => session !== sessions[index]);
-  if (!changed) return false;
-  const removedSessions = visibleSessions.filter(session => !next.includes(session));
-  setSessionOrder(next);
+  pruneExpiredPendingTmuxSessions();
+  if (options.clearConfirmedPending === true) clearConfirmedPendingTmuxSessions(next);
+  const effectiveNext = sessionOrderIncludingPending(next);
+  const changed = effectiveNext.length !== sessions.length || effectiveNext.some((session, index) => session !== sessions[index]);
+  if (!changed) {
+    layoutItems = computeLayoutItems();
+    return false;
+  }
+  const removedSessions = visibleSessions.filter(session => !effectiveNext.includes(session));
+  setSessionOrder(effectiveNext);
   layoutSlots = normalizeLayoutSlots(layoutSlots, {
     preserveRemovedItems: removedSessions,
     preserveRemovedSlots: true,
@@ -3640,12 +4576,14 @@ function flushPendingLayoutRender(reason = 'drag-flush') {
 }
 
 function updateActiveSessionParam() {
-  if (shareViewMode) return;
+  if (shareViewMode) return `${location.pathname}${location.search || ''}${location.hash || ''}`;
   const params = new URLSearchParams(location.search);
   params.delete('active');
   params.delete('sessions');
   params.delete('layout');
   params.delete('tabs');
+  params.delete('finder');
+  params.delete('state');
   const queryParts = [];
   const inactiveItems = inactiveTabItems();
   if (activeSessions.length || inactiveItems.length) {
@@ -3655,13 +4593,21 @@ function updateActiveSessionParam() {
     queryParts.push(`layout=${layoutParamValue(layoutSlots)}`);
     const tabs = layoutTabsParamValue(layoutSlots);
     if (tabs) queryParts.push(`tabs=${tabs}`);
+    if (paneItems(layoutSlots).some(isFileExplorerItem)) {
+      queryParts.push(`finder=${readableParamComponent(normalizeFileExplorerMode(fileExplorerMode))}`);
+    }
+    const state = layoutUrlStateParamValue();
+    if (state) queryParts.push(`state=${state}`);
   }
   const remaining = params.toString();
   if (remaining) queryParts.push(remaining);
   const query = queryParts.join('&');
-  history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash}`);
+  const nextUrl = `${location.pathname}${query ? `?${query}` : ''}${location.hash}`;
+  history.replaceState(null, '', nextUrl);
+  return nextUrl;
 }
 
 function syncInitialLayoutUrl() {
+  schedulePendingLayoutUrlStateApply();
   updateActiveSessionParam();
 }

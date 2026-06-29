@@ -48,6 +48,14 @@ def blank_prompt_state(reason: str = "") -> dict[str, object]:
         "command": None,
         "dangerous": False,
         "hash": "",
+        "signature": "",
+        "agent": "unknown",
+        "prompt_kind": "",
+        "question_text": "",
+        "options": [],
+        "confidence": 0.0,
+        "evidence_lines": [],
+        "negative_reason": reason,
         "source": "pane",
     }
     if reason:

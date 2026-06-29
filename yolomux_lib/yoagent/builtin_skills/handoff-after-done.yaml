@@ -1,6 +1,7 @@
 name: handoff-after-done
 kind: workflow
-description: Wait for one source session to become idle, done, or produce the requested result, then have YO!agent derive a bounded source-neutral pickup prompt and send it to a different verified target session. Use this for requests like "after session 4 finishes tests, tell session 6 to update docs." Prompts sent to a target agent are direct second-person instructions to that agent, not third-person descriptions of the session. The source and target sessions should not be told about each other unless the user explicitly asks for that disclosure; YO!agent owns the wait, summary, and send. Direct relay/chaining between agents is rare and allowed only when the user explicitly requests relay/chaining; if allowed, YO!agent must pass concrete instructions for how to relay.
+description: >-
+  Wait for one source session to become idle, done, or produce the requested result, then have YO!agent derive a bounded source-neutral pickup prompt and send it to a different verified target session. Use this for requests like "after session 4 finishes tests, tell session 6 to update docs." Prompts sent to a target agent are direct second-person instructions to that agent, not third-person descriptions of the session. The source and target sessions should not be told about each other unless the user explicitly asks for that disclosure; YO!agent owns the wait, result capture, requested original/excerpt/summary/modified transformation, target verification, send, and default result watch. Direct relay/chaining between agents is rare and allowed only when the user explicitly requests relay/chaining; if allowed, YO!agent must pass concrete instructions for how to relay.
 tools:
   - read_activity
   - watch_session

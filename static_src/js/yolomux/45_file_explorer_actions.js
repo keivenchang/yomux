@@ -50,6 +50,11 @@ async function fetchFilePathInfo(path, options = {}) {
   })());
 }
 
+async function fetchDirectoryFileCount(path) {
+  const normalized = normalizeDirectoryPath(path);
+  return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -83,6 +88,9 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  if (entry?.kind === 'dir') {
+    appendContextMenuButton(menu, 'Zip & download', () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
+  }
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
@@ -99,6 +107,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     openInNewTabDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
+    zipDownloadDisabled: multiple || entry?.kind !== 'dir' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
@@ -140,16 +149,93 @@ function rawFileDownloadUrl(path) {
   return rawFileUrl(path, {download: 1});
 }
 
-function triggerFileDownload(path) {
-  if (!path) return;
+function downloadFilenameFromContentDisposition(header, fallback = 'download') {
+  const text = String(header || '');
+  const starMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (starMatch) {
+    try {
+      return decodeURIComponent(starMatch[1]).trim() || fallback;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+  const quotedMatch = text.match(/filename="([^"]+)"/i);
+  if (quotedMatch) return quotedMatch[1].trim() || fallback;
+  const bareMatch = text.match(/filename=([^;]+)/i);
+  return bareMatch ? bareMatch[1].trim() || fallback : fallback;
+}
+
+function saveBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  link.href = rawFileDownloadUrl(path);
-  link.download = basenameOf(path) || 'download';
+  link.href = url;
+  link.download = filename || 'download';
   link.hidden = true;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  statusEl.textContent = `download started: ${basenameOf(path) || path}`;
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function fileTransferToastContainer(options = {}) {
+  return displayToastContainer(options.session || options.item || focusedPanelItem || fileExplorerItemId);
+}
+
+function showFileTransferError(message, options = {}) {
+  const text = String(message || t('fileTransfer.failed')).trim();
+  statusErr(esc(text));
+  showToast(t('fileTransfer.failedTitle'), [text], {
+    container: fileTransferToastContainer(options),
+    countdownMs: 20000,
+  });
+}
+
+async function transferErrorMessageFromResponse(response, fallback = '') {
+  const payload = await response.json().catch(() => ({}));
+  return payload?.error || response.statusText || fallback || `HTTP ${response.status}`;
+}
+
+async function triggerFileDownload(path) {
+  if (!path) return;
+  const label = basenameOf(path) || path;
+  statusEl.textContent = `downloading ${label}...`;
+  let response;
+  try {
+    response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+  } catch (error) {
+    showFileTransferError(error?.message || String(error));
+    return;
+  }
+  if (!response.ok) {
+    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
+    return;
+  }
+  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
+  const blob = await response.blob();
+  saveBlobDownload(blob, filename);
+  statusEl.textContent = `download started: ${filename}`;
+}
+
+async function triggerFolderZipDownload(path) {
+  if (!path) return;
+  const label = basenameOf(path) || path;
+  statusEl.textContent = `zipping ${label}...`;
+  let response;
+  try {
+    response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+  } catch (error) {
+    showFileTransferError(error?.message || String(error));
+    return;
+  }
+  if (!response.ok) {
+    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
+    return;
+  }
+  const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
+  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
+  const blob = await response.blob();
+  saveBlobDownload(blob, filename);
+  statusEl.textContent = `download started: ${filename}`;
 }
 
 function copyCurrentFileExplorerPath() {
@@ -386,6 +472,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     ? `Delete ${kind}?\n${deletePaths[0]}`
     : `Delete ${deletePaths.length} selected items?\n${deletePaths.join('\n')}`;
   if (!window.confirm(confirmText)) return;
+  if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
   try {
     for (const path of deletePaths) {
       await apiFetchJson('/api/fs/delete', {
@@ -411,6 +498,47 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   } catch (error) {
     statusErr(localizedHtml('status.deleteFailed', {error}));
   }
+}
+
+function fileTreeEntryFromRow(path) {
+  const row = document.querySelector(`.file-tree-row[data-path="${cssEscape(path)}"]`);
+  if (!row) return null;
+  return {
+    kind: row.dataset.kind || '',
+    name: row.dataset.name || basenameOf(path),
+    is_repo: row.dataset.isRepo === 'true',
+  };
+}
+
+async function fileTreeDeleteEntryForPath(path, primaryPath, primaryEntry = null) {
+  if (path === primaryPath && primaryEntry?.kind) return primaryEntry;
+  const rowEntry = fileTreeEntryFromRow(path);
+  if (rowEntry?.kind) return rowEntry;
+  try {
+    return await fetchFilePathInfo(path, {fresh: true});
+  } catch (error) {
+    console.warn('delete path info failed', path, error);
+    return null;
+  }
+}
+
+async function confirmLargeDirectoryDeletes(deletePaths, primaryPath, primaryEntry = null) {
+  for (const path of deletePaths) {
+    const entry = await fileTreeDeleteEntryForPath(path, primaryPath, primaryEntry);
+    if (entry?.kind !== 'dir') continue;
+    let count = null;
+    try {
+      const payload = await fetchDirectoryFileCount(path);
+      count = Number(payload?.files);
+    } catch (error) {
+      console.warn('directory delete count failed', path, error);
+      if (!window.confirm(`Could not count files in this directory, CONFIRM delete?\n${path}`)) return false;
+      continue;
+    }
+    if (!Number.isFinite(count) || count <= 5) continue;
+    if (!window.confirm(`You have ${Math.round(count)} files in this directory, CONFIRM?\n${path}`)) return false;
+  }
+  return true;
 }
 
 // C10: keyboard delete for the Finder tree. macOS Finder deletes the selection with Command-Delete (plain
@@ -454,7 +582,7 @@ let fileExplorerTypeaheadTimer = null;
 // forward from the lead (wrapping).
 function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
   if (fileExplorerTypeaheadTimer) clearTimeout(fileExplorerTypeaheadTimer);
-  fileExplorerTypeaheadTimer = setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, 700);
+  fileExplorerTypeaheadTimer = setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, fileExplorerTypeaheadClearMs);
   const lower = char.toLowerCase();
   const cycling = fileExplorerTypeaheadBuffer === lower;
   fileExplorerTypeaheadBuffer = cycling ? lower : (fileExplorerTypeaheadBuffer + lower);
@@ -489,6 +617,67 @@ function setFileTreeDirectoryExpanded(row, fullPath, expand) {
   else collapseDirectoryRow(row, fullPath, {manual: true});
 }
 
+const finderTreeInteractionController = createSharedTreeInteractionController({
+  name: 'finder',
+  rowSelector: '.file-tree-row[data-path]',
+  allowRange: true,
+  allowSelectAll: true,
+  applyCurrentClasses: false,
+  isRowSelectable: row => Boolean(
+    row
+    && !row.dataset.tabberType
+    && !row.closest?.('.file-explorer-changes-panel')
+    && (row.dataset.kind === 'file' || row.dataset.kind === 'dir'),
+  ),
+  selectedIds: () => fileExplorerSelectedPaths,
+  getLeadId: () => fileExplorerSelectionLead,
+  setLeadId: id => { fileExplorerSelectionLead = id; },
+  selectRow(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreePath(id || row?.dataset?.path || '');
+  },
+  selectRange(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreeRange(row, id || row?.dataset?.path || '', {clear: true});
+  },
+  afterSelectAll(rows) {
+    fileExplorerManualSelectionActive = true;
+    fileExplorerSelectionAnchor = rows[0]?.dataset?.path || null;
+  },
+  isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row, row.dataset.path || ''),
+  setExpanded(row, expanded) {
+    const path = row?.dataset?.path || '';
+    if (!path || row?.dataset?.kind !== 'dir') return;
+    setFileTreeDirectoryExpanded(row, path, expanded === true);
+  },
+});
+
+function finderTreeContainerForEvent(event) {
+  const treeSel = '.file-explorer-tree-panel';
+  return event?.target?.closest?.(treeSel)
+    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.(treeSel))
+    || document.querySelector(`.panel.file-explorer-panel ${treeSel}`)
+    || document.querySelector(treeSel)
+    || document;
+}
+
+function finderTreeLeadRow(container) {
+  const rows = finderTreeInteractionController.rows(container);
+  const leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
+  return {
+    rows,
+    leadIndex: leadIndex >= 0 ? leadIndex : rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path)),
+  };
+}
+
+function finderTreeRowEntry(row, path) {
+  return {
+    kind: row?.dataset?.kind,
+    name: row?.dataset?.name || basenameOf(path),
+    is_repo: row?.dataset?.isRepo === 'true',
+  };
+}
+
 // File Explorer / Finder-style keyboard nav over the SHARED selection (Finder AND Differ render
 // .file-tree-row). Dispatches the PURE fileExplorerKeyIntent map onto the live tree. Same surface gating
 // as the delete shortcut. Returns true if it handled the key.
@@ -506,45 +695,18 @@ function handleFileExplorerArrowNav(event) {
     if (parent && parent !== root) openFileExplorerManualRoot(parent);
     return true;
   }
-  // Scope to ONE tree: the event's tree, else the tree holding the lead, else the active tree. Matches BOTH
-  // the Finder (.file-explorer-tree-panel) and the Differ (.file-explorer-changes-panel) so the exact same
-  // handler drives both surfaces.
-  const treeSel = '.file-explorer-tree-panel, .file-explorer-changes-panel';
-  const container = event.target?.closest?.(treeSel)
-    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.(treeSel))
-    || document.querySelector(`.panel.file-explorer-panel ${treeSel.split(', ').join(', .panel.file-explorer-panel ')}`)
-    || document.querySelector(treeSel)
-    || document;
-  const rows = selectableFileTreeRows(container);
+  const container = finderTreeContainerForEvent(event);
+  const {rows, leadIndex} = finderTreeLeadRow(container);
   if (!rows.length) return false;
-  const selectLead = (row, extend = false) => {
-    fileExplorerManualSelectionActive = true;
-    if (extend) selectFileTreeRange(row, row.dataset.path, {clear: true});
-    else selectFileTreePath(row.dataset.path);
-    fileExplorerSelectionLead = row.dataset.path;
-    row.scrollIntoView({block: 'nearest'});
-  };
-  if (intent === 'select-all') {
-    consume();
-    fileExplorerManualSelectionActive = true;
-    fileExplorerSelectedPaths.clear();
-    for (const item of rows) fileExplorerSelectedPaths.add(item.dataset.path);
-    fileExplorerSelectionAnchor = rows[0].dataset.path;
-    fileExplorerSelectionLead = rows[rows.length - 1].dataset.path;
-    updateFileExplorerCurrentFileHighlight();
-    return true;
-  }
-  let leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
-  if (leadIndex < 0) leadIndex = rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path));
+  const selectLead = row => finderTreeInteractionController.selectRow(container, row, event);
   if (intent === 'typeahead') { consume(); fileExplorerTypeaheadSelect(rows, leadIndex, event.key, selectLead); return true; }
   // Intents that act on the current lead row.
-  if (intent === 'rename' || intent === 'open' || intent === 'preview' || intent === 'expand' || intent === 'collapse') {
+  if (intent === 'rename' || intent === 'open' || intent === 'preview') {
     if (leadIndex < 0) return false;
     const leadRow = rows[leadIndex];
     const leadPath = leadRow.dataset.path;
     const isDir = leadRow.dataset.kind === 'dir';
-    const inDiffer = Boolean(leadRow.closest('.file-explorer-changes-panel'));
-    const entry = {kind: leadRow.dataset.kind, name: leadRow.dataset.name || basenameOf(leadPath), is_repo: leadRow.dataset.isRepo === 'true'};
+    const entry = finderTreeRowEntry(leadRow, leadPath);
     if (intent === 'rename') {                     // Finder Return = rename; tracked files move via git mv (backend)
       consume();
       beginFileTreeRename(leadRow, leadPath, entry);
@@ -552,9 +714,7 @@ function handleFileExplorerArrowNav(event) {
     }
     if (intent === 'open') {                       // Cmd-O / Cmd-Down: open
       consume();
-      if (!isDir && inDiffer && leadRow.dataset.openChangeFile) openChangedFileInDiff(leadRow.dataset.openChangeFile, leadRow.dataset.openChangeSession || '', leadRow.dataset.openChangeStatus || '', leadRow.dataset.openChangeRepo || '');
-      else if (!isDir) openFileInEditor(leadPath, entry);
-      else if (inDiffer) setFileTreeDirectoryExpanded(leadRow, leadPath, !fileTreeDirectoryExpanded(leadRow, leadPath));
+      if (!isDir) openFileInEditor(leadPath, entry);
       else openFileExplorerManualRoot(leadPath);   // Finder: open a folder = descend into it
       return true;
     }
@@ -564,31 +724,8 @@ function handleFileExplorerArrowNav(event) {
       else if (!isDir) openFileImagePreview(leadRow, leadPath, entry);
       return true;
     }
-    const expanded = fileTreeDirectoryExpanded(leadRow, leadPath);
-    if (intent === 'expand') {
-      consume();
-      if (isDir && !expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, true);
-      else if (isDir && expanded) { const child = rows[leadIndex + 1]; if (child && pathIsInsideDirectory(child.dataset.path, leadPath)) selectLead(child); }
-      return true;
-    }
-    // collapse: collapse an expanded folder, else step to the parent row
-    consume();
-    if (isDir && expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, false);
-    else { const parentRow = rows.find(item => item.dataset.path === dirnameOf(leadPath)); if (parentRow) selectLead(parentRow); }
-    return true;
   }
-  // Movement intents (move/extend up/down/home/end).
-  const lastIndex = rows.length - 1;
-  let nextIndex;
-  if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
-  else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
-  else {
-    const delta = (intent === 'move-down' || intent === 'extend-down') ? 1 : -1;
-    nextIndex = leadIndex < 0 ? (delta > 0 ? 0 : lastIndex) : Math.max(0, Math.min(lastIndex, leadIndex + delta));
-  }
-  consume();
-  selectLead(rows[nextIndex], intent.startsWith('extend'));
-  return true;
+  return finderTreeInteractionController.handleKeydown(event, container);
 }
 
 function handleFileExplorerDeleteShortcut(event) {
@@ -739,8 +876,11 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   for (const path of fileExplorerExpanded) {
     if (pathIsInsideDirectory(path, normalizedRoot) && path !== normalizedRoot) directories.add(normalizeDirectoryPath(path));
   }
-  for (const directory of directories) {
-    const entries = await fetchDirectory(directory);
+  const listings = await Promise.all(Array.from(directories).map(async directory => ({
+    directory,
+    entries: await fetchDirectory(directory),
+  })));
+  for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
   }
   return entriesByDir;
@@ -801,6 +941,14 @@ function previewMediaKindForPath(path, state = null) {
 
 function previewKindForPath(path, state = null) {
   return previewRendererForPath(path, state)?.kind || 'unsupported';
+}
+
+function previewRendererIsPreviewable(renderer) {
+  return Boolean(renderer) && renderer.kind !== 'unsupported' && renderer.previewable !== false;
+}
+
+function previewPathIsPreviewable(path, state = null) {
+  return previewRendererIsPreviewable(previewRendererForPath(path, state));
 }
 
 function previewKindIsTextBacked(kind) {
@@ -2033,7 +2181,8 @@ async function refreshOpenFilesIfChanged(options = {}) {
 function watchedFileExplorerDirectories() {
   const root = currentFileExplorerRoot();
   const directories = new Set();
-  if (fileExplorerRoot || fileExplorerPaneIsOpen()) directories.add(root);
+  if (!fileExplorerTreePaneIsVisible()) return [];
+  directories.add(root);
   for (const path of fileExplorerExpanded) {
     if (pathIsInsideDirectory(path, root)) directories.add(normalizeDirectoryPath(path));
   }
@@ -2059,13 +2208,15 @@ function backgroundFileEditorWatchFiles() {
 
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
-  for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
-    const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
-    if (path && path !== '/') roots.add(path);
-  }
-  for (const file of fileExplorerSessionFilesPayload?.files || []) {
-    const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
-    if (path && path !== '/') roots.add(dirnameOf(path));
+  if (fileExplorerSessionFilesPaneIsVisible()) {
+    for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
+      const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
+      if (path && path !== '/') roots.add(path);
+    }
+    for (const file of fileExplorerSessionFilesPayload?.files || []) {
+      const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
+      if (path && path !== '/') roots.add(dirnameOf(path));
+    }
   }
   return Array.from(roots)
     .map(path => normalizeDirectoryPath(path))
@@ -2073,28 +2224,41 @@ function clientServerWatchRoots() {
     .sort();
 }
 
+function transcriptPreviewPaneIsActive(session) {
+  if (!isTmuxSession(session)) return false;
+  const pane = document.getElementById(`transcript-pane-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
+  return Boolean(pane?.classList?.contains(CLS.active) && preview?.isConnected);
+}
+
+function transcriptContextWatchRequests() {
+  return activeSessions
+    .filter(transcriptPreviewPaneIsActive)
+    .map(session => ({session, messages: transcriptPreviewMessages}));
+}
+
 function clientServerWatchState() {
   const state = {
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
-    context_items: activeSessions
-      .filter(isTmuxSession)
-      .map(session => ({session, messages: transcriptPreviewMessages})),
+    context_items: transcriptContextWatchRequests(),
   };
   if (typeof activitySummaryIsVisible === 'function') {
     state.activity_summary = {
       visible: activitySummaryIsVisible(),
       locale: typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : 'en',
+      scope: 'all',
+      hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
-  if (document.querySelector('.file-explorer-changes-panel') && typeof clientSessionFilesWatchRequests === 'function') {
+  if (fileExplorerSessionFilesPaneIsVisible() && typeof clientSessionFilesWatchRequests === 'function') {
     state.session_files = clientSessionFilesWatchRequests();
   }
   return state;
 }
 
-function syncServerWatchRoots(options = {}) {
+function syncServerWatchRootsNow(options = {}) {
   if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsInFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
@@ -2115,8 +2279,26 @@ function syncServerWatchRoots(options = {}) {
   });
 }
 
+function syncServerWatchRoots(options = {}) {
+  serverWatchRootsPendingOptions = {
+    ...serverWatchRootsPendingOptions,
+    ...options,
+    renew: serverWatchRootsPendingOptions.renew === true || options.renew === true,
+  };
+  if (serverWatchRootsTimer) clearTimeout(serverWatchRootsTimer);
+  const delay = options.immediate === true ? 0 : serverWatchDebounceMs;
+  serverWatchRootsTimer = setTimeout(() => {
+    serverWatchRootsTimer = null;
+    const pending = serverWatchRootsPendingOptions;
+    serverWatchRootsPendingOptions = {};
+    syncServerWatchRootsNow(pending);
+  }, delay);
+}
+
 async function refreshFileExplorerIfChanged() {
+  if (!fileExplorerTreePaneIsVisible()) return;
   const directories = watchedFileExplorerDirectories();
+  if (!directories.length) return;
   let changed = false;
   const entriesByDir = new Map();
   const signaturesByDir = new Map();
@@ -2143,13 +2325,19 @@ async function refreshFileExplorerIfChanged() {
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
 }
 
-async function refreshWatchedFilesystem() {
+async function refreshWatchedFilesystem(options = {}) {
   if (filesystemRefreshInFlight) return;
   filesystemRefreshInFlight = true;
   try {
-    await refreshFileExplorerIfChanged();
+    if (fileExplorerTreePaneIsVisible()) {
+      if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
+        await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+      } else {
+        await refreshFileExplorerIfChanged();
+      }
+    }
     await refreshOpenFilesIfChanged();
-    if (document.querySelector('.file-explorer-changes-panel')) {
+    if (fileExplorerSessionFilesPaneIsVisible()) {
       fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
     syncServerWatchRoots();
@@ -2511,9 +2699,20 @@ function codeMirrorThemeExtension(api) {
   }, {dark: scheme.dark});
 }
 
+function codeMirrorWrapMarkerRowsForBlock(block, lineHeight, textBlockType = 0) {
+  if (!block) return 1;
+  if (block.type !== undefined && block.type !== textBlockType) return 1;
+  if (block.widget) return 1;
+  const rowHeight = Math.max(1, Number(lineHeight) || 1);
+  const height = Number(block.height);
+  const measuredHeight = Number.isFinite(height) && height > 0 ? height : rowHeight;
+  return Math.max(1, Math.round(measuredHeight / rowHeight));
+}
+
 function codeMirrorWrapMarkerExtension(api) {
   if (!api.ViewPlugin) return [];
   const scheme = activeEditorScheme();
+  const textBlockType = Number.isFinite(Number(api.BlockType?.Text)) ? Number(api.BlockType.Text) : 0;
   return api.ViewPlugin.fromClass(class {
     constructor(view) {
       this.view = view;
@@ -2547,7 +2746,7 @@ function codeMirrorWrapMarkerExtension(api) {
       const blocks = Array.from(view.viewportLineBlocks || []);
       const nodes = [];
       for (const block of blocks) {
-        const rows = Math.max(1, Math.round((block.height || lineHeight) / Math.max(1, lineHeight)));
+        const rows = codeMirrorWrapMarkerRowsForBlock(block, lineHeight, textBlockType);
         for (let row = 1; row < rows; row += 1) {
           const marker = document.createElement('span');
           marker.className = 'cm-wrap-marker';
@@ -3029,7 +3228,12 @@ function openCodeMirrorFindForView(api, view) {
 function updateCodeMirrorCursorStatus(panel) {
   const view = panel?._cmView;
   const status = panel?.querySelector?.('.file-editor-cursor-status');
-  if (!view || !status) return;
+  updateFileEditorCountStatus(panel);
+  if (!status) return;
+  if (!view) {
+    status.textContent = '';
+    return;
+  }
   const main = view.state.selection.main;
   const line = view.state.doc.lineAt(main.head);
   const column = main.head - line.from + 1;
@@ -3037,6 +3241,37 @@ function updateCodeMirrorCursorStatus(panel) {
   const selections = view.state.selection.ranges.length;
   const selectionText = selectedChars ? ` · ${selections} sel · ${selectedChars} chars` : '';
   status.textContent = `${line.number}:${column}${selectionText}`;
+}
+
+function fileEditorTextMetrics(text) {
+  const value = String(text ?? '');
+  const words = (value.trim().match(/\S+/g) || []).length;
+  return {
+    lines: value ? value.split('\n').length : 1,
+    words,
+    characters: value.length,
+  };
+}
+
+function fileEditorCountStatusText(text) {
+  return t('editor.status.counts', fileEditorTextMetrics(text));
+}
+
+function fileEditorStatusSourceText(panel) {
+  const viewText = panel?._cmView?.state?.doc?.toString?.();
+  if (viewText !== undefined && viewText !== null) return viewText;
+  const path = panel?.dataset?.filePath || '';
+  const state = openFiles.get(path);
+  return state?.kind === 'text' ? state.content || '' : '';
+}
+
+function updateFileEditorCountStatus(panel) {
+  const status = panel?.querySelector?.('.file-editor-count-status');
+  if (!status) return;
+  const path = panel?.dataset?.filePath || '';
+  const state = path ? openFiles.get(path) : null;
+  const text = fileEditorStatusSourceText(panel);
+  status.textContent = state?.kind === 'text' || panel?._cmView ? fileEditorCountStatusText(text) : '';
 }
 
 function codeMirrorExtensions(api, panel, path, options = {}) {

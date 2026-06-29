@@ -11,8 +11,75 @@ from __future__ import annotations
 import hashlib
 import re
 import shlex
+import time
 
 from . import yolo_rules
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_COMMON_VISUAL_WRAP_COLS = frozenset({78, 80, 100, 120, 126, 150, 200})
+_VISUAL_WRAP_CONTINUATION_RE = re.compile(r"^\s+|^[a-z0-9_./~:+#?)\]}-]", re.IGNORECASE)
+_BOX_OR_RULE_RE = re.compile(r"^[\s─━╌╍▔╭╮╰╯│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬\-]+$")
+
+
+def _visual_wrap_candidate_cols(lines: list[str]) -> set[int]:
+    counts: dict[int, int] = {}
+    for line in lines:
+        length = len(line.rstrip())
+        if length >= 60:
+            counts[length] = counts.get(length, 0) + 1
+    inferred = {length for length, count in counts.items() if count >= 2}
+    return set(_COMMON_VISUAL_WRAP_COLS) | inferred
+
+
+def _is_visual_wrap_continuation(previous: str, current: str, wrap_cols: set[int]) -> bool:
+    prev = previous.rstrip()
+    cur = current.rstrip()
+    stripped = cur.strip()
+    if not stripped:
+        return False
+    prev_len = len(prev)
+    if not any(prev_len in {cols - 1, cols} for cols in wrap_cols):
+        return False
+    if re.search(r"(?:…|\.{3}).*\([^)]*(?:tokens|thinking|effort|esc\s+to\s+interrupt)[^)]*\)", prev, re.IGNORECASE):
+        return False
+    if _BOX_OR_RULE_RE.fullmatch(prev.strip()) or _BOX_OR_RULE_RE.fullmatch(stripped):
+        return False
+    if re.match(r"^[❯›>]?\s*\d+[.:]\s+\S", stripped):
+        return False
+    if re.match(r"^[❯›>]\s+\S", stripped):
+        return False
+    return bool(_VISUAL_WRAP_CONTINUATION_RE.match(cur))
+
+
+def _join_visual_wraps(text: str) -> str:
+    lines = str(text or "").splitlines()
+    if not lines:
+        return ""
+    wrap_cols = _visual_wrap_candidate_cols(lines)
+    joined: list[str] = []
+    previous_physical = ""
+    for line in lines:
+        if joined and _is_visual_wrap_continuation(previous_physical, line, wrap_cols):
+            if line.startswith((" ", "\t")):
+                joined[-1] = joined[-1].rstrip() + " " + line.lstrip()
+            elif line.startswith("+"):
+                joined[-1] = joined[-1].rstrip() + " " + line.lstrip()
+            else:
+                joined[-1] = joined[-1].rstrip() + line.lstrip()
+            previous_physical = line
+            continue
+        joined.append(line)
+        previous_physical = line
+    return "\n".join(joined)
+
+
+def normalize_capture_text(text: str) -> str:
+    """Strip terminal control bytes before classifying captured pane text."""
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _ANSI_ESCAPE_RE.sub("", normalized)
+    normalized = _CONTROL_CHAR_RE.sub("", normalized)
+    return _join_visual_wraps(normalized)
 
 
 def is_dangerous(cmd_line: str) -> bool:
@@ -56,9 +123,22 @@ _SKIP_LINE = re.compile(
 
 # Lines that look like commands (contain special shell chars, flags, or are long).
 _CMD_CHARS = re.compile(r"[/|&;$=(>`~]|--|\s-[a-zA-Z]")
+# Claude's per-step progress/description marker `[i/N] <description>`, e.g.
+# `[1/10] Create the build output directory`. This is DESCRIPTION prose, not the command — but the
+# `/` in `[1/10]` matches _CMD_CHARS, so without this guard the whole line folds into the danger
+# string ("mkdir -p build/output [1/10] Create the build output directory") and classification skews.
+# Treat the step marker (and the description it leads) as chrome.
+_STEP_MARKER_RE = re.compile(r"^\[\d+\s*/\s*\d+\]")
 # the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
 # the exact command, so anchoring to it avoids folding the adjacent description prose.
 _BASH_CALL_RE = re.compile(r"[●•]\s*Bash\((.+)\)\s*$")
+_CODEX_COMMAND_PROMPT_PREFIX = "would you like to run the following comm"
+
+
+def _is_codex_command_prompt_line(line: str) -> bool:
+    # Real Codex captures can crop the final "d?" at narrow widths, leaving
+    # "Would you like to run the following comman"; match the stable prefix.
+    return _CODEX_COMMAND_PROMPT_PREFIX in str(line or "").lower()
 
 
 def _shell_text_complete(cmd_line: str) -> bool:
@@ -102,11 +182,12 @@ def extract_command(pane_text: str) -> str | None:
     For Codex we look for the "$ " line *between* the question and the
     selector (it's below, not above).
     """
+    pane_text = normalize_capture_text(pane_text)
     lines = pane_text.splitlines()
 
     # Codex: command is on a "$ ..." line below the question.
     for i, line in enumerate(lines):
-        if "Would you like to run the following command" in line:
+        if _is_codex_command_prompt_line(line):
             for j in range(i + 1, min(i + 12, len(lines))):
                 stripped = lines[j].lstrip()
                 # Codex prefixes the command with "$ " after leading box whitespace.
@@ -144,7 +225,7 @@ def extract_command(pane_text: str) -> str | None:
     # Claude: walk backward from the trigger line to a separator/bullet.
     trigger_idx = None
     for i, line in enumerate(lines):
-        if "Permission rule" in line or "Do you want to proceed" in line or "Do you want to make this edit" in line:
+        if "Permission rule" in line or _CLAUDE_PROCEED_PROMPT_RE.search(line) or "Do you want to make this edit" in line:
             trigger_idx = i
             break
 
@@ -195,6 +276,10 @@ def extract_command(pane_text: str) -> str | None:
             continue
         if _SKIP_LINE.match(stripped):
             continue
+        # The `[i/N] <description>` progress marker is a DESCRIPTION line, never the command. Drop it
+        # before the _CMD_CHARS filter (whose `/` clause would otherwise fold "[1/10] ..." into the cmd).
+        if _STEP_MARKER_RE.match(stripped):
+            continue
         # #79: only fold genuinely command-ish lines. Dropped the `len > 60` fallback — it pulled long
         # DESCRIPTION prose into the "command" and skewed the danger verdict; a long command almost
         # always carries a shell metacharacter (caught by _CMD_CHARS), and the ● Bash(...) anchor above
@@ -242,6 +327,38 @@ _FILE_PROMPT_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_CLAUDE_PROCEED_PROMPT_RE = re.compile(r"^\s*(?:[●•]\s*)?Do you want to proceed\?\s*$", re.IGNORECASE)
+_PLAN_PROMPT_RE = re.compile(
+    r"(?:"
+    r"Do you want to (?:proceed with|approve|accept|use) (?:this )?plan\?"
+    r"|Would you like (?:me|Claude) to (?:start|proceed|make changes)(?: with this plan)?\?"
+    r"|Claude has written up a plan\b.*Would you like to proceed\?"
+    r"|Ready to (?:start|make changes)\?"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_plan_prompt_at(lines: list[str], index: int) -> bool:
+    return bool(_plan_prompt_text_at(lines, index))
+
+
+def _plan_prompt_text_at(lines: list[str], index: int) -> str:
+    line = lines[index] if 0 <= index < len(lines) else ""
+    if _PLAN_PROMPT_RE.search(line):
+        return line.strip()
+    if "Claude has written up a plan" not in line:
+        return ""
+    parts: list[str] = []
+    for part in lines[index:index + 4]:
+        stripped = part.strip()
+        if not stripped:
+            continue
+        parts.append(stripped)
+        if "Would you like to proceed?" in stripped:
+            break
+    window = " ".join(parts)
+    return window if "Would you like to proceed?" in window else ""
 
 
 def detect_prompt(pane_text: str) -> str | None:
@@ -259,16 +376,20 @@ def detect_prompt(pane_text: str) -> str | None:
     that, once we see the Codex header we suppress tool-prompt detection
     inside the next ~20 lines (the Codex prompt body).
     """
+    pane_text = normalize_capture_text(pane_text)
     last_type = None
     codex_body_until = -1
-    for i, line in enumerate(pane_text.splitlines()):
-        if "Do you want to proceed" in line:
+    lines = pane_text.splitlines()
+    for i, line in enumerate(lines):
+        if _CLAUDE_PROCEED_PROMPT_RE.search(line):
             last_type = "bash"
-        elif "Would you like to run the following command" in line:
+        elif _is_codex_command_prompt_line(line):
             last_type = "bash"
             codex_body_until = i + 20
         elif _FILE_PROMPT_RE.search(line):
             last_type = "file"
+        elif _is_plan_prompt_at(lines, i):
+            last_type = "plan"
         elif "Do you want to allow" in line and i > codex_body_until:
             last_type = "tool"
     return last_type
@@ -309,12 +430,12 @@ def yes_is_selected(pane_text: str) -> bool:
     frame with nothing highlighted that wrongly reports the first option as selected, which can confirm
     the wrong option. A send requires a visible selector glyph.
     """
-    return bool(_YES_SELECTOR_RE.search(pane_text))
+    return bool(_YES_SELECTOR_RE.search(normalize_capture_text(pane_text)))
 
 
 def selected_prompt_option(pane_text: str) -> int:
     # #67: only a visible selector glyph counts as a selection — no positional default-to-yes.
-    matches = list(_SELECTED_CHOICE_NUMBER_RE.finditer(pane_text))
+    matches = list(_SELECTED_CHOICE_NUMBER_RE.finditer(normalize_capture_text(pane_text)))
     if matches:
         return int(matches[-1].group(1))
     return 0
@@ -323,6 +444,7 @@ def selected_prompt_option(pane_text: str) -> int:
 PROMPT_ACTION = {
     "bash": "option1",
     "file": "option2",
+    "plan": "option1",
     "tool": "option2",
 }
 
@@ -363,22 +485,27 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
     This is the display companion to ``detect_prompt``. Keep the matching
     rules aligned so UI code and auto-approval code describe the same prompt.
     """
+    pane_text = normalize_capture_text(pane_text)
     text = ""
     codex_body_until = -1
     lines = pane_text.splitlines()
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if "Do you want to proceed" in stripped:
+        if _CLAUDE_PROCEED_PROMPT_RE.search(stripped):
             text = "Do you want to proceed?"
-        elif "Would you like to run the following command" in stripped:
+        elif _is_codex_command_prompt_line(stripped):
             text = "Would you like to run the following command?"
             codex_body_until = i + 20
         else:
             file_match = _FILE_PROMPT_RE.search(stripped)
             if file_match:
                 text = stripped
-            elif "Do you want to allow" in stripped and i > codex_body_until:
-                text = stripped
+            else:
+                plan_text = _plan_prompt_text_at(lines, i)
+                if plan_text:
+                    text = plan_text
+                elif "Do you want to allow" in stripped and i > codex_body_until:
+                    text = stripped
     if text:
         return text
     if prompt_type == "bash":
@@ -387,6 +514,8 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
         return "file approval prompt is visible"
     if prompt_type == "tool":
         return "tool approval prompt is visible"
+    if prompt_type == "plan":
+        return "plan approval prompt is visible"
     return ""
 
 
@@ -411,6 +540,16 @@ _CLAUDE_AGENT_TOKEN_SUBLINE_RE = re.compile(
     r"^\s*(?:[│├└]\s*)?\S.*\s·\s+(?:\d+\s+tool uses?\s+·\s+)?\d+(?:\.\d+)?[kKmM]?\s+tokens\b",
     re.IGNORECASE,
 )
+_STATUS_COUNTER_STALE_SECONDS = 75.0
+_STATUS_COUNTER_LEADING_MARKERS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*+·•◦∙⋅.☉○◯●"
+_STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>[{re.escape(_STATUS_COUNTER_LEADING_MARKERS)}])\s*(?P<body>\S.*)$")
+_STATUS_COUNTER_ELAPSED_RE = re.compile(r"\b(?:\d+(?:\.\d+)?[hms]\s*)+\b", re.IGNORECASE)
+_STATUS_COUNTER_DURATION_TOKEN_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>[hms])\b", re.IGNORECASE)
+_STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)\s*(?P<suffix>[kKmM])?\s+tokens?\b", re.IGNORECASE)
+_STATUS_COUNTER_TOOL_USE_RE = re.compile(r"\b(?P<count>\d+)\s+tool uses?\b", re.IGNORECASE)
+_STATUS_COUNTER_PAYLOAD_RE = re.compile(r"\b(?:thinking|effort|tokens?|tool uses?|esc\s+to\s+interrupt)\b|[↑↓]", re.IGNORECASE)
+_STATUS_COUNTER_BACKGROUND_RE = re.compile(r"^\s*[○◯]\s*\S.*\b\d+(?:\.\d+)?s\s*·\s*(?:[↑↓]\s*)?\d", re.IGNORECASE)
+_VISIBLE_STATUS_COUNTER_CACHE: dict[str, dict[str, object]] = {}
 _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├┤┬┴┼─━═╔╗╚╝╠╣╦╩╬]+$")
 _BOXED_EMPTY_INPUT_LINE_RE = re.compile(r"^\s*[│┃]\s*[❯›>]?\s*[█▉▊▋▌▍▎▏_ ]*[│┃]\s*$")
 _EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:[^\w\s]\s*)?\S+\s+/effort\b", re.IGNORECASE)
@@ -423,6 +562,14 @@ _CODEX_MODEL_STATUS_LINE_RE = re.compile(
     r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+(?:~|/)[^\s]*(?:\s+\d+%\s+context\s+(?:used|left|remaining))?\s*$",
     re.IGNORECASE,
 )
+_CODEX_PURSUING_GOAL_STATUS_RE = re.compile(r"\bPursuing\s+goal\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
+_CODEX_GOAL_ACHIEVED_STATUS_RE = re.compile(r"\bGoal\s+achieved\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
+_CODEX_GOAL_STATUS_RE = re.compile(r"\b(?:Pursuing\s+goal|Goal\s+achieved)\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
+_CLAUDE_GOAL_ACTIVE_RE = re.compile(
+    r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
+    re.IGNORECASE,
+)
+_SHELL_PROMPT_RE = re.compile(r"[@:][^@\s]+[$#](?:\s+\S.*)?$")
 # Header of the Ctrl-T todo overlay, e.g. "11 tasks (0 done, 1 in progress, 10 open)" — also matches
 # singular "1 task (...)". The whole overlay is a bounded block: everything below this header is
 # persistent chrome rendered under a LIVE prompt, not newer agent output.
@@ -431,7 +578,9 @@ _WORK_QUEUE_ROW_RE = re.compile(
     r"^\s*[○●◦]\s+\S.*(?:\b\d+(?:\.\d+)?\s*s\b|↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)",
     re.IGNORECASE,
 )
-_CHOICE_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?\d+[.:]\s+\S")
+_CODEX_QUEUED_FOLLOWUP_HEADER_RE = re.compile(r"^[•◦○]\s+Queued\s+follow-up\s+inputs\b", re.IGNORECASE)
+_CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE = re.compile(r"^shift\s+\+\s+←\s+edit\s+last\s+queued\s+message$", re.IGNORECASE)
+_CHOICE_LINE_RE = re.compile(r"^\s*(?:menu:\s*)?(?:[❯›>]\s*)?\d+[.:]\s+\S", re.IGNORECASE)
 _SELECTED_CHOICE_LINE_RE = re.compile(r"^\s*[❯›>]\s*\d+[.:]\s+\S")
 _SELECTED_CHOICE_NUMBER_RE = re.compile(r"^\s*[❯›>]\s*(\d+)[.:]\s+\S", re.MULTILINE)
 _YES_OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?1[.:]\s+Yes\b", re.IGNORECASE)
@@ -464,10 +613,388 @@ _ASK_QUESTION_FOOTER_RE = re.compile(
 _ASK_QUESTION_HINT_RE = re.compile(
     r"to\s+navigate|add\s+notes|switch\s+questions", re.IGNORECASE
 )
+_ASK_QUESTION_ACCESSIBLE_FOOTER_RE = re.compile(
+    r"^Enter selection\s+\[\d+\s*-\s*\d+\],\s+or\s+Escape\s+to\s+cancel:?\s*$",
+    re.IGNORECASE,
+)
+_INTERRUPTED_QUESTION_RE = re.compile(
+    r"(?:^|\b)(?:Interrupted\s*[·:.-]\s*)?(What should\s+(?:Claude|Codex|the agent|[\w.-]+)\s+do\s+instead\?)",
+    re.IGNORECASE,
+)
+_OPTION_LINE_RE = re.compile(r"^\s*(menu:\s*)?([❯›>]?)\s*(\d+)[.:]\s+(.+?)\s*$", re.IGNORECASE)
+_INLINE_CONFIRMATION_RE = re.compile(r"\?.*(?:\((?:y/n|yes/no)\)|\[(?:y/N|Y/n|yes/no)\])\s*$", re.IGNORECASE)
+_QUERY_URL_OR_PATH_RE = re.compile(r"(?:https?://\S+|(?:^|[\s=])(?:[/~]|\.\.?/)\S+)\?(?:[A-Za-z0-9_.%=&/-]*)?$", re.IGNORECASE)
+_QUESTION_WORD_RE = re.compile(r"\b(?:who|what|when|where|why|how|should|would|could|can|is|are|do|does|did|which|will)\b", re.IGNORECASE)
+
+
+def _is_query_url_or_path_output(line: str) -> bool:
+    stripped = _clean_prompt_block_line(line)
+    if not stripped or not _QUERY_URL_OR_PATH_RE.search(stripped):
+        return False
+    return not _QUESTION_WORD_RE.search(stripped)
+
+
+def _prompt_options(visible_text: str) -> list[dict[str, object]]:
+    option_groups: list[list[dict[str, object]]] = []
+    current_group: list[dict[str, object]] = []
+    lines = normalize_capture_text(visible_text).splitlines()
+    ask_question_mode = any(_is_ask_user_question_footer(line) for line in lines)
+    for line in lines:
+        match = _OPTION_LINE_RE.match(line)
+        if not match:
+            stripped = line.strip()
+            if current_group and stripped and _QUESTION_RE.match(_clean_prompt_block_line(line)):
+                option_groups.append(current_group)
+                current_group = []
+                continue
+            if current_group and not stripped:
+                continue
+            if current_group and stripped and (not _is_separator_or_footer(line) or (ask_question_mode and not _is_footer_hint_line(stripped))):
+                # Claude's AskUserQuestion UI can put descriptive sub-lines beneath each numbered
+                # choice, and current versions may put a separator before "Chat about this".
+                # Keep collecting the current option group until a blank/footer boundary.
+                continue
+            if current_group:
+                option_groups.append(current_group)
+                current_group = []
+            continue
+        inline_matches = list(re.finditer(r"(?:(?<=^)|(?<=\s))([❯›>]?)\s*(\d+)[.:]\s+", line))
+        if len(inline_matches) > 1:
+            for inline_index, inline_match in enumerate(inline_matches):
+                label_start = inline_match.end()
+                label_end = inline_matches[inline_index + 1].start() if inline_index + 1 < len(inline_matches) else len(line)
+                label = line[label_start:label_end].strip()
+                if label:
+                    current_group.append({
+                        "index": int(inline_match.group(2)),
+                        "label": re.sub(r"\s+", " ", label).strip(),
+                        "selected": bool(inline_match.group(1)),
+                    })
+            continue
+        menu_prefix, marker, number, label = match.groups()
+        if menu_prefix or ask_question_mode:
+            label = re.split(r"\s+[—-]\s+", label, maxsplit=1)[0]
+        current_group.append({
+            "index": int(number),
+            "label": re.sub(r"\s+", " ", label).strip(),
+            "selected": bool(marker),
+        })
+    if current_group:
+        option_groups.append(current_group)
+    return option_groups[-1] if option_groups else []
+
+
+def _infer_agent(visible_text: str, prompt_type: str | None = None) -> str:
+    text = normalize_capture_text(visible_text)
+    lowered = text.lower()
+    if (
+        "codex wants to run a shell command" in lowered
+        or "codex wants to use an mcp tool" in lowered
+        or _is_codex_command_prompt_line(lowered)
+        or re.search(r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\b", text, re.MULTILINE)
+    ):
+        return "codex"
+    if (
+        "permission rule bash requires confirmation" in lowered
+        or "bash command" in lowered
+        or "claude" in lowered
+        or "do you want to allow" in lowered
+        or prompt_type in {"file", "tool", "plan"}
+        or _is_ask_user_question_footer(text)
+        or "esc to cancel" in lowered
+        or (re.search(r"^\s*●\s+\S", text, re.MULTILINE) and not re.search(r"\(\s*y\s*/\s*n\s*\)|\by/n\b", lowered))
+    ):
+        return "claude"
+    return "unknown"
+
+
+def _prompt_kind(prompt_type: str | None) -> str:
+    if prompt_type == "bash":
+        return "shell-command"
+    if prompt_type == "file":
+        return "file-edit"
+    if prompt_type == "tool":
+        return "tool-approval"
+    if prompt_type == "plan":
+        return "plan-approval"
+    return ""
+
+
+def _question_prompt_kind(visible_text: str, question: str) -> str:
+    lowered = f"{visible_text}\n{question}".lower()
+    if "mcp" in lowered and ("would you like to allow" in lowered or "wants to use an mcp tool" in lowered):
+        return "tool-approval"
+    return "question"
+
+
+def _matching_evidence_lines(visible_text: str, prompt_type: str | None, question: str = "") -> list[str]:
+    evidence: list[str] = []
+    codex_body_until = -1
+    lines = normalize_capture_text(visible_text).splitlines()
+    for index, line in enumerate(lines):
+        stripped = _clean_prompt_block_line(line)
+        if not stripped:
+            continue
+        matched = False
+        if prompt_type == "bash" and (
+            _CLAUDE_PROCEED_PROMPT_RE.search(stripped)
+            or _is_codex_command_prompt_line(stripped)
+            or stripped.startswith("$ ")
+            or stripped.startswith("Bash command")
+            or stripped.startswith("Codex wants to run a shell command")
+        ):
+            matched = True
+            if _is_codex_command_prompt_line(stripped):
+                codex_body_until = index + 20
+        elif prompt_type == "file" and _FILE_PROMPT_RE.search(stripped):
+            matched = True
+        elif prompt_type == "plan" and _is_plan_prompt_at(lines, index):
+            matched = True
+        elif prompt_type == "tool" and "Do you want to allow" in stripped and index > codex_body_until:
+            matched = True
+        elif question and stripped in question.splitlines():
+            matched = True
+        elif _OPTION_LINE_RE.match(line):
+            matched = True
+
+        if matched:
+            evidence.append(stripped)
+        if len(evidence) >= 8:
+            break
+    return evidence
+
+
+def _negative_reason(visible_text: str) -> str:
+    visible_text = normalize_capture_text(visible_text)
+    if not visible_text.strip():
+        return "empty"
+    if stale_approval_behind_working(visible_text) or approval_prompt_has_later_activity(visible_text):
+        return "stale prompt text has later activity"
+    if visible_agent_working(visible_text):
+        return "agent is working"
+    if any(re.match(r"^\s*[❯›>]\s*(?:\S.*)?$", line) for line in visible_text.splitlines()[-8:]):
+        return "idle composer"
+    return "no current agent prompt"
+
+
+def _hash_prompt_parts(*parts: object) -> str:
+    normalized: list[str] = []
+    for part in parts:
+        if isinstance(part, list):
+            normalized.extend(str(item) for item in part)
+        elif part not in (None, ""):
+            normalized.append(str(part))
+    return hashlib.md5("\n".join(normalized).encode()).hexdigest()
+
+
+def _parse_duration_seconds(text: str) -> float | None:
+    total = 0.0
+    seen = False
+    for match in _STATUS_COUNTER_DURATION_TOKEN_RE.finditer(text):
+        seen = True
+        value = float(match.group("value"))
+        unit = match.group("unit").lower()
+        if unit == "h":
+            total += value * 3600
+        elif unit == "m":
+            total += value * 60
+        else:
+            total += value
+    return total if seen else None
+
+
+def _parse_status_duration_seconds(line: str) -> float | None:
+    match = _STATUS_COUNTER_ELAPSED_RE.search(line)
+    if not match:
+        return None
+    return _parse_duration_seconds(match.group(0))
+
+
+def _parse_codex_pursuing_goal_elapsed_seconds(line: str) -> float | None:
+    match = _CODEX_PURSUING_GOAL_STATUS_RE.search(line)
+    if not match:
+        return None
+    return _parse_duration_seconds(match.group("duration"))
+
+
+def _parse_codex_goal_achieved_elapsed_seconds(line: str) -> float | None:
+    match = _CODEX_GOAL_ACHIEVED_STATUS_RE.search(line)
+    if not match:
+        return None
+    return _parse_duration_seconds(match.group("duration"))
+
+
+def _parse_codex_goal_elapsed_seconds(line: str) -> float | None:
+    elapsed = _parse_codex_pursuing_goal_elapsed_seconds(line)
+    if elapsed is not None:
+        return elapsed
+    return _parse_codex_goal_achieved_elapsed_seconds(line)
+
+
+def _parse_claude_goal_elapsed_seconds(line: str) -> float | None:
+    match = _CLAUDE_GOAL_ACTIVE_RE.search(line)
+    if not match:
+        return None
+    return _parse_duration_seconds(match.group("duration"))
+
+
+def _parse_agent_goal_elapsed_seconds(line: str) -> float | None:
+    """Return active-goal elapsed time for Claude `/goal active` or Codex goal status."""
+    elapsed = _parse_claude_goal_elapsed_seconds(line)
+    if elapsed is not None:
+        return elapsed
+    return _parse_codex_goal_elapsed_seconds(line)
+
+
+def _parse_agent_active_goal_elapsed_seconds(line: str) -> float | None:
+    elapsed = _parse_claude_goal_elapsed_seconds(line)
+    if elapsed is not None:
+        return elapsed
+    return _parse_codex_pursuing_goal_elapsed_seconds(line)
+
+
+def _parse_status_token_count(line: str) -> int | None:
+    matches = list(_STATUS_COUNTER_TOKEN_RE.finditer(line))
+    if not matches:
+        return None
+    match = matches[-1]
+    count = float(match.group("count"))
+    suffix = (match.group("suffix") or "").lower()
+    if suffix == "k":
+        count *= 1000
+    elif suffix == "m":
+        count *= 1000000
+    return int(count)
+
+
+def _parse_status_tool_uses(line: str) -> int | None:
+    matches = list(_STATUS_COUNTER_TOOL_USE_RE.finditer(line))
+    if not matches:
+        return None
+    return int(matches[-1].group("count"))
+
+
+def _status_counter_identity(line: str) -> str:
+    identity = _STATUS_COUNTER_ELAPSED_RE.sub("<elapsed>", line.strip())
+    identity = _STATUS_COUNTER_TOKEN_RE.sub("<tokens>", identity)
+    identity = _STATUS_COUNTER_TOOL_USE_RE.sub("<tool-uses>", identity)
+    return re.sub(r"\s+", " ", identity).lower()
+
+
+def _status_counter_liveness_snapshot(counter: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(counter, dict):
+        return {}
+    return {
+        "status_identity": counter.get("status_identity"),
+        "status_elapsed_seconds": counter.get("status_elapsed_seconds"),
+        "status_tokens": counter.get("status_tokens"),
+        "status_tool_uses": counter.get("status_tool_uses"),
+    }
+
+
+def parse_agent_status_counter(line: str) -> dict[str, object] | None:
+    """Parse a visible Claude/Codex activity counter line when the line shape is current UI chrome."""
+    stripped = normalize_capture_text(line).strip()
+    if not stripped:
+        return None
+
+    elapsed_seconds = _parse_status_duration_seconds(stripped)
+    tokens = _parse_status_token_count(stripped)
+    tool_uses = _parse_status_tool_uses(stripped)
+    if elapsed_seconds is None and tokens is None and tool_uses is None:
+        return None
+
+    marker_match = _STATUS_COUNTER_MARKER_RE.match(stripped)
+    marker = marker_match.group("marker") if marker_match else ""
+    has_marker = marker_match is not None
+    has_payload = bool(_STATUS_COUNTER_PAYLOAD_RE.search(stripped))
+    has_status_text = "…" in stripped or "..." in stripped or "Working" in stripped or "Reviewing" in stripped
+    is_parenthesized_status = has_marker and elapsed_seconds is not None and "(" in stripped and ")" in stripped and (has_payload or has_status_text)
+    is_codex_status = bool(elapsed_seconds is not None and _WORKING_LINE_RE.search(stripped))
+    is_background_row = bool(elapsed_seconds is not None and tokens is not None and _STATUS_COUNTER_BACKGROUND_RE.search(stripped))
+    is_multi_agent_subline = bool((tokens is not None or tool_uses is not None) and _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped))
+    if not (is_parenthesized_status or is_codex_status or is_background_row or is_multi_agent_subline):
+        return None
+
+    return {
+        "status_line": stripped,
+        "status_identity": _status_counter_identity(stripped),
+        "status_marker": marker,
+        "status_elapsed_seconds": elapsed_seconds,
+        "status_tokens": tokens,
+        "status_tool_uses": tool_uses,
+    }
+
+
+def _last_status_counter(lines: list[str]) -> tuple[int, dict[str, object] | None]:
+    last_index = -1
+    last_counter = None
+    for index, line in enumerate(lines):
+        counter = parse_agent_status_counter(line)
+        if counter is not None:
+            last_index = index
+            last_counter = counter
+    return last_index, last_counter
+
+
+def _last_agent_goal_elapsed_seconds(lines: list[str]) -> float | None:
+    for line in reversed(lines):
+        elapsed = _parse_agent_goal_elapsed_seconds(normalize_capture_text(line).strip())
+        if elapsed is not None:
+            return elapsed
+    return None
+
+
+def _status_counter_advanced(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
+    if not previous:
+        return False
+    if previous.get("status_identity") != current.get("status_identity"):
+        return False
+    for key in ("status_elapsed_seconds", "status_tokens", "status_tool_uses"):
+        old = previous.get(key)
+        new = current.get(key)
+        if isinstance(old, (int, float)) and isinstance(new, (int, float)) and new > old:
+            return True
+    return False
+
+
+def _status_counter_screen_state(counter: dict[str, object], pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
+    now = time.monotonic() if now is None else now
+    advanced = False
+    stale = False
+    last_counter_seen_at = now
+    if pane_target:
+        previous = _VISIBLE_STATUS_COUNTER_CACHE.get(pane_target)
+        previous_counter = previous.get("counter") if previous else None
+        advanced = _status_counter_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
+        previous_liveness = _status_counter_liveness_snapshot(previous_counter if isinstance(previous_counter, dict) else None)
+        current_liveness = _status_counter_liveness_snapshot(counter)
+        if previous and previous_liveness == current_liveness and not advanced:
+            last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now)
+            stale = now - last_advanced_at > _STATUS_COUNTER_STALE_SECONDS
+            last_counter_seen_at = float(previous.get("last_counter_seen_at") or now)
+        if not stale:
+            _VISIBLE_STATUS_COUNTER_CACHE[pane_target] = {
+                "counter": dict(counter),
+                "first_seen_at": previous.get("first_seen_at") if previous else now,
+                "last_advanced_at": now if advanced or not previous else previous.get("last_advanced_at", now),
+                "last_counter_seen_at": now,
+            }
+
+    state = {
+        "key": "idle" if stale else "working",
+        "text": "" if stale else "agent is working",
+        "negative_reason": "stale visible status counter" if stale else "agent is working",
+        "activity_source": "visible-counter",
+        "status_counter_advanced": advanced,
+        "last_counter_seen_at": last_counter_seen_at,
+    }
+    state.update(counter)
+    return state
 
 
 def _is_working_line(line: str) -> bool:
-    return bool(_WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
+    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _parse_agent_active_goal_elapsed_seconds(line) is not None)
 
 
 def visible_agent_working(visible_text: str) -> bool:
@@ -475,23 +1002,55 @@ def visible_agent_working(visible_text: str) -> bool:
 
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#detector-principles
     """
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()[-25:]
     working_index = _last_working_index(lines)
     return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
 
 
+def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
+    """Return the newest current visible status counter, ignoring stale rows above real output."""
+    visible_text = normalize_capture_text(visible_text)
+    lines = visible_text.splitlines()[-25:]
+    counter_index, counter = _last_status_counter(lines)
+    if counter_index < 0 or counter is None or _working_line_has_later_prompt(lines, counter_index):
+        return None
+    goal_elapsed_seconds = _last_agent_goal_elapsed_seconds(lines)
+    if goal_elapsed_seconds is not None:
+        counter = dict(counter)
+        counter["goal_elapsed_seconds"] = goal_elapsed_seconds
+        counter["display_elapsed_seconds"] = goal_elapsed_seconds
+    else:
+        counter = dict(counter)
+        counter["display_elapsed_seconds"] = counter.get("status_elapsed_seconds")
+    return counter
+
+
 def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
+    in_codex_queued_followup = False
     for line in lines[working_index + 1:]:
         stripped = line.strip()
         # Same bounded-overlay rule as approval_prompt_has_later_activity: a Ctrl-T task list below a
         # working row is chrome, not a later prompt. break so real output above the header still counts.
         if _TASK_LIST_HEADER_RE.match(stripped):
             break
+        if _CODEX_QUEUED_FOLLOWUP_HEADER_RE.match(stripped):
+            in_codex_queued_followup = True
+            continue
+        if in_codex_queued_followup:
+            if not stripped:
+                in_codex_queued_followup = False
+                continue
+            if stripped.startswith("↳") or _CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE.match(stripped) or line.startswith(("    ", "  ")):
+                continue
+            in_codex_queued_followup = False
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
+            continue
+        if re.match(r"^[❯›>]\s*$", stripped):
             continue
         if re.match(r"^[❯›>]\s+\S", stripped):
             continue
-        if re.search(r"[@:][^@\s]+[$#]\s*$", stripped):
+        if _SHELL_PROMPT_RE.search(stripped):
             return True
         return True
     return False
@@ -501,9 +1060,9 @@ def _last_approval_prompt_index(lines: list[str]) -> int:
     last_index = -1
     codex_body_until = -1
     for index, line in enumerate(lines):
-        if "Do you want to proceed" in line or "Would you like to run the following command" in line:
+        if _CLAUDE_PROCEED_PROMPT_RE.search(line) or _is_codex_command_prompt_line(line):
             last_index = index
-            if "Would you like to run the following command" in line:
+            if _is_codex_command_prompt_line(line):
                 codex_body_until = index + 20
         elif _FILE_PROMPT_RE.search(line):
             last_index = index
@@ -522,6 +1081,7 @@ def _last_working_index(lines: list[str]) -> int:
 
 def stale_approval_behind_working(visible_text: str) -> bool:
     """Return True when old prompt text remains visible above a live working row."""
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()
     prompt_index = _last_approval_prompt_index(lines)
     return (
@@ -533,6 +1093,7 @@ def stale_approval_behind_working(visible_text: str) -> bool:
 
 def approval_prompt_has_later_activity(visible_text: str) -> bool:
     """Return True when a dismissed prompt remains visible above newer output."""
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()
     prompt_index = _last_approval_prompt_index(lines)
     if prompt_index < 0:
@@ -552,14 +1113,17 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
         if selected_index < 0:
             return False
 
+    composer_index = _current_input_prompt_index(lines)
     start = footer_index + 1 if footer_index >= 0 else selected_index + 1
-    for line in lines[start:]:
+    for index, line in enumerate(lines[start:], start=start):
         stripped = line.strip()
         # The Ctrl-T task overlay is a bounded block under a LIVE prompt: once its header appears,
         # the rest of the pane is overlay chrome, not newer output. break (not return False) so any
         # genuine output ABOVE the header is still evaluated below and still flags a dismissed prompt.
         if _TASK_LIST_HEADER_RE.match(stripped):
             break
+        if index == composer_index:
+            continue
         if (
             _is_separator_or_footer(line)
             or _CHOICE_LINE_RE.search(line)
@@ -570,7 +1134,7 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
             return True
         if stripped.startswith(("●", "•", "✻", "✢", "❯", "›")):
             return True
-        if re.search(r"[@:][^@\s]+[$#]\s*$", stripped):
+        if _SHELL_PROMPT_RE.search(stripped):
             return True
     return False
 
@@ -593,6 +1157,8 @@ def _is_footer_hint_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
+    if _ASK_QUESTION_ACCESSIBLE_FOOTER_RE.match(stripped):
+        return True
     if _FOOTER_LINE_RE.search(stripped):
         return True
     if stripped.startswith("(") and stripped.endswith(")"):
@@ -613,15 +1179,21 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _BOXED_EMPTY_INPUT_LINE_RE.match(stripped):
         return True
+    if stripped.startswith("Press enter to confirm") or stripped.startswith("Press y to"):
+        return True
     if _EFFORT_STATUS_LINE_RE.match(stripped):
+        return True
+    if _CODEX_QUEUED_FOLLOWUP_HEADER_RE.match(stripped) or stripped.startswith("↳") or _CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE.match(stripped):
         return True
     if _WORK_QUEUE_HINT_RE.search(stripped) or _WORK_QUEUE_ROW_RE.match(stripped):
         return True
-    if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped):
+    if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped) or _CODEX_GOAL_STATUS_RE.search(stripped):
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True
-    if re.match(r"^[⎿└]\s+Tip:", stripped, re.IGNORECASE):
+    if re.match(r"^(?:[⎿└]\s*)?Tip:", stripped, re.IGNORECASE):
+        return True
+    if re.match(r"^tmux\s+focus-events\s+off\b", stripped, re.IGNORECASE):
         return True
     if re.match(r"^(?:gpt|claude|opus|sonnet)[A-Za-z0-9_.-]*\s+.+\s·\s", stripped, re.IGNORECASE):
         return True
@@ -643,6 +1215,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
         return True
+    if re.fullmatch(r'[❯›>]\s+Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', stripped):
+        return True
     if re.search(r"\b(?:bypass\s+permissions|esc\s+to\s+interrupt|\d+\s+shells?\b)", stripped, re.IGNORECASE):
         return True
     # Claude Code auto-compact countdown footer: "Ns until auto-compact · /model sonnet[Nm"
@@ -661,7 +1235,10 @@ def _clip_prompt_lines(lines: list[str], max_lines: int = 12, max_chars: int = 1
 
 
 def _is_ask_user_question_footer(line: str) -> bool:
-    return bool(_ASK_QUESTION_FOOTER_RE.search(line) and _ASK_QUESTION_HINT_RE.search(line))
+    return bool(
+        (_ASK_QUESTION_FOOTER_RE.search(line) and _ASK_QUESTION_HINT_RE.search(line))
+        or _ASK_QUESTION_ACCESSIBLE_FOOTER_RE.match(line.strip())
+    )
 
 
 def ask_user_question_prompt_text(visible_text: str) -> str:
@@ -673,11 +1250,15 @@ def ask_user_question_prompt_text(visible_text: str) -> str:
     numbered options and a ``?``-question line — even with a preview box / "Notes:" / "Chat about this"
     block sitting between the options and the footer.
     """
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()[-80:]
     footer_indices = [i for i, line in enumerate(lines) if _is_ask_user_question_footer(line)]
     if not footer_indices:
         return ""
-    head = lines[: footer_indices[-1]]
+    footer_index = footer_indices[-1]
+    if _choice_prompt_has_later_activity(lines, footer_index):
+        return ""
+    head = lines[:footer_index]
     option_indices = [i for i, line in enumerate(head) if _CHOICE_LINE_RE.search(line)]
     if len(option_indices) < 2:
         return ""
@@ -690,14 +1271,39 @@ def ask_user_question_prompt_text(visible_text: str) -> str:
     return ""
 
 
+def interrupted_user_question_text(visible_text: str) -> str:
+    """Return Claude/Codex's current post-interrupt question, even when goal chrome remains visible."""
+    visible_text = normalize_capture_text(visible_text)
+    lines = visible_text.splitlines()[-80:]
+    for index in range(len(lines) - 1, -1, -1):
+        cleaned = _clean_prompt_block_line(re.sub(r"^\s*[⎿└]\s*", "", lines[index]))
+        match = _INTERRUPTED_QUESTION_RE.search(cleaned)
+        if not match:
+            continue
+        for later in lines[index + 1:]:
+            stripped = later.strip()
+            if not stripped or _is_separator_or_footer(later) or _is_prompt_trailing_ui_line(later):
+                continue
+            if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
+                continue
+            return ""
+        prefix = "Interrupted · " if re.search(r"\bInterrupted\b", cleaned, re.IGNORECASE) else ""
+        return prefix + match.group(1)
+    return ""
+
+
 def visible_choice_prompt_text(visible_text: str) -> str:
     """Return the current user-question prompt from the visible pane only.
 
     This intentionally ignores scrollback. If a spinner/working line is visible,
     working wins over older questions still present above the prompt.
     """
+    visible_text = normalize_capture_text(visible_text)
     if not visible_text.strip():
         return ""
+    interrupted_question = interrupted_user_question_text(visible_text)
+    if interrupted_question:
+        return interrupted_question
     if detect_prompt(visible_text) is not None or visible_agent_working(visible_text):
         return ""
     if re.search(r"accept edits on\s*\(", visible_text, re.IGNORECASE):
@@ -725,43 +1331,118 @@ def visible_choice_prompt_text(visible_text: str) -> str:
             end += 1
         block = lines[start:end]
         if sum(1 for line in block if _CHOICE_LINE_RE.search(line)) >= 2:
+            if _choice_prompt_has_later_activity(lines, end):
+                return ""
             return _clip_prompt_lines(block)
 
-    prompt_line_visible = any(re.match(r"^\s*[❯›>]\s*$", line) for line in lines[-8:])
-    if not prompt_line_visible:
+    prompt_index = _current_input_prompt_index(lines)
+    if prompt_index < 0:
         return ""
-    for line in reversed(lines[:-1]):
+    for line in reversed(lines[:prompt_index]):
         stripped = _clean_prompt_block_line(line)
-        if not stripped or _is_footer_hint_line(stripped) or stripped.startswith(("keivenc@", "$ ")):
+        if not stripped or _is_footer_hint_line(stripped) or _is_prompt_trailing_ui_line(line) or stripped.startswith(("keivenc@", "$ ")):
             continue
+        if line.strip().startswith(("●", "•")) and not (_QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped)):
+            break
         if re.match(r"^\s*[❯›>]\s+\S", line):
             break
-        if _QUESTION_RE.match(stripped):
+        if (_QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped)) and not _is_query_url_or_path_output(stripped):
             return stripped
     return ""
 
 
-def agent_screen_state(visible_text: str) -> dict[str, object]:
+def _current_input_prompt_index(lines: list[str]) -> int:
+    """Return the bottom composer prompt row when only trailing UI follows it."""
+    start = max(0, len(lines) - 12)
+    for index in range(len(lines) - 1, start - 1, -1):
+        stripped = lines[index].strip()
+        if not re.match(r"^[❯›>](?:\s+\S.*)?$", stripped):
+            continue
+        later_lines = lines[index + 1:]
+        if all(not line.strip() or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line) for line in later_lines):
+            return index
+    return -1
+
+
+def _choice_prompt_has_later_activity(lines: list[str], end_index: int) -> bool:
+    """Return True when a choice prompt is followed by newer output in the same capture."""
+    composer_index = _current_input_prompt_index(lines)
+    for index, line in enumerate(lines[end_index + 1:], start=end_index + 1):
+        stripped = line.strip()
+        if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
+            continue
+        if index == composer_index:
+            continue
+        if re.match(r"^[❯›>][\s█▉▊▋▌▍▎▏]*$", stripped):
+            continue
+        return True
+    return False
+
+
+def agent_screen_state(visible_text: str, pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
     """Classify the visible terminal screen for YOLOmux UI badges.
 
     Approval detection and auto-approval use the same visible pane text as this
     UI state, so the browser does not need its own stale scrollback parser.
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
     """
+    visible_text = normalize_capture_text(visible_text)
     prompt_state = approval_prompt_state(visible_text)
     prompt_type = prompt_state.get("type") or None
     if prompt_type is not None:
         return {
             "key": "approval",
-            "text": str(prompt_state.get("text") or prompt_text(visible_text, prompt_type)),
+            "text": str(prompt_state.get("question_text") or prompt_state.get("text") or prompt_text(visible_text, prompt_type)),
             "prompt_type": prompt_type,
+            "agent": prompt_state.get("agent") or "unknown",
+            "prompt_kind": prompt_state.get("prompt_kind") or "",
+            "question_text": prompt_state.get("question_text") or "",
+            "command": prompt_state.get("command"),
+            "options": prompt_state.get("options") or [],
+            "selected_option": prompt_state.get("selected_option") or 0,
+            "confidence": prompt_state.get("confidence") or 0.0,
+            "evidence_lines": prompt_state.get("evidence_lines") or [],
+            "prompt_hash": prompt_state.get("hash") or "",
         }
+    interrupted_question = interrupted_user_question_text(visible_text)
+    if interrupted_question:
+        return {
+            "key": "needs-input",
+            "text": interrupted_question,
+            "agent": _infer_agent(visible_text),
+            "prompt_kind": "question",
+            "question_text": interrupted_question,
+            "command": None,
+            "options": [],
+            "selected_option": 0,
+            "confidence": 0.75,
+            "evidence_lines": _matching_evidence_lines(visible_text, None, interrupted_question) or [interrupted_question],
+            "prompt_hash": _hash_prompt_parts(interrupted_question),
+        }
+    counter = visible_agent_status_counter(visible_text)
+    if counter is not None:
+        return _status_counter_screen_state(counter, pane_target=pane_target, now=now)
     if visible_agent_working(visible_text):
-        return {"key": "working", "text": "agent is working"}
+        return {"key": "working", "text": "agent is working", "negative_reason": "agent is working"}
     question = visible_choice_prompt_text(visible_text)
     if question:
-        return {"key": "needs-input", "text": question}
-    return {"key": "idle", "text": ""}
+        options = _prompt_options(visible_text)
+        option_labels = [str(option["label"]) for option in options]
+        prompt_kind = _question_prompt_kind(visible_text, question)
+        return {
+            "key": "needs-input",
+            "text": question,
+            "agent": _infer_agent(visible_text),
+            "prompt_kind": prompt_kind,
+            "question_text": question,
+            "command": None,
+            "options": options,
+            "selected_option": selected_prompt_option(visible_text),
+            "confidence": 0.9 if options else 0.75,
+            "evidence_lines": _matching_evidence_lines(visible_text, None, question),
+            "prompt_hash": _hash_prompt_parts(question, option_labels),
+        }
+    return {"key": "idle", "text": "", "negative_reason": _negative_reason(visible_text)}
 
 
 def prompt_hash(pane_text: str) -> str:
@@ -771,8 +1452,9 @@ def prompt_hash(pane_text: str) -> str:
     block above the selector so two different commands do not look like the
     same already-approved prompt.
     """
+    pane_text = normalize_capture_text(pane_text)
     all_lines = pane_text.splitlines()
-    selector_re = re.compile(r"[❯›]\s*\d+\.\s*\S")
+    selector_re = re.compile(r"[❯›>]\s*\d+\.\s*\S")
     selector_index = -1
     for i, line in enumerate(all_lines):
         if selector_re.search(line):
@@ -817,6 +1499,8 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#claude-approval-patterns
     and docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#codex-approval-patterns.
     """
+    visible_text = normalize_capture_text(visible_text)
+    pane_text = normalize_capture_text(pane_text) if pane_text is not None else None
     prompt_type = detect_prompt(visible_text)
     selected = yes_is_selected(visible_text)
     if prompt_type is not None and (
@@ -824,16 +1508,26 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
     ):
         prompt_type = None
 
+    question = prompt_text(visible_text, prompt_type) if prompt_type is not None else ""
+    options = _prompt_options(visible_text) if prompt_type is not None else []
     state: dict[str, object] = {
         "visible": prompt_type is not None,
         "type": prompt_type or "",
-        "text": prompt_text(visible_text, prompt_type) if prompt_type is not None else "",
+        "text": question,
         "yes_selected": selected if prompt_type is not None else False,
         "selected_option": selected_prompt_option(visible_text) if prompt_type is not None else 0,
         "action": None,
         "command": None,
         "dangerous": False,
         "hash": prompt_hash(visible_text) if prompt_type is not None else "",
+        "signature": prompt_hash(visible_text) if prompt_type is not None else "",
+        "agent": _infer_agent(visible_text, prompt_type) if prompt_type is not None else "unknown",
+        "prompt_kind": _prompt_kind(prompt_type),
+        "question_text": question,
+        "options": options,
+        "confidence": 0.95 if prompt_type is not None and options else 0.0,
+        "evidence_lines": _matching_evidence_lines(visible_text, prompt_type, question) if prompt_type is not None else [],
+        "negative_reason": "" if prompt_type is not None else _negative_reason(visible_text),
     }
     if prompt_type is None:
         return state
@@ -855,11 +1549,14 @@ __all__ = [
     "detect_prompt",
     "extract_command",
     "is_dangerous",
+    "normalize_capture_text",
+    "parse_agent_status_counter",
     "prompt_hash",
     "prompt_text",
     "selected_prompt_option",
     "stale_approval_behind_working",
     "visible_agent_working",
+    "visible_agent_status_counter",
     "visible_choice_prompt_text",
     "yes_is_selected",
 ]

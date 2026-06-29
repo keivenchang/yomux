@@ -1,19 +1,27 @@
 import io
 import json
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import yolomux_lib.yoagent.transports as transport_module
+from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_argv
+from yolomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+from yolomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_PERMISSION_MODE
+from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_result
+from yolomux_lib.common import codex_exec_argv
 from yolomux_lib.yoagent.transports import ClaudeChannelsTransport
 from yolomux_lib.yoagent.transports import ClaudeSdkTransport
 from yolomux_lib.yoagent.transports import ClaudeStreamJsonTransport
 from yolomux_lib.yoagent.transports import CodexAppServerTransport
+from yolomux_lib.yoagent.transports import CodexAppServerSession
 from yolomux_lib.yoagent.transports import CodexExecTransport
 from yolomux_lib.yoagent.transports import CodexMcpServerTransport
 from yolomux_lib.yoagent.transports import CodexSdkTransport
 from yolomux_lib.yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
 from yolomux_lib.yoagent.transports import TmuxLegacyTransport
+from yolomux_lib.yoagent.transports import TransportInterrupted
 from yolomux_lib.yoagent.transports import default_yoagent_transport_registry
 from yolomux_lib.yoagent.transports import normalize_yoagent_transport_id
 
@@ -34,6 +42,37 @@ def test_transport_registry_order_and_aliases():
     assert normalize_yoagent_transport_id("pane-paste") == TMUX_LEGACY_TRANSPORT_ID
     assert registry.get("pane-paste").id == TMUX_LEGACY_TRANSPORT_ID
     assert registry.get("tmux-legacy").label == "legacy tmux pane paste + Return"
+
+
+def test_codex_exec_search_is_top_level_and_not_used_for_resume():
+    fresh = codex_exec_argv(model="gpt-5.5", effort="xhigh", search=True)
+    resumed = codex_exec_argv(resume_session_id="thread-1", model="gpt-5.5", effort="xhigh", search=True)
+
+    assert fresh[:3] == ["codex", "--search", "exec"]
+    assert "--search" not in resumed
+    assert resumed[:3] == ["codex", "exec", "resume"]
+
+
+def test_claude_stream_json_argv_includes_partials_and_optional_tools():
+    args = claude_stream_json_argv({"agent_model": "claude-haiku-4-5", "agent_effort": "high", "tools": CLAUDE_STREAM_JSON_DEFAULT_TOOLS, "permission_mode": CLAUDE_STREAM_JSON_PERMISSION_MODE})
+
+    assert "--include-partial-messages" in args
+    assert "--show-thinking" not in args
+    assert args[args.index("--tools") + 1] == CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+    assert args[args.index("--permission-mode") + 1] == CLAUDE_STREAM_JSON_PERMISSION_MODE
+
+
+def test_claude_stream_json_result_falls_back_to_wrapped_text_deltas():
+    stdout = "\n".join([
+        json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "wrapped "}}}),
+        json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "answer"}}}),
+        json.dumps({"type": "result", "is_error": False, "result": ""}),
+    ])
+
+    answer, error = claude_stream_json_result(stdout)
+
+    assert answer == "wrapped answer"
+    assert error == ""
 
 
 def test_transport_registry_prefers_structured_provider_only_for_managed_targets(monkeypatch):
@@ -69,12 +108,15 @@ def test_tmux_legacy_transport_sends_with_injected_paste_func():
         "transport_label": "legacy tmux pane paste + Return",
         "result_source": "transcript-or-screen",
         "pasted": True,
+        "reason_code": "submitted",
         "returncode": 0,
     }
 
 
-def test_codex_exec_transport_uses_output_last_message(monkeypatch):
+def test_codex_exec_transport_uses_output_last_message(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
     calls = []
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
 
     def fake_run(args, **kwargs):
@@ -112,7 +154,7 @@ def test_codex_exec_transport_uses_output_last_message(monkeypatch):
     assert "-o" in args
     assert kwargs["input"] == "summarize the diff"
     assert kwargs["cwd"] == "/repo/app"
-    assert kwargs["env"]["CODEX_HOME"].endswith("codex-home")
+    assert kwargs["env"]["CODEX_HOME"] == str(codex_home)
     assert kwargs["env"]["TERM"] == "xterm-256color"
     assert kwargs["env"]["NO_COLOR"] == "1"
 
@@ -271,6 +313,37 @@ def test_claude_stream_json_transport_uses_result_message(monkeypatch):
     assert kwargs["cwd"] == "/repo/app"
 
 
+def test_claude_stream_json_transport_emits_normalized_stream_events(monkeypatch):
+    events = []
+    monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "claude" else None)
+
+    def fake_run(args, **kwargs):
+        stdout = "\n".join([
+            json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Visible"}}),
+            json.dumps({"type": "content_block_delta", "index": 1, "delta": {"type": "thinking_delta", "thinking": "Reading files"}}),
+            json.dumps({"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "Bash"}}),
+            json.dumps({"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": '{"command":"pwd"}'}}),
+            json.dumps({"type": "content_block_stop", "index": 2}),
+            json.dumps({"type": "result", "is_error": False, "result": "Final Claude stream answer.", "stop_reason": "end_turn"}),
+        ])
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    result = ClaudeStreamJsonTransport().send(
+        {"session": "job-1", "agent_kind": "claude", "transport": "claude-stream-json", "managed": True, "cwd": "/repo/app"},
+        "summarize the diff",
+        run=fake_run,
+        on_event=events.append,
+        timeout=3,
+    )
+
+    assert result.ok is True
+    assert [event["kind"] for event in events] == ["assistant_delta", "hidden_work_delta", "tool_call_started", "tool_call_delta", "tool_call_finished", "turn_done"]
+    assert events[0]["text"] == "Visible"
+    assert events[1]["text"] == "Reading files"
+    assert events[2]["tool_name"] == "Bash"
+    assert events[4]["text"] == "pwd"
+
+
 def test_claude_stream_json_transport_reports_result_error(monkeypatch):
     monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "claude" else None)
 
@@ -288,6 +361,35 @@ def test_claude_stream_json_transport_reports_result_error(monkeypatch):
     assert result.ok is False
     assert result.sent is False
     assert result.error == "permission denied"
+
+
+def test_claude_stream_json_transport_reports_interrupted_turn(monkeypatch):
+    cancel_event = threading.Event()
+    callback_args = []
+    monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "claude" else None)
+
+    def fake_stream_json_run(*_args, cancel_event=None, process_callback=None, **_kwargs):
+        callback_args.append((cancel_event, callable(process_callback)))
+        if callable(process_callback):
+            process_callback("fake-process")
+        raise TransportInterrupted("interrupted")
+
+    monkeypatch.setattr(transport_module, "claude_stream_json_run", fake_stream_json_run)
+    process_records = []
+
+    result = ClaudeStreamJsonTransport().send(
+        {"session": "job-1", "agent_kind": "claude", "transport": "claude-stream-json", "managed": True, "cwd": "/repo/app"},
+        "summarize the diff",
+        cancel_event=cancel_event,
+        process_callback=process_records.append,
+        timeout=3,
+    )
+
+    assert result.ok is False
+    assert result.sent is True
+    assert result.reason_code == "interrupted"
+    assert callback_args == [(cancel_event, True)]
+    assert process_records == ["fake-process"]
 
 
 def test_codex_sdk_transport_reports_missing_sdk(monkeypatch):
@@ -430,7 +532,21 @@ class FakeCodexAppServerProcess:
         self._returncode = -9
 
 
-def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(monkeypatch):
+def test_codex_app_server_session_interrupt_terminates_current_process():
+    fake_process = FakeCodexAppServerProcess([])
+    session = CodexAppServerSession({"session": "job-1", "agent_kind": "codex", "transport": "codex-app-server", "managed": True})
+    session.process = fake_process
+
+    result = session.interrupt()
+
+    assert result == {"ok": True, "interrupted": True, "transport": "codex-app-server"}
+    assert session.interrupted.is_set()
+    assert fake_process.terminated is True
+
+
+def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     messages = [
         {"jsonrpc": "2.0", "id": "initialize-1", "result": {"userAgent": "codex-cli", "codexHome": "/tmp/codex", "platformFamily": "unix", "platformOs": "linux"}},
@@ -459,9 +575,9 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
     assert result.transport == "codex-app-server"
     assert result.result_source == "codex-app-server-json-rpc"
     assert result.text == "Final app-server answer."
-    assert calls[0][0] == ["codex", "app-server", "--listen", "stdio://"]
+    assert calls[0][0] == ["codex", "app-server", "--listen", "stdio://", "-c", 'model_reasoning_summary="auto"']
     assert calls[0][1]["cwd"] == "/repo/app"
-    assert calls[0][1]["env"]["CODEX_HOME"].endswith("codex-home")
+    assert calls[0][1]["env"]["CODEX_HOME"] == str(codex_home)
     assert calls[0][1]["env"]["TERM"] == "xterm-256color"
     assert calls[0][1]["env"]["NO_COLOR"] == "1"
     assert fake_process.terminated is True
@@ -469,16 +585,43 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
     assert fake_process.stdin.messages[2]["params"]["cwd"] == "/repo/app"
     assert fake_process.stdin.messages[2]["params"]["model"] == "gpt-5"
     assert fake_process.stdin.messages[3]["params"]["input"] == [{"type": "text", "text": "summarize the diff", "text_elements": []}]
-    assert stream_events == [
-        {
-            "event": "delta",
-            "thread_id": "thread-1",
-            "turn_id": "turn-1",
-            "item_id": "item-1",
-            "delta": "intermediate text",
-            "text": "intermediate text",
-        }
+    assert [event["kind"] for event in stream_events] == ["assistant_delta", "turn_done"]
+    assert stream_events[0]["text"] == "intermediate text"
+    assert stream_events[0]["thread_id"] == "thread-1"
+    assert stream_events[0]["turn_id"] == "turn-1"
+    assert stream_events[0]["item_id"] == "item-1"
+    assert stream_events[0]["native_type"] == "item/agentMessage/delta"
+    assert stream_events[1]["native_type"] == "turn/completed"
+
+
+def test_codex_app_server_low_effort_keeps_reasoning_summary_enabled(tmp_path):
+    messages = [
+        {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
+        {"jsonrpc": "2.0", "id": "thread-1", "result": {"threadId": "thread-1"}},
+        {"jsonrpc": "2.0", "id": "turn-1", "result": {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}},
+        {"jsonrpc": "2.0", "method": "item/reasoning/summaryTextDelta", "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "reason-1", "delta": "Checking context"}},
+        {"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "answer-1", "delta": "Final app-server answer."}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"items": []}}},
     ]
+    fake_process = FakeCodexAppServerProcess(messages)
+    calls = []
+    stream_events = []
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return fake_process
+
+    result = CodexAppServerTransport().send(
+        {"session": "job-1", "agent_kind": "codex", "transport": "codex-app-server", "managed": True, "cwd": str(tmp_path), "agent_effort": "low"},
+        "summarize the diff",
+        popen=fake_popen,
+        timeout=3,
+        on_event=stream_events.append,
+    )
+
+    assert result.ok is True
+    assert calls[0][0] == ["codex", "app-server", "--listen", "stdio://", "-c", 'model_reasoning_effort="low"', "-c", 'model_reasoning_summary="auto"']
+    assert any(event["kind"] == "hidden_work_delta" and event["text"] == "Checking context" for event in stream_events)
 
 
 def test_codex_app_server_transport_resumes_existing_thread(monkeypatch):
@@ -502,6 +645,121 @@ def test_codex_app_server_transport_resumes_existing_thread(monkeypatch):
     assert result.text == "Resumed answer."
     assert fake_process.stdin.messages[2]["method"] == "thread/resume"
     assert fake_process.stdin.messages[2]["params"]["threadId"] == "thread-existing"
+
+
+def test_codex_app_server_session_resumes_or_starts_after_process_restart(monkeypatch):
+    monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    messages = [
+        {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
+        {"jsonrpc": "2.0", "id": "thread-1", "error": {"code": -32600, "message": "thread not found: exec-thread"}},
+        {"jsonrpc": "2.0", "id": "thread-2", "result": {"thread": {"id": "thread-new"}}},
+        {"jsonrpc": "2.0", "id": "turn-1", "result": {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "thread-new", "turn": {"id": "turn-1", "items": [{"type": "agentMessage", "id": "item-1", "text": "Fresh thread answer."}], "status": "completed"}}},
+    ]
+    fake_process = FakeCodexAppServerProcess(messages)
+    target = {
+        "session": "job-1",
+        "agent_kind": "codex",
+        "transport": "codex-app-server",
+        "managed": True,
+        "cwd": "/repo/app",
+        "agent_session_id": "exec-thread",
+    }
+    session = CodexAppServerSession(target, popen=lambda *_args, **_kwargs: fake_process)
+    session.thread_id = "exec-thread"
+
+    try:
+        result, status = session.send("continue", target, timeout=3)
+    finally:
+        session.close()
+
+    assert result.ok is True
+    assert result.text == "Fresh thread answer."
+    assert status["resume_error"]
+    assert status["thread_started"] is True
+    assert fake_process.stdin.messages[2]["method"] == "thread/resume"
+    assert fake_process.stdin.messages[2]["params"]["threadId"] == "exec-thread"
+    assert fake_process.stdin.messages[3]["method"] == "thread/start"
+    assert fake_process.stdin.messages[4]["method"] == "turn/start"
+    assert fake_process.stdin.messages[4]["params"]["threadId"] == "thread-new"
+
+
+def test_codex_app_server_session_retries_fresh_thread_after_request_too_large():
+    processes = [
+        FakeCodexAppServerProcess([
+            {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
+            {"jsonrpc": "2.0", "id": "thread-1", "result": {"thread": {"id": "thread-old"}}},
+            {"jsonrpc": "2.0", "id": "turn-1", "error": {"code": 413, "message": "Request Entity Too Large"}},
+        ]),
+        FakeCodexAppServerProcess([
+            {"jsonrpc": "2.0", "id": "initialize-2", "result": {}},
+            {"jsonrpc": "2.0", "id": "thread-2", "result": {"thread": {"id": "thread-new"}}},
+            {"jsonrpc": "2.0", "id": "turn-2", "result": {"turn": {"id": "turn-2", "items": [], "status": "inProgress"}}},
+            {"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "thread-new", "turn": {"id": "turn-2", "items": [{"type": "agentMessage", "id": "item-1", "text": "Fresh thread answer."}], "status": "completed"}}},
+        ]),
+    ]
+    target = {
+        "session": "job-1",
+        "agent_kind": "codex",
+        "transport": "codex-app-server",
+        "managed": True,
+        "cwd": "/repo/app",
+        "agent_session_id": "thread-old",
+    }
+    popen_calls = []
+
+    def fake_popen(*_args, **_kwargs):
+        popen_calls.append(True)
+        return processes[len(popen_calls) - 1]
+
+    session = CodexAppServerSession(target, popen=fake_popen)
+
+    try:
+        result, status = session.send("continue", target, timeout=3)
+    finally:
+        session.close()
+
+    assert result.ok is True
+    assert result.text == "Fresh thread answer."
+    assert status["oversize_resume_retried"] is True
+    assert status["dropped_thread_id"] == "thread-old"
+    assert status["thread_started"] is True
+    assert session.thread_id == "thread-new"
+    assert len(popen_calls) == 2
+    assert processes[0].terminated is True
+    assert processes[0].stdin.messages[2]["method"] == "thread/resume"
+    assert processes[0].stdin.messages[3]["method"] == "turn/start"
+    assert processes[0].stdin.messages[3]["params"]["threadId"] == "thread-old"
+    assert processes[1].stdin.messages[2]["method"] == "thread/start"
+    assert processes[1].stdin.messages[3]["method"] == "turn/start"
+    assert processes[1].stdin.messages[3]["params"]["threadId"] == "thread-new"
+
+
+def test_codex_app_server_transport_accepts_idle_status_as_turn_done(monkeypatch):
+    monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    messages = [
+        {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
+        {"jsonrpc": "2.0", "id": "thread-1", "result": {"thread": {"id": "thread-1"}}},
+        {"jsonrpc": "2.0", "id": "turn-1", "result": {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}},
+        {"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "Idle "}},
+        {"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "answer."}},
+        {"jsonrpc": "2.0", "method": "thread/status/changed", "params": {"threadId": "thread-1", "status": {"type": "idle"}}},
+    ]
+    fake_process = FakeCodexAppServerProcess(messages)
+    events = []
+
+    result = CodexAppServerTransport().send(
+        {"session": "job-1", "agent_kind": "codex", "transport": "codex-app-server", "managed": True, "cwd": "/repo/app"},
+        "continue",
+        popen=lambda *_args, **_kwargs: fake_process,
+        timeout=3,
+        on_event=events.append,
+    )
+
+    assert result.ok is True
+    assert result.text == "Idle answer."
+    assert [event["kind"] for event in events] == ["assistant_delta", "assistant_delta", "turn_done"]
+    assert events[-1]["native_type"] == "thread/status/changed"
 
 
 def test_codex_app_server_transport_reports_unhandled_server_request(monkeypatch):

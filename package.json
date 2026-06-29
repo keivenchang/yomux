@@ -1,0 +1,10 @@
+{
+  "name": "yolomux",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runtime frontend assets served by the YOLOmux web terminal. xterm.js and its addons are resolved from node_modules at runtime (see yolomux_lib/common.py XTERM_ASSET_ROOTS); `npm install` populates them so the server serves /static/xterm.js on any host, not only machines with an IDE bundle to borrow from.",
+  "dependencies": {
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/xterm": "6.0.0"
+  }
+}

@@ -1,8 +1,16 @@
 """DOIT.58 A5 — activity ledger coalescing semantics (these tests DEFINE the contract)."""
 
+from datetime import datetime
+from datetime import timezone
 import json
+import os
 
 from yolomux_lib.activity import ActivityLedger
+from yolomux_lib.activity_summary import agent_transcript_activity_ts
+from yolomux_lib.activity_summary import build_recent_agents_payload
+from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import PaneInfo
+from yolomux_lib.common import SessionInfo
 
 
 def _ledger(tmp_path, idle_gap_seconds=120.0, retention_days=14.0):
@@ -12,6 +20,142 @@ def _ledger(tmp_path, idle_gap_seconds=120.0, retention_days=14.0):
         idle_gap_seconds=idle_gap_seconds,
         retention_days=retention_days,
     )
+
+
+def _timestamp(year, month, day, hour, minute, second):
+    return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc).timestamp()
+
+
+def _write_jsonl(path, records):
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+
+def _agent(kind, transcript, cwd, session="s1", target="s1:0.0"):
+    return AgentInfo(
+        session=session,
+        kind=kind,
+        pid=1,
+        pane_target=target,
+        command=kind,
+        cwd=str(cwd),
+        status="running",
+        session_id=f"{kind}-sid",
+        transcript=str(transcript),
+        error=None,
+    )
+
+
+def test_claude_transcript_activity_uses_event_timestamp_before_recent_mtime(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    recent_mtime = _timestamp(2026, 6, 28, 14, 51, 23)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+            }
+        ],
+    )
+    os.utime(transcript, (recent_mtime, recent_mtime))
+
+    activity = agent_transcript_activity_ts(_agent("claude", transcript, tmp_path))
+
+    assert activity["timestamp"] == event_ts
+    assert activity["source"] == "transcript-event"
+
+
+def test_claude_transcript_activity_ignores_metadata_only_tail_records(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Finished the fix."}]},
+            },
+            {"timestamp": "2026-06-28T14:40:00Z", "type": "last-prompt", "value": "repeat the last prompt"},
+            {"timestamp": "2026-06-28T14:41:00Z", "type": "metadata", "key": "ai-title", "value": "Tabber work"},
+            {"timestamp": "2026-06-28T14:42:00Z", "payload": {"type": "metadata", "key": "permission-mode", "value": "default"}},
+            {"timestamp": "2026-06-28T14:43:00Z", "type": "pr-link", "value": "https://example.invalid/pr/1"},
+        ],
+    )
+
+    activity = agent_transcript_activity_ts(_agent("claude", transcript, tmp_path))
+
+    assert activity["timestamp"] == event_ts
+    assert activity["source"] == "transcript-event"
+
+
+def test_codex_transcript_activity_uses_jsonl_timestamp_before_recent_mtime(tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    recent_mtime = _timestamp(2026, 6, 28, 14, 51, 23)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Done."},
+            }
+        ],
+    )
+    os.utime(transcript, (recent_mtime, recent_mtime))
+
+    activity = agent_transcript_activity_ts(_agent("codex", transcript, tmp_path))
+
+    assert activity["timestamp"] == event_ts
+    assert activity["source"] == "transcript-event"
+
+
+def test_recent_agents_payload_uses_meaningful_transcript_timestamp(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    event_ts = _timestamp(2026, 6, 26, 22, 16, 16)
+    recent_mtime = _timestamp(2026, 6, 28, 14, 51, 23)
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-26T22:16:16Z",
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+            }
+        ],
+    )
+    os.utime(transcript, (recent_mtime, recent_mtime))
+    pane = PaneInfo(
+        session="4",
+        window="0",
+        pane="0",
+        pane_id="%40",
+        target="4:0.0",
+        current_path=str(tmp_path),
+        command="claude",
+        active=True,
+        window_active=True,
+        title="",
+        pid=40,
+        window_name="claude",
+        process_label="claude",
+    )
+    info = SessionInfo(
+        session="4",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[_agent("claude", transcript, tmp_path, session="4", target="4:0.0")],
+    )
+
+    rows = build_recent_agents_payload({"4": info}, ["4"])
+
+    assert len(rows) == 1
+    assert rows[0]["last_used_ts"] == event_ts
+    assert rows[0]["sort_ts"] == event_ts
+    assert rows[0]["last_used_source"] == "transcript-event"
 
 
 def test_two_close_heartbeats_count_the_real_gap(tmp_path):
@@ -78,6 +222,33 @@ def test_atomic_persistence_round_trip(tmp_path):
     assert reloaded.snapshot()["6:1"]["total_user_input_ms"] == 5000
 
 
+def test_load_replays_fresh_heartbeat_log_over_stale_activity_json(tmp_path):
+    led = _ledger(tmp_path)
+    led.heartbeat("8002", "0", ts=1000.0, byte_count=1)
+    led.flush()
+    with open(tmp_path / "activity-heartbeats.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"ts": 2000.0, "s": "8002", "w": "0", "b": 1, "src": "host"}) + "\n")
+
+    reloaded = _ledger(tmp_path)
+    reloaded.load()
+
+    snap = reloaded.snapshot()
+    assert snap["8002"]["last_user_input_ts"] == 2000.0
+    assert snap["8002:0"]["last_user_input_ts"] == 2000.0
+
+
+def test_snapshot_replays_heartbeat_lines_appended_by_another_process(tmp_path):
+    led = _ledger(tmp_path)
+    led.load()
+    with open(tmp_path / "activity-heartbeats.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"ts": 3000.0, "s": "8002", "w": "0", "b": 1, "src": "host"}) + "\n")
+
+    snap = led.snapshot()
+
+    assert snap["8002"]["last_user_input_ts"] == 3000.0
+    assert snap["8002:0"]["last_user_input_ts"] == 3000.0
+
+
 def test_load_corrupt_activity_json_resets_records_and_logs(tmp_path, caplog):
     led = _ledger(tmp_path)
     led.heartbeat("6", "1", ts=1000.0)
@@ -85,7 +256,7 @@ def test_load_corrupt_activity_json_resets_records_and_logs(tmp_path, caplog):
 
     led.load()
 
-    assert led.snapshot() == {}
+    assert led.snapshot()["6:1"]["last_user_input_ts"] == 1000.0
     assert "resetting unreadable activity ledger" in caplog.text
 
 

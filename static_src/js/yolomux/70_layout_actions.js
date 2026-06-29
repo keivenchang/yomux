@@ -35,6 +35,7 @@ function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
   if (isFiles) rememberFileExplorerOpenIntent(false);
+  if (typeof closePopoutsForLayoutItem === 'function') closePopoutsForLayoutItem(item);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
@@ -48,6 +49,7 @@ function removePaneFromLayout(item) {
   if (!slot) return;
   const moved = paneTabs(slot);
   if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
+  if (typeof closePopoutsForLayoutItem === 'function') moved.forEach(closePopoutsForLayoutItem);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
@@ -322,17 +324,19 @@ function slotForTabActivation(item) {
   return fileEditorActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
-async function activateTabInExistingPane(item) {
+async function activateTabInExistingPane(item, options = {}) {
   if (!isLayoutItem(item)) return;
   if (isTmuxSession(item)) {
     const ensured = await ensureSession(item);
     if (!ensured) return;
   }
-  const targetSlot = slotForTabActivation(item);
+  const targetSlot = options.preferFocused === true
+    ? (fileEditorActivationSlot() || slotForTabActivation(item))
+    : slotForTabActivation(item);
   if (!targetSlot) return;
   const currentSlot = slotForSession(item);
   if (currentSlot === targetSlot) {
-    activatePaneTab(targetSlot, item);
+    activatePaneTab(targetSlot, item, {userInitiated: options.userInitiated === true});
     return;
   }
   await moveSessionToSlot(item, targetSlot, currentSlot, paneTabs(targetSlot).length);
@@ -374,8 +378,8 @@ async function placeTmuxSession(session) {
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
 }
 
-// File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
-// Finder panel's close button), otherwise open/focus it. The menu's `checked` state tracks this.
+// File -> Finder and Mod+B toggle the reserved Finder/Differ/Tabber pane. Hide it when it is already in
+// the layout (same path as the close button), otherwise open/focus it. The menu's `checked` state tracks this.
 function toggleFinderPane() {
   if (itemInLayout(fileExplorerItemId)) {
     removeSessionFromLayout(fileExplorerItemId);
@@ -702,10 +706,56 @@ async function selectSession(session, options = {}) {
   await activateTabInExistingPane(session);
 }
 
-function paneTabTraversalPositions(slots = layoutSlots) {
+function layoutPaneTabTraversalPositions(slots = layoutSlots) {
   return layoutLeafSlots(slots?.[layoutTreeKey])
     .flatMap(slot => paneTabs(slot, slots).map(item => ({slot, item})))
     .filter(position => position.item);
+}
+
+function renderedPaneTabTraversalPositions(slots = layoutSlots) {
+  const groups = Array.from(grid?.querySelectorAll?.('.dv-groupview') || []);
+  const knownSlots = new Set(layoutSlotKeys(slots));
+  const seenSlots = new Set();
+  const records = [];
+  groups.forEach((group, index) => {
+    const slot = typeof dockviewSlotForGroupElement === 'function' ? dockviewSlotForGroupElement(group) : '';
+    if (!knownSlots.has(slot) || seenSlots.has(slot)) return;
+    const rect = group.getBoundingClientRect?.() || {};
+    const width = Number(rect.width || 0);
+    const height = Number(rect.height || 0);
+    if (width <= 0 && height <= 0) return;
+    seenSlots.add(slot);
+    records.push({
+      slot,
+      group,
+      index,
+      left: Number.isFinite(Number(rect.left)) ? Number(rect.left) : index,
+      top: Number.isFinite(Number(rect.top)) ? Number(rect.top) : index,
+    });
+  });
+  if (!records.length) return [];
+  records.sort((a, b) => (a.left - b.left) || (a.top - b.top) || (a.index - b.index));
+  const positions = [];
+  const seenItems = new Set();
+  const appendItem = (slot, item) => {
+    if (!item || seenItems.has(item) || !paneTabs(slot, slots).includes(item)) return;
+    seenItems.add(item);
+    positions.push({slot, item});
+  };
+  for (const record of records) {
+    const renderedTabs = Array.from(record.group.querySelectorAll?.('.dockview-pane-tab') || [])
+      .map(tab => tab?.dataset?.paneTab || '')
+      .filter(Boolean);
+    const tabItems = renderedTabs.length ? renderedTabs : paneTabs(record.slot, slots);
+    tabItems.forEach(item => appendItem(record.slot, item));
+  }
+  for (const position of layoutPaneTabTraversalPositions(slots)) appendItem(position.slot, position.item);
+  return positions;
+}
+
+function paneTabTraversalPositions(slots = layoutSlots) {
+  const rendered = renderedPaneTabTraversalPositions(slots);
+  return rendered.length ? rendered : layoutPaneTabTraversalPositions(slots);
 }
 
 function adjacentPaneTabPosition(direction, options = {}) {
@@ -718,7 +768,9 @@ function adjacentPaneTabPosition(direction, options = {}) {
   const index = positions.findIndex(position => position.slot === currentSlot && position.item === currentItem);
   if (index < 0) return null;
   const offset = direction < 0 ? -1 : 1;
-  return positions[(index + offset + positions.length) % positions.length] || null;
+  const nextIndex = index + offset;
+  if (nextIndex < 0 || nextIndex >= positions.length) return null;
+  return positions[nextIndex] || null;
 }
 
 function selectAdjacentPaneTab(direction, options = {}) {
@@ -745,11 +797,13 @@ function agentIcon(kind, options = {}) {
   const name = agentLabel(kind);
   const label = options.label || name;
   const labelAttr = label ? ` aria-label="${esc(label)}" title="${esc(label)}"` : '';
+  const extraClass = String(options.className || '').trim();
+  const classes = agentKind => ['agent-icon', agentKind, extraClass].filter(Boolean).join(' ');
   if (kind === 'codex') {
-    return `<span class="agent-icon codex"${labelAttr}>${codexIcon()}</span>`;
+    return `<span class="${esc(classes('codex'))}"${labelAttr}>${codexIcon()}</span>`;
   }
   if (kind === 'claude') {
-    return `<span class="agent-icon claude"${labelAttr}>${claudeIcon()}</span>`;
+    return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
   }
   return '';
 }
@@ -779,7 +833,7 @@ function claudeIcon() {
 }
 
 function agentName(kind) {
-  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Term' : '';
+  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Xterm' : '';
 }
 
 function numericSessionName(session) {
@@ -823,12 +877,17 @@ function sessionForLabel(label) {
   return null;
 }
 
-function sessionLabel(session) {
+function sessionShortcutLabel(session) {
   const assigned = sessionLabelAssignments().get(session);
   if (assigned) return assigned;
   const numeric = numericSessionName(session);
   if (numeric !== null) return String(numeric);
   return String(session);
+}
+
+function sessionLabel(session) {
+  const numeric = numericSessionName(session);
+  return numeric !== null ? String(numeric) : String(session);
 }
 
 function shortText(value, limit = 96) {
@@ -1010,9 +1069,98 @@ function pullRequestChecksHtml(pr) {
   return metaJoin(parts);
 }
 
+function activeWindowPaneForProjectMeta(session, info) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  return panes.length ? terminalDisplayPane(info, session) : null;
+}
+
+function repoSummaryAsGit(repo) {
+  return gitFromRepoSummary(repo);
+}
+
+function activeAgentWindowMetadataItemForProjectMeta(session, info) {
+  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof windowViewModel !== 'function') return null;
+  const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
+  if (activeWindowIndex === null) return null;
+  const agent = windowViewModel(session, activeWindowIndex, info, autoApproveStates.get(session));
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : String(agent?.kind || '').trim().toLowerCase();
+  if (!['claude', 'codex'].includes(kind)) return null;
+  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+  const paths = pathEntries.map(item => item.path).filter(Boolean);
+  const meta = {
+    window: String(agent?.window ?? ''),
+    window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
+    window_name: String(agent?.window_name || ''),
+    path: paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || '')),
+    paths,
+    path_entries: pathEntries,
+    git: typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null),
+  };
+  return {agent, meta};
+}
+
+function projectMetaPathFromWindowMetadata(meta) {
+  const pathEntries = Array.isArray(meta?.path_entries) ? meta.path_entries.map(item => String(item?.path || '').trim()).filter(Boolean) : [];
+  if (pathEntries.length) return pathEntries[0];
+  const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
+  if (paths.length) return paths[0];
+  const path = String(meta?.path || '').trim();
+  if (path) return path;
+  return String(meta?.git?.root || '').trim();
+}
+
+function projectMetaSelection(session, info) {
+  const project = info?.project || {};
+  const repos = sessionRepoSummaries(info);
+  const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
+  const activePane = activeWindowPaneForProjectMeta(session, info);
+  const activePath = normalizeDirectoryPath(activePane?.current_path || '');
+  const activeAgent = activePane ? agentForPane(info, activePane) : null;
+  const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
+  const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
+  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info) : null;
+  const activeWindowMeta = activeWindowMetadataItem?.meta || null;
+  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || Boolean(projectMetaPathFromWindowMetadata(activeWindowMeta));
+  const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
+  let repoIndex = selectedSessionRepoIndex(session, info);
+  if (!explicitRoot && activePath && repos.length) {
+    const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
+    if (activeRepoIndex >= 0) repoIndex = activeRepoIndex;
+  }
+  let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
+  let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
+  let repoSwitchRepos = repos;
+  let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  if (!explicitRoot && activeWindowMetaHasSharedData) {
+    const activeMetaRoot = repoRootKey(activeWindowMeta.git?.root || '');
+    const activeMetaRepoIndex = activeMetaRoot
+      ? repos.findIndex(repo => repoRootKey(repo.root) === activeMetaRoot)
+      : activeWindowMetaPath
+        ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
+        : -1;
+    if (activeMetaRepoIndex >= 0) {
+      repoIndex = activeMetaRepoIndex;
+      selectedRepo = repos[repoIndex];
+    }
+    if (activeWindowMeta.git) git = activeWindowMeta.git;
+    else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
+    if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
+  }
+  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
+    git = null;
+    selectedRepo = null;
+    repoIndex = -1;
+    repoSwitchRepos = [];
+    fullPath = activePath;
+  }
+  return {project, repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
+}
+
 function panelFullPath(session, info) {
   const project = info?.project || {};
   const git = project.git;
+  const activePane = activeWindowPaneForProjectMeta(session, info);
+  if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
   if (nonHomePane?.current_path) return nonHomePane.current_path;
@@ -1031,52 +1179,67 @@ function compactHomePath(path) {
   return text;
 }
 
-function projectMetaHtml(session, info) {
-  const project = info?.project || {};
-  const repos = sessionRepoSummaries(info);
-  const repoIndex = selectedSessionRepoIndex(session, info);
-  const selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
-  const git = displayedSessionGit(session, info);
+function projectMetaParts(session, info, options = {}) {
+  const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
   const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
-  const parts = [];
-  const fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  const metadataParts = [];
+  const fullText = options.fullText === true;
   const repoSwitchHtml = repos.length > 1 ? (() => {
     const position = Math.max(0, repoIndex) + 1;
     const switchLabel = `${position}/${repos.length}`;
     return `<span class="meta-repo-switch" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">
-      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
-      <button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
-      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
+      <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
+      <button type="button" class="btn-base meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
+      <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
     </span>`;
   })() : '';
   if (!git) {
-    if (repoSwitchHtml) parts.push(repoSwitchHtml);
-    if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-    parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
-    return metaJoin(parts);
+    if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+    metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
+    return {repoSwitchHtml, metadataParts};
   }
-  const pr = displayPullRequest(info);
-  if (repoSwitchHtml) parts.push(repoSwitchHtml);
-  if (showingPrimaryGit && pr?.number) parts.push(pullRequestLinkHtml(pr));
-  if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
-  if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
-  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
-  if (showingPrimaryGit && pr?.number) {
+  const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
+  const pr = displayPullRequestForGit(info, prGit);
+  if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
+  if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
+  if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+  if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
+  if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
+  if (pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
-      parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
+      metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
   if (showingPrimaryGit) {
     for (const issue of project.linear || []) {
       const state = issue.state ? ` ${issue.state}` : '';
-      parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
-    const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-    if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
   }
-  return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
+  const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
+  if (desc) {
+    const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
+    if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
+  }
+  if (!metadataParts.length) metadataParts.push(`<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`);
+  return {repoSwitchHtml, metadataParts};
+}
+
+function projectMetaHtml(session, info, options = {}) {
+  const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, options);
+  return metaJoin([repoSwitchHtml, ...metadataParts]);
+}
+
+function paneInfoBarMetaHtml(session, info) {
+  const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, {fullText: true});
+  const scrollHtml = metaJoin(metadataParts);
+  const controlsHtml = repoSwitchHtml ? `<span class="pane-info-bar-controls">${repoSwitchHtml}</span>` : '';
+  const separatorHtml = controlsHtml && scrollHtml ? '<span class="meta-sep pane-info-bar-fixed-sep"> · </span>' : '';
+  const scrollTrackHtml = scrollHtml
+    ? `<span class="pane-info-bar-scroll-viewport"><span class="pane-info-bar-scroll-text">${scrollHtml}</span></span>`
+    : '';
+  return `${controlsHtml}${separatorHtml}${scrollTrackHtml}`;
 }
 
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
@@ -1106,7 +1269,13 @@ function showRepoChipMenu(session, x, y) {
   delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
     const root = row.dataset.repoChipOpen || '';
     repoChipContextMenu.close();
-    if (root) openFileExplorerAt(root);
+    if (!root) return;
+    // Pick this repo as the Info Bar's displayed repo (the <N/M>) and refresh — same effect as
+    // cycling with the < / > arrows, but jumps straight to the chosen repo.
+    sessionRepoDisplayRoot.set(session, root);
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    renderSessionButtons();
+    renderPaneTabStrips();
   });
   repoChipContextMenu.open(menu, x, y);
 }
@@ -1155,19 +1324,42 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 
 async function ensureSession(session) {
   if (readOnlyMode) return true;
-  try {
-    const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    statusEl.innerHTML = payload.created
-      ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
-      : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
-    return true;
-  } catch (error) {
-    if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+  const key = String(session || '');
+  const existing = ensureSessionPromises.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
+      statusEl.innerHTML = payload.created
+        ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
+        : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
+      return true;
+    } catch (error) {
+      if (error?.status) {
+        statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+        return false;
+      }
+      statusErr(localizedHtml('status.sessionCheckFailed', {error}));
       return false;
     }
-    statusErr(localizedHtml('status.sessionCheckFailed', {error}));
-    return false;
+  })();
+  ensureSessionPromises.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (ensureSessionPromises.get(key) === promise) ensureSessionPromises.delete(key);
+  }
+}
+
+async function tmuxSessionExistsForReconnect(session) {
+  try {
+    const payload = await apiFetchJson(`/api/tmux-session-exists?session=${encodeURIComponent(session)}`, {cache: 'no-store'});
+    if (payload?.exists === true) return true;
+    if (payload?.exists === false) return false;
+    return null;
+  } catch (error) {
+    if (error?.status === 404) return false;
+    return null;
   }
 }
 
@@ -1180,6 +1372,7 @@ async function createNextSession(agent) {
   statusEl.textContent = `creating ${agentLabel} session...`;
   try {
     const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
+    markPendingTmuxSession(payload.session);
     const previousActive = activeSessions.slice();
     updateSessionList(payload.sessions || []);
     renderSessionButtons();
@@ -1266,6 +1459,8 @@ function replaceSessionMetadata(oldSession, newSession) {
 }
 
 function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
+  clearPendingTmuxSession(oldSession);
+  markPendingTmuxSession(newSession);
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
   stopSessionUi(oldSession);
   replaceSessionMetadata(oldSession, newSession);
@@ -1299,9 +1494,10 @@ function showSessionRenameDialog(session) {
   const overlay = document.createElement('div');
   overlay.className = 'app-modal-overlay session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
+  const titleName = sessionLabel(session);
   overlay.innerHTML = `
     <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
-      <div class="session-rename-title">${esc(t('rename.title', {name: `${sessionLabel(session)} ${session}`}))}</div>
+      <div class="session-rename-title">${esc(t('rename.title', {name: titleName}))}</div>
       <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="${esc(t('rename.inputAria'))}" autocomplete="off">
       <div class="session-rename-error" hidden></div>
       <div class="session-rename-actions">
@@ -1397,6 +1593,7 @@ async function killTmuxSession(session) {
   try {
     const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
+    clearPendingTmuxSession(session);
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
     autoApproveStates.delete(session);
@@ -1490,6 +1687,44 @@ function terminalCanPublishRemoteSize() {
   return !shareViewMode && document.visibilityState !== 'hidden';
 }
 
+let lastTerminalResizeAuthoritySignature = '';
+let terminalResizeAuthorityHandlersInstalled = false;
+
+function visibleTerminalResizeAuthorityEntries() {
+  if (!terminalCanPublishRemoteSize()) return [];
+  return activeSessions
+    .filter(isTmuxSession)
+    .map(session => ({session, item: terminals.get(session)}))
+    .filter(entry => entry.item?.term && entry.item?.socket?.readyState === WebSocket.OPEN && terminalIsVisible(entry.session, entry.item.container));
+}
+
+function terminalResizeAuthoritySignature(entries) {
+  return entries
+    .map(({session, item}) => `${session}:${terminalFitSignature(estimateTerminalSize(item.container, item.term))}`)
+    .join('|');
+}
+
+function claimVisibleTerminalResizeAuthority(reason = '', options = {}) {
+  const entries = visibleTerminalResizeAuthorityEntries();
+  if (!entries.length) return;
+  const signature = terminalResizeAuthoritySignature(entries);
+  if (options.force !== true && signature === lastTerminalResizeAuthoritySignature) return;
+  lastTerminalResizeAuthoritySignature = signature;
+  for (const {session} of entries) {
+    fitTerminal(session, {claim: true});
+  }
+}
+
+function installTerminalResizeAuthorityHandlers() {
+  if (terminalResizeAuthorityHandlersInstalled || shareViewMode) return;
+  terminalResizeAuthorityHandlersInstalled = true;
+  window.addEventListener('focus', () => claimVisibleTerminalResizeAuthority('window-focus', {force: true}));
+  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown'), {capture: true});
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') claimVisibleTerminalResizeAuthority('visible', {force: true});
+  });
+}
+
 function fitTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
@@ -1510,33 +1745,51 @@ function fitTerminal(session, options = {}) {
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
   const signature = terminalFitSignature(size);
-  if (options.force !== true && terminalFitIsUnchanged(item, size)) return;
+  const claim = options.claim === true;
+  if (options.force !== true && !claim && terminalFitIsUnchanged(item, size)) return;
   item.lastFitSignature = signature;
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
   if (changed) item.term.resize(size.cols, size.rows);
-  if (changed) scheduleRemoteResize(session);
+  if (claim) sendRemoteResize(session, {activate: true});
+  else if (changed) scheduleRemoteResize(session);
   refreshTerminal(session);
 }
 
-function sendRemoteResize(session) {
-  if (!terminalCanPublishRemoteSize()) return;
+function sendRemoteResize(session, options = {}) {
+  if (!terminalCanPublishRemoteSize()) return false;
   const item = terminals.get(session);
-  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
-  item.socket.send(JSON.stringify({type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true}));
+  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return false;
+  const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true};
+  if (options.activate === true) message.activate = true;
+  if (shareClientId) message.client = shareClientId;
+  item.socket.send(JSON.stringify(message));
+  item.remoteResizePending = false;
+  return true;
 }
 
-function scheduleRemoteResize(session, delay = remoteResizeDelayMs) {
+function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}) {
   const item = terminals.get(session);
   if (!item) return;
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
   if (!terminalCanPublishRemoteSize()) {
+    item.remoteResizePending = true;
     item.resizeTimer = null;
     return;
   }
   item.resizeTimer = setTimeout(() => {
     item.resizeTimer = null;
-    sendRemoteResize(session);
+    sendRemoteResize(session, options);
   }, delay);
+}
+
+function forceRemoteResize(session) {
+  const item = terminals.get(session);
+  if (!item) return false;
+  if (item.resizeTimer) {
+    clearTimeout(item.resizeTimer);
+    item.resizeTimer = null;
+  }
+  return sendRemoteResize(session);
 }
 
 function refreshTerminal(session) {
@@ -1544,16 +1797,625 @@ function refreshTerminal(session) {
   if (!item?.term) return;
   requestAnimationFrame(() => {
     try { item.term.refresh(0, Math.max(0, item.term.rows - 1)); } catch (_) {}
+    syncTerminalAttentionHighlight(session);
   });
 }
 
 function terminalIsVisible(session, container) {
   const pane = document.getElementById(`terminal-pane-${session}`);
   return Boolean(
-    pane?.classList.contains('active')
+    pane?.classList.contains(CLS.active)
     && container.clientWidth > 40
     && container.clientHeight > 40
   );
+}
+
+const terminalAttentionQuestionRowClass = 'terminal-attention-question-row';
+const terminalAttentionQuestionOverlayClass = 'terminal-attention-question-overlay';
+
+function terminalAttentionTextPart(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function terminalAttentionRawText(value) {
+  return String(value || '').replace(/\u00a0/g, ' ');
+}
+
+function terminalAttentionQuestionChromeHintText(value) {
+  const text = terminalAttentionTextPart(value).replace(/^[>❯$#\s]+/, '').trim();
+  return /^[?？]\s+for\s+(?:shortcuts|help|commands)\b/i.test(text);
+}
+
+function terminalAttentionQuestionTexts(session) {
+  const state = sessionState(session, transcriptMeta.sessions?.[session]);
+  if (![STATE_KEY.needsInput, STATE_KEY.needsApproval].includes(String(state?.key || '')) || state?.attention === false) return [];
+  const payload = autoApproveStates.get(session) || {};
+  const candidates = [
+    payload.display?.question_text,
+    payload.screen?.question_text,
+    payload.prompt?.question_text,
+    payload.screen?.text,
+    payload.prompt?.text,
+    payload.prompt?.rule_input_text,
+    payload.prompt?.command,
+  ];
+  for (const agentWindow of Array.isArray(payload.agent_windows) ? payload.agent_windows : []) {
+    candidates.push(
+      agentWindow?.question_text,
+      agentWindow?.screen_text,
+      agentWindow?.display?.question_text,
+      agentWindow?.screen?.question_text,
+      agentWindow?.screen?.text,
+    );
+  }
+  candidates.push(state.reason);
+  const seen = new Set();
+  const texts = [];
+  for (const candidate of candidates) {
+    const text = terminalAttentionTextPart(candidate);
+    if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) continue;
+    seen.add(text);
+    texts.push(text);
+  }
+  return texts;
+}
+
+function terminalAttentionRowTexts(item) {
+  const rows = Array.from(item?.container?.querySelector?.('.xterm-rows')?.children || [])
+    .map((row, index) => {
+      const rawText = terminalAttentionRawText(row?.textContent || '');
+      return {index, row, rawText, text: terminalAttentionTextPart(rawText)};
+    })
+    .filter(record => record.text);
+  if (rows.length) return rows;
+  const buffer = item?.term?.buffer?.active;
+  const bufferLength = Number(buffer?.length);
+  if (!Number.isFinite(bufferLength) || typeof buffer?.getLine !== 'function') return [];
+  const visibleRows = Math.max(1, Number(item.term.rows || 0));
+  const start = Math.max(0, Number(buffer.viewportY || 0));
+  const end = Math.min(bufferLength, start + visibleRows);
+  const records = [];
+  for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
+    const line = buffer.getLine(lineIndex);
+    const rawText = terminalAttentionRawText(typeof line?.translateToString === 'function' ? line.translateToString(true) : '');
+    const text = terminalAttentionTextPart(rawText);
+    if (text) records.push({index: lineIndex - start, row: null, rawText, text});
+  }
+  return records;
+}
+
+function terminalAttentionNormalizeMappedText(rawText, rawMap = []) {
+  const raw = terminalAttentionRawText(rawText);
+  let text = '';
+  const map = [];
+  let hasPendingSpace = false;
+  let pendingSpaceSource = null;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (/\s/.test(char)) {
+      if (text && !hasPendingSpace) {
+        hasPendingSpace = true;
+        pendingSpaceSource = rawMap[index] || null;
+      }
+      continue;
+    }
+    if (hasPendingSpace && text) {
+      text += ' ';
+      map.push(pendingSpaceSource);
+      hasPendingSpace = false;
+      pendingSpaceSource = null;
+    }
+    text += char;
+    map.push(rawMap[index] || null);
+  }
+  return {text, map};
+}
+
+function terminalAttentionJoinedContext(rows, separator = '') {
+  let rawText = '';
+  const rawMap = [];
+  rows.forEach((record, rowIndex) => {
+    if (rowIndex > 0 && separator) {
+      for (let index = 0; index < separator.length; index += 1) {
+        rawText += separator[index];
+        rawMap.push(null);
+      }
+    }
+    const rowText = terminalAttentionRawText(record?.rawText || record?.text || '');
+    for (let index = 0; index < rowText.length; index += 1) {
+      rawText += rowText[index];
+      rawMap.push({record, column: index});
+    }
+  });
+  return terminalAttentionNormalizeMappedText(rawText, rawMap);
+}
+
+function terminalAttentionRowsLikelyWrapped(previous, item) {
+  const rawText = terminalAttentionRawText(previous?.rawText || previous?.text || '').replace(/\s+$/g, '');
+  if (!rawText) return false;
+  if (/[A-Za-z0-9)]-$/.test(rawText)) return true;
+  const cols = Math.floor(Number(item?.term?.cols || 0));
+  return cols > 0 && rawText.length >= Math.max(1, cols - 2);
+}
+
+function terminalAttentionFallbackContext(rows, item) {
+  let rawText = '';
+  const rawMap = [];
+  rows.forEach((record, rowIndex) => {
+    if (rowIndex > 0) {
+      const previous = rows[rowIndex - 1];
+      const previousText = terminalAttentionRawText(previous?.rawText || previous?.text || '').replace(/\s+$/g, '');
+      const separator = terminalAttentionRowsLikelyWrapped(previous, item)
+        ? (previousText.endsWith('-') ? '' : ' ')
+        : '. ';
+      for (let index = 0; index < separator.length; index += 1) {
+        rawText += separator[index];
+        rawMap.push(null);
+      }
+    }
+    const rowText = terminalAttentionRawText(record?.rawText || record?.text || '');
+    for (let index = 0; index < rowText.length; index += 1) {
+      rawText += rowText[index];
+      rawMap.push({record, column: index});
+    }
+  });
+  return terminalAttentionNormalizeMappedText(rawText, rawMap);
+}
+
+function terminalAttentionSegmentsForRange(context, start, length, highlightText) {
+  const end = start + length;
+  const segments = [];
+  for (let index = start; index < end; index += 1) {
+    const source = context.map[index];
+    if (!source?.record) continue;
+    let segment = segments.find(item => item.record === source.record);
+    if (!segment) {
+      segment = {
+        record: source.record,
+        highlightStart: source.column,
+        highlightEnd: source.column + 1,
+      };
+      segments.push(segment);
+    } else {
+      segment.highlightStart = Math.min(segment.highlightStart, source.column);
+      segment.highlightEnd = Math.max(segment.highlightEnd, source.column + 1);
+    }
+  }
+  return segments
+    .sort((a, b) => Number(a.record.index || 0) - Number(b.record.index || 0))
+    .map(segment => ({
+      ...segment.record,
+      highlightStart: Math.max(0, segment.highlightStart),
+      highlightLength: Math.max(1, segment.highlightEnd - segment.highlightStart),
+      highlightText,
+    }));
+}
+
+function terminalAttentionCharIsAlphaNumeric(char) {
+  return /[A-Za-z0-9]/.test(String(char || ''));
+}
+
+function terminalAttentionDotIsSentenceBoundary(source, index) {
+  return !(
+    terminalAttentionCharIsAlphaNumeric(source[index - 1])
+    && terminalAttentionCharIsAlphaNumeric(source[index + 1])
+  );
+}
+
+function terminalAttentionCharIsQuestionSentenceBoundary(source, index) {
+  const char = source[index];
+  if (char === '.') return terminalAttentionDotIsSentenceBoundary(source, index);
+  return /[!?？|│—–]/.test(char);
+}
+
+function terminalAttentionCharIsHardQuestionSentenceBoundary(source, index) {
+  const char = source[index];
+  if (char === '.') return terminalAttentionDotIsSentenceBoundary(source, index);
+  return /[!?？|│]/.test(char);
+}
+
+function terminalAttentionDashContinuesNoteSentence(source, index) {
+  let sentenceStart = 0;
+  for (let scan = index - 1; scan >= 0; scan -= 1) {
+    if (terminalAttentionCharIsHardQuestionSentenceBoundary(source, scan)) {
+      sentenceStart = scan + 1;
+      break;
+    }
+  }
+  return /^Note:\s+\S/i.test(source.slice(sentenceStart, index).trimStart());
+}
+
+function terminalAttentionSkipPromptPrefix(source, start) {
+  let index = Math.max(0, Number(start) || 0);
+  while (/\s/.test(source[index] || '')) index += 1;
+  while (/[>❯]/.test(source[index] || '')) {
+    index += 1;
+    while (/\s/.test(source[index] || '')) index += 1;
+  }
+  if (/[$#]/.test(source[index] || '') && /\s/.test(source[index + 1] || '')) {
+    index += 1;
+    while (/\s/.test(source[index] || '')) index += 1;
+  }
+  return index;
+}
+
+function terminalAttentionQuestionSentenceStart(source, questionIndex) {
+  let start = 0;
+  for (let index = questionIndex - 1; index >= 0; index -= 1) {
+    if (terminalAttentionCharIsQuestionSentenceBoundary(source, index)) {
+      if (/[—–]/.test(source[index] || '') && terminalAttentionDashContinuesNoteSentence(source, index)) continue;
+      start = index + 1;
+      break;
+    }
+  }
+  return terminalAttentionSkipPromptPrefix(source, start);
+}
+
+function terminalAttentionQuestionSentenceRanges(text) {
+  const source = terminalAttentionTextPart(text);
+  if (!source || !/[?？]/.test(source)) return [];
+  const ranges = [];
+  for (let questionIndex = 0; questionIndex < source.length; questionIndex += 1) {
+    if (!/[?？]/.test(source[questionIndex])) continue;
+    const end = questionIndex + 1;
+    const start = terminalAttentionQuestionSentenceStart(source, questionIndex);
+    const rawSentence = source.slice(start, end);
+    const trimOffset = rawSentence.length - rawSentence.trimStart().length;
+    const sentence = rawSentence.trim();
+    if (terminalAttentionQuestionChromeHintText(sentence)) continue;
+    const content = sentence.replace(/[?？]/g, '').replace(/^[>❯$#\s]+/, '').trim();
+    if (content) {
+      ranges.push({
+        start: start + trimOffset,
+        length: sentence.length,
+        text: sentence,
+      });
+    }
+  }
+  return ranges;
+}
+
+function terminalAttentionContainingQuestionRange(context, start, length) {
+  const matchStart = Math.max(0, Number(start) || 0);
+  const matchEnd = matchStart + Math.max(0, Number(length) || 0);
+  return terminalAttentionQuestionSentenceRanges(context?.text || '')
+    .filter(range => range.start <= matchStart && range.start + range.length >= matchEnd)
+    .sort((left, right) => left.length - right.length)[0] || null;
+}
+
+function terminalAttentionShouldExpandQuestionFragment(item, rows, context, start) {
+  const source = context?.map?.[start];
+  if (!source?.record || Number(source.column || 0) !== 0) return false;
+  const rowIndex = rows.findIndex(record => record === source.record);
+  if (rowIndex <= 0) return false;
+  return terminalAttentionRowsLikelyWrapped(rows[rowIndex - 1], item);
+}
+
+function terminalAttentionQuestionRangeStartsOnMatchRow(context, range, start) {
+  const rangeSource = context?.map?.[range?.start];
+  const matchSource = context?.map?.[start];
+  return Boolean(rangeSource?.record && rangeSource.record === matchSource?.record);
+}
+
+function terminalAttentionQuestionRangeHasNoteLead(context, range, start) {
+  if (!context || !range || range.start >= start) return false;
+  const lead = String(context.text || '').slice(range.start, start);
+  return /^Note:\s+\S/i.test(lead.trimStart()) && /[—–]\s*$/.test(lead);
+}
+
+function terminalAttentionQuestionCandidateTexts(questionTexts) {
+  const seen = new Set();
+  const candidates = [];
+  const add = value => {
+    const text = terminalAttentionTextPart(value);
+    if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) return;
+    seen.add(text);
+    candidates.push(text);
+  };
+  for (const candidate of questionTexts) {
+    const text = terminalAttentionTextPart(candidate);
+    for (const range of terminalAttentionQuestionSentenceRanges(text)) add(range.text);
+    add(text);
+  }
+  return candidates;
+}
+
+function terminalAttentionSingleRowSpan(record, candidate) {
+  const needle = terminalAttentionTextPart(candidate);
+  if (!needle) return null;
+  const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
+  const directStart = rawText.indexOf(needle);
+  if (directStart >= 0) return {highlightStart: directStart, highlightLength: needle.length, highlightText: needle};
+  const normalized = terminalAttentionTextPart(rawText);
+  const normalizedStart = normalized.indexOf(needle);
+  if (normalizedStart >= 0) {
+    const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
+    return {highlightStart: leading + normalizedStart, highlightLength: needle.length, highlightText: needle};
+  }
+  if (normalized.length >= 8 && needle.includes(normalized)) {
+    const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
+    return {highlightStart: leading, highlightLength: normalized.length, highlightText: normalized};
+  }
+  return null;
+}
+
+function terminalAttentionSpanSegments(item, rows, candidate) {
+  const needle = terminalAttentionTextPart(candidate);
+  if (!needle) return [];
+  for (const separator of ['', ' ']) {
+    const context = terminalAttentionJoinedContext(rows, separator);
+    const start = context.text.indexOf(needle);
+    if (start < 0) continue;
+    const containingRange = terminalAttentionContainingQuestionRange(context, start, needle.length);
+    const expandsWrappedFragment = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start);
+    const expandsNoteLead = terminalAttentionQuestionRangeHasNoteLead(context, containingRange, start);
+    const mayExpandRange = containingRange && (
+      terminalAttentionQuestionRangeStartsOnMatchRow(context, containingRange, start)
+      || expandsWrappedFragment
+      || expandsNoteLead
+    );
+    const expandsRange = containingRange && (
+      containingRange.start < start
+      || containingRange.length > needle.length
+      || expandsWrappedFragment
+      || expandsNoteLead
+    );
+    const range = containingRange && mayExpandRange && expandsRange ? containingRange : null;
+    const highlightStart = range?.start ?? start;
+    const highlightLength = range?.length ?? needle.length;
+    const highlightText = range?.text ?? needle;
+    const segments = terminalAttentionSegmentsForRange(context, highlightStart, highlightLength, highlightText);
+    if (segments.length) return segments;
+  }
+  for (const record of rows) {
+    const span = terminalAttentionSingleRowSpan(record, candidate);
+    if (span) return [{...record, ...span}];
+  }
+  return [];
+}
+
+function terminalAttentionQuestionFallbackSpan(record) {
+  const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
+  const trimmedEnd = rawText.replace(/\s+$/g, '');
+  if (!/[?？]$/.test(trimmedEnd)) return null;
+  const questionEnd = Math.max(trimmedEnd.lastIndexOf('?'), trimmedEnd.lastIndexOf('？')) + 1;
+  const questionPrefix = trimmedEnd.slice(0, questionEnd);
+  const ranges = terminalAttentionQuestionSentenceRanges(questionPrefix);
+  const sentence = ranges.length ? ranges[ranges.length - 1].text : terminalAttentionTextPart(trimmedEnd);
+  const start = Math.max(0, rawText.lastIndexOf(sentence));
+  return {highlightStart: start, highlightLength: Math.max(1, sentence.length), highlightText: sentence};
+}
+
+function terminalAttentionQuestionFallbackSegments(item, rows) {
+  const context = terminalAttentionFallbackContext(rows, item);
+  const ranges = terminalAttentionQuestionSentenceRanges(context.text);
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
+    const range = ranges[index];
+    const segments = terminalAttentionSegmentsForRange(context, range.start, range.length, range.text);
+    if (segments.length) return segments;
+  }
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (terminalAttentionQuestionFallback(rows[index].text)) {
+      const span = terminalAttentionQuestionFallbackSpan(rows[index]);
+      if (span) return [{...rows[index], ...span}];
+    }
+  }
+  return [];
+}
+
+function terminalAttentionQuestionFallback(text) {
+  const trimmed = terminalAttentionTextPart(text);
+  if (!trimmed || !/[?？]\s*$/.test(trimmed)) return false;
+  return !/^(>|❯|\$|#)\s*$/.test(trimmed);
+}
+
+function terminalAttentionQuestionSegments(item, questionTexts = []) {
+  const rows = terminalAttentionRowTexts(item);
+  if (!rows.length) return [];
+  const candidates = terminalAttentionQuestionCandidateTexts(questionTexts);
+  for (const candidate of candidates) {
+    const segments = terminalAttentionSpanSegments(item, rows, candidate);
+    if (segments.length) return segments;
+  }
+  return terminalAttentionQuestionFallbackSegments(item, rows);
+}
+
+function terminalAttentionQuestionRow(item, questionTexts = []) {
+  const segments = terminalAttentionQuestionSegments(item, questionTexts);
+  if (!segments.length) return null;
+  return {...segments[0], segments};
+}
+
+function terminalAttentionOverlay(session, item, index = 0) {
+  if (!item?.container) return null;
+  const overlay = document.createElement('div');
+  overlay.className = terminalAttentionQuestionOverlayClass;
+  overlay.dataset.session = String(session);
+  overlay.dataset.attentionIndex = String(index);
+  item.container.appendChild(overlay);
+  return overlay;
+}
+
+function clearTerminalAttentionHighlight(session, item = terminals.get(session)) {
+  const container = item?.container;
+  if (!container) return;
+  for (const row of container.querySelectorAll?.(`.${terminalAttentionQuestionRowClass}`) || []) {
+    row.classList.remove(terminalAttentionQuestionRowClass);
+  }
+  for (const overlay of container.querySelectorAll?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`) || []) {
+    overlay.remove();
+  }
+}
+
+function placeTerminalAttentionOverlay(session, item, record, index = 0) {
+  const overlay = terminalAttentionOverlay(session, item, index);
+  if (!overlay) return;
+  const containerRect = item.container.getBoundingClientRect?.() || {};
+  const rowRect = record.row?.getBoundingClientRect?.();
+  const screenRect = terminalScreenElement(item.container)?.getBoundingClientRect?.() || containerRect;
+  const cell = terminalCellDimensions(item.term, item.container);
+  const cellWidth = Math.max(1, Number(cell.width || 0) || 0);
+  const top = rowRect?.height
+    ? rowRect.top - Number(containerRect.top || 0)
+    : Number(screenRect.top || 0) - Number(containerRect.top || 0) + Math.max(0, Number(record.index || 0)) * Math.max(1, Number(cell.height || 0));
+  const height = rowRect?.height || Math.max(1, Number(cell.height || 0));
+  const leftBase = Number((rowRect || screenRect)?.left || 0) - Number(containerRect.left || 0);
+  const start = Math.max(0, Number(record.highlightStart || 0));
+  const length = Math.max(1, Number(record.highlightLength || terminalAttentionTextPart(record.text).length || 1));
+  const left = Math.max(0, leftBase + start * cellWidth);
+  const maxWidth = Math.max(cellWidth, Number(containerRect.width || 0) - left);
+  const width = Math.max(cellWidth, Math.min(maxWidth, length * cellWidth));
+  overlay.style.top = `${Math.max(0, top)}px`;
+  overlay.style.height = `${height}px`;
+  overlay.style.left = `${left}px`;
+  overlay.style.width = `${width}px`;
+  overlay.title = record.highlightText || record.text;
+}
+
+function syncTerminalAttentionHighlight(session) {
+  const perf = clientPerfStart('terminalAttentionScan');
+  try {
+    return syncTerminalAttentionHighlightMeasured(session);
+  } finally {
+    const item = terminals.get(session);
+    clientPerfEnd(perf, {rows: Math.max(0, Number(item?.term?.rows || 0))});
+  }
+}
+
+function syncTerminalAttentionHighlightMeasured(session) {
+  const item = terminals.get(session);
+  if (!item?.container || !item?.term) return false;
+  clearTerminalAttentionHighlight(session, item);
+  const texts = terminalAttentionQuestionTexts(session);
+  if (!texts.length) return false;
+  const record = terminalAttentionQuestionRow(item, texts);
+  if (!record) return false;
+  const segments = Array.isArray(record.segments) && record.segments.length ? record.segments : [record];
+  segments.forEach((segment, index) => {
+    segment.row?.classList?.add(terminalAttentionQuestionRowClass);
+    placeTerminalAttentionOverlay(session, item, segment, index);
+  });
+  return true;
+}
+
+function scheduleTerminalAttentionHighlight(session) {
+  const item = terminals.get(session);
+  if (!item) {
+    requestAnimationFrame(() => syncTerminalAttentionHighlight(session));
+    return;
+  }
+  if (item.attentionHighlightFrame) return;
+  item.attentionHighlightFrame = requestAnimationFrame(() => {
+    item.attentionHighlightFrame = 0;
+    if (terminals.get(session) === item) syncTerminalAttentionHighlight(session);
+  });
+}
+
+function syncTerminalAttentionHighlights() {
+  for (const session of sessions.filter(isTmuxSession)) syncTerminalAttentionHighlight(session);
+}
+
+const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);
+const terminalBlankScreenRefreshRiskReasons = Object.freeze(new Set([
+  'socket-open',
+  'fit',
+  'first-output',
+  'terminal-tab',
+  'tmux-window',
+  'blank-risk',
+]));
+
+function terminalBlankScreenRefreshAllowed(reason) {
+  return terminalBlankScreenRefreshRiskReasons.has(String(reason || 'blank-risk'));
+}
+
+function terminalRenderedContentPresent(session, item = terminals.get(session)) {
+  const perf = clientPerfStart('terminalBlankProbe');
+  try {
+    return terminalRenderedContentPresentMeasured(session, item);
+  } finally {
+    clientPerfEnd(perf, {rows: Math.max(0, Number(item?.term?.rows || 0))});
+  }
+}
+
+function terminalRenderedContentPresentMeasured(session, item = terminals.get(session)) {
+  if (!item?.term) return false;
+  const buffer = item.term.buffer?.active;
+  const bufferLength = Number(buffer?.length);
+  const visibleRows = Math.max(1, Number(item.term.rows || 0));
+  if (Number.isFinite(bufferLength) && typeof buffer?.getLine === 'function') {
+    const start = Math.max(0, Number(buffer.viewportY || 0));
+    const end = Math.min(bufferLength, start + visibleRows);
+    for (let index = start; index < end; index += 1) {
+      const line = buffer.getLine(index);
+      const text = typeof line?.translateToString === 'function' ? line.translateToString(true) : '';
+      if (String(text || '').trim()) return true;
+    }
+  }
+  const rows = item.container?.querySelectorAll?.('.xterm-rows > div, .xterm-rows div') || [];
+  for (const row of rows) {
+    if (String(row?.textContent || '').trim()) return true;
+  }
+  return false;
+}
+
+function requestTerminalScreenRefresh(session, item = terminals.get(session), reason = 'terminal-refresh') {
+  if (shareViewMode || item?.socket?.readyState !== WebSocket.OPEN) return false;
+  try {
+    const refreshReason = String(reason || 'terminal-refresh');
+    item.socket.send(JSON.stringify({type: 'refresh', reason: refreshReason}));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function refreshVisibleTerminalScreens(reason = 'manual-refresh') {
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const item = terminals.get(session);
+    if (!item?.term || !terminalIsVisible(session, item.container)) continue;
+    refreshTerminal(session);
+    requestTerminalScreenRefresh(session, item, reason);
+  }
+}
+
+function runTerminalBlankScreenRefresh(session) {
+  const item = terminals.get(session);
+  if (!item) return;
+  item.blankScreenRefreshTimer = 0;
+  if (!terminalIsVisible(session, item.container)) return;
+  if (terminalRenderedContentPresent(session, item)) {
+    item.blankScreenRefreshAttempts = 0;
+    return;
+  }
+  const attempts = Math.max(0, Number(item.blankScreenRefreshAttempts || 0));
+  if (attempts >= terminalBlankScreenRefreshDelaysMs.length) return;
+  item.blankScreenRefreshAttempts = attempts + 1;
+  if (requestTerminalScreenRefresh(session, item)) scheduleTerminalBlankScreenRefresh(session);
+}
+
+function scheduleTerminalBlankScreenRefresh(session, options = {}) {
+  const item = terminals.get(session);
+  if (!item || shareViewMode || !terminalIsVisible(session, item.container)) return;
+  const reason = String(options.reason || 'blank-risk');
+  if (!terminalBlankScreenRefreshAllowed(reason)) return;
+  if (item.socket?.readyState !== WebSocket.OPEN) return;
+  if (item.blankScreenRefreshTimer && options.reset !== true) return;
+  if (terminalRenderedContentPresent(session, item)) {
+    item.blankScreenRefreshAttempts = 0;
+    if (item.blankScreenRefreshTimer) {
+      clearTimeout(item.blankScreenRefreshTimer);
+      item.blankScreenRefreshTimer = 0;
+    }
+    return;
+  }
+  const attempts = Math.max(0, Number(item.blankScreenRefreshAttempts || 0));
+  if (attempts >= terminalBlankScreenRefreshDelaysMs.length) return;
+  if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  const delayMs = Number.isFinite(Number(options.delayMs))
+    ? Math.max(1, Number(options.delayMs))
+    : terminalBlankScreenRefreshDelaysMs[attempts];
+  item.blankScreenRefreshTimer = setTimeout(() => runTerminalBlankScreenRefresh(session), delayMs);
 }
 
 function scheduleFit(session) {
@@ -1567,10 +2429,12 @@ function scheduleFit(session) {
     item.fitFrame = requestAnimationFrame(() => {
       item.fitFrame = 0;
       fitTerminal(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     });
     item.fitTimer = setTimeout(() => {
       item.fitTimer = 0;
       fitTerminal(session);
+      scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     }, 250);
     return;
   }
@@ -1586,8 +2450,15 @@ function observeTerminalResize(session, container) {
   resizeObservers.set(session, observer);
 }
 
+// Carries the synthetic wheel events we re-dispatch at xterm (see forwardAltScreenWheel) so the
+// capture-phase handler below lets them through to xterm instead of re-processing them.
+let dispatchingSyntheticWheel = false;
+// Per-session fractional remainder so small touchpad deltas still accumulate into whole lines.
+const altScreenWheelRemainder = new Map();
+
 function enableTerminalScroll(session, term, container) {
   container.addEventListener('wheel', event => {
+    if (dispatchingSyntheticWheel) return;
     if (event.ctrlKey && event.deltaY !== 0) {
       event.preventDefault();
       event.stopPropagation();
@@ -1595,6 +2466,18 @@ function enableTerminalScroll(session, term, container) {
     }
     const signedLines = terminalWheelSignedLines(event, term.rows);
     if (!signedLines) return;
+    // Alt-screen TUIs (claude, codex, vim, less) own the mouse and keep their own scroll view,
+    // and their tmux pane has no scrollback, so hijacking the wheel into tmux copy-mode scrolls
+    // nothing. Forward the wheel to the app instead — but xterm emits only ONE mouse-wheel report
+    // per accumulated cell regardless of delta magnitude, which feels like "several scrolls per
+    // line". Drive it ourselves with the same line count the tmux path uses for consistent speed.
+    if (sessionPaneIsAlternateScreen(session)) {
+      event.preventDefault();
+      event.stopPropagation();
+      forwardAltScreenWheel(session, container, signedLines);
+      return;
+    }
+    altScreenWheelRemainder.delete(session);
     event.preventDefault();
     event.stopPropagation();
     const item = terminals.get(session);
@@ -1604,6 +2487,29 @@ function enableTerminalScroll(session, term, container) {
     }
     queueLocalTerminalScroll(term, signedLines);
   }, {capture: true, passive: false});
+}
+
+// Re-emit `lines` worth of single-line wheel events at xterm's screen element. xterm encodes each
+// one into the app's negotiated mouse protocol and sends it over the data stream, so the alt-screen
+// app scrolls one line per synthetic event — i.e. our full computed line count, not xterm's capped one.
+function forwardAltScreenWheel(session, container, signedLines) {
+  if (typeof WheelEvent !== 'function') return;
+  const node = terminalScreenElement(container);
+  if (!node?.dispatchEvent) return;
+  const accumulated = (altScreenWheelRemainder.get(session) || 0) + signedLines;
+  const whole = Math.trunc(accumulated);
+  altScreenWheelRemainder.set(session, accumulated - whole);
+  if (!whole) return;
+  const count = Math.min(terminalWheelMaxLinesPerEvent, Math.abs(whole));
+  const deltaY = whole < 0 ? -1 : 1;
+  dispatchingSyntheticWheel = true;
+  try {
+    for (let i = 0; i < count; i++) {
+      node.dispatchEvent(new WheelEvent('wheel', {deltaY, deltaMode: 1, bubbles: true, cancelable: true}));
+    }
+  } finally {
+    dispatchingSyntheticWheel = false;
+  }
 }
 
 function terminalWheelSignedLines(event, rows = 0) {
@@ -1653,6 +2559,16 @@ function closeTerminalItem(session, item) {
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
   if (item.scrollTimer) clearTimeout(item.scrollTimer);
+  if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
+  if (item.fitTimer) clearTimeout(item.fitTimer);
+  if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
+  item.fileUnderlineController?.dispose?.();
+  item.fitFrame = 0;
+  item.fitTimer = 0;
+  item.blankScreenRefreshTimer = 0;
+  item.attentionHighlightFrame = 0;
+  item.fileUnderlineController = null;
   const observer = resizeObservers.get(session);
   if (observer) {
     observer.disconnect();
@@ -1703,7 +2619,12 @@ function scheduleTerminalReconnect(session, item) {
 
 // A tmux session that is absent from the live roster has been killed (vs a transient disconnect).
 function sessionConfirmedGone(session, order) {
-  return isTmuxSession(session) && Array.isArray(order) && !order.includes(session);
+  return isTmuxSession(session) && !isPendingTmuxSession(session) && Array.isArray(order) && !order.includes(session);
+}
+
+function terminalSocketCloseLooksFinal(event = null) {
+  const code = Number(event?.code || 0);
+  return event?.wasClean === true || code === 1000 || code === 1001;
 }
 
 // Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
@@ -1711,6 +2632,7 @@ function sessionConfirmedGone(session, order) {
 function pruneDeadSession(session) {
   const previousActive = activeSessions.slice();
   stopSessionUi(session);
+  completeTerminalRemovalLatency('session', session, {reason: 'prune-dead-session'});
   autoApproveStates.delete(session);
   if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
   updateDocumentTitle();
@@ -1723,22 +2645,33 @@ function pruneDeadSession(session) {
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
-async function confirmSessionGoneOrReconnect(session, item) {
+async function confirmSessionGoneOrReconnect(session, item, event = null) {
   if (item.manualClose || terminals.get(session) !== item) return;
+  const closeDetails = {
+    origin: 'ws-close',
+    closeCode: Number(event?.code || 0),
+    wasClean: event?.wasClean === true,
+  };
+  if (terminalSocketCloseLooksFinal(event) && isTmuxSession(session) && !isPendingTmuxSession(session)) {
+    noteTerminalRemovalLatencyStart('session', session, closeDetails);
+    pruneDeadSession(session);
+    return;
+  }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
   if (item.confirmingGone) return;
+  noteTerminalRemovalLatencyStart('session', session, closeDetails);
   item.confirmingGone = true;
   try {
-    let order = null;
-    try {
-      const payload = await apiFetchJson('/api/auto-approve');
-      if (Array.isArray(payload.session_order)) order = payload.session_order;
-    } catch (_) {}
+    const exists = await tmuxSessionExistsForReconnect(session);
     if (item.manualClose || terminals.get(session) !== item) return;
-    if (sessionConfirmedGone(session, order)) {
+    if (exists === false) {
       pruneDeadSession(session);
+      return;
+    }
+    if (exists === true) {
+      scheduleTerminalReconnect(session, item);
       return;
     }
     scheduleTerminalReconnect(session, item);

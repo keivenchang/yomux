@@ -67,6 +67,38 @@ def test_filesystem_allowlist_env_can_narrow_scope(monkeypatch, tmp_path):
     assert info.value.status == 403
 
 
+def test_filesystem_entrypoints_reject_outside_root_through_paths_validator(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    outside_file = outside / "note.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+    calls = []
+    original = filesystem.paths._validated_path
+
+    def tracking_validator(raw):
+        calls.append(raw)
+        return original(raw)
+
+    monkeypatch.setattr(filesystem.paths, "_validated_path", tracking_validator)
+
+    cases = [
+        ("listing", lambda: filesystem.list_directory(str(outside))),
+        ("read", lambda: filesystem.read_file(str(outside_file))),
+        ("write", lambda: filesystem.write_file(str(outside / "new.txt"), "x")),
+        ("search", lambda: filesystem.search_files(str(outside), "note")),
+        ("git", lambda: filesystem.diff_file(str(outside_file))),
+    ]
+    for name, action in cases:
+        before = len(calls)
+        with pytest.raises(FilesystemError) as info:
+            action()
+        assert info.value.status == 403
+        assert len(calls) == before + 1, name
+
+
 def test_filesystem_blocks_home_secret_paths(monkeypatch, tmp_path):
     home = tmp_path / "home"
     secret = home / ".ssh" / "id_rsa"
@@ -647,6 +679,22 @@ def test_delete_path_removes_directory_tree(tmp_path):
     assert result["deleted"] is True
     assert result["kind"] == "dir"
     assert not target.exists()
+
+
+def test_count_directory_files_counts_recursive_regular_files(tmp_path):
+    target = tmp_path / "dir"
+    nested = target / "nested"
+    nested.mkdir(parents=True)
+    (target / "a.txt").write_text("alpha", encoding="utf-8")
+    (nested / "b.txt").write_text("bravo", encoding="utf-8")
+    os.mkfifo(target / "pipe")
+    os_symlink = getattr(os, "symlink", None)
+    if os_symlink:
+        os_symlink(target / "a.txt", target / "a-link.txt")
+
+    result = filesystem.count_directory_files(str(target))
+
+    assert result == {"path": str(target), "kind": "dir", "files": 2, "recursive": True}
 
 
 def test_path_info_returns_git_relative_path(tmp_path):

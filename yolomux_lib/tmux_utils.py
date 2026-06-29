@@ -9,6 +9,7 @@ import re
 import secrets
 import subprocess
 import time
+from typing import Any
 
 from .cache import TtlCache
 
@@ -17,7 +18,7 @@ YOLOMUX_TMUX_SOCKET_ENV = "YOLOMUX_TMUX_SOCKET"
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(args, 124, exc.stdout or "", exc.stderr or f"timed out after {timeout}s")
 
@@ -52,6 +53,33 @@ def tmux_run(*args: str, check: bool = True, timeout: float = 5.0) -> subprocess
 
 def tmux_session_target(session: str) -> str:
     return f"{session}:"
+
+
+def tmux_session_client_rows(session: str) -> list[dict[str, Any]]:
+    """Every client attached to `session`, with its column width and flags.
+
+    Deliberately NOT limited to yolomux-spawned clients: under `window-size largest` ANY wider
+    client pins the shared window wider than the focused browser surface, so the active surface
+    must be able to see -- and silence -- a hand-attached terminal too, not just sibling browsers.
+    Only columns are collected; rows never overflow the browser the same way, and tmux's status
+    line makes window rows differ from client rows, which would only muddy the comparison.
+    """
+    fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_width}", "#{client_flags}"))
+    result = tmux(["list-clients", "-F", fmt])
+    if result.returncode != 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    clean_session = str(session or "")
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[1] != clean_session:
+            continue
+        try:
+            width = int(parts[2])
+        except ValueError:
+            continue
+        rows.append({"name": parts[0], "session": parts[1], "width": width, "flags": parts[3]})
+    return rows
 
 
 def session_sort_key(session: str) -> tuple[int, str, int]:
@@ -157,13 +185,25 @@ def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False, 
     return result.stdout
 
 
+def tmux_capture_pane_styled(target: str, lines: int = 80, visible_only: bool = False, timeout: float = 3.0) -> str | None:
+    """Capture pane text with SGR attributes preserved for UI-state checks that need dim/ghost text."""
+    exact_target = tmux_exact_target(target)
+    if visible_only:
+        result = tmux_run("capture-pane", "-e", "-t", exact_target, "-p", "-J", check=False, timeout=timeout)
+    else:
+        result = tmux_run("capture-pane", "-e", "-t", exact_target, "-p", "-J", "-S", f"-{lines}", check=False, timeout=timeout)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
 def tmux_send_enter(target: str) -> None:
     tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
 
 
 def tmux_clear_input(target: str, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
     """Clear the current prompt input line in a target pane without submitting it."""
-    return tmux_run("send-keys", "-t", tmux_exact_target(target), "C-u", check=False, timeout=timeout)
+    return tmux_run("send-keys", "-t", tmux_exact_target(target), "C-e", "C-u", check=False, timeout=timeout)
 
 
 def tmux_paste_text(target: str, text: str, submit: bool = False, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:

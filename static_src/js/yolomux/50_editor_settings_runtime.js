@@ -186,8 +186,8 @@ function updateEditorThemeButton(button, options = {}) {
   const scheme = activeEditorScheme();
   const previewState = editorPreviewThemeState();
   const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
-  button.classList.toggle('theme-dark', previewState === 'dark');
-  button.classList.toggle('theme-light', previewState === 'light');
+  button.classList.toggle(themeBodyClass('dark'), previewState === 'dark');
+  button.classList.toggle(themeBodyClass('light'), previewState === 'light');
   button.classList.toggle('theme-vanilla', previewState === 'vanilla');
   button.classList.toggle('theme-with-label', includeVanilla);
   button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
@@ -225,13 +225,14 @@ function refreshOpenEditorThemePanels() {
 function applyEditorThemeMode(options = {}) {
   const scheme = activeEditorScheme();
   applyEditorSchemeCssVariables(scheme);
-  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light', 'editor-preview-vanilla');
+  document.body?.classList.remove(...EDITOR_THEME_BODY_CLASSES, EDITOR_PREVIEW_VANILLA_CLASS);
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
-  document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
+  document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
-  document.body?.classList.toggle('editor-preview-vanilla', fileEditorPreviewDisplayMode === 'vanilla');
+  document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
 
 function setFileEditorThemeMode(mode) {
@@ -498,12 +499,14 @@ function toggleEditorLineNumbers() {
 }
 
 function numberSetting(path, fallback) {
-  const value = Number(initialSetting(path, fallback));
-  return Number.isFinite(value) ? value : fallback;
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = Number(initialSetting(path, defaultValue));
+  return Number.isFinite(value) ? value : defaultValue;
 }
 
 function boolSetting(path, fallback) {
-  const value = initialSetting(path, fallback);
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = initialSetting(path, defaultValue);
   return value === true || value === 'true' || value === 1;
 }
 
@@ -538,13 +541,9 @@ function updateNotificationAllowsVersion(currentVersion, targetVersion, level = 
   if (!currentParts || !targetParts) {
     return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
   }
-  if (targetParts[0] !== currentParts[0]) {
-    return cleanLevel !== 'none' && targetParts[0] > currentParts[0];
-  }
-  if (targetParts[1] !== currentParts[1]) {
-    return (cleanLevel === 'minor' || cleanLevel === 'patch') && targetParts[1] > currentParts[1];
-  }
-  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch' && targetParts[2] > currentParts[2];
+  if (targetParts[0] !== currentParts[0]) return cleanLevel !== 'none';
+  if (targetParts[1] !== currentParts[1]) return cleanLevel === 'minor' || cleanLevel === 'patch';
+  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch';
   return false;
 }
 
@@ -554,6 +553,9 @@ function normalizeEditorCursorStyle(value) {
 
 const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
 const DEFAULT_CURSOR_COLOR = 'yellow';
+const BAD_CONNECTION_BODY_CLASS = 'bad-connection';
+const BAD_CONNECTION_CURSOR_COLORS = Object.freeze({dark: '#ff6673', light: '#b91c1c'});
+const BAD_CONNECTION_CURSOR_ACCENT = '#fff3f4';
 const SEPARATOR_COLOR_CHOICES = ['theme', ...UI_COLOR_CHOICES];
 const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
 const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
@@ -599,6 +601,27 @@ function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalThe
   return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
 }
 
+function badConnectionCursorStateActive() {
+  return document.body?.classList?.contains(BAD_CONNECTION_BODY_CLASS) === true;
+}
+
+function badConnectionTerminalCursorColor() {
+  return resolvedTerminalThemeMode() === 'light' ? BAD_CONNECTION_CURSOR_COLORS.light : BAD_CONNECTION_CURSOR_COLORS.dark;
+}
+
+function terminalCursorBlinkEnabled() {
+  return !badConnectionCursorStateActive();
+}
+
+function terminalThemeWithBadConnectionCursor(theme) {
+  return {...theme, cursor: badConnectionTerminalCursorColor(), cursorAccent: BAD_CONNECTION_CURSOR_ACCENT};
+}
+
+function setBadConnectionCursorState(active) {
+  document.body?.classList?.toggle(BAD_CONNECTION_BODY_CLASS, active === true);
+  refreshActiveTerminalCursor();
+}
+
 function applyCursorColorSetting() {
   const style = document.documentElement?.style;
   if (!style) return;
@@ -635,7 +658,7 @@ function hexToRgbTriple(hex) {
 function uiColorVisualPreset(value, light = false) {
   if (value === 'green') {
     return light
-      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#ffffff'}
+      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#071000'}
       : {accent: '#76b900', bright: '#86d600', text: '#071000'};
   }
   const preset = ACTIVE_COLOR_PRESETS[value];
@@ -653,9 +676,10 @@ function applyActiveColor(value) {
   const preset = ACTIVE_COLOR_PRESETS[value];
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    updateBrowserFavicon({force: true});
     return;
   }
-  const light = document.body.classList.contains('theme-resolved-light');
+  const light = document.body.classList.contains(themeResolvedBodyClass('light'));
   const p = light ? preset.light : preset.dark;
   const rgb = hexToRgbTriple(p.accent);
   for (const style of styles) {
@@ -666,6 +690,8 @@ function applyActiveColor(value) {
     style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
     style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
   }
+  // keep the browser-tab favicon background/glyph in sync with the chosen accent + theme
+  updateBrowserFavicon({force: true});
 }
 
 function applySeparatorColor(value) {
@@ -687,7 +713,13 @@ function applySeparatorColor(value) {
   }
 }
 
+function applyStatusPulseModeClass() {
+  const enabled = typeof statusPulseAnimationEnabled === 'function' ? statusPulseAnimationEnabled() : false;
+  document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
+}
+
 function applyCssSettings() {
+  applyStatusPulseModeClass();
   const root = document.documentElement?.style;
   if (!root) return;
   const uiFontSize = numberSetting('appearance.ui_font_size', 13);
@@ -712,8 +744,11 @@ function applyCssSettings() {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
-  root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
-  root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
+  const statusPulsePeriodMs = Math.max(1, agentStatusPulsePeriodMs);
+  root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
+  root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
+  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 250))));
+  if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
   root.setProperty('--file-image-preview-max-size', `${Math.max(1, fileExplorerImagePreviewMaxPx)}px`);
@@ -722,14 +757,16 @@ function applyCssSettings() {
 function applyGlobalThemeMode(options = {}) {
   globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
   const resolved = resolvedGlobalThemeMode();
-  document.body?.classList.remove('theme-system', 'theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light');
-  document.body?.classList.add(`theme-${globalThemeMode}`, `theme-resolved-${resolved}`);
+  document.body?.classList.remove(...THEME_BODY_CLASSES);
+  document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));
+  if (globalThemeMode === 'system') document.body?.classList.add(themeBodyClass('system'));
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
   scheduleShareTopologySnapshot('theme');
   if (typeof scheduleShareAppearancePublish === 'function') {
     scheduleShareAppearancePublish({reason: options.reason || 'theme', topology: false});
@@ -758,7 +795,14 @@ function installGlobalThemeMediaListener() {
 
 function terminalThemeForSession(session, baseTheme) {
   const theme = baseTheme || terminalThemeForGlobalTheme();
+  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor(theme);
   return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
+}
+
+function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTheme(), mode = globalThemeMode) {
+  if (!container) return;
+  container.dataset.terminalTheme = resolvedTerminalThemeMode(terminalThemeMode, mode);
+  if (container.style) container.style.background = theme.background;
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
@@ -772,11 +816,12 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.fontFamily = terminalFontFamily;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
+    item.term.options.cursorBlink = terminalCursorBlinkEnabled();
     item.term.options.theme = terminalThemeForSession(session, theme);
     item.term.options.minimumContrastRatio = minContrast;
     item.term.clearTextureAtlas?.();
     refreshTerminal(session);
-    if (item.container?.style) item.container.style.background = theme.background;
+    applyTerminalContainerTheme(item.container, theme);
     if (options.fit !== false) scheduleFit(session);
   }
 }
@@ -785,11 +830,18 @@ function applyTerminalRuntimeSettings(options = {}) {
 // terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
 function refreshActiveTerminalCursor() {
   const base = terminalThemeForGlobalTheme();
+  const badConnection = badConnectionCursorStateActive();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term?.options) continue;
-    const cursor = session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor;
+    item.term.options.cursorBlink = !badConnection;
+    const cursor = badConnection
+      ? badConnectionTerminalCursorColor()
+      : (session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor);
+    const cursorAccent = badConnection ? BAD_CONNECTION_CURSOR_ACCENT : base.cursorAccent;
     const current = item.term.options.theme || base;
-    if (current.cursor !== cursor) item.term.options.theme = {...current, cursor};
+    if (current.cursor !== cursor || current.cursorAccent !== cursorAccent) {
+      item.term.options.theme = {...current, cursor, cursorAccent};
+    }
   }
 }
 
@@ -806,6 +858,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
   clientSettingsPayload = payload;
+  clientSettingsMetadataDeferred = payload.deferred_metadata === true;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
   clientSettingsMtimeNs = nextMtime;
@@ -813,8 +866,8 @@ function applySettingsPayload(payload, options = {}) {
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
-  redReminderMs = numberSetting('appearance.red_reminder_ms');
-  yoloRotateMs = numberSetting('appearance.yolo_rotate_ms');
+  agentStatusPulsePeriodMs = numberSetting('performance.agent_status_pulse_period_ms');
+  workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
   hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms');
@@ -825,31 +878,31 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms');
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds');
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
-  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
-  fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
+  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
+  fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
-  uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
+  uploadMaxBytes = numberSetting('uploads.max_bytes');
   shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
   shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
   shareDefaultReadOnly = boolSetting('share.read_only', true);
   shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
   shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', shareViewFit));
-  terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
-  editorFontSize = numberSetting('appearance.editor_font_size', 13);
+  terminalFontSize = numberSetting('appearance.terminal_font_size');
+  editorFontSize = numberSetting('appearance.editor_font_size');
   editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
-  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 13);
-  terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size');
+  terminalScrollback = numberSetting('terminal_editor.scrollback');
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
-  fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+  fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
   const previousBlameAllLines = fileEditorBlameAllLines;
   fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
-  autoFocusEnabled = boolSetting('general.auto_focus', false);
-  startupHelpersEnabled = boolSetting('general.startup_tips', true);
+  autoFocusEnabled = boolSetting('general.auto_focus');
+  startupHelpersEnabled = boolSetting('general.startup_tips');
   const previousEditorSchemeId = activeEditorScheme().id;
   const previousCursorColor = fileEditorCursorColor;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
-  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle', '24'));
+  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle'));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR));
   fileEditorThemeMode = readConfiguredEditorScheme();
@@ -894,6 +947,18 @@ function applySettingsPayload(payload, options = {}) {
     scheduleShareAppearancePublish();
   }
   return true;
+}
+
+function scheduleDeferredSettingsMetadataRefresh() {
+  if (!clientSettingsMetadataDeferred || shareViewMode) return null;
+  if (clientSettingsMetadataRefreshPromise) return clientSettingsMetadataRefreshPromise;
+  if (clientSettingsMetadataRefreshTimer) return null;
+  clientSettingsMetadataRefreshTimer = setTimeout(() => {
+    clientSettingsMetadataRefreshTimer = null;
+    clientSettingsMetadataRefreshPromise = refreshSettings({force: true, silent: true})
+      .finally(() => { clientSettingsMetadataRefreshPromise = null; });
+  }, 0);
+  return null;
 }
 
 async function refreshSettings(options = {}) {
@@ -968,7 +1033,7 @@ function installRuntimeIntervals() {
     if (clientEventsConnected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
-  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
+  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
   if (fileExplorerMode === 'tabber') {
     resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
   }

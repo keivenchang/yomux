@@ -1,9 +1,11 @@
 .file-editor-path {
-  flex: 1;
+  flex: 1 1 min(42vw, 72ch);
+  min-width: min(22ch, 28vw);
+  max-width: min(64vw, 96ch);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   color: var(--muted);
-  direction: rtl;
+  direction: ltr;
   text-align: start;
 }
 .file-editor-panel {
@@ -21,7 +23,7 @@
   min-height: 0;
   height: 100%;
   border: 0;
-  background: #ffffff;
+  background: var(--document-preview-bg);
   color-scheme: light;
 }
 .file-editor-pdf-preview {
@@ -31,25 +33,25 @@
   min-height: 420px;
   height: min(72vh, 100%);
   border: 0;
-  background: #ffffff;
+  background: var(--document-preview-bg);
   color-scheme: light;
 }
 .html-preview-body {
   display: flex;
   flex-direction: column;
   padding: 0;
-  background: #ffffff;
+  background: var(--document-preview-bg);
 }
 .pdf-preview-body {
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 0;
-  background: #ffffff;
+  background: var(--document-preview-bg);
 }
 .image-preview-body,
 .file-editor-image-panel {
-  background-color: #151a22;
+  background-color: var(--image-preview-checker-bg);
   background-image:
     linear-gradient(45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
     linear-gradient(-45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
@@ -60,7 +62,7 @@
 }
 body.editor-theme-light .image-preview-body,
 body.editor-theme-light .file-editor-image-panel {
-  background-color: #e9edf2;
+  background-color: var(--image-preview-checker-bg-light);
   background-image:
     linear-gradient(45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
     linear-gradient(-45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
@@ -73,11 +75,16 @@ body.editor-theme-light .file-editor-image-panel {
   padding: 10px;
 }
 .file-editor-preview-image,
-.markdown-body img.markdown-preview-image,
 .mermaid-preview-image {
   display: block;
   max-width: 100%;
   max-height: min(340px, 48vh);
+  height: auto;
+  object-fit: contain;
+}
+.markdown-body img.markdown-preview-image {
+  display: block;
+  max-width: 100%;
   height: auto;
   object-fit: contain;
 }
@@ -246,7 +253,7 @@ body.editor-theme-light .file-editor-image-panel {
   font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .file-editor-html-js-notice a {
-  color: #064e3b;
+  color: var(--success-text-strong);
   text-decoration: underline;
   white-space: nowrap;
 }
@@ -542,7 +549,7 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-action:hover,
 .file-editor-dialog-action:focus-visible {
   border-color: var(--active-control-border);
-  outline: none;
+  outline: 0;
   box-shadow: 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-editor-dialog-action.danger {
@@ -625,8 +632,8 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 .file-editor-gutter.active,
 .file-editor-find:hover,
 .file-editor-theme:hover {
-  color: #9fd8ff;
-  border-color: #9fd8ff;
+  color: var(--accent-sky-strong);
+  border-color: var(--accent-sky-strong);
 }
 .file-editor-theme.theme-dark,
 .file-editor-theme-panel.theme-dark {
@@ -658,7 +665,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 .file-editor-codemirror {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   width: 100%;
   height: 100%;
 }
@@ -761,7 +768,7 @@ body.editor-theme-light .file-editor-image {
 .file-editor-preview-pane {
   position: absolute;
   inset: 0;
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   overflow: auto;
   padding: 12px 16px;
   background: var(--editor-preview-bg);
@@ -771,6 +778,10 @@ body.editor-theme-light .file-editor-image {
   line-height: 1.35;
 }
 .file-editor-preview-pane[hidden] { display: none; }
+body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane.markdown-body,
+body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-panel.markdown-body {
+  background: var(--markdown-preview-bg);
+}
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
   margin: 10px 0 5px;
   font-weight: 600;
@@ -797,7 +808,7 @@ body.editor-theme-light .file-editor-image {
   font-family: var(--mono-font);
   font-size: 0.9em;
 }
-.markdown-body pre { background: #0b0e14; border: 1px solid var(--line); border-radius: var(--radius-control); padding: 6px 8px; overflow: auto; margin: 6px 0; }
+.markdown-body pre { background: var(--markdown-code-block-bg); border: 1px solid var(--line); border-radius: var(--radius-control); padding: 4px 8px; overflow: auto; margin: 4px 0; }
 /* Light mode: the near-black code block is a dark box on the light app
    chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
    transcript summary) — the file-editor preview's `pre` is handled separately under
@@ -815,6 +826,11 @@ body.theme-light .summary-preview pre {
 }
 .markdown-body pre code.hljs {
   color: var(--editor-scheme-fg, inherit) !important;
+  background: transparent !important;
+  border: 0;
+  display: inline;
+  overflow: visible;
+  padding: 0;
 }
 .markdown-body pre code .hljs-comment,
 .markdown-body pre code .hljs-quote {
@@ -998,9 +1014,123 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
 .markdown-body li > p { margin: 0; }
 .markdown-body blockquote { border-inline-start: 3px solid var(--line); margin: 6px 0; padding: 3px 8px; color: var(--muted); }
+.markdown-body blockquote.markdown-alert {
+  --markdown-heading: var(--markdown-html-light-text);
+  --markdown-strong: var(--markdown-html-light-text);
+  --markdown-emphasis: var(--markdown-html-light-text);
+  --markdown-link: var(--markdown-html-light-link);
+  --code-inline: var(--markdown-html-light-code);
+  --code-inline-bg: var(--markdown-html-light-code-bg);
+  --code-inline-border: var(--markdown-html-light-code-border);
+  margin: 6px 0;
+  padding: 8px 10px;
+  color: var(--markdown-html-light-text);
+  background: #fff8cc;
+  border: 0;
+  border-radius: var(--radius-control);
+}
+.markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
+.markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
+.markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) { margin-block: 2px; }
+.markdown-body blockquote.markdown-alert :is(strong, em) { color: var(--markdown-html-light-text); }
+.markdown-body blockquote.markdown-alert code {
+  color: var(--markdown-html-light-code);
+  background: var(--markdown-html-light-code-bg);
+  border-color: var(--markdown-html-light-code-border);
+}
+.markdown-body blockquote.markdown-alert-caution {
+  background: var(--markdown-alert-caution-light-bg);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) {
+  --markdown-heading: var(--markdown-html-dark-text);
+  --markdown-strong: var(--markdown-html-dark-text);
+  --markdown-emphasis: var(--markdown-html-dark-text);
+  --markdown-link: var(--markdown-html-dark-link);
+  --code-inline: var(--markdown-html-dark-code);
+  --code-inline-bg: var(--markdown-html-dark-code-bg);
+  --code-inline-border: var(--markdown-html-dark-code-border);
+  color: var(--markdown-html-dark-text);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.markdown-alert-warning {
+  background: var(--markdown-html-dark-bg);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.markdown-alert-caution {
+  background: var(--markdown-alert-caution-dark-bg);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
+body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) code {
+  color: var(--markdown-html-dark-code);
+  background: var(--markdown-html-dark-code-bg);
+  border-color: var(--markdown-html-dark-code-border);
+}
 .markdown-body table { border-collapse: collapse; margin: 8px 0; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
 .markdown-body th { background: var(--panel2); }
+.markdown-body .markdown-html-light-bg,
+.markdown-body table.markdown-html-light-bg :is(th, td),
+.markdown-body table[bgcolor],
+.markdown-body table[bgcolor] :is(th, td),
+.markdown-body :is(th, td)[bgcolor] {
+  --markdown-heading: var(--markdown-html-light-text);
+  --markdown-strong: var(--markdown-html-light-text);
+  --markdown-emphasis: var(--markdown-html-light-text);
+  --markdown-link: var(--markdown-html-light-link);
+  --code-inline: var(--markdown-html-light-code);
+  --code-inline-bg: var(--markdown-html-light-code-bg);
+  --code-inline-border: var(--markdown-html-light-code-border);
+  color: var(--markdown-html-light-text) !important;
+  border-color: transparent;
+}
+.markdown-body :is(th, td).markdown-html-light-bg,
+.markdown-body table.markdown-html-light-bg :is(th, td),
+.markdown-body table[bgcolor] :is(th, td),
+.markdown-body :is(th, td)[bgcolor] {
+  padding: 10px;
+}
+.markdown-body .markdown-html-light-bg :is(strong, em),
+.markdown-body table.markdown-html-light-bg :is(strong, em),
+.markdown-body table[bgcolor] :is(strong, em),
+.markdown-body :is(th, td)[bgcolor] :is(strong, em) {
+  color: var(--markdown-html-light-text);
+}
+.markdown-body .markdown-html-light-bg code,
+.markdown-body table.markdown-html-light-bg code,
+.markdown-body table[bgcolor] code,
+.markdown-body :is(th, td)[bgcolor] code {
+  color: var(--markdown-html-light-code);
+  background: var(--markdown-html-light-code-bg);
+  border-color: var(--markdown-html-light-code-border);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg,
+body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(th, td),
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor],
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] :is(th, td),
+body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] {
+  --markdown-heading: var(--markdown-html-dark-text);
+  --markdown-strong: var(--markdown-html-dark-text);
+  --markdown-emphasis: var(--markdown-html-dark-text);
+  --markdown-link: var(--markdown-html-dark-link);
+  --code-inline: var(--markdown-html-dark-code);
+  --code-inline-bg: var(--markdown-html-dark-code-bg);
+  --code-inline-border: var(--markdown-html-dark-code-border);
+  color: var(--markdown-html-dark-text) !important;
+  background: var(--markdown-html-dark-bg) !important;
+  border-color: var(--markdown-html-dark-border);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg :is(strong, em),
+body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(strong, em),
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] :is(strong, em),
+body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
+  color: var(--markdown-html-dark-text);
+}
+body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg code,
+body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg code,
+body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] code,
+body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] code {
+  color: var(--markdown-html-dark-code);
+  background: var(--markdown-html-dark-code-bg);
+  border-color: var(--markdown-html-dark-code-border);
+}
 .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
@@ -1074,7 +1204,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   border-top-color: var(--lt-line);
 }
 .markdown-source-anchor {
-  display: inline-block;
+  display: none;
   width: 0;
   height: 0;
   overflow: hidden;
@@ -1135,7 +1265,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   background: rgba(10, 14, 20, 0.98);
   border: 1px solid var(--active-control-border);
   border-radius: 3px;
-  outline: none;
+  outline: 0;
   box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 /* Light mode: the rename box hardcodes a near-black fill while its text
@@ -1309,7 +1439,7 @@ body.resizing-file-explorer-changes {
    centered ::before. Light/dark flip automatically via the tokens (no hardcoded hex). */
 .file-explorer-changes-resizer {
   position: relative;
-  z-index: 2;
+  z-index: var(--z-panel-resizer-inline);
   flex: 0 0 var(--file-explorer-changes-resizer-size);
   min-height: var(--file-explorer-changes-resizer-size);
   cursor: row-resize;
@@ -1346,6 +1476,10 @@ body.resizing-file-explorer-changes {
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 0 5px 5px;
 }
+/* Differ timestamps are supporting metadata, smaller than the changed-file names. */
+.file-explorer-changes-panel .file-tree-date {
+  font-size: 70%;
+}
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
   --pane-bar-bg: var(--pane-tab-strip-bg);
@@ -1362,7 +1496,7 @@ body.theme-light .file-explorer-changes-panel {
 .file-explorer-changes-head {
   position: sticky;
   top: 0;
-  z-index: 6;
+  z-index: var(--z-sticky-pane-head);
   display: grid;
   /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
      title (flex), sort, date mode, refresh, close. */
@@ -1444,7 +1578,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   min-width: 0;
 }
 .file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline .diff-ref-input {
-  max-width: 16ch;
+  width: clamp(17ch, 24vw, 32ch);
+  max-width: min(34ch, 42vw);
   margin: 0 2px;
   vertical-align: baseline;
   font-size: var(--ui-font-size-xs);
@@ -1553,8 +1688,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   }
   .file-explorer-changes-head .diff-ref-input,
   .file-explorer-changes-head .diff-ref-control input {
-    width: auto;
-    min-width: 0;
+    width: min(17ch, 42vw);
+    min-width: min(15ch, 38vw);
   }
   .file-explorer-changes-head .changes-refresh {
     grid-area: refresh;
@@ -1820,19 +1955,33 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-editor-diff-codemirror .cm-content .cm-activeLine {
   background: var(--diff-full-line-bg, transparent);
 }
+/* Extend the colored line band to both editor edges. This box-shadow + clip-path full-bleed trick is
+   ONLY safe on BLOCK-level line elements (.cm-changedLine / .cm-deletedChunk / .cm-insertedChunk /
+   .cm-inlineChangedLine). It must NOT be applied to .cm-insertedLine / .cm-deletedLine: in
+   @codemirror/merge those are inline marks (Decoration.mark -> <ins>/<del>), and on a soft-wrapped
+   inline element the clip-path establishes a clip box over the element's whole multi-row bounding box
+   while the parent .cm-changedLine block paints its own full-bleed band on top, burying the wrapped
+   continuation rows' text (gutter line numbers stay, text goes blank). The parent block already paints
+   the full-width fill, so the inline mark does not need it. Regression:
+   test_diff_wrapped_inserted_line_continuation_rows_show_text. */
 .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
 .file-editor-diff-codemirror .cm-inlineChangedLine,
 .file-editor-diff-codemirror .cm-deletedChunk,
-.file-editor-diff-codemirror .cm-insertedChunk,
-.file-editor-diff-codemirror .cm-deletedLine,
-.file-editor-diff-codemirror .cm-insertedLine {
+.file-editor-diff-codemirror .cm-insertedChunk {
   box-shadow: -100vw 0 0 var(--diff-full-line-bg), 100vw 0 0 var(--diff-full-line-bg);
   clip-path: inset(0 -100vw);
 }
+/* Inline inserted/deleted marks: keep them inert for layout so a long added/removed line that
+   soft-wraps shows text on every visual row. No full-bleed box-shadow/clip-path here. */
+.file-editor-diff-codemirror .cm-insertedLine,
+.file-editor-diff-codemirror .cm-deletedLine {
+  box-shadow: none;
+  clip-path: none;
+}
 .file-editor-diff-codemirror .cm-searchMatch {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   color: var(--diff-search-match-fg) !important;
   background: var(--diff-search-match-bg) !important;
   box-shadow: inset 0 0 0 1px var(--diff-search-match-ring), 0 0 0 1px rgb(var(--shadow-rgb) / 0.54) !important;
@@ -1861,7 +2010,7 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   position: absolute !important;
   inset-block-start: 2px;
   inset-inline-end: 8px !important;
-  z-index: 2;
+  z-index: var(--z-panel-resizer-inline);
   display: inline-flex;
   gap: 2px;
   align-items: center;
@@ -1881,14 +2030,14 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   position: absolute;
   inset-block: 0;
   inset-inline-end: 14px;
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   width: 4px;
   pointer-events: none;
 }
 .file-editor-diff-codemirror .cm-diff-overview-viewport {
   position: absolute;
   inset-inline: -2px;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   box-sizing: border-box;
   min-height: 6px;
   border: 1px solid rgba(226, 238, 248, 0.18);
@@ -1924,9 +2073,9 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-delete
   text-decoration-color: var(--danger-light-text);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText {
-  color: #064e3b;
+  color: var(--success-text-strong);
   background: #b9e7c2;
-  text-decoration-color: #064e3b;
+  text-decoration-color: var(--success-text-strong);
 }
 /* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
    scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
@@ -1997,9 +2146,10 @@ body.editor-theme-light .file-editor-content {
   box-shadow: none;
 }
 /* #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) render on a dedicated
-   info line BELOW the tab strip instead of cramming the tabs. */
+   toolbar line BELOW the tab strip instead of cramming the tabs. */
 .file-editor-toolbar {
   position: relative;
+  container-type: inline-size;
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
@@ -2026,7 +2176,7 @@ body.editor-theme-light .file-editor-content {
   min-width: 0;
 }
 .file-editor-toolbar-left {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
 }
 .file-editor-toolbar-center {
   position: absolute;
@@ -2046,15 +2196,38 @@ body.editor-theme-light .file-editor-content {
   align-items: center;
   flex: 0 1 auto;
   min-width: max-content;
-  max-width: min(56vw, 340px);
+  max-width: min(50vw, 300px);
   overflow: visible;
 }
 .file-editor-diff-ref-panel[hidden] {
   display: none;
 }
-.file-editor-diff-ref-panel .diff-ref-input,
-.file-editor-diff-ref-panel .diff-ref-control input {
-  width: clamp(44px, 7vw, 88px);
+.file-editor-diff-ref-panel .diff-ref-controls.compact {
+  gap: 2px;
+}
+.file-editor-diff-ref-panel .diff-ref-control {
+  gap: 1px;
+  font-size: 0;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
+  width: 9ch;
+}
+@container (min-width: 900px) {
+  .file-editor-diff-ref-panel {
+    max-width: min(72vw, 620px);
+  }
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset {
+  width: 22px;
+  min-width: 22px;
+  padding: 0;
+  font-size: 0;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset::before {
+  content: "↺";
+  font-size: var(--ui-font-size-xs);
+  line-height: 1;
 }
 .file-editor-toolbar-separator {
   width: 1px;
@@ -2129,8 +2302,8 @@ body.editor-theme-light .file-editor-content {
   justify-content: center;
   padding: 0;
 }
-.file-editor-wrap-panel,
 .file-editor-gutter-panel,
+.file-editor-wrap-panel,
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
 .file-editor-popout-preview-panel,
@@ -2494,7 +2667,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-codemirror,
 .file-editor-codemirror-panel {
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -2509,7 +2682,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-codemirror .cm-focused,
 .file-editor-codemirror-panel .cm-focused {
-  outline: none;
+  outline: 0;
 }
 .file-editor-codemirror .cm-scroller,
 .file-editor-codemirror-panel .cm-scroller {
@@ -2541,7 +2714,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .cm-wrap-marker-layer {
   position: absolute;
   inset: 0 auto auto 0;
-  z-index: 8;
+  z-index: var(--z-editor-wrap-marker);
   pointer-events: none;
 }
 .cm-wrap-marker {
@@ -2550,7 +2723,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #9fd8ff;
+  color: var(--accent-sky-strong);
   font-weight: 900;
   opacity: 0.86;
   text-indent: 0;
@@ -2648,13 +2821,13 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   grid-column: 1;
   grid-row: 2;
   margin-inline-start: 0;
-  border-color: #6f7b8c;
+  border-color: var(--neutral-border-strong);
   box-shadow: none;
 }
 .file-editor-codemirror .cm-search .cm-textfield:focus,
 .file-editor-codemirror-panel .cm-search .cm-textfield:focus {
-  border-color: #9fd8ff;
-  outline: none;
+  border-color: var(--accent-sky-strong);
+  outline: 0;
   box-shadow: 0 0 0 2px rgba(159, 216, 255, 0.22);
 }
 .file-editor-codemirror .cm-search .cm-button,
@@ -2670,7 +2843,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   color: var(--text);
   background: rgba(255, 255, 255, 0.055);
   background-image: none;
-  border: 1px solid #6f7b8c;
+  border: 1px solid var(--neutral-border-strong);
   border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
@@ -2749,7 +2922,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-search .cm-button:hover,
 .file-editor-codemirror-panel .cm-search .cm-button:hover {
   color: #ffffff;
-  border-color: #9fd8ff;
+  border-color: var(--accent-sky-strong);
   background: rgba(159, 216, 255, 0.12);
 }
 .file-editor-codemirror .cm-search label,
@@ -2765,7 +2938,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   margin: 0;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.045);
-  border: 1px solid #6f7b8c;
+  border: 1px solid var(--neutral-border-strong);
   border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
@@ -2897,7 +3070,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--lt-markdown-heading);
 }
 .file-editor-raw-panel {
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   margin: 0;
   overflow: auto;
   padding: 8px 10px;
@@ -3091,7 +3264,7 @@ body.editor-theme-light .cm-content .md-code {
   color: var(--code-tag);
 }
 .file-editor-preview-pane-panel {
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   min-height: 0;
   overflow: auto;
   padding: 12px 16px;
@@ -3173,7 +3346,7 @@ body.editor-theme-light .file-editor-native-video {
   background: #000;
 }
 .file-editor-image-panel {
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   min-height: 0;
   display: grid;
   place-items: center;
@@ -3195,7 +3368,7 @@ body.editor-theme-light .file-editor-native-video {
 }
 .file-editor-empty-state {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   max-width: min(60ch, 100%);
   padding: 16px;
   color: var(--pane-tab-text);
@@ -3295,7 +3468,8 @@ body.editor-theme-light .file-editor-native-video {
 .file-drag-more,
 .diff-ref-suggestion-ref,
 .diff-ref-suggestion-subject,
-.diff-ref-suggestion-meta,
+.diff-ref-suggestion-date,
+.diff-ref-suggestion-author,
 .changes-comparison-title,
 .changes-repo-title,
 .preferences-path-value,
@@ -3310,7 +3484,6 @@ body.editor-theme-light .file-editor-native-video {
 .transcript-path-value,
 .transcript-path-missing,
 .summary-context-line,
-.info-cell,
 .file-explorer-path-inline,
 .file-editor-path,
 .file-explorer-repo-summary,
@@ -3322,17 +3495,18 @@ body.editor-theme-light .file-editor-native-video {
   white-space: nowrap;
 }
 
-/* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the detail column (pane cwd /
-   session work description, carried in the agent slot) and the active-window emphasis are tabber-specific. */
+/* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the level-0 session label shape,
+   the window/process detail, and the active-window emphasis are tabber-specific. */
 .file-tree-row.tabber-row {
   --tabber-level0-color: var(--markdown-heading);
   --tabber-level1-color: var(--code-function);
   --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
+  --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
 }
 body.theme-light .file-tree-row.tabber-row {
-  --tabber-level0-color: var(--lt-markdown-heading);
-  --tabber-level1-color: var(--lt-code-function);
+  --tabber-level0-color: var(--text);
+  --tabber-level1-color: var(--text);
   --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
 }
@@ -3340,88 +3514,123 @@ body.theme-light .file-tree-row.tabber-row {
   background: var(--file-hover-bg);
   box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
 }
-.file-tree-row.tabber-row .tabber-session-name,
-.file-tree-row.tabber-row .tabber-session-description {
-  cursor: pointer;
+.file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-inline-size: 100%;
+}
+.file-tree-row.tabber-row .tabber-session-tab {
+  flex: 1 1 auto;
+  inline-size: 100%;
+  max-inline-size: 100%;
+}
+.file-tree-row.tabber-row .tabber-session-tab .session-agent-activity-marker .agent-window-activity {
+  --agent-window-icon-size: var(--tabber-agent-icon-size);
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+}
+.file-tree-row.tabber-row.selected .tabber-session-tab {
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+}
+.file-tree-row.tabber-row .tabber-window-token {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: 0;
+  justify-content: flex-start;
+  overflow: visible;
+  vertical-align: middle;
+}
+.file-tree-row.tabber-row .tabber-window-button {
+  max-width: 100%;
+}
+/* pid is printed as a muted suffix AFTER the window button so the button icon stays identical to the
+   Info Bar / YO!info window button. */
+.file-tree-row.tabber-row .tabber-window-pid {
+  flex: 0 0 auto;
+  color: var(--text-muted-cool);
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
+  white-space: nowrap;
+}
+.file-tree-row.tabber-row .tabber-window-button .tmux-window-name-label {
+  justify-content: flex-start;
 }
 .file-tree-row.tabber-row .tabber-window-label {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   vertical-align: middle;
+}
+.file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
+  --agent-window-icon-size: var(--tabber-agent-icon-size);
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+  margin-inline-start: 0;
+  margin-inline-end: 1px;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-icon {
   flex: 0 0 auto;
-  width: calc(var(--file-explorer-font-size) + 2px);
-  min-width: calc(var(--file-explorer-font-size) + 2px);
-  height: calc(var(--file-explorer-font-size) + 2px);
   margin: 0;
   padding: 0;
   vertical-align: middle;
-}
-.file-tree-row.tabber-row .tabber-window-label .agent-icon svg {
-  width: calc(var(--file-explorer-font-size) + 2px);
-  height: calc(var(--file-explorer-font-size) + 2px);
 }
 .file-tree-row.tabber-row .tabber-window-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-tree-row.tabber-row .tabber-session-description {
-  color: var(--tabber-level0-color);
-  margin-inline-start: 8px;
-  font-weight: 500;
-}
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) .tabber-session-name {
-  color: var(--tabber-level0-color);
-  font-weight: 800;
-}
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-name {
   color: var(--tabber-level1-color);
   font-weight: 700;
 }
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level1-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level1-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-path-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);
 }
 .file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-name,
-.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-icon {
+.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-detail-color);
   font-style: italic;
 }
 .file-tree-row.tabber-active-window:not(.selected) .file-tree-name {
   font-weight: 800;
 }
-/* Tabber rows: the session/work name is the priority. Let its column take all available width and only
-   ellipsize as a last resort; keep the date from forcing the name to truncate by letting it shrink, and
-   drop the date entirely when the pane is genuinely narrow so the name is never starved. */
+/* Tabber rows keep recency visible at every width; the tree/path text truncates first. */
 .file-tree-row.tabber-row .file-tree-name {
   flex: 1 1 auto;
   min-width: 0;
 }
 .file-tree-row.tabber-row .file-tree-date {
-  flex: 0 1 auto;
+  flex: 0 0 var(--file-tree-date-column-width);
+  inline-size: var(--file-tree-date-column-width);
   color: var(--tabber-detail-color);
   font-weight: 600;
 }
-@container (max-width: 380px) {
-  .file-explorer-changes-panel .file-tree-row.tabber-row .file-tree-date {
-    display: none;
-  }
+.file-tree-row.tabber-row.tabber-status-long .file-tree-date {
+  display: block;
+  flex: 0 1 auto;
+  inline-size: auto;
+  max-inline-size: min(24ch, 48%);
+  min-inline-size: 0;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
 }

@@ -59,7 +59,7 @@ function dockviewOppositeOrientation(orientation) {
 function dockviewThemeForApp() {
   const core = dockviewCore();
   if (!core) return undefined;
-  return document.body?.classList?.contains('theme-light') ? core.themeLight : core.themeDark;
+  return document.body?.classList?.contains(themeBodyClass('light')) ? core.themeLight : core.themeDark;
 }
 
 function dockviewRootBoundaryDropIntent(event) {
@@ -600,7 +600,7 @@ function dockviewSlotForGroupElement(group) {
   return slotForItem(activeItem) || '';
 }
 
-function dockviewFileDropIntentForEvent(event) {
+function dockviewGroupDropIntentForEvent(event) {
   const group = dockviewGroupForEvent(event);
   const targetSlot = dockviewSlotForGroupElement(group);
   const targetRect = group?.getBoundingClientRect?.();
@@ -611,6 +611,10 @@ function dockviewFileDropIntentForEvent(event) {
     previewNode: group,
     targetRect,
   };
+}
+
+function dockviewFileDropIntentForEvent(event) {
+  return dockviewGroupDropIntentForEvent(event);
 }
 
 function dockviewHandleFileDragOver(event) {
@@ -629,17 +633,32 @@ function dockviewHandleFileDragOver(event) {
     return;
   }
   const payload = fileDragPayload(event);
-  if (!payload?.path) return;
-  const intent = dockviewFileDropIntentForEvent(event);
+  if (payload?.path) {
+    const intent = dockviewFileDropIntentForEvent(event);
+    if (!intent) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!fileDropIntentAllowsPayload(payload, intent)) {
+      event.dataTransfer.dropEffect = 'none';
+      clearDropPreview();
+      return;
+    }
+    event.dataTransfer.dropEffect = 'copy';
+    showDropPreview(intent);
+    return;
+  }
+  const tabPayload = dragPayload(event);
+  if (!tabPayload?.session) return;
+  const intent = dockviewGroupDropIntentForEvent(event);
   if (!intent) return;
   event.preventDefault();
   event.stopPropagation();
-  if (!fileDropIntentAllowsPayload(payload, intent)) {
+  if (!dropIntentAllowsSession(tabPayload.session, intent)) {
     event.dataTransfer.dropEffect = 'none';
     clearDropPreview();
     return;
   }
-  event.dataTransfer.dropEffect = 'copy';
+  event.dataTransfer.dropEffect = 'move';
   showDropPreview(intent);
 }
 
@@ -654,14 +673,25 @@ function dockviewHandleFileDrop(event) {
     return;
   }
   const payload = fileDragPayload(event);
-  if (!payload?.path) return;
-  const intent = dockviewFileDropIntentForEvent(event);
+  if (payload?.path) {
+    const intent = dockviewFileDropIntentForEvent(event);
+    if (!intent) return;
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    if (!fileDropIntentAllowsPayload(payload, intent)) return;
+    openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+    return;
+  }
+  const tabPayload = dragPayload(event);
+  if (!tabPayload?.session) return;
+  const intent = dockviewGroupDropIntentForEvent(event);
   if (!intent) return;
   event.preventDefault();
   event.stopPropagation();
   clearDropPreview();
-  if (!fileDropIntentAllowsPayload(payload, intent)) return;
-  openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+  if (!dropIntentAllowsSession(tabPayload.session, intent)) return;
+  dropSessionWithIntent(tabPayload.session, intent, tabPayload.sourceSlot || slotForSession(tabPayload.session));
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -763,7 +793,7 @@ function dockviewSyncHeaderBackgroundDragSources() {
   if (!dockviewLayoutActive()) return;
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
-    const detail = group.querySelector('.dockview-panel-content > .panel > .panel-detail-row');
+    const infoBar = group.querySelector('.dockview-panel-content > .panel > .pane-info-bar, .dockview-panel-content > .panel > .panel-detail-row');
     const editorToolbar = group.querySelector('.dockview-panel-content > .file-editor-panel > .file-editor-toolbar');
     const slot = dockviewSlotForGroupElement(group);
     const draggable = Boolean(slot && !slotIsFileExplorerPane(slot) && activeItemForSide(slot));
@@ -782,15 +812,9 @@ function dockviewSyncHeaderBackgroundDragSources() {
       element.addEventListener('mousedown', begin);
     };
     syncDragSource(header);
-    syncDragSource(detail);
+    syncDragSource(infoBar);
     syncDragSource(editorToolbar);
   });
-}
-
-function dockviewClearTabRowBreaks(tabsContainer) {
-  Array.from(tabsContainer?.children || [])
-    .filter(node => node.classList?.contains('dockview-tab-row-break'))
-    .forEach(node => node.remove());
 }
 
 function dockviewSyncHeaderActionReservations() {
@@ -798,10 +822,6 @@ function dockviewSyncHeaderActionReservations() {
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
     if (!header) return;
-    const tabsContainer = header.querySelector('.dv-tabs-container');
-    dockviewClearTabRowBreaks(tabsContainer);
-    const tabs = Array.from(tabsContainer?.children || [])
-      .filter(node => node.classList?.contains('dv-tab'));
     const actions = group.querySelector('.dockview-pane-header-actions:not([hidden])');
     const width = actions ? Math.ceil(appSpaceRect(actions).width || actions.offsetWidth || 0) : 0;
     const reservedWidth = width > 0 ? width + 8 : 0;
@@ -815,17 +835,6 @@ function dockviewSyncHeaderActionReservations() {
       : Math.max(minTabWidth, preferredTabWidth);
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
-    if (!tabsContainer || tabs.length < 2 || reservedWidth <= 0 || headerWidth <= reservedWidth) return;
-    const tabStyle = getComputedStyle(tabs[0]);
-    const tabInlineGap = (Number.parseFloat(tabStyle.marginLeft) || 0) + (Number.parseFloat(tabStyle.marginRight) || 0);
-    const tabOuterWidth = Math.max(1, tabWidth + tabInlineGap);
-    const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
-    const firstRowCapacity = Math.max(1, Math.min(tabs.length, Math.floor((firstRowWidth + tabInlineGap) / tabOuterWidth)));
-    if (firstRowCapacity >= tabs.length) return;
-    const rowBreak = document.createElement('span');
-    rowBreak.className = 'dockview-tab-row-break';
-    rowBreak.setAttribute('aria-hidden', 'true');
-    tabsContainer.insertBefore(rowBreak, tabs[firstRowCapacity]);
   });
 }
 
@@ -986,6 +995,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   dockviewSyncMountedPanels();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
+  scheduleAgentWindowActivityAnimationSync();
   if (options.prune === false) {
     if (responsiveLayoutPruneTimer) {
       clearTimeout(responsiveLayoutPruneTimer);
@@ -1350,6 +1360,7 @@ function dockviewHeaderActionsHtml(item) {
     return `${paneHandle}${paneFrameControlsGroupHtml(item, {
       groupClass: 'file-editor-frame-controls',
       actions: false,
+      popout: paneCanPopout(item),
       minimize: true,
       expand: true,
       close: true,
@@ -1358,7 +1369,7 @@ function dockviewHeaderActionsHtml(item) {
       closeLabel: t('editor.closePane'),
     })}`;
   }
-  if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item)}`;
+  if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item, {popout: paneCanPopout(item)})}`;
   return '';
 }
 
@@ -1373,7 +1384,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   if (!button) return;
   const item = button.dataset.tab || button.dataset.windowSession || button.dataset.detailToggle
     || button.dataset.paneActions || button.dataset.paneMinimize || button.dataset.paneExpand
-    || button.dataset.paneClose || fallbackItem;
+    || button.dataset.panePopout || button.dataset.paneClose || fallbackItem;
   if (!item) return;
   if (button.dataset.tab !== undefined) {
     event.preventDefault();
@@ -1413,6 +1424,12 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
     event.preventDefault();
     event.stopPropagation();
     expandPaneFromLayout(button.dataset.paneExpand || item);
+    return;
+  }
+  if (button.dataset.panePopout !== undefined) {
+    event.preventDefault();
+    event.stopPropagation();
+    openPanePopout(button.dataset.panePopout || item);
     return;
   }
   if (button.dataset.paneClose !== undefined) {
@@ -1594,6 +1611,7 @@ function createDockviewTabRenderer() {
 function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
   syncDockviewTabActiveClass(tab, api);
+  tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
   tab.classList.toggle('file-missing', isFileEditorItem(item) && openFileIsMissing(fileItemPath(item)));
   tab.classList.toggle('pinned-tab', tabIsPinned(item));
   applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMeta.sessions?.[item]));
@@ -1627,11 +1645,12 @@ function dockviewRefreshTabs() {
   });
   dockviewSyncHeaderBackgroundDragSources();
   dockviewSyncHeaderActionReservations();
+  scheduleAgentWindowActivityAnimationSync();
 }
 
 function syncDockviewTabActiveClass(tab, api = null) {
   const dockviewActive = tab?.closest?.('.dv-tab')?.classList?.contains('dv-active-tab') === true;
-  tab?.classList?.toggle('active', api?.isActive === true || dockviewActive);
+  tab?.classList?.toggle(CLS.active, api?.isActive === true || dockviewActive);
 }
 
 function dockviewSyncMountedPanels() {
@@ -1650,14 +1669,19 @@ function hideDockviewInnerPaneTabs(panel) {
   if (!panel || !dockviewLayoutEnabled()) return false;
   panel.classList.remove('dockview-inner-head-collapsed');
   const head = panel.querySelector('.panel-head');
-  const strip = head?.querySelector('.pane-tabs');
-  if (!strip) return true;
+  if (!head) return true;
+  // Collapse the inner head for every non-file-explorer terminal panel — even one without a
+  // .pane-tabs strip — so the dockview tab bar is the only tab row and NO pane keeps the head's
+  // min-height as an inconsistent buffer above the Info Bar. (file-explorer heads keep their head.)
   if (!head.classList.contains('file-explorer-head')) {
     head.hidden = true;
     head.classList.add('dockview-inner-head-hidden');
     panel.classList.add('dockview-inner-head-collapsed');
   }
-  strip.hidden = true;
-  strip.replaceChildren();
+  const strip = head.querySelector('.pane-tabs');
+  if (strip) {
+    strip.hidden = true;
+    strip.replaceChildren();
+  }
   return true;
 }

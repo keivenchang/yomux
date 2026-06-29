@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import datetime
 from datetime import timezone
@@ -25,6 +26,10 @@ YOAGENT_CLI_STATE_PATH = YOAGENT_STATE_DIR / "cli-sessions.json"
 YOAGENT_CONVERSATION_MAX_MESSAGES = 500
 YOAGENT_MESSAGE_CONTENT_LIMIT = 20_000
 YOAGENT_MESSAGE_DETAILS_LIMIT = 4_000
+YOAGENT_AUXILIARY_LINE_LIMIT = 4_000
+YOAGENT_AUXILIARY_TOTAL_LIMIT = 120_000
+YOAGENT_STREAM_ITEM_TEXT_LIMIT = 8_000
+YOAGENT_STREAM_ITEMS_TOTAL_LIMIT = 120_000
 YOAGENT_ACTIONS_LIMIT = 8
 YOAGENT_BACKENDS = {"claude", "codex"}
 YOAGENT_MESSAGE_KINDS = {"agent_result"}
@@ -63,6 +68,103 @@ def sanitized_actions(value: Any) -> list[dict[str, Any]]:
     return clean
 
 
+def bounded_auxiliary_lines(value: Any) -> tuple[list[str], bool]:
+    if not isinstance(value, list):
+        return [], False
+    clean: list[str] = []
+    truncated = False
+    for item in value:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        redacted = redacted_auxiliary_text(raw)
+        bounded = truncate_text(redacted, YOAGENT_AUXILIARY_LINE_LIMIT)
+        truncated = truncated or bounded != redacted
+        if bounded.strip():
+            clean.append(bounded)
+    return bounded_text_tail(clean, YOAGENT_AUXILIARY_TOTAL_LIMIT, truncated=truncated)
+
+
+def bounded_text_tail(value: list[str], limit: int, *, truncated: bool = False) -> tuple[list[str], bool]:
+    selected: list[str] = []
+    total = 0
+    for item in reversed(value):
+        text = str(item or "")
+        separator = 1 if selected else 0
+        projected = total + len(text) + separator
+        if selected and projected > limit:
+            truncated = True
+            break
+        if not selected and projected > limit:
+            selected.append(truncate_text(text, limit))
+            truncated = True
+            break
+        selected.append(text)
+        total = projected
+    selected.reverse()
+    truncated = truncated or len(selected) < len(value)
+    return selected, truncated
+
+
+def sanitized_auxiliary_lines(value: Any) -> list[str]:
+    lines, _truncated = bounded_auxiliary_lines(value)
+    return lines
+
+
+def sanitized_auxiliary_preview(value: Any, fallback: str = "") -> tuple[str, bool]:
+    raw = str(value or fallback or "").strip()
+    if not raw:
+        return "", False
+    redacted = redacted_auxiliary_text(raw)
+    bounded = truncate_text(redacted, YOAGENT_AUXILIARY_LINE_LIMIT)
+    return bounded, bounded != redacted
+
+
+def redacted_auxiliary_text(text: str) -> str:
+    return re.sub(r"(?i)\b(token|secret|password|api[_-]?key)\s*=\s*\S+", r"\1=<redacted>", str(text or ""))
+
+
+def bounded_stream_items(value: Any) -> tuple[list[dict[str, str]], bool]:
+    if not isinstance(value, list):
+        return [], False
+    result: list[dict[str, str]] = []
+    truncated = False
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind not in {"assistant", "thinking", "tool"}:
+            continue
+        text = redacted_auxiliary_text(str(item.get("text") or ""))
+        bounded = truncate_text(text, YOAGENT_STREAM_ITEM_TEXT_LIMIT)
+        truncated = truncated or bounded != text
+        if bounded.strip():
+            result.append({"kind": kind, "text": bounded})
+    selected: list[dict[str, str]] = []
+    total = 0
+    for item in reversed(result):
+        text = item["text"]
+        separator = 1 if selected else 0
+        projected = total + len(text) + separator
+        if selected and projected > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT:
+            truncated = True
+            break
+        if not selected and projected > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT:
+            selected.append({**item, "text": truncate_text(text, YOAGENT_STREAM_ITEMS_TOTAL_LIMIT)})
+            truncated = True
+            break
+        selected.append(item)
+        total = projected
+    selected.reverse()
+    truncated = truncated or len(selected) < len(result)
+    return selected, truncated
+
+
+def sanitized_stream_items(value: Any) -> list[dict[str, str]]:
+    items, _truncated = bounded_stream_items(value)
+    return items
+
+
 def sanitize_message(value: Any, *, role: str | None = None, content: str | None = None, created_at: str | None = None) -> dict[str, Any] | None:
     raw = value if isinstance(value, dict) else {}
     message_role = str(role or raw.get("role") or "").strip().lower()
@@ -85,6 +187,29 @@ def sanitize_message(value: Any, *, role: str | None = None, content: str | None
     details = truncate_text(str(raw.get("details") or "").strip(), YOAGENT_MESSAGE_DETAILS_LIMIT)
     if details and message_role == "assistant":
         message["details"] = details
+    raw_response_ms = raw.get("responseMs", raw.get("response_ms"))
+    response_ms = float_value(raw_response_ms, 0.0)
+    if message_role == "assistant" and response_ms > 0:
+        message["responseMs"] = round(response_ms, 3)
+    auxiliary_lines, auxiliary_truncated = bounded_auxiliary_lines(raw.get("auxiliaryLines"))
+    if auxiliary_lines and message_role == "assistant":
+        message["auxiliaryLines"] = auxiliary_lines
+        auxiliary_text = "\n".join(auxiliary_lines)
+        bounded_auxiliary_text = truncate_text(auxiliary_text, YOAGENT_AUXILIARY_TOTAL_LIMIT)
+        auxiliary_truncated = auxiliary_truncated or bounded_auxiliary_text != auxiliary_text
+        message["auxiliaryText"] = bounded_auxiliary_text
+        preview, preview_truncated = sanitized_auxiliary_preview(raw.get("auxiliaryPreview"), "\n".join(auxiliary_lines[-1:]))
+        auxiliary_truncated = auxiliary_truncated or preview_truncated
+        if preview:
+            message["auxiliaryPreview"] = preview
+    stream_items, stream_truncated = bounded_stream_items(raw.get("streamItems"))
+    if stream_items and message_role == "assistant":
+        message["streamItems"] = stream_items
+    if message_role == "assistant" and (auxiliary_lines or stream_items):
+        if bool(raw.get("auxiliaryDone")):
+            message["auxiliaryDone"] = True
+        if bool(raw.get("auxiliaryTruncated")) or auxiliary_truncated or stream_truncated:
+            message["auxiliaryTruncated"] = True
     return message
 
 

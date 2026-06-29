@@ -6,9 +6,26 @@ function toggleHiddenFiles() {
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
+function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
+  if (!row) return;
+  row.classList.toggle('expanded', expanded);
+  row.classList.toggle(CLS.collapsed, !expanded);
+  row.classList.toggle('loading-children', loading);
+  row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const icon = row.querySelector('.file-tree-icon');
+  if (icon) setDisclosureTriangleElement(icon, expanded);
+}
+
 async function expandDirectoryRow(row, fullPath, options = {}) {
+  fileExplorerPendingExpansions.add(fullPath);
+  syncDirectoryRowExpansionVisual(row, true, true);
   const entries = await fetchDirectory(fullPath);
-  if (!entries) return;
+  fileExplorerPendingExpansions.delete(fullPath);
+  if (!entries) {
+    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
+    else syncDirectoryRowExpansionVisual(row, true, false);
+    return;
+  }
   if (options.manual === true) {
     forgetFileExplorerSyncManualCollapse(fullPath);
     resetFileExplorerAppliedSyncPlan();
@@ -20,12 +37,12 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
   // be free to restore a directory across sync-target switches.
   if (options.auto === true && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
+    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
+    else syncDirectoryRowExpansionVisual(row, true, false);
     return;
   }
   fileExplorerExpanded.add(fullPath);
-  row.classList.add('expanded');
-  row.setAttribute('aria-expanded', 'true');
-  row.querySelector('.file-tree-icon').textContent = '▾';
+  syncDirectoryRowExpansionVisual(row, true, false);
   const existingChildren = childContainerForRow(row, fullPath);
   const children = existingChildren || createFileTreeChildContainer(fullPath);
   const nextDepth = fileTreeRowDepth(row) + 1;
@@ -33,6 +50,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();
   scheduleShareUiStatePublish();
+  refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -42,14 +60,14 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
     resetFileExplorerAppliedSyncPlan();
   }
   fileExplorerExpanded.delete(fullPath);
-  row.classList.remove('expanded');
-  row.setAttribute('aria-expanded', 'false');
-  row.querySelector('.file-tree-icon').textContent = '▸';
+  fileExplorerPendingExpansions.delete(fullPath);
+  syncDirectoryRowExpansionVisual(row, false, false);
   Array.from(row.parentElement?.children || [])
     .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
     .forEach(node => node.remove());
   rememberFileExplorerSyncExpandedState();
   scheduleShareUiStatePublish();
+  refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -71,16 +89,58 @@ function updateSessionButtonStates() {
   // and menu rows, which are rebuilt by their normal render paths.
   // Keep the top-bar cross-session activity line live as states change (poll-driven).
   updateTopbarActivityStatus();
+  refreshPaneTabSessionPopovers();
 }
 
-function bindFilePopoverActions(container) {
-  container.querySelectorAll('[data-copy-popover-path]').forEach(button => {
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      copyFilePath(button.dataset.copyPopoverPath || '', 'path');
-    });
+function sessionPopoverNodeFromHtml(html) {
+  const template = document.createElement('template');
+  if (template?.content !== undefined) {
+    template.innerHTML = String(html || '');
+    return template.content.firstElementChild;
+  }
+  const text = String(html || '');
+  const match = text.match(/^<div class="session-popover" role="tooltip">([\s\S]*)<\/div>\s*$/);
+  return {
+    className: 'session-popover',
+    innerHTML: match ? match[1] : text,
+    getAttribute(name) {
+      return name === 'role' ? 'tooltip' : null;
+    },
+  };
+}
+
+function refreshSessionPopoverContent(popover, html) {
+  if (!popover) return;
+  const fresh = sessionPopoverNodeFromHtml(html);
+  if (!fresh) return;
+  const keepOpen = popover.classList?.contains?.('popover-open') === true;
+  const keepDetached = popover.classList?.contains?.('pane-tab-detached-popover') === true;
+  popover.className = fresh.className || 'session-popover';
+  if (keepOpen) popover.classList?.add?.('popover-open');
+  if (keepDetached) popover.classList?.add?.('pane-tab-detached-popover');
+  const role = fresh.getAttribute?.('role') || 'tooltip';
+  popover.setAttribute?.('role', role);
+  popover.innerHTML = fresh.innerHTML;
+}
+
+function refreshPaneTabSessionPopovers() {
+  document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]').forEach(tab => {
+    const session = String(tab?.dataset?.paneTab || '').trim();
+    if (!session || tabTypeForItem(session)) return;
+    const popover = typeof paneTabPopoverForAnchor === 'function'
+      ? paneTabPopoverForAnchor(tab)
+      : tab?.querySelector?.(':scope > .session-popover');
+    if (!popover || popover.classList?.contains?.('file-popover')) return;
+    const info = transcriptMeta.sessions?.[session];
+    const auto = autoApproveStates.get(session)?.enabled === true;
+    const state = sessionState(session, info);
+    const agentKind = sessionAgentKind(session);
+    refreshSessionPopoverContent(popover, sessionPopoverHtml(session, info, agentKind, auto, state));
   });
+}
+
+function bindFilePopoverActions(_container) {
+  // Popover copy buttons route through the document-level data-copy-path delegate.
 }
 
 function clearTimer(timer) {
@@ -124,7 +184,7 @@ function stopPopoverEvent(event) {
 function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
   let changed = false;
-  for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
+  for (const other of document.querySelectorAll('.pane-tab.popover-open, .tabber-session-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) {
       const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
         || other.__yolomuxDetachedPopover;
@@ -349,11 +409,11 @@ function metaJoin(parts) {
   return parts.filter(Boolean).join('<span class="meta-sep"> · </span>');
 }
 
-function sessionNumberNameHtml(session) {
+function sessionNumberNameHtml(session, options = {}) {
   const label = sessionLabel(session);
-  const name = String(session);
-  const nameHtml = name && name !== label ? `<span class="session-button-name">${esc(name)}</span>` : '';
-  return `<span class="session-button-number">${esc(label)}</span>${nameHtml}`;
+  const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
+  const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml) : esc(label);
+  return `<span class="${className}">${labelHtml}</span>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {
@@ -367,13 +427,111 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
-  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
-  const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
+  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
   const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}" aria-label="${esc(title)}">${esc(t('brand.marker'))}</span>`;
+}
+
+function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null) {
+  if (auto) return true;
+  if (autoApproveEnabledElsewhere(payload)) return true;
+  const tabState = state || sessionState(session, info);
+  return [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(tabState?.key) && tabState?.promptAttentionCleared !== true;
+}
+
+function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
+  // The tab's AI status indicator summarizes every visible agent-window ball as one segmented ball.
+  // Its symbol and glow follow the most urgent state: red attention, then yellow stopped cooldown, then
+  // green working. A screen-only working signal still falls back to the current/first agent window.
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
+  const agents = sessionAgentWindowStatusPayloads(session, info, payload);
+  if (!agents.length) return null;
+  let selected = null;
+  const byTone = new Map();
+  const screenWorking = sessionYoloIsWorking(session, payload);
+  const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent?.state));
+  for (const agent of agents) {
+    const item = typeof agentWindowActivityIconForStatusItem === 'function'
+      ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
+      : null;
+    const tone = typeof agentWindowStatusToneForItem === 'function'
+      ? agentWindowStatusToneForItem(item)
+      : (item?.state ? agentWindowActivityTone(item.state) : '');
+    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(tone)) continue;
+    const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
+    if (screenWorking && !hasWorkingWindow && tone === 'cooldown' && !explicitStopped) continue;
+    const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
+    const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
+    const current = agentWindowPayloadCurrent(agent) === true;
+    const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
+    const toneCurrent = byTone.get(tone);
+    const toneCurrentIsActive = toneCurrent ? agentWindowPayloadCurrent(toneCurrent.agent) === true : false;
+    if (!toneCurrent || current && !toneCurrentIsActive) byTone.set(tone, {agent, item});
+    if (item.acknowledged !== true && (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent))) selected = {agent, item};
+  }
+  if (!selected && byTone.size) {
+    const statusTones = typeof agentWindowStatusToneOrder === 'function'
+      ? agentWindowStatusToneOrder([...byTone.keys()])
+      : [...byTone.keys()];
+    selected = byTone.get(statusTones[0]) || null;
+  }
+  if (!selected && screenWorking) {
+    const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
+    if (candidate && !agentWindowIsAttentionState(candidate.state)) {
+      const agent = {...candidate, state: STATE_KEY.working};
+      const item = typeof agentWindowActivityIconForStatusItem === 'function'
+        ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
+        : {state: STATE_KEY.working, icon: '●', label: `${agentLabel(agent.kind)} ${t('state.working')}`};
+      selected = {agent, item};
+      byTone.set(STATE_KEY.working, selected);
+    }
+  }
+  if (!selected) return null;
+  const statusTones = typeof agentWindowStatusToneOrder === 'function'
+    ? agentWindowStatusToneOrder([...byTone.keys()])
+    : [...byTone.keys()];
+  const label = statusTones
+    .map(tone => byTone.get(tone)?.item?.label || '')
+    .filter(Boolean)
+    .join('; ') || selected.item?.label || agentLabel(selected.agent?.kind);
+  return {...selected, statusTones, label};
+}
+
+function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
+  return sessionStatusAgentWindowSummaryForTab(session, info, payload)?.agent || null;
+}
+
+function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
+  const payload = options.payload || autoApproveStates.get(session);
+  const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
+  const offerYolo = sessionShouldOfferYoloMarker(session, info, payload, auto, state);
+  const yoloHtml = offerYolo
+    ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
+    : '';
+  const statusSummary = sessionStatusAgentWindowSummaryForTab(session, info, payload);
+  if (statusSummary?.agent) {
+    const statusAgent = statusSummary.agent;
+    const iconHtml = agentWindowActivityIconHtml(statusAgent.kind, statusAgent.state, agentWindowIdleSeconds(statusAgent), {
+      ...agentWindowActivityOptionsForStatus(statusAgent, session),
+      item: statusSummary.item,
+      label: statusSummary.label,
+      statusTones: statusSummary.statusTones,
+      statusOnly: true,
+    });
+    if (iconHtml) {
+      return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
+    }
+  }
+  if (!offerYolo) return '';
+  return yoloMarkerHtml(session, auto, {
+    ...options,
+    enabledOnly: false,
+    yoloWorking: sessionYoloIsWorking(session, payload),
+    payload,
+  });
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
@@ -385,10 +543,10 @@ function pullRequestCompactBadgesHtml(session, pr) {
 }
 
 function applySessionStateClasses(node, state) {
-  node.classList.toggle('needs-attention', state?.attention === true);
-  node.classList.toggle('needs-input', state?.key === 'needs-input');
-  node.classList.toggle('needs-exec', state?.key === 'needs-approval');
-  node.classList.toggle('needs-blocked', state?.key === 'blocked');
+  node.classList.toggle(STATE_CLASS.needsAttention, state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsInput, state?.key === STATE_KEY.needsInput && state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsExec, state?.key === STATE_KEY.needsApproval && state?.attention === true);
+  node.classList.toggle(STATE_CLASS.needsBlocked, state?.key === STATE_KEY.blocked);
   syncAttentionAnimation(node, state?.attention === true);
 }
 
@@ -424,14 +582,15 @@ function githubPullRequestUrlFromGit(git, number) {
   return repoUrl && number ? `${repoUrl}/pull/${number}` : '';
 }
 
-function defaultBranchHeadPullRequest(info) {
+function defaultBranchHeadPullRequestForGit(info, git) {
   const project = info?.project || {};
-  const git = project.git;
   if (!isDefaultBranch(git)) return null;
   const subject = gitHeadSubject(git);
   const number = pullRequestNumberFromSubject(subject);
   if (!number) return null;
-  const existing = project.pull_request?.number === number ? project.pull_request : {};
+  const projectGitRoot = repoRootKey(project.git?.root);
+  const showingPrimaryGit = !projectGitRoot || projectGitRoot === repoRootKey(git?.root);
+  const existing = showingPrimaryGit && project.pull_request?.number === number ? project.pull_request : {};
   const title = subjectWithoutPullRequestNumber(existing.title || subject);
   const description = subjectWithoutPullRequestNumber(existing.description || subject);
   return {
@@ -448,13 +607,31 @@ function defaultBranchHeadPullRequest(info) {
   };
 }
 
-function currentBranchInventoryPullRequest(info) {
-  const branches = info?.project?.git?.other_branches?.branches || [];
+function defaultBranchHeadPullRequest(info) {
+  return defaultBranchHeadPullRequestForGit(info, info?.project?.git);
+}
+
+function currentBranchInventoryPullRequestForGit(git) {
+  const branches = git?.other_branches?.branches || [];
   return branches.find(branch => branch.current === true)?.pull_request || null;
 }
 
+function currentBranchInventoryPullRequest(info) {
+  return currentBranchInventoryPullRequestForGit(info?.project?.git);
+}
+
+function displayPullRequestForGit(info, git) {
+  const project = info?.project || {};
+  const targetGit = git || project.git;
+  const projectGitRoot = repoRootKey(project.git?.root);
+  const showingPrimaryGit = !targetGit || !projectGitRoot || projectGitRoot === repoRootKey(targetGit.root);
+  return defaultBranchHeadPullRequestForGit(info, targetGit)
+    || (showingPrimaryGit ? project.pull_request : null)
+    || currentBranchInventoryPullRequestForGit(targetGit);
+}
+
 function displayPullRequest(info) {
-  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || currentBranchInventoryPullRequest(info);
+  return displayPullRequestForGit(info, info?.project?.git);
 }
 
 function metadataBadgeKey(session, badge) {
@@ -587,8 +764,14 @@ function pathCopyButtonHtml(path, options = {}) {
   return `<button type="button" class="${esc(className)}" ${dataAttr}="${esc(path)}" title="${esc(title)}" aria-label="${esc(options.ariaLabel || title)}"></button>`;
 }
 
+function popoverCopyValueHtml(value, options = {}) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: options.title || 'Copy', ariaLabel: options.ariaLabel || options.title || 'Copy'})}`;
+}
+
 function filePopoverPathHtml(path) {
-  return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button', dataAttr: 'data-copy-popover-path'})}`;
+  return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button'})}`;
 }
 
 function sessionPopoverSubtitleHtml(session, info, fallback = '') {
@@ -642,6 +825,200 @@ function gitHeadValueHtml(git) {
   return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
 }
 
+function sessionPopoverAgentStateRank(state) {
+  return typeof agentWindowStateRank === 'function' ? agentWindowStateRank(state) : 9;
+}
+
+function agentStatusIsAttentionState(state) {
+  return typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state);
+}
+
+function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, options = {}) {
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  let timestamp = Number.isFinite(lastActive) && lastActive > 0 ? lastActive : nowSeconds;
+  if (options.forceAgo === true && timestamp >= nowSeconds) timestamp = nowSeconds - 1;
+  return sessionFileRelativeTimeText(timestamp, nowSeconds);
+}
+
+function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
+  const state = String(agent?.state || STATE_KEY.idle);
+  if (agentWindowIsWorkingState(state)) {
+    const elapsed = Number(agent?.working_elapsed_seconds);
+    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
+  }
+  if (agentWindowIsAttentionState(state)) return sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true});
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
+}
+
+function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
+  const text = sessionPopoverAgentStateText(agent, nowSeconds);
+  if (agentWindowIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
+  return `<span class="${esc(className)}">${esc(text)}</span>`;
+}
+
+function tmuxSessionDescriptorLabel(label) {
+  const text = String(label || '').trim();
+  if (/^tmux\s+session\b/i.test(text)) return text;
+  return t('popover.tmuxSession', {label: text});
+}
+
+function tmuxWindowDescriptorLabel(label) {
+  const text = String(label || '').trim();
+  if (/^tmux\s+window\b/i.test(text)) return text;
+  return t('popover.tmuxWindow', {label: text});
+}
+
+function sessionPopoverWindowPidByIndex(info) {
+  if (typeof tmuxWindowRecords !== 'function') return new Map();
+  return new Map(tmuxWindowRecords(info?.panes || [])
+    .map(record => [tmuxWindowIndexKey(record.index ?? record.indexText), record.pid])
+    .filter(([index, pid]) => index !== null && Number.isFinite(Number(pid)) && Number(pid) > 0));
+}
+
+function sessionPopoverAgentWindowPid(agent, pidByIndex) {
+  const directPid = Number(agent?.pid || agent?.process_label_pid || 0);
+  if (Number.isFinite(directPid) && directPid > 0) return Math.floor(directPid);
+  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const sharedPid = index !== null ? Number(pidByIndex.get(index)) : null;
+  if (Number.isFinite(sharedPid) && sharedPid > 0) return Math.floor(sharedPid);
+  return null;
+}
+
+function sessionPopoverActiveWindowIndex(session, info) {
+  if (typeof tmuxWindowCurrentActiveIndex === 'function') return tmuxWindowCurrentActiveIndex(session, info);
+  const active = typeof tmuxWindowInfoActiveIndex === 'function' ? tmuxWindowInfoActiveIndex(info) : null;
+  if (active !== null) return active;
+  const pane = info?.selected_pane || null;
+  return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
+}
+
+function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
+  const activeWindowIndex = sessionPopoverActiveWindowIndex(session, info);
+  const pidByIndex = sessionPopoverWindowPidByIndex(info);
+  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .map((agent, index) => ({
+      ...agent,
+      _session: session,
+      _index: index,
+      kind: String(agent?.kind || '').toLowerCase(),
+      state: String(agent?.state || STATE_KEY.idle),
+      current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
+        ? agentWindowPayloadCurrent(agent) === true
+        : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
+      pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
+    }))
+    .filter(agent => ['claude', 'codex'].includes(agent.kind))
+    .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
+      || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
+      || left._index - right._index);
+}
+
+function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000) {
+  const working = agentWindowIsWorkingState(agent.state);
+  const attention = agentWindowIsAttentionState(agent.state);
+  const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+  const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
+  const classes = ['session-agent-row', `state-${agent.state}`];
+  if (working) classes.push('working');
+  if (attention) classes.push('attention');
+  if (agent.current === true) classes.push('current');
+  const activityHtml = agentWindowActivityIconHtmlForStatus(agent, agent.kind, agent._session || '');
+  return `<div class="${esc(classes.join(' '))}">
+    <span class="session-agent-kind">${activityHtml}${esc(label)}</span>
+    <span class="session-agent-sep">—</span>
+    ${sessionPopoverAgentStatusHtml(agent, nowSeconds)}
+  </div>`;
+}
+
+function sessionPopoverWindowMetadataItems(session, info, agentRows) {
+  const agents = Array.isArray(agentRows) ? agentRows : [];
+  if (!agents.length) return [];
+  return agents.map(agent => {
+    const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+    const paths = pathEntries.map(item => item.path).filter(Boolean);
+    const git = typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null);
+    const path = paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || ''));
+    const meta = {
+      window: String(agent?.window ?? ''),
+      window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
+      window_name: String(agent?.window_name || ''),
+      path,
+      paths,
+      path_entries: pathEntries,
+      git,
+    };
+    const html = windowMetadataRowsHtml(meta);
+    return html ? {agent, meta, html} : null;
+  }).filter(Boolean);
+}
+
+function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null, metadataItems = null) {
+  const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
+  if (!agents.length) {
+    return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
+  }
+  const nowSeconds = Date.now() / 1000;
+  const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(session, info, agents);
+  const metadataByWindow = new Map(items.map(item => [tmuxWindowIndexKey(item.agent.window_index ?? item.agent.window), item]));
+  const sharedMetadata = items.length > 1 && items.length === agents.length && new Set(items.map(item => sessionWindowMetadataSignature(item.meta))).size === 1;
+  const rows = agents.map(agent => {
+    const row = sessionPopoverAgentWindowRowHtml(agent, nowSeconds);
+    const item = metadataByWindow.get(tmuxWindowIndexKey(agent.window_index ?? agent.window));
+    const transcriptHtml = agentTranscriptRowsHtml(agent);
+    if ((!item || sharedMetadata) && !transcriptHtml) return row;
+    const metadataHtml = item && !sharedMetadata ? item.html : '';
+    return `<div class="session-agent-window-block">${row}<div class="session-window-metadata">${metadataHtml}${transcriptHtml}</div></div>`;
+  }).join('');
+  const sharedRows = sharedMetadata ? `<div class="session-window-metadata-list shared">${items[0].html}</div>` : '';
+  const metadataClass = items.length ? ' has-window-metadata' : '';
+  return `<div class="session-agent-list${metadataClass}">${rows}${sharedRows}</div>`;
+}
+
+function sessionWindowMetadataSignature(row) {
+  const git = row?.git || {};
+  const paths = Array.isArray(row?.paths) ? row.paths.join('\u0001') : (row?.path || '');
+  return [paths, git.root || '', git.branch || '', git.worktree?.path || ''].join('\u0000');
+}
+
+function windowMetadataBranchHtml(git) {
+  if (!git?.branch) return '';
+  return `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
+}
+
+function windowMetadataRowsHtml(row) {
+  if (!row) return '';
+  const git = row.git || {};
+  const rows = [];
+  const paths = Array.isArray(row.paths) ? row.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
+  const displayPaths = paths.length ? paths : (row.path ? [String(row.path)] : []);
+  for (const path of displayPaths) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(path)));
+  if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
+  if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
+  return rows.join('');
+}
+
+function agentTranscriptId(agent) {
+  const direct = String(agent?.transcript_id || agent?.agent_session_id || agent?.session_id || '').trim();
+  if (direct) return direct;
+  const transcript = String(agent?.transcript || '').trim();
+  if (!transcript) return '';
+  return basenameOf(transcript).replace(/\.[^.]+$/, '');
+}
+
+function agentTranscriptRowsHtml(agent) {
+  const transcript = String(agent?.transcript || '').trim();
+  if (!transcript) return '';
+  const transcriptId = agentTranscriptId(agent);
+  const rows = [];
+  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: 'Copy session ID'})));
+  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: 'Copy transcript path'})));
+  return rows.join('');
+}
+
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
@@ -649,7 +1026,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const linear = project.linear || [];
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
-  const title = `${sessionLabel(session)} · ${projectDirName(session, info)}`;
+  const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
   const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
   const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle);
   const rows = [];
@@ -659,11 +1036,17 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
-  rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
+  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
+  const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
+  const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows, windowMetadataItems);
+  const perWindowMetadata = Boolean(windowMetadataItems.length);
+  if (!perWindowMetadata) rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
-  rows.push(popoverRow(t('popover.path'), displayPath));
-  if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+  if (!perWindowMetadata) {
+    rows.push(popoverRow(t('popover.path'), displayPath));
+    if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+  }
   let linearValue = '';
   let linearDesc = '';
   if (linear.length) {
@@ -677,11 +1060,11 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
-  if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-  if (git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
-  if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
-  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
+  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (!perWindowMetadata && gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
@@ -689,6 +1072,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
         ${subtitleHtml}
       </div>
     </div>
+    ${agentWindowsHtml}
     ${rows.join('')}
     ${otherBranchesHtml(session, info)}
   </div>`;
@@ -706,7 +1090,7 @@ function popoverPairRow(leftLabel, leftValueHtml, rightLabel, rightValueHtml) {
 }
 
 function stripTitleAttrs(html) {
-  return String(html || '').replace(/\s+title="[^"]*"/g, '');
+  return String(html || '').replace(/\s+title=(?:"[^"]*"|'[^']*'|[^\s>]+)/g, '');
 }
 
 function linearInlineHtml(issues) {
@@ -749,9 +1133,15 @@ function linearIssueHtml(issue) {
   return linkHtml(issue.url, label, issue.title || '');
 }
 
+function linearIssueUrl(identifier) {
+  const id = String(identifier || '').trim();
+  if (!id || !linearIssueBaseUrl) return '';
+  return `${linearIssueBaseUrl}/${encodeURIComponent(id)}`;
+}
+
 function linearIssueLinkHtml(identifier) {
   if (!identifier) return '';
-  return linkHtml(`https://linear.app/team/issue/${encodeURIComponent(identifier)}`, identifier, identifier);
+  return linkHtml(linearIssueUrl(identifier), identifier, identifier);
 }
 
 function pullRequestLinkForBranch(git, branch) {
@@ -950,7 +1340,7 @@ function terminalCurrentPath(session) {
   const signalPath = tmuxSignalPanePathForSession(session);
   if (signalPath) return signalPath;
   const info = transcriptMeta.sessions?.[session];
-  return terminalDisplayPane(info)?.current_path || info?.selected_pane?.current_path || '';
+  return terminalDisplayPane(info, session)?.current_path || info?.selected_pane?.current_path || '';
 }
 
 function pathRelativeToDirectory(path, directory) {
@@ -977,16 +1367,14 @@ function transparentNativeDragImage() {
   if (transparentDragImage) return transparentDragImage;
   const node = document.createElement('div');
   node.className = 'transparent-drag-image';
-  node.style.position = 'fixed';
-  node.style.left = '-10000px';
-  node.style.top = '-10000px';
-  node.style.width = '1px';
-  node.style.height = '1px';
-  node.style.opacity = '0';
-  node.style.pointerEvents = 'none';
   document.body.appendChild(node);
   transparentDragImage = node;
   return node;
+}
+
+function clearNativeDragImagePreview() {
+  nativeDragImagePreview?.remove?.();
+  nativeDragImagePreview = null;
 }
 
 function moveCustomDragPreview(event) {
@@ -1035,7 +1423,7 @@ function paneDragPreviewMetrics(slot, event) {
   const sourceWidth = Math.max(1, Number(rect?.width) || fallbackWidth);
   const sourceHeight = Math.max(1, Number(rect?.height) || fallbackHeight);
   const viewport = appViewport();
-  const viewportWidth = Math.max(320, Number(viewport.width) || 1200);
+  const viewportWidth = effectiveViewportWidth(viewport);
   const viewportHeight = Math.max(240, Number(viewport.height) || 800);
   const maxWidth = Math.min(720, Math.max(220, viewportWidth * 0.64));
   const maxHeight = Math.min(420, Math.max(160, viewportHeight * 0.58));
@@ -1131,7 +1519,7 @@ function fileDragPreviewMedia(path, entry) {
   if (kind === 'file' && previewMediaKindForPath(path) === 'image') {
     return `<img class="file-drag-thumb" src="${rawFileUrl(path)}" alt="">`;
   }
-  const icon = kind === 'dir' ? '▸' : '📄';
+  const icon = kind === 'dir' ? disclosureTriangleCollapsedGlyph : '📄';
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
@@ -1194,8 +1582,9 @@ function showDragTimingOverlay(rows) {
     ...rows.map(row => `${row.mark.padEnd(width)}  +${String(row.deltaMs).padStart(7)}  total ${String(row.sinceStartMs).padStart(7)}`)].join('\n');
 }
 
-function startSessionDrag(event, session, sourceSlot = null) {
+function startSessionDrag(event, session, sourceSlot = null, options = {}) {
   dragTimingMark('startSessionDrag:begin');
+  clearNativeDragImagePreview();
   dragSession = session;
   dragSourceSlot = sourceSlot;
   dragPaneSlot = null;
@@ -1210,10 +1599,13 @@ function startSessionDrag(event, session, sourceSlot = null) {
   // getBoundingClientRect(), which forced a synchronous layout reflow inside the handler — coldest on the
   // first drag after load — before the browser could start the drag.
   const source = event.currentTarget;
-  if (source && event.dataTransfer?.setDragImage) {
+  const dragImageSource = typeof options.dragImage === 'function'
+    ? (options.dragImage(event, source) || source)
+    : (options.dragImage || source);
+  if (dragImageSource && event.dataTransfer?.setDragImage) {
     const offsetX = Math.max(0, Number(event.offsetX) || 0);
     const offsetY = Math.max(0, Number(event.offsetY) || 0);
-    event.dataTransfer.setDragImage(source, offsetX, offsetY);
+    event.dataTransfer.setDragImage(dragImageSource, offsetX, offsetY);
   }
   resetDragTabRectCache();
   dragTimingMark('startSessionDrag:end');
@@ -1246,6 +1638,7 @@ function endSessionDrag(event) {
   dragSourceSlot = null;
   dragPaneSlot = null;
   resetDragTabRectCache();
+  clearNativeDragImagePreview();
   stopCustomDragPreview();
   sessionButtons.classList.remove(CLS.dragOver);
   clearDropPreview();

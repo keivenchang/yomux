@@ -15,6 +15,11 @@ from ..settings import SETTINGS_DISPLAY_PATH
 from ..settings import canonical_image_action_order_item
 from ..settings import default_settings
 from ..settings import settings_catalog
+from .transports import BACKEND_REASON_AVAILABLE
+from .transports import BACKEND_REASON_MODULE_MISSING
+from .transports import BACKEND_REASON_NO_CREDENTIALS
+from .transports import BACKEND_REASON_NO_PROVIDER
+from .transports import BackendAvailability
 
 
 SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
@@ -23,7 +28,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "appearance.separator_color": ("separator color", "split color", "divider color", "drop preview color"),
     "appearance.editor_cursor_color": ("cursor color", "caret color", "editor cursor color", "terminal cursor color"),
     "appearance.editor_cursor_style": ("cursor style", "caret style", "block cursor", "line cursor"),
-    "appearance.ui_font_size": ("ui font size", "interface font size", "app font size", "terminal size", "yo!agent font size", "yoagent font size"),
+    "appearance.ui_font_size": ("ui font size", "interface font size", "app font size", "yo!agent font size", "yoagent font size"),
     "appearance.terminal_font_size": ("terminal font size", "tmux font size", "shell font size"),
     "appearance.editor_font_size": ("editor font size", "code font size", "codemirror font size"),
     "appearance.preview_font_size": ("preview font size", "markdown preview font size"),
@@ -33,8 +38,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "appearance.pane_spacing": ("pane spacing", "split spacing", "pane gap"),
     "appearance.pane_ring_opacity": ("pane ring opacity", "active ring opacity", "focus ring opacity"),
     "appearance.inactive_pane_opacity": ("inactive pane opacity", "inactive dim", "dim inactive panes"),
-    "appearance.yolo_rotate_ms": ("yo rotate", "yo marker rotation", "yolo rotate"),
-    "appearance.red_reminder_ms": ("red reminder", "attention reminder", "red pulse"),
+    "performance.workflow_transition_glow_seconds": ("workflow transition glow", "transition glow", "ball glow", "status ball glow", "green red yellow ball glow", "red yellow green ball glow"),
     "appearance.metadata_badge_pulse_seconds": ("metadata pulse", "badge pulse", "pr badge pulse"),
     "appearance.date_time_hour_cycle": ("hour cycle", "clock format", "12 hour", "24 hour"),
     "appearance.terminal_theme": ("terminal theme", "xterm theme"),
@@ -67,7 +71,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "uploads.suggestion_autorun": ("upload autorun", "drop autorun", "shell autorun"),
     "uploads.image_action_order": ("image action", "image actions", "image action order", "image paste actions", "image drop actions"),
     "uploads.custom_actions": ("custom upload actions", "custom drop actions", "file drop actions"),
-    "uploads.max_bytes": ("upload max bytes", "upload limit", "max upload size"),
+    "uploads.max_bytes": ("file transfer size cap", "transfer size cap", "upload max bytes", "upload limit", "download limit", "max upload size", "max download size"),
     "share.ttl_seconds": ("share ttl", "share expiry", "share duration"),
     "share.max_viewers": ("share max viewers", "max viewers"),
     "share.read_only": ("share read only", "share write access"),
@@ -76,6 +80,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "performance.latency_refresh_ms": ("latency refresh", "ping refresh"),
     "performance.event_log_refresh_ms": ("event log refresh", "log refresh"),
     "performance.tabber_activity_refresh_ms": ("tabber refresh", "recent agents refresh", "activity refresh"),
+    "performance.agent_status_pulse_period_ms": ("status ball pulse", "ball pulse period", "pulse frequency", "pulsating frequency", "red yellow green pulse"),
     "performance.server_event_poll_ms": ("server event poll", "visible file poll"),
     "performance.server_background_file_event_poll_ms": ("background file poll", "background file refresh"),
     "performance.server_directory_event_poll_ms": ("directory poll", "finder poll", "differ poll"),
@@ -95,7 +100,6 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "editor.blame_all_lines": ("blame all lines", "inline blame all lines"),
     "yoagent.backend": ("yoagent backend", "yo!agent backend", "agent backend"),
     "yoagent.invocation": ("yoagent invocation", "yo!agent invocation"),
-    "yoagent.refresh_interval_seconds": ("yoagent refresh interval", "yo!agent refresh interval", "transcript summary refresh", "background summaries", "background transcript summaries"),
     "yoagent.system_prompt": ("yoagent system prompt", "yo!agent system prompt", "agent system prompt"),
     "yoagent.intro": ("yoagent intro", "yo!agent intro"),
     "yoagent.format": ("yoagent format", "yo!agent format", "answer format"),
@@ -137,6 +141,35 @@ GENERIC_SETTING_KEY_ALIASES = {
 
 def normalize_text(value: Any) -> str:
     return " ".join(re.sub(r"[^a-z0-9_./#:-]+", " ", str(value or "").lower()).split())
+
+
+def implicit_settings_write_question(question: str) -> bool:
+    text = normalize_text(question)
+    if re.search(r"\b(?:tab|tabs)\b", text) and (re.search(r"\b(?:wider|narrower|bigger|smaller|larger|width)\b", text) or re.search(r"\d", text)):
+        return True
+    if re.search(r"\b(?:ui|interface|app)\b", text) and re.search(r"\b(?:bigger|smaller|larger|font|size)\b", text):
+        return True
+    if "terminal" in text and re.search(r"\b(?:bigger|smaller|larger|font|size|light|dark|black|white)\b", text):
+        return True
+    if re.search(r"\b(?:no|quiet|silent|silence|disable|off)\b", text) and re.search(r"\b(?:notify|notification|notifications|alerts)\b", text):
+        return True
+    return False
+
+
+def direct_setting_path_for_question(question: str, catalog: dict[str, dict[str, Any]]) -> str:
+    text = normalize_text(question)
+    path = ""
+    if re.search(r"\b(?:tab|tabs)\b", text) and (re.search(r"\b(?:wider|narrower|bigger|smaller|larger|width)\b", text) or re.search(r"\d", text)):
+        path = "appearance.tab_width"
+    elif re.search(r"\b(?:ui|interface|app)\b", text) and re.search(r"\b(?:bigger|smaller|larger|font|size)\b", text):
+        path = "appearance.ui_font_size"
+    elif "terminal" in text and re.search(r"\b(?:font|size|bigger|smaller|larger)\b", text):
+        path = "appearance.terminal_font_size"
+    elif "terminal" in text and re.search(r"\b(?:light|dark|black|white)\b", text):
+        path = "appearance.terminal_theme"
+    elif re.search(r"\b(?:no|quiet|silent|silence|disable|off)\b", text) and re.search(r"\b(?:notify|notification|notifications|alerts)\b", text):
+        path = "notifications.notify_transitions"
+    return path if path in catalog else ""
 
 
 def hidden_setting_message(question: str) -> str:
@@ -366,10 +399,15 @@ def clamp_numeric_setting_value(number: float, item: dict[str, Any]) -> tuple[in
 
 def choice_value_from_text(value_text: str, item: dict[str, Any]) -> str:
     text = normalize_text(value_text)
+    raw_text = str(value_text or "").casefold()
     choices = [str(choice) for choice in item.get("choices") or []]
     aliases = item.get("aliases") if isinstance(item.get("aliases"), dict) else {}
     for alias, canonical in aliases.items():
-        if normalize_text(alias) in text:
+        normalized_alias = normalize_text(alias)
+        raw_alias = str(alias or "").casefold()
+        if normalized_alias and normalized_alias in text:
+            return str(canonical)
+        if not normalized_alias and raw_alias and raw_alias in raw_text:
             return str(canonical)
     choice_aliases = {
         "on": "true",
@@ -391,7 +429,7 @@ def choice_value_from_text(value_text: str, item: dict[str, Any]) -> str:
         for alias, canonical in choice_aliases.items():
             if canonical == choice:
                 variants.add(alias)
-        if any(normalize_text(variant) in text for variant in variants):
+        if any(normalize_text(variant) and normalize_text(variant) in text for variant in variants):
             return choice
     return ""
 
@@ -533,6 +571,10 @@ def setting_value_from_question(question: str, item: dict[str, Any], operation: 
         value = choice_value_from_question(question, item)
         return (value, "") if value else (None, f"I need one of: {', '.join(f'`{choice}`' for choice in item.get('choices') or [])}.")
     if setting_type == "list":
+        if path == "notifications.notify_transitions" and operation == "set":
+            text = normalize_text(question)
+            if re.search(r"\b(?:no|quiet|silent|silence|disable|off)\b", text) and re.search(r"\b(?:notify|notification|notifications|alerts)\b", text):
+                return [], ""
         if operation not in {"add", "remove"}:
             return None, f"Tell me whether to add or remove an item from `{path}`."
         return list_value_from_question(question, path, current if isinstance(current, list) else [], operation)
@@ -570,7 +612,9 @@ def changed_setting_answer(path: str, item: dict[str, Any], before: Any, after: 
 
 
 def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-    if not WRITE_RE.search(question):
+    if READ_RE.search(question) and not WRITE_RE.search(question):
+        return None
+    if not WRITE_RE.search(question) and not implicit_settings_write_question(question):
         return None
     text = normalize_text(question)
     hidden_message = hidden_setting_message(question)
@@ -579,7 +623,8 @@ def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, An
     if "reset" in text and any(term in text for term in ["all", "everything", "preferences", "settings"]):
         return {"type": "settings_clarify", "answer": "Resetting all Preferences is broad and can disrupt the running UI. Tell me the specific setting to reset, or use Preferences -> Reset all defaults."}
     catalog = catalog_from_payload(payload)
-    candidates = setting_candidates(question, catalog)
+    direct_path = direct_setting_path_for_question(question, catalog)
+    candidates = [(1000, direct_path)] if direct_path else setting_candidates(question, catalog)
     if not candidates:
         return None
     top_score = candidates[0][0]
@@ -627,6 +672,46 @@ def parse_settings_read(question: str, payload: dict[str, Any]) -> dict[str, Any
     return {"type": "settings_read", "answer": answer} if answer else None
 
 
+# Maps a structured BackendAvailability reason to the locale key + substitution params the UI should
+# render instead of the generic det.noBackend string. The keys live in static_src/locales/en.json.
+BACKEND_REASON_LOCALE_KEYS = {
+    BACKEND_REASON_NO_PROVIDER: "det.noBackend.noProvider",
+    BACKEND_REASON_MODULE_MISSING: "det.noBackend.moduleMissing",
+    BACKEND_REASON_NO_CREDENTIALS: "det.noBackend.noCredentials",
+}
+
+
+def backend_no_backend_notice(availability: BackendAvailability) -> dict[str, Any]:
+    """Translate a structured backend diagnostic into a UI notice.
+
+    Returns the specific locale key plus params (provider / module / command) so the YO!agent chat can
+    say WHICH precondition failed and point at the exact fix, rather than the generic det.noBackend
+    "set or log in a backend" message. When the backend IS available, falls back to the generic key so
+    callers still have something to show for an unexpected empty answer.
+    """
+    if availability.available or availability.reason == BACKEND_REASON_AVAILABLE:
+        return {"reason": availability.reason, "locale_key": "det.noBackend", "params": {}}
+    locale_key = BACKEND_REASON_LOCALE_KEYS.get(availability.reason, "det.noBackend")
+    params: dict[str, str] = {}
+    if availability.reason == BACKEND_REASON_MODULE_MISSING:
+        params = {
+            "provider": availability.provider or availability.backend,
+            "module": availability.sdk_module,
+        }
+    elif availability.reason == BACKEND_REASON_NO_CREDENTIALS:
+        params = {
+            "provider": availability.provider or availability.backend,
+            "command": availability.login_command,
+        }
+    return {
+        "reason": availability.reason,
+        "locale_key": locale_key,
+        "params": params,
+        "backend": availability.backend,
+        "detail": availability.detail,
+    }
+
+
 def product_capability_registry() -> list[dict[str, Any]]:
     return [
         {
@@ -670,7 +755,7 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "write_action": "server-verified prompt preview/send/watch",
             "auth": "admin",
             "backing": "yoagent action/job helpers and transport registry",
-            "setting_keys": ["yoagent.backend", "yoagent.invocation", "yoagent.refresh_interval_seconds"],
+            "setting_keys": ["yoagent.backend", "yoagent.invocation"],
             "examples": ["ask session 1 what changed, then ask session 2 if it is correct", "notify me when all sessions are idle"],
         },
         {

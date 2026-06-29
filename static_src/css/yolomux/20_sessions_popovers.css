@@ -2,8 +2,9 @@
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  min-width: 1ch;
+  /* Keep the branch and description column stable as the numeric session changes on reload. */
+  justify-content: flex-start;
+  min-width: 4ch;
   color: inherit;
   background: transparent;
   border: 0;
@@ -50,13 +51,13 @@
 }
 .session-button-dir {
   min-width: 0;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   font-size: var(--tab-label-size);
   font-weight: 500;
 }
 .session-button-detail {
   max-width: 86px;
-  color: #9ea8b7;
+  color: var(--text-muted-cool);
   font: var(--ui-font-size-xs)/1 var(--mono-font);
 }
 .session-button-detail.pr-status-failing {
@@ -75,18 +76,266 @@
 .session-button-detail.pr-status-closed {
   color: var(--pr-status-closed);
 }
-.session-state-badge {
-  min-width: 26px;
+.status-indicator {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transform-origin: center;
+}
+.status-indicator--inline {
+  min-width: 0;
+  padding: 0 2px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  line-height: 1.15;
+}
+.status-indicator--text {
+  min-width: 26px;
   padding: 1px 3px;
   border: 1px solid var(--divider);
   border-radius: 5px;
-  color: var(--pr-status-closed);
-  background: #161d29;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
   text-transform: uppercase;
+}
+.status-indicator--label {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-indicator--dot {
+  width: 1em;
+  min-width: 1em;
+  color: var(--muted);
+  font-size: 0.9em;
+  line-height: 1;
+  text-align: center;
+  border-radius: 999px;
+  opacity: 1;
+}
+.status-indicator--dot.heartbeat-pulse {
+  --attention-pulse-saturate-rest: 1.04;
+  --attention-pulse-saturate-peak: 1.42;
+  --attention-pulse-brightness-rest: 0.82;
+  --attention-pulse-brightness-peak: 1.34;
+  --attention-ring-border-rest-alpha: 0.56;
+  --attention-ring-border-peak-alpha: 1;
+  --attention-ring-rest-glow-alpha: 0.24;
+  --attention-ring-peak-outline-alpha: 0.72;
+  --attention-ring-peak-glow-alpha: 0.68;
+  --attention-ring-rest-glow-size: 5px;
+  --attention-ring-peak-glow-size: 26px;
+}
+.status-indicator--positive,
+.status-indicator--working {
+  color: var(--pr-status-passing);
+  --attention-ring-rgb: 82 210 115;
+}
+.status-indicator--cooldown {
+  color: var(--accent-gold);
+  --attention-ring-rgb: 245 197 66;
+}
+.status-indicator--active {
+  color: var(--file-tree-recency-max-contrast, var(--text));
+}
+.heartbeat-pulse {
+  transform-origin: center;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
+/* Re-declare the pulse cadence at higher specificity (.status-indicator beats the bare
+   .heartbeat-pulse) so the prefers-reduced-motion rule `.heartbeat-pulse { animation: none }` cannot
+   zero the status balls' timing. Without this the balls freeze under reduced motion while the
+   higher-specificity status labels keep pulsing (the balls' animation-name survives but their
+   duration/iteration get reset to 0). Same cadence as the parent; only the specificity differs. */
+.status-indicator.heartbeat-pulse {
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
+.status-indicator--dot.status-indicator--working.heartbeat-pulse {
+  --attention-pulse-saturate-rest: 1;
+  --attention-pulse-saturate-peak: 1.08;
+  --attention-pulse-brightness-rest: 0.96;
+  --attention-pulse-brightness-peak: 1.06;
+  --attention-ring-border-rest-alpha: 0.18;
+  --attention-ring-border-peak-alpha: 0.42;
+  --attention-ring-rest-glow-alpha: 0.06;
+  --attention-ring-peak-outline-alpha: 0.14;
+  --attention-ring-peak-glow-alpha: 0.18;
+  --attention-ring-rest-glow-size: 2px;
+  --attention-ring-peak-glow-size: 8px;
+  border: 1px solid transparent;
+  animation-name: attention-ring-fade, working-ball-hard-flash;
+}
+.status-indicator--dot.status-indicator--attention.heartbeat-pulse,
+.status-indicator--dot.status-indicator--cooldown.heartbeat-pulse {
+  border: 1px solid transparent;
+  animation-name: attention-ring-fade;
+}
+.agent-window-status-dot--transition-glow.status-indicator--working,
+.agent-window-status-dot--transition-glow.status-indicator--attention,
+.agent-window-status-dot--transition-glow.status-indicator--cooldown {
+  border: 1px solid rgb(var(--attention-ring-rgb, 255 51 71) / 0.42);
+  box-shadow: 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.18), 0 0 5px rgb(var(--attention-ring-rgb, 255 51 71) / 0.18);
+}
+.agent-window-status-dot--transition-pulse:not(.heartbeat-pulse) {
+  border: 1px solid transparent;
+  animation-name: agent-status-transition-pulse;
+  animation-duration: var(--agent-status-transition-pulse-duration, var(--pulse-duration, 1.55s));
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+}
+.status-indicator--settled {
+  color: var(--agent-inactive-marker-bg);
+}
+.status-indicator--attention {
+  color: var(--danger-text);
+  --attention-ring-rgb: 255 51 71;
+}
+.status-indicator--dot.status-indicator--attention {
+  color: var(--bad);
+}
+.status-indicator--dot.status-indicator--cooldown {
+  color: var(--accent-gold);
+  border: 1px solid transparent;
+}
+.agent-window-activity {
+  --agent-window-icon-size: 18px;
+  /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
+     two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
+  --agent-status-ball-size-base: 14px;
+  --agent-status-ball-size: var(--agent-status-ball-size-base);
+  --agent-window-activity-inline-size: 24px;
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  margin-inline-start: 2px;
+  vertical-align: middle;
+}
+.agent-window-activity .agent-icon {
+  width: var(--agent-window-icon-size);
+  min-width: var(--agent-window-icon-size);
+  height: var(--agent-window-icon-size);
+  margin: 0;
+}
+.agent-window-activity .agent-icon svg {
+  width: var(--agent-window-icon-size);
+  height: var(--agent-window-icon-size);
+}
+.agent-window-status-dot {
+  margin-inline-start: 0;
+  font-family: var(--ui-font);
+  font-stretch: normal;
+}
+.status-indicator--dot.agent-window-status-dot--segmented {
+  --agent-status-segment-attention: var(--bad);
+  --agent-status-segment-cooldown: var(--accent-gold);
+  --agent-status-segment-working: var(--pr-status-passing);
+  display: inline-block;
+  height: 1em;
+  color: transparent;
+  background: var(--agent-status-segment-bg, currentColor);
+  overflow: hidden;
+}
+.agent-window-status-dot--attention-cooldown {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-attention) 0 50%,
+    var(--agent-status-segment-cooldown) 0 100%
+  );
+}
+.agent-window-status-dot--attention-working {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-attention) 0 50%,
+    var(--agent-status-segment-working) 0 100%
+  );
+}
+.agent-window-status-dot--cooldown-working {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-cooldown) 0 50%,
+    var(--agent-status-segment-working) 0 100%
+  );
+}
+.agent-window-status-dot--attention-cooldown-working {
+  --agent-status-segment-bg: conic-gradient(
+    var(--agent-status-segment-attention) 0 33.333%,
+    var(--agent-status-segment-cooldown) 0 66.666%,
+    var(--agent-status-segment-working) 0 100%
+  );
+}
+/* Agent status = a static AI symbol followed by a separate glowing status ball:
+   [symbol][ball]. Working uses a quieter green glow; attention and cooldown keep stronger red/yellow
+   glows. The active/current state is the only status that animates the symbol itself. */
+.agent-window-activity--attention {
+  --attention-ring-rgb: 255 51 71;
+}
+.agent-window-activity--cooldown {
+  --attention-ring-rgb: 245 197 66;
+}
+/* Status balls own their size through --agent-status-ball-size instead of inheriting the surrounding
+   surface's icon/font size. The symbol can be compact in a window button while the ball stays identical
+   across dock tabs, Tabber parent rows, Tabber child rows, popovers, and Info Bar buttons. */
+.agent-window-activity--working .agent-window-status-dot,
+.agent-window-activity--attention .agent-window-status-dot,
+.agent-window-activity--cooldown .agent-window-status-dot {
+  font-size: var(--agent-status-ball-size);
+  line-height: 1;
+}
+.agent-window-activity .agent-window-status-dot--acknowledged {
+  font-size: var(--agent-status-ball-size-base);
+  border-color: transparent;
+  box-shadow: none;
+  filter: saturate(0.9) brightness(0.95);
+  opacity: 0.82;
+}
+.agent-window-agent-icon--active {
+  --agent-working-glow-rgb: 226 238 248;
+  border-radius: 5px;
+  animation-name: agent-symbol-glow-cadence;
+  will-change: opacity, transform, filter, box-shadow;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
+.agent-window-agent-icon--active.agent-icon.codex {
+  --agent-working-glow-rgb: 102 126 248;
+}
+.agent-window-agent-icon--active.agent-icon.claude {
+  --agent-working-glow-rgb: 207 117 84;
+}
+@keyframes agent-symbol-glow-cadence {
+  0%, 30% {
+    opacity: 1;
+    transform: scale(1.12);
+    filter: saturate(var(--attention-pulse-saturate-peak, 1.52)) brightness(var(--attention-pulse-brightness-peak, 1.5)) drop-shadow(0 0 12px rgb(var(--agent-working-glow-rgb) / 0.9));
+    box-shadow: 0 0 0 2px rgb(var(--agent-working-glow-rgb) / 0.55), 0 0 16px rgb(var(--agent-working-glow-rgb) / 0.82);
+  }
+  55%, 85% {
+    opacity: 0.15;
+    transform: scale(0.9);
+    filter: saturate(var(--attention-pulse-saturate-rest, 0.86)) brightness(var(--attention-pulse-brightness-rest, 0.7)) drop-shadow(0 0 0 rgb(var(--agent-working-glow-rgb) / 0));
+    box-shadow: 0 0 0 0 rgb(var(--agent-working-glow-rgb) / 0);
+  }
+}
+.session-state-badge {
+  color: var(--pr-status-closed);
+  background: #161d29;
 }
 .session-state-needs-approval,
 .session-state-needs-input {
@@ -115,38 +364,51 @@
   background: var(--pr-status-passing);
   border-color: #9befad;
 }
-.session-state-working {
-  color: #dce9ff;
-  background: #1c355f;
-  border-color: #4d7ed8;
-}
-.session-state-done {
-  color: #d9e5f5;
-  background: #273244;
-  border-color: #58667b;
-}
 @keyframes attention-ring-fade {
   0%, 100% {
-    border-color: rgba(255, 51, 71, 0.56);
-    box-shadow: 0 0 0 0 rgba(255, 51, 71, 0), 0 0 5px rgba(255, 51, 71, 0.24);
+    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-border-rest-alpha, 0.56));
+    box-shadow: 0 0 0 0 rgb(var(--attention-ring-rgb, 255 51 71) / 0), 0 0 var(--attention-ring-rest-glow-size, 5px) rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-rest-glow-alpha, 0.24));
+    filter: saturate(var(--attention-pulse-saturate-rest, 1)) brightness(var(--attention-pulse-brightness-rest, 1));
   }
   45%, 55% {
-    border-color: rgba(255, 51, 71, 1);
-    box-shadow: 0 0 0 2px rgba(255, 51, 71, 0.72), 0 0 26px rgba(255, 51, 71, 0.68);
+    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-border-peak-alpha, 1));
+    box-shadow: 0 0 0 2px rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-outline-alpha, 0.72)), 0 0 var(--attention-ring-peak-glow-size, 26px) rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-glow-alpha, 0.68));
+    filter: saturate(var(--attention-pulse-saturate-peak, 1)) brightness(var(--attention-pulse-brightness-peak, 1));
   }
 }
-.session-state-badge.session-state-reminder,
-.session-state-badge.session-state-needs-approval,
-.session-state-badge.session-state-needs-input,
-.session-state-badge.session-state-blocked,
-.session-state-badge.session-state-disconnected,
+@keyframes working-ball-hard-flash {
+  0%, 100% {
+    color: var(--pr-status-passing);
+  }
+  45%, 55% {
+    color: #4be878;
+  }
+}
+@keyframes agent-status-transition-pulse {
+  0%, 100% {
+    opacity: 0.52;
+    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.18);
+  }
+  45%, 55% {
+    opacity: 1;
+    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.72);
+  }
+}
+.attention-pulse {
+  --attention-ring-border: 1px;
+  animation-name: attention-ring-fade;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
+}
+.status-indicator--text.status-indicator--attention.attention-pulse,
 .ci-indicator.pr-status-failing {
   --attention-ring-border: 1px;
-  transform-origin: center;
   animation-name: attention-ring-fade, red-pill-fill-fade;
-  animation-duration: var(--red-reminder-duration), var(--red-reminder-duration);
+  animation-duration: var(--pulse-duration), var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s), var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--red-reminder-easing), var(--red-reminder-easing);
+  animation-timing-function: var(--pulse-easing), var(--pulse-easing);
   animation-iteration-count: infinite, infinite;
 }
 @keyframes red-pill-fill-fade {
@@ -164,6 +426,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .heartbeat-pulse,
+  .attention-pulse,
+  .agent-window-status-dot--transition-pulse,
   .session-state-needs-approval,
   .session-state-needs-input,
   .session-state-blocked,
@@ -175,6 +440,29 @@
   .panel.needs-blocked-pane::after {
     animation: none;
   }
+  /* Reduced motion disables the --active glow-cadence animation, which would leave the active glyph
+     identical to idle. Pin it to a steady peak-like glow. (Working needs no fallback here: it renders
+     a static green status dot under reduced motion, which already distinguishes it from idle.) */
+  .agent-window-agent-icon--active {
+    opacity: 1;
+    filter: saturate(var(--attention-pulse-saturate-peak, 1.52)) brightness(var(--attention-pulse-brightness-peak, 1.44));
+    box-shadow: 0 0 0 2px rgb(var(--agent-working-glow-rgb) / 0.48), 0 0 12px rgb(var(--agent-working-glow-rgb) / 0.7);
+  }
+}
+html.status-pulse-disabled .heartbeat-pulse,
+html.status-pulse-disabled .attention-pulse,
+html.status-pulse-disabled .agent-window-agent-icon--active,
+html.status-pulse-disabled .ci-indicator.pr-status-failing {
+  animation: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+  transform: none !important;
+  transition: none !important;
+}
+html.status-pulse-disabled .status-indicator--dot,
+html.status-pulse-disabled .agent-window-status-dot,
+html.status-pulse-disabled .agent-window-agent-icon--active {
+  will-change: auto;
 }
 .session-yolo-marker {
   flex: 0 0 auto;
@@ -188,26 +476,38 @@
   padding: 1px 0;
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
-  border: 1px solid var(--pane-tab-yolo-border);
-  border-radius: 2px;
-  box-shadow: none;
+  border: 2px solid var(--pane-tab-yolo-border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
 }
 .session-yolo-marker[data-auto-session] {
   cursor: pointer;
 }
+.session-agent-activity-marker {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.session-agent-activity-marker[data-auto-session] {
+  cursor: pointer;
+}
+.session-agent-activity-marker .agent-window-activity {
+  margin-inline-start: 0;
+}
 .panel-session-label .session-yolo-marker {
   min-width: max(17px, calc(var(--ui-font-size) + 5px));
   height: max(16px, calc(var(--ui-font-size) + 5px));
   padding: 0;
-  border-radius: 2px;
+  border-radius: var(--radius-control);
   font-size: max(10px, var(--ui-font-size));
 }
 .session-yolo-marker.inactive {
-  color: var(--pane-meta-branch);
-  background: var(--divider);
-  border-color: #5d6878;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 .session-yolo-marker.locked {
   color: #ffd75d;
@@ -218,31 +518,28 @@
    status colors — red/blue/green — already read on white and are left alone).
    Repaint the neutral chips as light gray with dark text. */
 body.theme-light .session-state-badge {
-  color: #52617a;
+  color: var(--neutral-text-strong);
   background: #eef1f5;
   border-color: #cdd5e0;
 }
-body.theme-light .session-state-done {
-  color: #3a4659;
-  background: #e2e8f1;
-  border-color: #b8c2d2;
-}
 body.theme-light .session-yolo-marker.inactive {
-  color: #52617a;
-  background: #e2e6ec;
-  border-color: #c2cad6;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
-/* the YO ball spins ONLY when the agent is working, and SLOWLY — at the
-   "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
-   value. An idle marker (auto-on or not) is STATIC — there is no ambient idle rotation rule.
-   yolo_rotate_ms = 0 -> --yolo-rotation-duration: 0s -> the rotation renders static (disabled). */
+/* The session YO marker no longer rotates to signal "working" — the glowing green ball beside the
+   agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
+   model work, not session-working. */
 .session-yolo-marker.working {
   transform-origin: center;
-  animation-name: yolo-marker-rotate !important;
-  animation-duration: var(--yolo-rotation-duration, 20s) !important;
-  animation-delay: var(--yolo-rotate-delay, 0s) !important;
-  animation-timing-function: linear !important;
-  animation-iteration-count: infinite !important;
+}
+.session-yolo-marker.yoagent-waiting-spinner,
+.session-yolo-marker.yoagent-chat-spinner {
+  transform-origin: center;
+  animation-name: yolo-marker-rotate;
+  animation-duration: var(--pulse-duration, 1.55s);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
 }
 @keyframes yolo-marker-rotate {
   to {
@@ -329,7 +626,7 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.branch-indicator {
   color: #071321;
-  background: #9fd8ff;
+  background: var(--accent-sky-strong);
   border-color: #c9ebff;
 }
 /* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
@@ -380,7 +677,10 @@ body.theme-light .ci-indicator.branch-indicator {
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
-  animation: metadata-badge-pulse 1.4s var(--red-reminder-easing) 14;
+  animation-name: metadata-badge-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
 }
 @keyframes metadata-badge-pulse {
   0%, 100% {
@@ -515,6 +815,74 @@ body.theme-light .branch-link {
 .popover-subtitle-text {
   min-width: 0;
 }
+.session-agent-list {
+  display: grid;
+  gap: 2px;
+  margin: 1px 0 6px;
+  padding: 4px 0 5px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.session-agent-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font: var(--ui-font-size-xs)/1.25 var(--ui-font);
+  white-space: nowrap;
+}
+.session-agent-window-block > .session-agent-row {
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: var(--pane-inactive-tab-bg);
+}
+.session-agent-window-block > .session-agent-row.current {
+  background: var(--active-tab-muted-bg);
+}
+.session-agent-row.attention {
+  color: var(--danger-text);
+}
+.session-agent-kind {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-weight: 600;
+}
+.session-agent-kind .agent-window-activity {
+  margin-inline-start: 0;
+}
+.session-agent-sep,
+.session-agent-status,
+.session-agent-empty {
+  color: var(--muted);
+}
+.session-agent-row.attention .session-agent-status {
+  color: var(--danger-text);
+}
+.session-agent-status.status-indicator--label,
+.tabber-agent-status.status-indicator--label {
+  color: var(--danger-text);
+}
+.session-agent-empty {
+  font: var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.session-window-metadata-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 6px;
+}
+.session-window-metadata,
+.session-window-metadata-list.shared {
+  padding: 4px 0 2px;
+  border-top: 1px solid var(--line);
+}
+.session-window-metadata-title {
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+  padding: 2px 0;
+}
 .popover-row {
   display: grid;
   grid-template-columns: 62px minmax(0, 1fr);
@@ -576,6 +944,23 @@ body.theme-light .branch-link {
   box-shadow: 0 14px 34px rgb(var(--shadow-rgb) / 0.42);
   overflow: hidden;
   opacity: 0.86 !important;
+}
+.tabber-drag-image.drag-image {
+  max-height: min(56vh, 520px);
+  padding: 4px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 94%, black 6%);
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 12px 30px rgb(var(--shadow-rgb) / 0.42);
+  overflow: hidden;
+  opacity: 0.88 !important;
+}
+.tabber-drag-image .file-tree-row {
+  width: 100%;
+}
+.tabber-drag-image .session-popover {
+  display: none !important;
 }
 .pane-drag-image-frame {
   display: grid;
@@ -693,8 +1078,7 @@ body.theme-light .branch-link {
 }
 .popover-value a.pr-status-failing,
 .meta a.pr-status-failing,
-.summary-context a.pr-status-failing,
-.info-cell a.pr-status-failing {
+.summary-context a.pr-status-failing {
   color: var(--pr-status-failing);
 }
 .popover-value a.pr-status-pending,
@@ -702,27 +1086,22 @@ body.theme-light .branch-link {
 .meta a.pr-status-pending,
 .meta a.pr-status-draft,
 .summary-context a.pr-status-pending,
-.summary-context a.pr-status-draft,
-.info-cell a.pr-status-pending,
-.info-cell a.pr-status-draft {
+.summary-context a.pr-status-draft {
   color: var(--accent-gold);
 }
 .popover-value a.pr-status-passing,
 .meta a.pr-status-passing,
-.summary-context a.pr-status-passing,
-.info-cell a.pr-status-passing {
+.summary-context a.pr-status-passing {
   color: var(--pr-status-passing);
 }
 .popover-value a.pr-status-merged,
 .meta a.pr-status-merged,
 .summary-context a.pr-status-merged,
-.branch-meta a.pr-status-merged,
-.info-cell a.pr-status-merged {
+.branch-meta a.pr-status-merged {
   color: var(--pr-status-merged);
 }
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,
-.summary-context a.pr-status-closed,
-.info-cell a.pr-status-closed {
+.summary-context a.pr-status-closed {
   color: var(--pr-status-closed);
 }

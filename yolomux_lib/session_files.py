@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 import shlex
 import time
@@ -20,6 +22,10 @@ from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
 from .sessions import find_recent_codex_transcript
 from .sessions import recent_codex_transcript_candidates
+from .types import RepoPayload
+from .types import SessionFileEntry
+from .types import SessionFilesPayload
+from .workdir import session_workdir
 
 
 CLAUDE_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -29,8 +35,13 @@ CODEX_SHELL_TOOL_NAMES = {"exec_command", "shell_command", "shell"}
 SHELL_COMMAND_BREAK_TOKENS = {"&&", "||", ";", "|"}
 SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
+SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
 _CODEX_TRANSCRIPT_SCAN_CACHE_MAX = 64
-_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, bool, float, int], dict[str, set[str]]] = {}
+_CODEX_TRANSCRIPT_SCAN_VERSION = 2
+_CODEX_TRANSCRIPT_SCAN_TAIL_BYTES = 512
+_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str, str, bool], dict[str, Any]] = {}
+_CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX = 64
+_CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, float, int], dict[str, Any]] = {}
 
 
 def classify_change(markers: set[str]) -> str:
@@ -50,7 +61,7 @@ def resolved_change_path(raw_path: str, cwd: str | None) -> Path | None:
         if not cwd:
             return None
         path = Path(cwd).expanduser() / path
-    return path.resolve(strict=False)
+    return Path(os.path.abspath(os.fspath(path)))
 
 
 def file_mtime(path: Path) -> float:
@@ -81,7 +92,19 @@ def file_mtime_or_fallback(path: Path, fallback: Any = 0.0) -> float:
 
 
 def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[str]]:
+    return copy_change_set(scan_claude_transcript_details(path, cwd).get("changes", {}))
+
+
+def scan_claude_transcript_details(path: Path, cwd: str | None = None) -> dict[str, Any]:
+    # Same (path, mtime, size) memoization the codex scanner uses: candidate_session_cwds now scans
+    # transcripts on the hot metadata-refresh path, so an unchanged transcript must read from disk once.
+    cache_key = claude_transcript_scan_cache_key(path, cwd)
+    if cache_key is not None:
+        cached = _CLAUDE_TRANSCRIPT_SCAN_CACHE.get(cache_key)
+        if cached is not None:
+            return copy_transcript_scan_details(cached)
     changes: dict[str, set[str]] = {}
+    generated_tokens = 0.0
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -94,6 +117,7 @@ def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[
                 message = record.get("message")
                 if not isinstance(message, dict):
                     continue
+                generated_tokens += claude_usage_generated_tokens(message.get("usage"))
                 for item in message.get("content", []) or []:
                     if not isinstance(item, dict) or item.get("type") != "tool_use":
                         continue
@@ -107,49 +131,249 @@ def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[
                         continue
                     changes.setdefault(str(resolved), set()).add("A" if tool == "Write" else "M")
     except OSError:
-        return changes
-    return changes
-
-
-def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, set[str]]:
-    cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text)
+        return transcript_scan_details(changes, generated_tokens)
+    details = transcript_scan_details(changes, generated_tokens)
     if cache_key is not None:
-        cached = _CODEX_TRANSCRIPT_SCAN_CACHE.get(cache_key)
-        if cached is not None:
-            return copy_change_set(cached)
-    changes: dict[str, set[str]] = {}
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                if include_patch_text:
-                    for verb, raw_path in CODEX_PATCH_RE.findall(line):
-                        resolved = resolved_change_path(raw_path, cwd)
-                        if resolved is None:
-                            continue
-                        changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
-                if not codex_line_may_contain_git_change(line):
-                    continue
-                for path_text, markers in scan_codex_tool_call_changes(line, cwd).items():
-                    changes.setdefault(path_text, set()).update(markers)
-    except OSError:
-        return changes
-    if cache_key is not None:
-        if len(_CODEX_TRANSCRIPT_SCAN_CACHE) >= _CODEX_TRANSCRIPT_SCAN_CACHE_MAX:
-            _CODEX_TRANSCRIPT_SCAN_CACHE.pop(next(iter(_CODEX_TRANSCRIPT_SCAN_CACHE)))
-        _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_change_set(changes)
-    return changes
+        if len(_CLAUDE_TRANSCRIPT_SCAN_CACHE) >= _CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX:
+            _CLAUDE_TRANSCRIPT_SCAN_CACHE.pop(next(iter(_CLAUDE_TRANSCRIPT_SCAN_CACHE)))
+        _CLAUDE_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_transcript_scan_details(details)
+    return details
 
 
-def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool) -> tuple[str, str, bool, float, int] | None:
+def claude_transcript_scan_cache_key(path: Path, cwd: str | None) -> tuple[str, str, float, int] | None:
     try:
         stat = path.stat()
     except OSError:
         return None
-    return (str(path.expanduser().resolve(strict=False)), str(cwd or ""), bool(include_patch_text), stat.st_mtime, stat.st_size)
+    return (str(path.expanduser().resolve(strict=False)), str(cwd or ""), stat.st_mtime, stat.st_size)
+
+
+def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, set[str]]:
+    return copy_change_set(scan_codex_transcript_details(path, cwd, include_patch_text).get("changes", {}))
+
+
+def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, Any]:
+    cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text)
+    state: dict[str, Any] | None = None
+    current_size = 0
+    if cache_key is not None:
+        try:
+            current_size = path.stat().st_size
+        except OSError:
+            current_size = 0
+        cached = _CODEX_TRANSCRIPT_SCAN_CACHE.get(cache_key)
+        if cached is not None:
+            state = cached
+            if codex_transcript_scan_state_needs_reset(path, current_size, state):
+                state = new_codex_transcript_scan_state()
+                _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = state
+        else:
+            state = new_codex_transcript_scan_state()
+            if len(_CODEX_TRANSCRIPT_SCAN_CACHE) >= _CODEX_TRANSCRIPT_SCAN_CACHE_MAX:
+                oldest_key = next(iter(_CODEX_TRANSCRIPT_SCAN_CACHE), None)
+                if oldest_key is not None:
+                    _CODEX_TRANSCRIPT_SCAN_CACHE.pop(oldest_key, None)
+            _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = state
+        if int(state.get("offset") or 0) >= current_size:
+            state["size"] = current_size
+            return codex_transcript_scan_state_details(state)
+    if state is None:
+        state = new_codex_transcript_scan_state()
+    try:
+        offset = int(state.get("offset") or 0) if cache_key is not None else 0
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+        lines, consumed = complete_transcript_lines(chunk)
+        for line in lines:
+            update_codex_transcript_scan_state(state, line, cwd, include_patch_text)
+        update_codex_transcript_scan_tail(state, chunk[:consumed])
+        state["offset"] = offset + consumed
+        state["size"] = current_size if cache_key is not None else offset + consumed
+    except OSError:
+        return codex_transcript_scan_state_details(state)
+    return codex_transcript_scan_state_details(state)
+
+
+def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool) -> tuple[int, int, int, str, str, bool] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        _CODEX_TRANSCRIPT_SCAN_VERSION,
+        int(stat.st_dev),
+        int(stat.st_ino),
+        str(path.expanduser().resolve(strict=False)),
+        str(cwd or ""),
+        bool(include_patch_text),
+    )
+
+
+def new_codex_transcript_scan_state() -> dict[str, Any]:
+    return {
+        "offset": 0,
+        "size": 0,
+        "changes": {},
+        "last_token_total": None,
+        "summed_last_generated_tokens": 0.0,
+        "parsed_tail": b"",
+    }
+
+
+def codex_transcript_scan_state_needs_reset(path: Path, current_size: int, state: dict[str, Any]) -> bool:
+    offset = int(state.get("offset") or 0)
+    if current_size < offset:
+        return True
+    parsed_tail = state.get("parsed_tail")
+    if offset <= 0 or not isinstance(parsed_tail, bytes) or not parsed_tail:
+        return False
+    start = max(0, offset - len(parsed_tail))
+    try:
+        with path.open("rb") as handle:
+            handle.seek(start)
+            current_tail = handle.read(offset - start)
+    except OSError:
+        return True
+    return current_tail != parsed_tail[-len(current_tail):]
+
+
+def complete_transcript_lines(chunk: bytes) -> tuple[list[str], int]:
+    if not chunk:
+        return [], 0
+    lines = chunk.splitlines(keepends=True)
+    if lines and not (lines[-1].endswith(b"\n") or lines[-1].endswith(b"\r")):
+        lines = lines[:-1]
+    consumed = sum(len(line) for line in lines)
+    return [line.decode("utf-8", errors="replace") for line in lines], consumed
+
+
+def update_codex_transcript_scan_tail(state: dict[str, Any], parsed_chunk: bytes) -> None:
+    if not parsed_chunk:
+        return
+    previous = state.get("parsed_tail")
+    previous_tail = previous if isinstance(previous, bytes) else b""
+    state["parsed_tail"] = (previous_tail + parsed_chunk)[-_CODEX_TRANSCRIPT_SCAN_TAIL_BYTES:]
+
+
+def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: str | None, include_patch_text: bool) -> None:
+    changes = state.get("changes")
+    if not isinstance(changes, dict):
+        changes = {}
+        state["changes"] = changes
+    if include_patch_text:
+        for verb, raw_path in CODEX_PATCH_RE.findall(line):
+            resolved = resolved_change_path(raw_path, cwd)
+            if resolved is None:
+                continue
+            changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    total_generated, last_generated = codex_record_usage_generated_tokens(record)
+    if total_generated is not None:
+        state["last_token_total"] = total_generated
+    elif last_generated is not None:
+        state["summed_last_generated_tokens"] = float(state.get("summed_last_generated_tokens") or 0.0) + last_generated
+    if not codex_line_may_contain_git_change(line):
+        return
+    for path_text, markers in scan_codex_tool_call_changes_from_record(record, cwd).items():
+        changes.setdefault(path_text, set()).update(markers)
+
+
+def codex_transcript_scan_state_details(state: dict[str, Any]) -> dict[str, Any]:
+    changes = state.get("changes") if isinstance(state, dict) else {}
+    last_token_total = state.get("last_token_total") if isinstance(state, dict) else None
+    summed_last_generated_tokens = float(state.get("summed_last_generated_tokens") or 0.0) if isinstance(state, dict) else 0.0
+    generated_tokens = numeric_token_value(last_token_total) if last_token_total is not None else summed_last_generated_tokens
+    return transcript_scan_details(changes if isinstance(changes, dict) else {}, generated_tokens)
 
 
 def copy_change_set(changes: dict[str, set[str]]) -> dict[str, set[str]]:
     return {path_text: set(markers) for path_text, markers in changes.items()}
+
+
+def transcript_scan_details(changes: dict[str, set[str]], generated_tokens: float = 0.0) -> dict[str, Any]:
+    return {
+        "changes": copy_change_set(changes),
+        "usage": {"generated_tokens": max(0.0, float(generated_tokens or 0.0))},
+    }
+
+
+def copy_transcript_scan_details(details: dict[str, Any]) -> dict[str, Any]:
+    changes = details.get("changes") if isinstance(details, dict) else {}
+    usage = details.get("usage") if isinstance(details, dict) else {}
+    generated_tokens = usage.get("generated_tokens") if isinstance(usage, dict) else 0.0
+    return transcript_scan_details(changes if isinstance(changes, dict) else {}, numeric_token_value(generated_tokens))
+
+
+def numeric_token_value(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number) or number <= 0:
+        return 0.0
+    return number
+
+
+def generated_usage_tokens(usage: Any) -> float:
+    if not isinstance(usage, dict):
+        return 0.0
+    return sum(numeric_token_value(usage.get(key)) for key in (
+        "output_tokens",
+        "outputTokens",
+        "completion_tokens",
+        "completionTokens",
+        "generated_tokens",
+        "generatedTokens",
+        "reasoning_output_tokens",
+        "reasoningOutputTokens",
+    ))
+
+
+def claude_usage_generated_tokens(usage: Any) -> float:
+    direct = generated_usage_tokens(usage)
+    if direct:
+        return direct
+    if not isinstance(usage, dict):
+        return 0.0
+    iterations = usage.get("iterations")
+    if not isinstance(iterations, list):
+        return 0.0
+    return sum(generated_usage_tokens(item) for item in iterations if isinstance(item, dict))
+
+
+def codex_record_usage_generated_tokens(record: Any) -> tuple[float | None, float | None]:
+    if not isinstance(record, dict):
+        return None, None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None, None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None, None
+    total_usage = info.get("total_token_usage")
+    total_generated = generated_usage_tokens(total_usage)
+    if total_generated:
+        return total_generated, None
+    last_usage = info.get("last_token_usage")
+    last_generated = generated_usage_tokens(last_usage)
+    return None, last_generated if last_generated else None
+
+
+def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -> float | None:
+    agent_kind = str(kind or "").strip().lower()
+    if agent_kind == "claude":
+        details = scan_claude_transcript_details(path, cwd)
+    elif agent_kind == "codex":
+        details = scan_codex_transcript_details(path, cwd)
+    else:
+        return None
+    usage = details.get("usage") if isinstance(details, dict) else {}
+    generated_tokens = numeric_token_value(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
+    return generated_tokens if generated_tokens > 0 else None
 
 
 def codex_line_may_contain_git_change(line: str) -> bool:
@@ -176,6 +400,10 @@ def scan_codex_tool_call_changes(line: str, cwd: str | None = None) -> dict[str,
         record = json.loads(line)
     except json.JSONDecodeError:
         return {}
+    return scan_codex_tool_call_changes_from_record(record, cwd)
+
+
+def scan_codex_tool_call_changes_from_record(record: Any, cwd: str | None = None) -> dict[str, set[str]]:
     if not isinstance(record, dict):
         return {}
     payload = record.get("payload")
@@ -334,12 +562,37 @@ def scan_agent_changes(agent: AgentInfo) -> dict[str, set[str]]:
     return {}
 
 
+def session_touched_dirs(info: SessionInfo) -> list[str]:
+    """Directories the session's agents have actually EDITED files in, derived from each agent's
+    transcript (the same edit-tool scan the Modified-files / Tabber panes use, so it counts edits, not
+    reads). This is the signal that lets repo detection find the real project repo even when the live
+    pane cwd is $HOME or another non-repo: a claude launched from ~ but editing files in
+    ~/yolomux.dev8003 still surfaces that repo. Returns unique containing directories in first-seen
+    order; git-root resolution and dedupe across repos happen in the caller's repo_summary pass."""
+    dirs: list[str] = []
+    seen: set[str] = set()
+    for agent in info.agents:
+        for path_text in scan_agent_changes(agent):
+            parent = str(Path(path_text).parent)
+            if parent and parent != "." and parent not in seen:
+                seen.add(parent)
+                dirs.append(parent)
+    return dirs
+
+
 def bounded_session_files_hours(value: Any) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return 24.0
     return max(0.25, min(parsed, float(SESSION_FILES_MAX_HOURS)))
+
+
+def session_files_cutoff(hours: float, now: float | None = None) -> float:
+    # Poll ticks near the lookback boundary should not make a repo appear on one refresh and vanish on the
+    # next just because transcript mtime crossed the exact second cutoff.
+    current = now if now is not None else time.time()
+    return current - bounded_session_files_hours(hours) * 3600 - SESSION_FILES_CUTOFF_GRACE_SECONDS
 
 
 def git_default_branch_ref(repo: Path) -> str | None:
@@ -407,25 +660,84 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
         if error:
             return [], False, error
         if newer == "current":
-            return [older], older == "HEAD", ""
+            return [older], True, ""
         return [older, newer], False, ""
     return [base or git_diff_base(repo)], True, ""
 
 
-def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
-    result = git(["log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an"], cwd=str(repo), timeout=5.0)
-    refs = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
+def git_decoration_aliases(decorations: str, *, include_head: bool = False) -> list[str]:
+    aliases: list[str] = ["HEAD"] if include_head else []
+    for raw in decorations.split(","):
+        for part in raw.strip().split(" -> "):
+            alias = part.strip()
+            if alias.startswith("tag: "):
+                alias = alias.removeprefix("tag: ").strip()
+            if alias.startswith("refs/heads/"):
+                alias = alias.removeprefix("refs/heads/")
+            elif alias.startswith("refs/remotes/"):
+                alias = alias.removeprefix("refs/remotes/")
+            if alias == "HEAD" and not include_head:
+                continue
+            if not alias or alias == "origin/HEAD" or alias in aliases:
+                continue
+            aliases.append(alias)
+
+    def sort_key(alias: str) -> tuple[int, str]:
+        if alias == "HEAD":
+            return (0, alias)
+        if alias in {"origin/main", "origin/master"}:
+            return (1, alias)
+        if alias in {"main", "master"}:
+            return (2, alias)
+        if alias.startswith("origin/"):
+            return (3, alias)
+        return (4, alias)
+
+    return sorted(aliases, key=sort_key)
+
+
+def git_ref_label(short_sha: str, aliases: list[str]) -> str:
+    if not aliases:
+        return short_sha
+    return f"{short_sha}/{aliases[0]}{' ' + ' '.join(aliases[1:]) if len(aliases) > 1 else ''}"
+
+
+def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, Any]]:
+    result = git([
+        "log",
+        "--decorate=short",
+        f"--max-count={max(1, min(limit, 200))}",
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an%x1f%D",
+    ], cwd=str(repo), timeout=5.0)
+    refs: list[dict[str, Any]] = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
     if result.returncode != 0:
         return refs
     seen = {"current", "HEAD"}
+    head_commit_seen = False
     for line in result.stdout.splitlines():
-        parts = line.split("\x1f", 4)
+        parts = line.split("\x1f", 5)
         if len(parts) < 3 or not parts[0] or parts[0] in seen:
             continue
-        entry: dict[str, str] = {"ref": parts[0], "short": parts[1], "subject": parts[2]}
+        aliases = git_decoration_aliases(parts[5] if len(parts) >= 6 else "")
+        entry: dict[str, Any] = {"ref": parts[0], "short": git_ref_label(parts[1], aliases), "subject": parts[2]}
+        if aliases:
+            entry["aliases"] = aliases
         if len(parts) >= 5:
             entry["date"] = parts[3]
             entry["author"] = parts[4]
+        if not head_commit_seen:
+            head_aliases = git_decoration_aliases(parts[5] if len(parts) >= 6 else "", include_head=True)
+            refs[0] = {
+                **refs[0],
+                "short": git_ref_label(parts[1], head_aliases),
+                "subject": parts[2],
+                "commit": parts[0],
+                "aliases": head_aliases,
+            }
+            if len(parts) >= 5:
+                refs[0]["date"] = parts[3]
+                refs[0]["author"] = parts[4]
+            head_commit_seen = True
         refs.append(entry)
         seen.add(parts[0])
     return refs
@@ -562,6 +874,18 @@ def repo_relative_path(path: Path, repo: Path) -> str | None:
         return None
 
 
+def configured_session_repo_candidate(info: SessionInfo) -> str | None:
+    configured = session_workdir(info.session)
+    if not configured.is_dir():
+        return None
+    try:
+        if configured.resolve() == Path.home().resolve():
+            return None
+    except OSError:
+        pass
+    return str(configured)
+
+
 def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     roots: list[str] = []
     candidates: list[str] = []
@@ -569,11 +893,73 @@ def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     if info.selected_pane is not None and info.selected_pane.current_path:
         candidates.append(info.selected_pane.current_path)
     candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
+    configured = configured_session_repo_candidate(info)
+    if configured:
+        candidates.append(configured)
     for value in candidates:
         repo = git_root_for_path(Path(value).expanduser())
         if repo and repo not in roots:
             roots.append(repo)
     return roots
+
+
+def session_live_pane_repo_roots(info: SessionInfo) -> list[str]:
+    roots: list[str] = []
+    candidates: list[str] = []
+    if info.selected_pane is not None and info.selected_pane.current_path:
+        candidates.append(info.selected_pane.current_path)
+    candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
+    configured = configured_session_repo_candidate(info)
+    if configured:
+        candidates.append(configured)
+    for value in candidates:
+        repo = git_root_for_path(Path(value).expanduser())
+        if repo and repo not in roots:
+            roots.append(repo)
+    return roots
+
+
+def refreshing_session_files_payload_for_info(
+    info: SessionInfo,
+    hours: float = 24.0,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+    repo_refs: dict[str, dict[str, str]] | None = None,
+) -> SessionFilesPayload:
+    refs_active = refs_requested(from_ref, to_ref)
+    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
+    repo_payloads: list[RepoPayload] = []
+    for repo_text in session_live_pane_repo_roots(info):
+        repo = Path(repo_text)
+        repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
+        repo_from = str(repo_override.get("from") or "").strip() or from_ref
+        repo_to = str(repo_override.get("to") or "").strip() or to_ref
+        repo_refs_active = refs_requested(repo_from, repo_to)
+        sel_from, sel_to = diff_refs(repo_from, repo_to) if repo_refs_active else ("", "")
+        repo_payload: RepoPayload = {
+            "repo": str(repo),
+            "count": 0,
+            "touched_count": 0,
+            "added": 0,
+            "removed": 0,
+            "from_ref": sel_from or "default",
+            "to_ref": sel_to or "base",
+            "error": "",
+        }
+        repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
+        repo_payloads.append(repo_payload)
+    return {
+        "session": info.session,
+        "hours": bounded_session_files_hours(hours),
+        "files": [],
+        "repos": repo_payloads,
+        "refs_by_repo": {},
+        "from_ref": selected_from or "default",
+        "to_ref": selected_to or "base",
+        "errors": [],
+        "warnings": [],
+        "refreshing_elsewhere": True,
+    }
 
 
 def session_file_entry(
@@ -587,7 +973,8 @@ def session_file_entry(
     removed: int | None = None,
     mtime: float | None = None,
     diff_tracked: bool | None = None,
-) -> dict[str, Any]:
+    agent_windows: list[dict[str, Any]] | None = None,
+) -> SessionFileEntry:
     rel_path = repo_relative_path(path, repo) if repo else None
     agent_list = [a for a in agents if a]
     tracked_diff = bool(repo) and source == "git" and status != "?"
@@ -600,6 +987,7 @@ def session_file_entry(
         # renders 0-to-N icons from it). `agent` stays as a scalar first-agent alias for legacy consumers.
         "agents": agent_list,
         "agent": agent_list[0] if agent_list else "",
+        "agent_windows": agent_windows or [],
         "status": status,
         "repo": str(repo) if repo else "",
         "path": rel_path or str(path),
@@ -626,6 +1014,10 @@ def line_total(entries: list[dict[str, Any]], key: str) -> int:
     return total
 
 
+def differ_visible_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in entries if str(entry.get("status") or "M").upper() != "T"]
+
+
 def merge_agent_lists(*agent_lists: list[str]) -> list[str]:
     merged: list[str] = []
     for agent_list in agent_lists:
@@ -635,12 +1027,65 @@ def merge_agent_lists(*agent_lists: list[str]) -> list[str]:
     return merged
 
 
-def touched_files_for_info(info: SessionInfo, cutoff: float, errors: list[str] | None = None) -> dict[str, dict[str, Any]]:
+def agent_window_for_info(info: SessionInfo, agent: AgentInfo) -> tuple[str, str]:
+    for pane in info.panes:
+        if pane.target == agent.pane_target or pane.pane_id == agent.pane_target:
+            return str(pane.window or ""), str(pane.pane or "")
+    match = re.match(r"^[^:]+:(?P<window>[^.]+)(?:\.(?P<pane>.*))?$", str(agent.pane_target or ""))
+    if not match:
+        return "", ""
+    return match.group("window") or "", match.group("pane") or ""
+
+
+def agent_window_attribution(info: SessionInfo, agent: AgentInfo) -> dict[str, Any]:
+    window, pane = agent_window_for_info(info, agent)
+    try:
+        window_index: int | None = int(window)
+    except ValueError:
+        window_index = None
+    return {
+        "kind": str(agent.kind or ""),
+        "window": window,
+        "window_index": window_index,
+        "pane": pane,
+        "pane_target": str(agent.pane_target or ""),
+    }
+
+
+def merge_agent_window_lists(*window_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for window_list in window_lists:
+        for raw in window_list:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                "kind": str(raw.get("kind") or ""),
+                "window": str(raw.get("window") or ""),
+                "window_index": raw.get("window_index") if isinstance(raw.get("window_index"), int) else None,
+                "pane": str(raw.get("pane") or ""),
+                "pane_target": str(raw.get("pane_target") or ""),
+            }
+            key = (item["kind"], item["window"], item["pane"], item["pane_target"])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
+def touched_files_for_info(info: SessionInfo, cutoff: float, warnings: list[str] | None = None) -> dict[str, dict[str, Any]]:
     touched: dict[str, dict[str, Any]] = {}
     for agent in info.agents:
         if not agent.transcript:
-            if agent.error and errors is not None:
-                errors.append(agent.error)
+            # D2: a missing/undiscoverable transcript is inherently a PER-AGENT condition (e.g. an inactive
+            # background Codex pane that never wrote a discoverable rollout). It is NOT a session-level
+            # failure: the other agents and git-derived repo data in the same session are still valid. Surface
+            # it as a non-blocking warning so the Differ keeps rendering the changed files/repos instead of
+            # treating the whole session as failed (the frontend renders payload["errors"] as red blocking
+            # rows; warnings are a separate, non-blocking channel).
+            if agent.error and warnings is not None:
+                warnings.append(agent.error)
             continue
         transcript = Path(agent.transcript).expanduser()
         transcript_mtime = file_mtime(transcript)
@@ -649,13 +1094,14 @@ def touched_files_for_info(info: SessionInfo, cutoff: float, errors: list[str] |
         for path_text, markers in scan_agent_changes(agent).items():
             # C5: accumulate every agent that touched this path instead of overwriting, so a file edited
             # by both Claude and Codex keeps both attributions (rendered as two icons).
-            entry = touched.setdefault(path_text, {"agents": [], "status": "", "mtime": 0.0})
+            entry = touched.setdefault(path_text, {"agents": [], "agent_windows": [], "status": "", "mtime": 0.0})
             if agent.kind and agent.kind not in entry["agents"]:
                 entry["agents"].append(agent.kind)
+            entry["agent_windows"] = merge_agent_window_lists(entry.get("agent_windows", []), [agent_window_attribution(info, agent)])
             entry["status"] = classify_change(markers)
             entry["mtime"] = max(float(entry.get("mtime") or 0.0), transcript_mtime)
     for path_text, metadata in historical_codex_changes_for_info(info, cutoff).items():
-        entry = touched.setdefault(path_text, {"agents": [], "status": "", "mtime": 0.0})
+        entry = touched.setdefault(path_text, {"agents": [], "agent_windows": [], "status": "", "mtime": 0.0})
         if "codex" not in entry["agents"]:
             entry["agents"].append("codex")
         entry["status"] = str(metadata.get("status") or "M")
@@ -720,8 +1166,11 @@ def historical_codex_candidate_cwds(info: SessionInfo) -> list[str]:
     unique: list[str] = []
     for value in candidates:
         text = str(value or "").strip()
-        if text and text not in unique:
-            unique.append(text)
+        if not text:
+            continue
+        repo = git_root_for_path(Path(text).expanduser())
+        if repo and repo not in unique:
+            unique.append(repo)
     return unique
 
 
@@ -741,15 +1190,18 @@ def session_files_payload_for_info(
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
     agent_attribution: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
+) -> SessionFilesPayload:
     # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
     # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
     # to any repo without an override (and drive the top-level payload refs for legacy single-repo callers).
-    cutoff = (now if now is not None else time.time()) - bounded_session_files_hours(hours) * 3600
+    cutoff = session_files_cutoff(hours, now)
     refs_active = refs_requested(from_ref, to_ref)
     selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
     errors: list[str] = []
-    touched = touched_files_for_info(info, cutoff, errors)
+    # D2: per-agent transcript-discovery problems land here, separate from the blocking `errors` list, so a
+    # single inactive agent's missing transcript does not read as a session-level Differ failure.
+    warnings: list[str] = []
+    touched = touched_files_for_info(info, cutoff, warnings)
 
     repos: dict[str, set[str]] = {}
     outside_repo_paths: set[str] = set()
@@ -760,15 +1212,16 @@ def session_files_payload_for_info(
             repos.setdefault(repo_text, set()).add(path_text)
         else:
             outside_repo_paths.add(path_text)
-    for repo_text in session_candidate_repo_roots(info):
+    candidate_repo_roots = set(session_candidate_repo_roots(info))
+    for repo_text in candidate_repo_roots:
         repos.setdefault(repo_text, set())
+    live_pane_repo_roots = set(session_live_pane_repo_roots(info))
 
-    files: list[dict[str, Any]] = []
-    repo_payloads: list[dict[str, Any]] = []
-    refs_by_repo: dict[str, list[dict[str, str]]] = {}
+    files: list[SessionFileEntry] = []
+    repo_payloads: list[RepoPayload] = []
+    refs_by_repo: dict[str, list[dict[str, Any]]] = {}
     for repo_text in sorted(repos):
         repo = Path(repo_text)
-        refs_by_repo[str(repo)] = git_recent_refs(repo)
         # C6: resolve this repo's effective FROM/TO — its own override if present, else the global scalar.
         repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
         repo_from = str(repo_override.get("from") or "").strip() or from_ref
@@ -798,7 +1251,7 @@ def session_files_payload_for_info(
             rel_path = repo_relative_path(Path(touched_path), repo)
             if rel_path:
                 touched_by_rel[rel_path] = metadata
-        repo_entries: list[dict[str, Any]] = []
+        repo_entries: list[SessionFileEntry] = []
         for rel_path, status in statuses.items():
             path = repo / rel_path
             counts = numstat.get(rel_path, {})
@@ -811,7 +1264,18 @@ def session_files_payload_for_info(
             # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
             # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
             agents = merge_agent_lists(touched_by_rel.get(rel_path, {}).get("agents", []), (agent_attribution or {}).get(str(path), []))
-            repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added=added, removed=removed, diff_tracked=diff_tracked))
+            repo_entries.append(session_file_entry(
+                info.session,
+                agents,
+                status,
+                path,
+                repo,
+                "git",
+                added=added,
+                removed=removed,
+                diff_tracked=diff_tracked,
+                agent_windows=merge_agent_window_lists(touched_by_rel.get(rel_path, {}).get("agent_windows", [])),
+            ))
         for rel_path, metadata in touched_by_rel.items():
             if rel_path in statuses:
                 continue
@@ -826,15 +1290,20 @@ def session_files_payload_for_info(
                 repo,
                 "transcript",
                 mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
+                agent_windows=merge_agent_window_lists(metadata.get("agent_windows", [])),
             ))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
-        repo_payload = {
+        rendered_entries = differ_visible_entries(repo_entries)
+        if not rendered_entries and repo_text not in live_pane_repo_roots and not repo_refs_active:
+            continue
+        refs_by_repo[str(repo)] = git_recent_refs(repo)
+        repo_payload: RepoPayload = {
             "repo": str(repo),
-            "count": len(repo_entries),
+            "count": len(rendered_entries),
             "touched_count": len(repos[repo_text]),
-            "added": line_total(repo_entries, "added"),
-            "removed": line_total(repo_entries, "removed"),
+            "added": line_total(rendered_entries, "added"),
+            "removed": line_total(rendered_entries, "removed"),
             # C6: report the refs THIS repo actually compared, plus any per-repo fallback, so each repo
             # header can render its own comparison title independently of the others.
             "from_ref": sel_from or "default",
@@ -844,7 +1313,7 @@ def session_files_payload_for_info(
         repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
         repo_payloads.append(repo_payload)
 
-    outside_entries: list[dict[str, Any]] = []
+    outside_entries: list[SessionFileEntry] = []
     if outside_repo_paths and not refs_active:
         for path_text in sorted(outside_repo_paths):
             path = Path(path_text)
@@ -861,6 +1330,7 @@ def session_files_payload_for_info(
                 0 if path.exists() and path.is_file() else None,
                 mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
                 diff_tracked=False,
+                agent_windows=merge_agent_window_lists(metadata.get("agent_windows", [])),
             ))
         outside_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(outside_entries)
@@ -887,6 +1357,7 @@ def session_files_payload_for_info(
         "from_ref": payload_from_ref,
         "to_ref": payload_to_ref,
         "errors": errors,
+        "warnings": warnings,
     }
 
 
@@ -898,9 +1369,9 @@ def session_files_payload(
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
     include_cross_session_attribution: bool = True,
-) -> tuple[dict[str, Any], HTTPStatus]:
+) -> tuple[SessionFilesPayload, HTTPStatus]:
     now = time.time()
-    cutoff = now - bounded_session_files_hours(hours) * 3600
+    cutoff = session_files_cutoff(hours, now)
     attribution = agent_attribution_by_path(infos, cutoff) if include_cross_session_attribution else {}
     if session:
         info = infos.get(session)
@@ -909,14 +1380,16 @@ def session_files_payload(
         payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         return payload, HTTPStatus.OK
 
-    files: list[dict[str, Any]] = []
-    repos: dict[str, dict[str, Any]] = {}
-    refs_by_repo: dict[str, list[dict[str, str]]] = {}
+    files: list[SessionFileEntry] = []
+    repos: dict[str, RepoPayload] = {}
+    refs_by_repo: dict[str, list[dict[str, Any]]] = {}
     errors: list[str] = []
+    warnings: list[str] = []
     for info in infos.values():
         payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         files.extend(payload["files"])
         errors.extend(payload["errors"])
+        warnings.extend(payload.get("warnings", []))
         refs_by_repo.update(payload.get("refs_by_repo", {}))
         for repo in payload["repos"]:
             key = repo["repo"]
@@ -939,4 +1412,5 @@ def session_files_payload(
         "from_ref": diff_refs(from_ref, to_ref)[0] if refs_requested(from_ref, to_ref) else "default",
         "to_ref": diff_refs(from_ref, to_ref)[1] if refs_requested(from_ref, to_ref) else "base",
         "errors": errors,
+        "warnings": warnings,
     }, HTTPStatus.OK

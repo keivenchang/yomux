@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import copy
+from functools import lru_cache
+import gzip
 import hashlib
 import html
 import json
@@ -18,13 +21,13 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
-from urllib.parse import unquote
 from urllib.parse import urlparse
 
 import yaml
@@ -34,24 +37,28 @@ from . import yolo_rules
 from .app import TmuxWebtermApp
 from .common import DEFAULT_COLS
 from .common import DEFAULT_ROWS
-from .common import MAX_EVENT_TAIL_LINES
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import PROJECT_ROOT
-from .common import SUMMARY_CODEX_EFFORT
-from .common import SUMMARY_CODEX_MODEL
-from .common import SUMMARY_CODEX_SERVICE_TIER
-from .common import SUMMARY_CODEX_TIMEOUT_SECONDS
-from .common import SUMMARY_LOOKBACK_SECONDS
+from .common import PACIFIC_TIME
+from .common import UPLOAD_MAX_BYTES
 from .common import WEBSOCKET_GUID
-from .common import auth_setup_required
 from .common import codex_event_kind
 from .common import codex_exec_argv
+from .common import codex_runtime_env
 from .common import error_payload
-from .common import parse_bool
 from .common import terminate_process_group
 from .filesystem import FilesystemError
+from .http_routes import dispatch_http_route
+from .http_routes import parse_query_float
+from .http_routes import parse_query_int
+from .http_routes import parse_repo_refs_param
+from .http_routes import query_bool
+from .http_routes import query_list
+from .http_routes import query_one
+from .tmux_utils import tmux
 from .tmux_utils import tmux_command
+from .tmux_utils import tmux_session_client_rows
 from .tmux_utils import tmux_session_target
 from .transcripts import codex_event_text
 from .transcripts import compact_transcript_items
@@ -59,22 +66,30 @@ from .transcripts import strip_terminal_query_responses
 from .transcripts import transcript_items_from_raw_line
 from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
+from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
+from .settings import SUMMARY_DEFAULT_LOOKBACK_SECONDS
 from .web import html_page
 from .web import static_asset_path
 from .web import static_content_type
 from .websocket import make_ws_frame
 from .websocket import read_ws_frame
 from .websocket import set_pty_size
+from .workdir import AGENT_LOGIN_COMMANDS
+from .workdir import agent_auth_status
+from .workdir import start_agent_auth_status_refresh
 
 
 PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
 WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0
+RESIZE_AUTHORITY_CLIENT_ID_MAX = 128
 SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES = 256 * 1024
 SHARE_VIEWER_POINTER_WAKE_FRAME = b""
 SHARE_VIEWER_OVERFLOW_LIMIT = 3
 SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS = 60.0
+SHARE_VIEWER_SEND_TIMEOUT_SECONDS = 5.0
 SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
+TMUX_ATTACH_REFRESH_DELAYS_SECONDS = (0.1, 0.5)
 SHARE_POINTER_MAX_WRITES_PER_SECOND = 1500
 SHARE_POINTER_MAX_HZ = 30
 SHARE_POINTER_CLICK_QUEUE_LIMIT = 32
@@ -195,26 +210,17 @@ SHARE_INPUT_INTENT_COMMAND_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 MAX_FS_BATCH_REQUESTS = 64
 TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
-
-
-def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> str | None:
-    values = qs.get(name)
-    return values[0] if values else default
-
-
-def query_list(qs: dict[str, list[str]], name: str) -> list[str]:
-    values: list[str] = []
-    for raw_value in qs.get(name, []):
-        for item in str(raw_value or "").split(","):
-            value = item.strip()
-            if value:
-                values.append(value)
-    return values
-
-
-def query_bool(qs: dict[str, list[str]], name: str, default: bool = False) -> bool:
-    raw_default = "1" if default else "0"
-    return parse_bool(str(query_one(qs, name, raw_default) or ""))
+STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
+STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
+STATIC_GZIP_MIN_BYTES = 1024
+STATIC_GZIP_CONTENT_TYPES = {
+    "application/javascript",
+    "application/json",
+    "text/css",
+    "text/html",
+    "text/plain",
+}
+FS_ZIP_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
 def content_disposition_attachment(raw_path: str) -> str:
@@ -223,72 +229,64 @@ def content_disposition_attachment(raw_path: str) -> str:
     return f'attachment; filename="{safe or "download"}"'
 
 
-def parse_query_int(
-    qs: dict[str, list[str]],
-    name: str,
-    default: int,
-    *,
-    min_value: int = 1,
-    max_value: int | None = None,
-) -> tuple[int | None, str]:
-    raw = qs.get(name, [str(default)])[0]
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None, f"{name} must be an integer"
-    if value < min_value:
-        return None, f"{name} must be at least {min_value}"
-    if max_value is not None:
-        value = min(value, max_value)
-    return value, ""
+def fs_zip_attachment_filename(raw_path: str) -> str:
+    name = Path(os.path.expanduser(str(raw_path or ""))).name or "folder"
+    stamp = datetime.now(PACIFIC_TIME).strftime(FS_ZIP_TIMESTAMP_FORMAT)
+    return f"{name}.{stamp}.zip"
 
 
-def parse_query_float(
-    qs: dict[str, list[str]],
-    name: str,
-    default: float,
-    *,
-    min_value: float = 0.0,
-    max_value: float | None = None,
-) -> tuple[float | None, str]:
-    raw = qs.get(name, [str(default)])[0]
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return None, f"{name} must be a number"
-    if not math.isfinite(value):
-        return None, f"{name} must be finite"
-    if value < min_value:
-        return None, f"{name} must be at least {min_value:g}"
-    if max_value is not None:
-        value = min(value, max_value)
-    return value, ""
+def content_type_base(content_type: str) -> str:
+    return str(content_type or "").split(";", 1)[0].strip().lower()
 
 
-def parse_repo_refs_param(raw: str | None) -> dict[str, dict[str, str]] | None:
-    # C6: decode the optional per-repo FROM/TO override map sent as URL-encoded JSON
-    # ({repo_path: {"from": <ref>, "to": <ref>}}). Returns None for absent/malformed input so the caller
-    # falls back to the scalar from/to; only well-formed string ref pairs survive.
-    if not raw:
-        return None
-    try:
-        decoded = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(decoded, dict):
-        return None
-    result: dict[str, dict[str, str]] = {}
-    for repo, refs in decoded.items():
-        if not isinstance(repo, str) or not isinstance(refs, dict):
+def static_content_type_supports_gzip(content_type: str) -> bool:
+    base = content_type_base(content_type)
+    return base in STATIC_GZIP_CONTENT_TYPES or base.startswith("text/")
+
+
+def accept_encoding_allows_gzip(accept_encoding: str | None) -> bool:
+    gzip_q: float | None = None
+    wildcard_q: float | None = None
+    for raw_part in str(accept_encoding or "").split(","):
+        part = raw_part.strip()
+        if not part:
             continue
-        entry: dict[str, str] = {}
-        for key in ("from", "to"):
-            value = refs.get(key)
-            if isinstance(value, str) and value.strip():
-                entry[key] = value.strip()
-        if entry:
-            result[repo] = entry
-    return result or None
+        token, *raw_params = part.split(";")
+        encoding = token.strip().lower()
+        if encoding not in {"gzip", "*"}:
+            continue
+        q = 1.0
+        for raw_param in raw_params:
+            name, separator, value = raw_param.strip().partition("=")
+            if separator and name.strip().lower() == "q":
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+        if encoding == "gzip":
+            gzip_q = q
+        else:
+            wildcard_q = q
+    if gzip_q is not None:
+        return gzip_q > 0
+    return bool(wildcard_q is not None and wildcard_q > 0)
+
+
+def static_asset_cache_control(request_path: str) -> str:
+    qs = parse_qs(urlparse(request_path or "").query)
+    if any(str(value).strip() for value in qs.get("v", [])):
+        return STATIC_CACHE_CONTROL_VERSIONED
+    return STATIC_CACHE_CONTROL_UNVERSIONED
+
+
+def static_asset_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
+    if (
+        len(data) >= STATIC_GZIP_MIN_BYTES
+        and static_content_type_supports_gzip(content_type)
+        and accept_encoding_allows_gzip(accept_encoding)
+    ):
+        return gzip.compress(data, compresslevel=6, mtime=0), "gzip"
+    return data, None
 
 
 def clamp_pty_dimension(value: int) -> int:
@@ -303,6 +301,130 @@ def ws_resize_dimensions(message: dict[str, Any], default_rows: int, default_col
     return clamp_pty_dimension(rows), clamp_pty_dimension(cols)
 
 
+def clean_resize_authority_client_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", text)[:RESIZE_AUTHORITY_CLIENT_ID_MAX]
+
+
+@lru_cache(maxsize=1)
+def tmux_supports_ignore_size_flag() -> bool:
+    """Whether this tmux accepts client flags on attach-session.
+
+    tmux 1.9a, still shipped on the ITSS VDI image, predates both
+    ``attach-session -f`` and the ``ignore-size`` client flag. Probe against a
+    deliberately nonexistent target: supported tmux versions reject only the
+    target, while older versions explicitly reject the option or flag.
+    """
+    result = tmux([
+        "attach-session",
+        "-f",
+        "ignore-size",
+        "-t",
+        "__yolomux_ignore_size_capability_probe__",
+    ], timeout=1.0)
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    return "unknown option" not in output and "unknown flag" not in output
+
+
+def tmux_attach_command(readonly: bool = False) -> list[str]:
+    args = tmux_command(["attach-session"])
+    if readonly:
+        args.append("-r")
+    if tmux_supports_ignore_size_flag():
+        args.extend(["-f", "ignore-size"])
+    return args
+
+
+def resize_pty_and_signal_process(fd: int, process: subprocess.Popen[Any] | None, rows: int, cols: int) -> None:
+    set_pty_size(fd, rows, cols)
+    if process is not None and process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGWINCH)
+        except OSError:
+            pass
+
+
+def tmux_client_name_for_fd(fd: int) -> str:
+    try:
+        return os.ttyname(fd)
+    except OSError:
+        return ""
+
+
+def tmux_client_has_flag(row: dict[str, Any], flag: str) -> bool:
+    return flag in {item.strip() for item in str(row.get("flags") or "").split(",") if item.strip()}
+
+
+def refresh_tmux_client_ignore_size(client_name: str, ignore_size: bool) -> bool:
+    if not client_name or not tmux_supports_ignore_size_flag():
+        return False
+    result = tmux(["refresh-client", "-t", client_name, "-f", "ignore-size" if ignore_size else "!ignore-size"])
+    return result.returncode == 0
+
+
+def refresh_tmux_session_clients(session: str) -> bool:
+    clean_session = str(session or "").strip()
+    if not clean_session:
+        return False
+    result = tmux(["refresh-client", "-t", tmux_session_target(clean_session)])
+    return result.returncode == 0
+
+
+def refresh_tmux_session_clients_after_attach(session: str) -> bool:
+    clean_session = str(session or "").strip()
+    if not clean_session:
+        return False
+    refreshed = refresh_tmux_session_clients(clean_session)
+    for delay in TMUX_ATTACH_REFRESH_DELAYS_SECONDS:
+        timer = threading.Timer(float(delay), refresh_tmux_session_clients, args=(clean_session,))
+        timer.daemon = True
+        timer.start()
+    return refreshed
+
+
+def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int | None = None) -> bool:
+    """Make `client_name` the column authority for `session`: silence every WIDER client.
+
+    Called when a browser surface activates a pane. Under `window-size largest` the shared window
+    is as wide as the widest non-`ignore-size` client, so a wider sibling (a second browser surface
+    OR a hand-attached terminal) makes the focused surface's content overflow its viewport. Flag
+    those wider clients `ignore-size` so they stop voting and the window collapses to the active
+    width; `active_cols` is the width the surface is asking for, preferred over its last-reported
+    width since the pty resize for this same message lands just after this call.
+
+    Width-only by design (per the column-overflow symptom): clients at or below the active width
+    don't inflate it and are left untouched, so the blast radius is exactly the clients that would
+    break the active surface. Idempotent -- when nothing is wider and the active client already
+    counts, it issues no tmux calls (the "current width already == active width" fast path).
+    """
+    clean_client_name = str(client_name or "").strip()
+    if not clean_client_name:
+        return False
+    rows = tmux_session_client_rows(session)
+    current = next((row for row in rows if str(row.get("name") or "") == clean_client_name), None)
+    if current is None:
+        # The active client is not listed yet (just attached); best-effort make it count.
+        return refresh_tmux_client_ignore_size(clean_client_name, False)
+    width = active_cols if isinstance(active_cols, int) and active_cols > 0 else int(current.get("width") or 0)
+    active_ignored = tmux_client_has_flag(current, "ignore-size")
+    wider = [
+        row for row in rows
+        if str(row.get("name") or "") != clean_client_name
+        and not tmux_client_has_flag(row, "ignore-size")
+        and int(row.get("width") or 0) > width
+    ]
+    if not active_ignored and not wider:
+        return False
+    changed = False
+    if active_ignored:
+        changed = refresh_tmux_client_ignore_size(clean_client_name, False) or changed
+    for row in wider:
+        changed = refresh_tmux_client_ignore_size(str(row.get("name") or ""), True) or changed
+    return changed
+
+
 def configure_session_tmux_options(session: str) -> None:
     """Set the shared tmux options every YOLOmux attach needs, idempotent and best-effort.
 
@@ -312,26 +434,22 @@ def configure_session_tmux_options(session: str) -> None:
     - set-clipboard on: tmux's default `external` IGNORES application OSC 52, so Claude's copy
       would never reach the browser; `on` forwards it to this client.
     - window-size largest + aggressive-resize on: YOLOmux spawns one `attach-session` client per
-      WebSocket, so two browser surfaces on the same session attach as two differently-sized
-      clients. Under tmux's default `latest`, the most-recently-active (often smaller) client
-      keeps resizing the shared window; when it shrinks below a larger client's height that
-      client's xterm is left rendering tmux's now-shorter grid and the status line smears across
-      the orphaned rows. `largest` pins the window to the largest viewing client so the larger
-      view never smears or minimizes (smaller duplicates clip instead); `aggressive-resize`
-      scopes that to clients actually viewing the window rather than the whole session.
+      WebSocket, so two browser surfaces on one session attach as differently-sized clients. The
+      attach itself starts with `ignore-size`; activating a browser surface clears that flag for
+      its own client and sets it on every WIDER client on the session — a second browser surface OR
+      a hand-attached terminal — so they stop voting on the column width. Keeping `largest` avoids
+      the old tmux `latest` status-line smear while active-surface authority keeps a wider client
+      from stretching the focused surface.
     """
     target = tmux_session_target(session)
-    for args in (
+    commands = [
         ["set-option", "-s", "set-clipboard", "on"],
-        ["set-option", "-t", target, "window-size", "largest"],
         ["set-option", "-wg", "aggressive-resize", "on"],
-    ):
-        subprocess.run(
-            tmux_command(args),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+    ]
+    if tmux_supports_ignore_size_flag():
+        commands.insert(1, ["set-option", "-t", target, "window-size", "largest"])
+    for args in commands:
+        tmux(args)
 
 
 def share_terminal_frame(session: str, data: bytes) -> bytes:
@@ -581,6 +699,18 @@ class ShareViewerConnection:
         with self.lock:
             return self.closed
 
+    def send_frame(self, frame: bytes) -> None:
+        previous_timeout = None
+        timeout_supported = hasattr(self.connection, "gettimeout") and hasattr(self.connection, "settimeout")
+        if timeout_supported:
+            previous_timeout = self.connection.gettimeout()
+            self.connection.settimeout(SHARE_VIEWER_SEND_TIMEOUT_SECONDS)
+        try:
+            self.connection.sendall(frame)
+        finally:
+            if timeout_supported:
+                self.connection.settimeout(previous_timeout)
+
     def write_loop(self) -> None:
         try:
             while True:
@@ -591,16 +721,16 @@ class ShareViewerConnection:
                     self.mark_pointer_wakeup_drained()
                     pointer_frame = self.pop_latest_pointer_frame()
                     if pointer_frame is not None:
-                        self.connection.sendall(pointer_frame)
+                        self.send_frame(pointer_frame)
                     continue
                 pointer_frame = self.pop_latest_pointer_frame() if share_frame_is_dom_keyframe(frame) else None
                 if pointer_frame is not None:
-                    self.connection.sendall(pointer_frame)
+                    self.send_frame(pointer_frame)
                 with self.lock:
                     self.queued_bytes = max(0, self.queued_bytes - len(frame))
                     if share_frame_is_dom_keyframe(frame):
                         self.queued_replay_keyframe = False
-                self.connection.sendall(frame)
+                self.send_frame(frame)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
@@ -643,29 +773,43 @@ class ShareTerminalUpstream:
     def start_locked(self) -> None:
         rows, cols = self.server.host_pty_dimensions_for_session(self.session)
         master_fd, slave_fd = pty.openpty()
-        set_pty_size(slave_fd, rows, cols)
-        self.master_fd = master_fd
-        self.slave_fd = slave_fd
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        configure_session_tmux_options(self.session)
-        record = self.server.app.verify_share_token(self.token)
-        readonly = str((record or {}).get("mode") or "ro") != "rw"
-        attach_args = tmux_command(["attach-session"])
-        if readonly:
-            attach_args.append("-r")
-        attach_args.extend(["-t", tmux_session_target(self.session)])
-        self.process = subprocess.Popen(
-            attach_args,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            close_fds=True,
-            env=env,
-            start_new_session=True,
-        )
-        self.reader_thread = threading.Thread(target=self.reader_loop, name=f"share-terminal-{self.session}", daemon=True)
-        self.reader_thread.start()
+        process: subprocess.Popen[Any] | None = None
+        try:
+            set_pty_size(slave_fd, rows, cols)
+            self.master_fd = master_fd
+            self.slave_fd = slave_fd
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            configure_session_tmux_options(self.session)
+            record = self.server.app.verify_share_token(self.token)
+            readonly = str((record or {}).get("mode") or "ro") != "rw"
+            attach_args = tmux_attach_command(readonly=readonly)
+            attach_args.extend(["-t", tmux_session_target(self.session)])
+            process = subprocess.Popen(
+                attach_args,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                env=env,
+                start_new_session=True,
+            )
+            refresh_tmux_session_clients_after_attach(self.session)
+            self.process = process
+            self.reader_thread = threading.Thread(target=self.reader_loop, name=f"share-terminal-{self.session}", daemon=True)
+            self.reader_thread.start()
+        except (OSError, subprocess.SubprocessError):
+            self.master_fd = None
+            self.slave_fd = None
+            self.process = None
+            for fd in (master_fd, slave_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if process is not None and process.poll() is None:
+                terminate_process_group(process)
+            raise
 
     def write_input(self, payload: bytes) -> bool:
         try:
@@ -685,7 +829,7 @@ class ShareTerminalUpstream:
             if master_fd is None:
                 return False
             os.write(master_fd, filtered.encode("utf-8"))
-        self.server.app.record_user_input(self.session, len(filtered), source="share")
+        self.server.app.record_user_input(self.session, len(filtered), source="share", data=filtered)
         return True
 
     def update_dimensions(self, rows: int, cols: int, *, refresh: bool = True) -> None:
@@ -695,35 +839,44 @@ class ShareTerminalUpstream:
             process = self.process
             if slave_fd is None:
                 return
-            set_pty_size(slave_fd, rows, cols)
+            resize_pty_and_signal_process(slave_fd, process, rows, cols)
             refresh_needed = True
-            if process is not None and process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGWINCH)
-                except OSError:
-                    pass
         if refresh_needed and refresh:
             self.request_refresh_client()
 
     def reader_loop(self) -> None:
+        reader_fd: int | None = None
         try:
-            while not self.stop_event.is_set():
+            with self.lock:
                 master_fd = self.master_fd
                 process = self.process
                 if master_fd is None or process is None:
+                    return
+                reader_fd = os.dup(master_fd)
+            while not self.stop_event.is_set():
+                with self.lock:
+                    process = self.process
+                if process is None:
                     break
                 if process.poll() is not None:
                     break
-                readable, _, _ = select.select([master_fd], [], [], 0.1)
-                if master_fd not in readable:
+                readable, _, _ = select.select([reader_fd], [], [], 0.1)
+                if reader_fd not in readable:
                     continue
-                data = os.read(master_fd, 65536)
+                if self.stop_event.is_set():
+                    break
+                data = os.read(reader_fd, 65536)
                 if not data:
                     break
                 self.broadcast(data)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
+            if reader_fd is not None:
+                try:
+                    os.close(reader_fd)
+                except OSError:
+                    pass
             self.stop()
 
     def broadcast(self, data: bytes) -> None:
@@ -743,12 +896,7 @@ class ShareTerminalUpstream:
         if now - self.last_refresh_at < SHARE_REFRESH_CLIENT_MIN_SECONDS:
             return
         self.last_refresh_at = now
-        subprocess.run(
-            tmux_command(["refresh-client", "-t", tmux_session_target(self.session)]),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        tmux(["refresh-client", "-t", tmux_session_target(self.session)])
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -788,6 +936,43 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         message = TOKEN_LOG_RE.sub(r"\1[redacted]", fmt % args)
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), message))
+
+    def http_endpoint_metric_key(self) -> str:
+        method = str(getattr(self, "command", "") or "GET").upper()
+        try:
+            path = urlparse(str(getattr(self, "path", "") or "/")).path or "/"
+        except ValueError:
+            path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
+        return f"{method} {path}"[:120]
+
+    def record_http_response_bytes(self, status: HTTPStatus | int, body_bytes: int, content_type: str = "") -> None:
+        app = getattr(getattr(self, "server", None), "app", None)
+        recorder = getattr(app, "record_performance_sample", None)
+        if not callable(recorder):
+            return
+        status_code = int(status)
+        endpoint = self.http_endpoint_metric_key()
+        details = {
+            "status": status_code,
+            "method": endpoint.split(" ", 1)[0],
+            "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
+            "content_type": content_type_base(content_type),
+        }
+        extra_details = getattr(self, "_http_response_performance_details", None)
+        if isinstance(extra_details, dict):
+            details.update(extra_details)
+        recorder(
+            "http-endpoint",
+            endpoint,
+            trigger=endpoint,
+            compute_ms=getattr(self, "_http_response_compute_ms", None),
+            payload_bytes=max(0, int(body_bytes or 0)),
+            cache_key={"kind": endpoint},
+            cache_status=str(status_code),
+            owner_role="server",
+            count=1,
+            details=details,
+        )
 
     def plaintext_share_scope_allowed(self, parsed: Any) -> bool:
         if not getattr(self.server, "tls_context", None) or self.request_is_https():
@@ -838,292 +1023,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, len(body), "text/plain; charset=utf-8")
+        else:
+            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, 0, "text/plain; charset=utf-8")
         self.close_connection = True
         return True
 
     def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if self.redirect_plaintext_to_https_if_needed(parsed):
-            return
-        if parsed.path.startswith("/static/"):
-            asset = parsed.path.removeprefix("/static/")
-            content_type = static_content_type(asset)
-            if content_type:
-                self.write_static_asset(asset, content_type)
-                return
-        if parsed.path == "/api/auth-setup":
-            self.write_json({"setup_required": auth_setup_required()})
-            return
-        if parsed.path == "/login":
-            self.handle_login_page(parsed)
-            return
-        if parsed.path == "/logout":
-            self.write_redirect("/login", clear_auth=True)
-            return
-        if parsed.path.startswith("/share/") and self.handle_share_shell(parsed):
-            return
-        admin_only_paths = {
-            "/api/summary-stream",
-            "/api/share",
-            "/api/yoagent/skills",
-            "/api/yoagent/skill-files",
-            "/api/yoagent/conversation",
-            "/api/yoagent/jobs",
-            "/ws/share-host",
-        }
-        if parsed.path == "/api/share" and self.share_token_text():
-            required_role = "readonly"
-        else:
-            required_role = "admin" if parsed.path in admin_only_paths else "readonly"
-        if not self.require_auth(required_role):
-            return
-        # blame reads repository file history, so it is admin-only like the rest of the
-        # file/repo API (the /api/fs/* reads) — a readonly identity must not read file content/history.
-        if (parsed.path.startswith("/api/fs/") or parsed.path == "/api/blame") and self.auth_readonly() and not self.share_readonly_api_allowed(parsed):
-            self.reject_forbidden(self.auth_identity(), "admin")
-            return
-        if parsed.path == "/api/ping":
-            self.write_json({"ok": True, "time": time.time()})
-            return
-        if parsed.path == "/api/update-status":
-            if self.auth_readonly():
-                self.reject_forbidden(self.auth_identity(), "admin")
-                return
-            self.write_json(self.server.app.update_status_payload(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
-            return
-        if parsed.path == "/api/dev-reload":
-            # Dev-velocity #1b: an SSE stream that emits the static-bundle signature whenever it changes,
-            # so a dev page reloads itself on rebuild (ends the "is the bundle stale?" misdiagnoses). Only
-            # active under --dev; a 404 otherwise so production never exposes it.
-            if not getattr(self.server, "dev", False):
-                self.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                return
-            self.stream_dev_reload()
-            return
-        if parsed.path == "/api/client-events":
-            self.stream_client_events()
-            return
-        if parsed.path == "/":
-            sessions = self.share_sessions() if self.share_sessions() else self.server.app.sessions
-            self.write_html(html_page(
-                sessions,
-                self.auth_identity().role,
-                dev=getattr(self.server, 'dev', False),
-                dangerously_yolo=self.server.app.dangerously_yolo,
-                share=self.share_bootstrap_payload(self.share_record()) if self.share_record() else None,
-            ))
-            return
-        if parsed.path == "/preview-popout":
-            self.handle_preview_popout_placeholder(parsed)
-            return
-        if parsed.path == "/api/transcripts":
-            qs = parse_qs(parsed.query)
-            self.write_json(self.share_scoped_transcripts_payload(self.server.app.transcripts_payload(force=query_bool(qs, "force"))))
-            return
-        if parsed.path == "/api/activity-summary":
-            qs = parse_qs(parsed.query)
-            self.write_json(self.server.app.activity_summary_payload(
-                force=query_bool(qs, "force"),
-                locale=str(query_one(qs, "locale", "en") or "en"),
-            ))
-            return
-        if parsed.path == "/api/yoagent/skills":
-            self.write_json(self.server.app.yoagent_skills_payload())
-            return
-        if parsed.path == "/api/yoagent/skill-files":
-            qs = parse_qs(parsed.query)
-            payload, status = self.server.app.yoagent_skill_files_payload(
-                str(query_one(qs, "kind", "") or ""),
-                str(query_one(qs, "name", "") or ""),
-            )
-            self.write_json(payload, status=status)
-            return
-        if parsed.path == "/api/yoagent/conversation":
-            self.write_json(self.server.app.yoagent_conversation_payload())
-            return
-        if parsed.path == "/api/yoagent/jobs":
-            response, status = self.server.app.yoagent_jobs_payload()
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/tmux":
-            self.write_int_query_app_result(
-                parsed,
-                "lines",
-                90,
-                MAX_TRANSCRIPT_TAIL_LINES,
-                lambda qs, lines: self.server.app.tmux_snapshot(str(query_one(qs, "session", "") or ""), lines),
-            )
-            return
-        if parsed.path == "/api/tmux-signals":
-            self.write_app_result(self.server.app.tmux_signals_payload(force=query_bool(parse_qs(parsed.query), "force")))
-            return
-        if parsed.path == "/api/transcript":
-            self.write_int_query_app_result(
-                parsed,
-                "lines",
-                120,
-                MAX_TRANSCRIPT_TAIL_LINES,
-                lambda qs, lines: self.server.app.transcript_tail(str(query_one(qs, "session", "") or ""), lines),
-            )
-            return
-        if parsed.path == "/api/context":
-            self.write_int_query_app_result(
-                parsed,
-                "messages",
-                40,
-                MAX_COMPACT_TRANSCRIPT_ITEMS,
-                lambda qs, messages: self.server.app.context_tail(str(query_one(qs, "session", "") or ""), messages),
-            )
-            return
-        if parsed.path == "/api/context-items":
-            self.write_int_query_app_result(
-                parsed,
-                "messages",
-                40,
-                MAX_COMPACT_TRANSCRIPT_ITEMS,
-                lambda qs, messages: self.server.app.context_items(str(query_one(qs, "session", "") or ""), messages),
-            )
-            return
-        if parsed.path == "/api/context-stream":
-            self.stream_context_items(parsed)
-            return
-        if parsed.path == "/api/summary-stream":
-            self.stream_codex_summary(parsed)
-            return
-        if parsed.path == "/api/auto-approve":
-            qs = parse_qs(parsed.query)
-            session = query_one(qs, "session", None)
-            self.write_app_result(self.server.app.auto_approve_status(session))
-            return
-        if parsed.path == "/api/notify":
-            self.write_json(self.server.app.notify_status())
-            return
-        if parsed.path == "/api/settings":
-            self.write_json(self.server.app.settings_payload())
-            return
-        if parsed.path == "/api/share":
-            if self.share_token():
-                self.write_app_result(self.server.app.share_status_payload(self.share_token(), base_url=self.request_base_url()))
-            else:
-                self.write_app_result(self.server.app.active_share_payload(base_url=self.request_base_url()))
-            return
-        if parsed.path == "/api/watched-prs":
-            self.write_json(self.server.app.watched_prs_payload())
-            return
-        if parsed.path == "/api/yolo-rules":
-            self.write_json(self.server.app.yolo_rules_payload())
-            return
-        if parsed.path == "/api/events":
-            self.write_int_query_app_result(
-                parsed,
-                "limit",
-                100,
-                MAX_EVENT_TAIL_LINES,
-                lambda qs, limit: self.server.app.events_payload(query_one(qs, "session", None), limit),
-            )
-            return
-        if parsed.path == "/api/search":
-            self.write_int_query_app_result(
-                parsed,
-                "limit",
-                100,
-                MAX_EVENT_TAIL_LINES,
-                lambda qs, limit: self.server.app.search_payload(str(query_one(qs, "q", "") or ""), query_one(qs, "session", None), limit),
-            )
-            return
-        if parsed.path == "/api/run-history":
-            qs = parse_qs(parsed.query)
-            session = query_one(qs, "session", None)
-            self.write_app_result(self.server.app.run_history_payload(session))
-            return
-        if parsed.path == "/api/activity":
-            # DOIT.58 Phase 1: per-session/window activity ledger (metadata; readonly-allowed).
-            self.write_app_result(self.share_scoped_activity_result(self.server.app.activity_payload()))
-            return
-        if parsed.path == "/api/session-files-batch":
-            qs = parse_qs(parsed.query)
-            requested_sessions = query_list(qs, "session") or query_list(qs, "sessions")
-            hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
-            if error:
-                self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
-                return
-            from_ref = query_one(qs, "from", None)
-            to_ref = query_one(qs, "to", None)
-            force = query_bool(qs, "force")
-            share_sessions = self.share_sessions()
-            if share_sessions:
-                if not requested_sessions:
-                    requested_sessions = share_sessions
-                blocked = [session for session in requested_sessions if session not in share_sessions]
-                if blocked:
-                    self.write_json(error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
-                    return
-            repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
-            self.write_app_result(self.server.app.session_files_batch_payload(requested_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
-            return
-        if parsed.path == "/api/session-files":
-            qs = parse_qs(parsed.query)
-            session = query_one(qs, "session", None)
-            hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
-            if error:
-                self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
-                return
-            from_ref = query_one(qs, "from", None)
-            to_ref = query_one(qs, "to", None)
-            force = query_bool(qs, "force")
-            if self.share_sessions() and session not in self.share_sessions():
-                self.write_json(error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
-                return
-            # C6: optional per-repo override map ({repo_path: {"from","to"}}) as URL-encoded JSON, so each
-            # repo can compare its own commit graph. Malformed JSON falls back to the scalar from/to.
-            repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
-            self.write_app_result(self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
-            return
-        if parsed.path == "/api/summary":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_app_result(self.server.app.summary(session))
-            return
-        if parsed.path == "/api/fs/list":
-            self.handle_fs_list(parsed)
-            return
-        if parsed.path == "/api/fs/search":
-            self.handle_fs_search(parsed)
-            return
-        if parsed.path == "/api/fs/index-status":
-            self.handle_fs_index_status(parsed)
-            return
-        if parsed.path == "/api/fs/read":
-            self.handle_fs_read(parsed)
-            return
-        if parsed.path == "/api/fs/info":
-            self.handle_fs_info(parsed)
-            return
-        if parsed.path == "/api/fs/diff":
-            self.handle_fs_diff(parsed)
-            return
-        if parsed.path == "/api/blame":
-            self.handle_blame(parsed)
-            return
-        if parsed.path == "/api/fs/raw":
-            self.handle_fs_raw(parsed)
-            return
-        if parsed.path == "/api/fs/html-preview":
-            self.handle_fs_html_preview(parsed)
-            return
-        if parsed.path == "/ws/share-host":
-            self.websocket_share_host(parsed)
-            return
-        if parsed.path == "/ws/share-ui":
-            self.websocket_share_ui(parsed)
-            return
-        if parsed.path == "/ws/share-view":
-            self.websocket_share_view(parsed)
-            return
-        if parsed.path == "/ws":
-            self.websocket(parsed)
-            return
-        self.write_text("not found\n", status=HTTPStatus.NOT_FOUND)
+        dispatch_http_route(self, "GET")
 
     def share_bootstrap_payload(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
         if not record:
@@ -1291,7 +1198,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         raw_path = str(query_one(qs, "path", "") or "")
         download = query_bool(qs, "download")
         try:
-            data, mime = filesystem.read_raw(raw_path)
+            data, mime = filesystem.read_raw(raw_path, max_bytes=self.file_transfer_max_bytes())
         except FilesystemError as exc:
             self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
             return
@@ -1306,6 +1213,40 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(HTTPStatus.OK, len(data), mime)
+
+    def handle_fs_zip(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        try:
+            archive_file, archive_size = filesystem.zip_directory(raw_path, max_bytes=self.file_transfer_max_bytes())
+        except FilesystemError as exc:
+            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            return
+        mime = "application/zip"
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(archive_size))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Disposition", content_disposition_attachment(fs_zip_attachment_filename(raw_path)))
+            self.send_auth_cookie_if_needed()
+            if self.close_connection:
+                self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                chunk = archive_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+            self.record_http_response_bytes(HTTPStatus.OK, archive_size, mime)
+        finally:
+            archive_file.close()
+
+    def handle_fs_count(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        self.write_filesystem_json(raw_path, lambda: filesystem.count_directory_files(raw_path))
 
     def handle_fs_html_preview(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1351,23 +1292,78 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 </html>"""
         self.write_html(body)
 
-    def read_json_body(self, max_length: int) -> dict[str, Any] | None:
+    def handle_pane_popout_placeholder(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_item = qs.get("item", [""])[0]
+        title = html.escape(f"{raw_item or 'YOLOmux'} popout")
+        body = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+</head>
+<body></body>
+</html>"""
+        self.write_html(body)
+
+    def read_request_body(
+        self,
+        max_length: int,
+        *,
+        allow_empty: bool = False,
+        allow_missing: bool = False,
+        missing_message: str = "missing Content-Length",
+        invalid_message: str = "invalid Content-Length",
+        empty_message: str = "invalid Content-Length",
+        too_large_message: str = "content too large",
+        missing_status: HTTPStatus = HTTPStatus.LENGTH_REQUIRED,
+        invalid_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        empty_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        too_large_status: HTTPStatus = HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        close_on_too_large: bool = True,
+    ) -> tuple[bytes | None, dict[str, Any] | None, HTTPStatus]:
         length_text = self.headers.get("Content-Length", "")
+        if not length_text and allow_missing:
+            return b"", None, HTTPStatus.OK
         try:
             length = int(length_text)
-        except ValueError:
-            self.write_json(error_payload("missing or invalid Content-Length", status=HTTPStatus.LENGTH_REQUIRED), status=HTTPStatus.LENGTH_REQUIRED)
+        except (TypeError, ValueError):
+            return None, error_payload(missing_message if not length_text else invalid_message, status=missing_status if not length_text else invalid_status), missing_status if not length_text else invalid_status
+        if length < 0 or (length == 0 and not allow_empty):
+            return None, error_payload(empty_message, status=empty_status), empty_status
+        if length > max_length:
+            if close_on_too_large:
+                self.close_connection = True
+            return None, error_payload(too_large_message, status=too_large_status), too_large_status
+        return self.rfile.read(length), None, HTTPStatus.OK
+
+    def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
+        body, error, status = Handler.read_request_body(
+            self,
+            max_length,
+            allow_empty=allow_empty,
+            allow_missing=allow_missing,
+            missing_message="missing or invalid Content-Length",
+            invalid_message="missing or invalid Content-Length",
+            empty_message="content too large",
+            missing_status=HTTPStatus.LENGTH_REQUIRED,
+            invalid_status=HTTPStatus.LENGTH_REQUIRED,
+            empty_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            too_large_message="content too large",
+        )
+        if error is not None:
+            self.write_json(error, status=status)
             return None
-        if length <= 0 or length > max_length:
-            self.write_json(error_payload("content too large", status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE), status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-            return None
+        if body == b"" and (allow_empty or allow_missing):
+            return {}
         try:
-            body = self.rfile.read(length).decode("utf-8")
+            text = (body or b"").decode("utf-8")
         except UnicodeDecodeError:
             self.write_json(error_payload("request body must be utf-8 JSON", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return None
         try:
-            payload = json.loads(body)
+            payload = json.loads(text)
         except json.JSONDecodeError as exc:
             self.write_json(error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return None
@@ -1435,242 +1431,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.write_filesystem_json(raw_path, lambda: filesystem.create_directory(raw_path))
 
     def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        if self.redirect_plaintext_to_https_if_needed(parsed):
-            return
-        if parsed.path == "/login":
-            self.handle_login_submit(parsed)
-            return
-        if not self.require_auth_for_post(parsed.path):
-            return
-        if parsed.path == "/api/self-update":
-            if self.auth_readonly():
-                self.reject_forbidden(self.auth_identity(), "admin")
-                return
-            self.write_json(self.server.app.perform_self_update(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
-            return
-        if parsed.path == "/api/ensure-session":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_app_result(self.server.app.ensure_session(session))
-            return
-        if parsed.path == "/api/create-session":
-            qs = parse_qs(parsed.query)
-            agent = str(query_one(qs, "agent", "claude") or "claude")
-            self.write_app_result(self.server.app.create_next_session(agent))
-            return
-        if parsed.path == "/api/rename-session":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            new_name = str(query_one(qs, "new_name", "") or "")
-            self.write_app_result(self.server.app.rename_session(session, new_name))
-            return
-        if parsed.path == "/api/kill-session":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_app_result(self.server.app.kill_session(session))
-            return
-        if parsed.path == "/api/upload":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_app_result(self.handle_upload(session))
-            return
-        if parsed.path == "/api/auto-approve":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            enabled = query_bool(qs, "enabled")
-            self.write_app_result(self.server.app.set_auto_approve(session, enabled))
-            return
-        if parsed.path == "/api/notify":
-            qs = parse_qs(parsed.query)
-            enabled = query_bool(qs, "enabled")
-            self.write_json(self.server.app.set_notify(enabled))
-            return
-        if parsed.path == "/api/settings":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            self.write_json(self.server.app.save_settings(payload.get("settings", payload)))
-            return
-        if parsed.path == "/api/share":
-            payload = self.read_json_body(16 * 1024)
-            if payload is None:
-                return
-            self.write_app_result(self.handle_share_create(payload))
-            return
-        if parsed.path == "/api/share/stop":
-            qs = parse_qs(parsed.query)
-            token_or_short_id = str(query_one(qs, "token", "") or query_one(qs, "id", "") or "")
-            content_length = int(self.headers.get("Content-Length", "0") or 0)
-            if not token_or_short_id and content_length > 0:
-                payload = self.read_json_body(4096)
-                if payload is None:
-                    return
-                token_or_short_id = str(payload.get("token") or payload.get("short_id") or payload.get("id") or "")
-            result = self.server.app.stop_active_share(token_or_short_id)
-            self.server.close_inactive_share_upstreams()
-            self.write_app_result(result)
-            return
-        if parsed.path == "/api/share/extend":
-            payload = self.read_json_body(4096)
-            if payload is None:
-                return
-            token_or_short_id = str(payload.get("token") or payload.get("short_id") or payload.get("id") or "")
-            add_seconds = payload.get("add_seconds", 600)
-            result = self.server.app.extend_share_token(token_or_short_id, add_seconds, base_url=self.request_base_url())
-            if result[1] == HTTPStatus.OK:
-                token = str(result[0].get("token") or token_or_short_id)
-                self.server.broadcast_share_status(token)
-            self.write_app_result(result)
-            return
-        if parsed.path == "/api/share/debug-profile":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            token = self.share_token()
-            if not token:
-                self.write_json(error_payload("share token required", status=HTTPStatus.UNAUTHORIZED), status=HTTPStatus.UNAUTHORIZED)
-                return
-            client_ip = self.client_address[0] if isinstance(self.client_address, tuple) and self.client_address else ""
-            self.write_app_result(self.server.app.record_share_debug_profile(
-                token,
-                payload,
-                ip=client_ip,
-                user_agent=self.headers.get("User-Agent", ""),
-            ))
-            return
-        if parsed.path == "/api/watch/roots":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            self.write_json(self.server.app.update_client_watch_roots(payload))
-            return
-        if parsed.path == "/api/drop-action/run":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            self.write_app_result(self.server.app.run_file_drop_action(payload))
-            return
-        if parsed.path == "/api/yoagent/chat":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.yoagent_chat(payload, access_role=self.auth_identity().role)
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/actions/preview-send":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.preview_yoagent_send_action(payload)
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/actions/execute-send":
-            payload = self.read_json_body(16 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.execute_yoagent_send_action(payload)
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/intent":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.yoagent_intent(payload)
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/jobs":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.create_yoagent_job(payload)
-            self.write_json(response, status=status)
-            return
-        if parsed.path.startswith("/api/yoagent/jobs/") and parsed.path.endswith("/confirm"):
-            payload = self.read_json_body(16 * 1024)
-            if payload is None:
-                return
-            job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/confirm")]).strip("/")
-            response, status = self.server.app.confirm_yoagent_job(str(payload.get("id") or job_id))
-            self.write_json(response, status=status)
-            return
-        if parsed.path.startswith("/api/yoagent/jobs/") and parsed.path.endswith("/cancel"):
-            payload = self.read_json_body(16 * 1024)
-            if payload is None:
-                return
-            job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/cancel")]).strip("/")
-            response, status = self.server.app.cancel_yoagent_job(str(payload.get("id") or job_id))
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/skill-files/upsert":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.upsert_yoagent_skill_file(payload)
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/skill-files/delete":
-            payload = self.read_json_body(16 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.delete_yoagent_skill_file(payload)
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/prewarm":
-            payload = self.read_json_body(64 * 1024)
-            if payload is None:
-                return
-            response, status = self.server.app.yoagent_prewarm(payload)
-            self.write_json(response, status=status)
-            return
-        if parsed.path == "/api/yoagent/reset":
-            self.write_json(self.server.app.reset_yoagent_chat())
-            return
-        if parsed.path == "/api/yolo-rules/reload":
-            self.write_json(self.server.app.reload_yolo_rules())
-            return
-        if parsed.path == "/api/yolo-rules/open":
-            self.write_json(self.server.app.ensure_yolo_rules_file())
-            return
-        if parsed.path == "/api/tmux-next":
-            qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
-            self.write_app_result(self.server.app.tmux_next_window(session))
-            return
-        if parsed.path == "/api/tmux-window":
-            qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
-            window = qs.get("window", [""])[0]
-            payload, status = self.server.app.tmux_select_window(session, window)
-            self.write_json(payload, status=status)
-            return
-        if parsed.path == "/api/tmux-copy-selection":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_app_result(self.server.app.tmux_copy_selection(session))
-            return
-        if parsed.path == "/api/event":
-            self.write_app_result(self.handle_client_event())
-            return
-        if parsed.path == "/api/fs/batch":
-            self.handle_fs_batch(parsed)
-            return
-        if parsed.path == "/api/fs/write":
-            self.handle_fs_write(parsed)
-            return
-        if parsed.path == "/api/fs/delete":
-            self.handle_fs_delete(parsed)
-            return
-        if parsed.path == "/api/fs/unindex":
-            self.handle_fs_unindex(parsed)
-            return
-        if parsed.path == "/api/fs/rename":
-            self.handle_fs_rename(parsed)
-            return
-        if parsed.path == "/api/fs/mkdir":
-            self.handle_fs_mkdir(parsed)
-            return
-        self.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+        dispatch_http_route(self, "POST")
 
     def request_base_url(self, scheme: str | None = None) -> str:
         host = str(self.headers.get("Host") or self.server.server_name_with_port()).strip()
@@ -1696,7 +1457,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         }
         return scoped, status
 
-    def share_scoped_transcripts_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def share_scoped_session_metadata_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         allowed = set(self.share_sessions())
         if not allowed or not isinstance(payload, dict):
             return payload
@@ -1708,6 +1469,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if isinstance(order, list):
             scoped["session_order"] = [session for session in order if session in allowed]
         return scoped
+
+    def share_scoped_transcripts_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.share_scoped_session_metadata_payload(payload)
 
     def handle_share_create(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         session = str(payload.get("session") or "").strip()
@@ -1738,6 +1502,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         )
 
     def handle_fs_batch(self, parsed: Any) -> None:
+        started = time.perf_counter()
         payload = self.read_json_body(64 * 1024)
         if payload is None:
             return
@@ -1749,6 +1514,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_json(error_payload(f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
         responses = []
+        op_counts: dict[str, int] = {}
+        path_samples: list[str] = []
         for index, item in enumerate(requests):
             request_id = item.get("id", index) if isinstance(item, dict) else index
             if not isinstance(item, dict):
@@ -1756,6 +1523,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 continue
             op = str(item.get("type", item.get("op", "")) or "")
             raw_path = str(item.get("path", "") or "")
+            op_counts[op] = op_counts.get(op, 0) + 1
+            if raw_path and len(path_samples) < 8:
+                path_samples.append(raw_path)
             if op not in {"list", "info"}:
                 responses.append({"id": request_id, "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": raw_path})
                 continue
@@ -1765,71 +1535,62 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 responses.append({"id": request_id, "ok": False, "status": exc.status, "error": str(exc), "path": raw_path})
                 continue
             responses.append({"id": request_id, "ok": True, "status": 200, "payload": result})
-        self.write_json({"responses": responses})
+        response_payload = {"responses": responses}
+        recorder = getattr(getattr(getattr(self, "server", None), "app", None), "record_performance_sample", None)
+        if callable(recorder):
+            recorder(
+                "fs-batch",
+                "api",
+                trigger="POST /api/fs/batch",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=response_payload,
+                cache_key={"kind": "fs-batch"},
+                cache_status="computed",
+                owner_role="client",
+                count=len(requests),
+                details={"ops": json.dumps(op_counts, sort_keys=True), "paths": json.dumps(path_samples)},
+            )
+        self.write_json(response_payload)
 
     def read_urlencoded_form(self) -> dict[str, list[str]]:
-        content_length_text = self.headers.get("Content-Length")
-        if not content_length_text:
-            return {}
-        try:
-            content_length = int(content_length_text)
-        except ValueError:
+        body, error, _status = Handler.read_request_body(self, 16 * 1024, allow_empty=True, allow_missing=True)
+        if error is not None:
             self.close_connection = True
             return {}
-        if content_length > 16 * 1024:
-            self.close_connection = True
-            return {}
-        body = self.rfile.read(content_length).decode("utf-8", errors="replace")
-        return parse_qs(body, keep_blank_values=True)
+        return parse_qs((body or b"").decode("utf-8", errors="replace"), keep_blank_values=True)
 
     def handle_client_event(self) -> tuple[dict[str, Any], HTTPStatus]:
-        content_length_text = self.headers.get("Content-Length")
-        if not content_length_text:
-            return error_payload("missing Content-Length", status=HTTPStatus.LENGTH_REQUIRED), HTTPStatus.LENGTH_REQUIRED
+        body, error, status = Handler.read_request_body(self, 64 * 1024, too_large_message="event is too large")
+        if error is not None:
+            return error, status
         try:
-            content_length = int(content_length_text)
-        except ValueError:
-            return error_payload("invalid Content-Length", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
-        # reject a non-positive length — `read(-1)` blocks until disconnect and `read(-5)`
-        # raises (-> 500); only the upper bound was checked.
-        if content_length <= 0:
-            return error_payload("invalid Content-Length", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
-        if content_length > 64 * 1024:
-            self.close_connection = True
-            return error_payload("event is too large", status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE), HTTPStatus.REQUEST_ENTITY_TOO_LARGE
-        body = self.rfile.read(content_length)
-        try:
-            event = json.loads(body.decode("utf-8"))
+            event = json.loads((body or b"").decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             return error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         if not isinstance(event, dict):
             return error_payload("event must be an object", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         return self.server.app.client_event(event)
 
-    def handle_upload(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        content_length_text = self.headers.get("Content-Length")
-        if not content_length_text:
-            return {"session": session, "error": "missing Content-Length"}, HTTPStatus.LENGTH_REQUIRED
-        try:
-            content_length = int(content_length_text)
-        except ValueError:
-            return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
-        # reject a non-positive length (read(-1) blocks until disconnect; read(-5) -> 500).
-        if content_length <= 0:
-            return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
-        upload_max_bytes = self.server.app.upload_max_bytes()
-        if content_length > upload_max_bytes:
-            self.close_connection = True
-            return {
-                "session": session,
-                "error": f"upload is too large; limit is {upload_max_bytes} bytes",
-            }, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    def file_transfer_max_bytes(self) -> int:
+        getter = getattr(self.server.app, "file_transfer_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        getter = getattr(self.server.app, "upload_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        return UPLOAD_MAX_BYTES
 
-        body = self.rfile.read(content_length)
+    def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        upload_max_bytes = self.file_transfer_max_bytes()
+        body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
+        if error is not None:
+            return {"session": session, "error": str(error.get("error") or "")}, status
         try:
-            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body, max_part_bytes=upload_max_bytes)
+            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
         except ValueError as exc:
             return {"session": session, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        if editor_path or base_dir:
+            return self.server.app.upload_editor_files(files, editor_path=editor_path, base_dir=base_dir)
         return self.server.app.upload_files(session, files)
 
     def do_HEAD(self) -> None:
@@ -1852,9 +1613,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_auth_cookie_if_needed()
             self.end_headers()
+            self.record_http_response_bytes(HTTPStatus.OK, 0, "text/html; charset=utf-8")
             return
         self.send_response(HTTPStatus.NOT_FOUND)
         self.end_headers()
+        self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0)
 
     def dev_bundle_signature(self) -> str:
         # mtime_ns of the served bundle + css; changes the instant static_build.py rewrites them.
@@ -1898,6 +1661,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_auth_cookie_if_needed()
         self.end_headers()
         subscriber_id, subscriber_queue = self.server.app.client_events.subscribe()
+        if hasattr(self.server.app, "start_client_event_watcher"):
+            self.server.app.start_client_event_watcher()
         try:
             self.write_sse_json("ready", {"time": time.time()})
             while True:
@@ -1911,6 +1676,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         finally:
             self.server.app.client_events.unsubscribe(subscriber_id)
+            if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
+                self.server.app.stop_client_event_watcher_if_idle()
 
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1957,9 +1724,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def stream_codex_summary(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         session = str(query_one(qs, "session", "") or "")
-        lookback_seconds, error = parse_query_int(qs, "lookback", SUMMARY_LOOKBACK_SECONDS, max_value=SUMMARY_LOOKBACK_SECONDS * 24)
+        summary_settings = self.server.app.summary_settings()
+        default_lookback = int(summary_settings.get("lookback_seconds") or SUMMARY_DEFAULT_LOOKBACK_SECONDS)
+        lookback_seconds, error = parse_query_int(qs, "lookback", default_lookback, max_value=24 * 3600)
         if error:
             self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            return
+        availability_error = self.codex_summary_availability_error(summary_settings)
+        if availability_error:
+            self.write_json(availability_error, status=HTTPStatus.SERVICE_UNAVAILABLE)
             return
 
         payload, status = self.server.app.codex_summary_prompt(session, lookback_seconds)
@@ -1980,29 +1753,56 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
 
         meta = {key: value for key, value in payload.items() if key != "prompt"}
-        meta["summary_model"] = SUMMARY_CODEX_MODEL
-        meta["summary_effort"] = SUMMARY_CODEX_EFFORT
-        meta["summary_service_tier"] = SUMMARY_CODEX_SERVICE_TIER
+        meta["summary_model"] = summary_settings["codex_model"]
+        meta["summary_effort"] = summary_settings["codex_effort"]
+        meta["summary_service_tier"] = summary_settings["codex_service_tier"]
         self.server.app.log_event(
             session,
             "summary_started",
             "AI summary started",
-            {"lookback_seconds": lookback_seconds, "model": SUMMARY_CODEX_MODEL},
+            {"lookback_seconds": lookback_seconds, "model": summary_settings["codex_model"]},
         )
         try:
             self.write_sse_json("meta", meta)
-            self.run_codex_summary(prompt)
-            self.server.app.log_event(session, "summary_finished", "AI summary finished", {"model": SUMMARY_CODEX_MODEL})
+            self.run_codex_summary(prompt, summary_settings)
+            self.server.app.log_event(session, "summary_finished", "AI summary finished", {"model": summary_settings["codex_model"]})
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             self.server.app.log_event(session, "summary_disconnected", "AI summary stream disconnected", {})
             return
 
-    def run_codex_summary(self, prompt: str) -> None:
+    def codex_summary_availability_error(self, summary_settings: dict[str, Any]) -> dict[str, Any] | None:
+        provider = str(summary_settings.get("backend") or "").strip().lower()
+        if provider != "codex":
+            return {
+                "error": "AI summary provider is disabled",
+                "provider": provider or "disabled",
+            }
+        status = agent_auth_status()
+        codex_status = status.get("codex") if isinstance(status, dict) else {}
+        codex_status = codex_status if isinstance(codex_status, dict) else {}
+        if not codex_status.get("installed"):
+            return {
+                "error": "Codex summary provider is unavailable because the codex CLI is not on PATH",
+                "provider": "codex",
+                "login_command": AGENT_LOGIN_COMMANDS["codex"],
+            }
+        if not codex_status.get("logged_in"):
+            return {
+                "error": f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{AGENT_LOGIN_COMMANDS['codex']}`.",
+                "provider": "codex",
+                "login_command": AGENT_LOGIN_COMMANDS["codex"],
+            }
+        return None
+
+    def run_codex_summary(self, prompt: str, summary_settings: dict[str, Any]) -> None:
         repo_root = PROJECT_ROOT
-        args = codex_exec_argv(ephemeral=True)
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        env["NO_COLOR"] = "1"
+        args = codex_exec_argv(
+            ephemeral=True,
+            model=str(summary_settings.get("codex_model") or "").strip() or None,
+            effort=str(summary_settings.get("codex_effort") or "").strip() or None,
+            service_tier=str(summary_settings.get("codex_service_tier") or "").strip() or None,
+        )
+        env = codex_runtime_env()
         process: subprocess.Popen[bytes] | None = None
         try:
             process = subprocess.Popen(
@@ -2019,21 +1819,26 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             process.stdin.write(prompt.encode("utf-8"))
             process.stdin.close()
-            self.stream_codex_process(process)
+            self.stream_codex_process(process, timeout_seconds=summary_settings.get("timeout_seconds"))
         except OSError as exc:
             self.write_sse_json("summary_error", {"error": str(exc)})
         finally:
             if process is not None:
                 terminate_process_group(process)
 
-    def stream_codex_process(self, process: subprocess.Popen[bytes]) -> None:
+    def stream_codex_process(self, process: subprocess.Popen[bytes], timeout_seconds: Any = SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS) -> None:
         if process.stdout is None:
             self.write_sse_json("summary_error", {"error": "missing Codex stdout"})
             return
         fd = process.stdout.fileno()
         buffer = ""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         last_ping = time.monotonic()
-        deadline = time.monotonic() + SUMMARY_CODEX_TIMEOUT_SECONDS
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = float(SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS)
+        deadline = time.monotonic() + max(1.0, timeout)
         while True:
             now = time.monotonic()
             if now > deadline:
@@ -2045,7 +1850,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if readable:
                 chunk = os.read(fd, 4096)
                 if chunk:
-                    buffer += chunk.decode("utf-8", errors="replace")
+                    buffer += decoder.decode(chunk)
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
                         self.write_codex_summary_line(line)
@@ -2060,6 +1865,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if not readable:
                 break
 
+        buffer += decoder.decode(b"", final=True)
         if buffer.strip():
             self.write_codex_summary_line(buffer)
         return_code = process.wait(timeout=1.0)
@@ -2124,6 +1930,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "text/html; charset=utf-8")
 
     def write_redirect(self, location: str, status: HTTPStatus = HTTPStatus.SEE_OTHER, clear_auth: bool = False) -> None:
         self.send_response(status)
@@ -2139,6 +1946,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
+        self.record_http_response_bytes(status, 0)
 
     def write_static_asset(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
@@ -2150,31 +1958,49 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         except OSError as exc:
             self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", static_asset_cache_control(self.path))
+        if static_content_type_supports_gzip(content_type):
+            self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(body)
+        self.record_http_response_bytes(HTTPStatus.OK, len(body), content_type)
 
     def write_static_head(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
         if path is None:
             self.send_response(HTTPStatus.NOT_FOUND)
             self.end_headers()
+            self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0, content_type)
             return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(path.stat().st_size))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", static_asset_cache_control(self.path))
+        if static_content_type_supports_gzip(content_type):
+            self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
         self.end_headers()
+        self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+        data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -2184,6 +2010,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "application/json; charset=utf-8")
 
     def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
         # Every app method returns a (payload, HTTPStatus) pair; the unpack-then-write_json dance was
@@ -2196,6 +2023,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         # range-checked one int the same way, emitting an identical 400 on a bad value before calling the
         # app. Centralized so the bad-int response stays uniform; make_result(value) -> (payload, status).
         value, error = parse_query_int(qs, name, default, max_value=max_value)
+        if error:
+            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            return
+        self.write_app_result(make_result(value))
+
+    def write_validated_float_result(self, qs: dict, name: str, default: float, max_value: float, make_result) -> None:
+        # The activity/session-files routes share one bounded float query parameter. Keep the bad-float
+        # response and cap in one path so the three handlers cannot drift.
+        value, error = parse_query_float(qs, name, default, max_value=max_value)
         if error:
             self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
@@ -2216,9 +2052,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "text/plain; charset=utf-8")
 
     def websocket(self, parsed: Any) -> None:
-        session = parse_qs(parsed.query).get("session", [""])[0]
+        qs = parse_qs(parsed.query)
+        session = qs.get("session", [""])[0]
+        resize_client_id = clean_resize_authority_client_id(qs.get("client", [""])[0])
         share_sessions = self.share_sessions()
         if share_sessions and session not in share_sessions:
             self.write_text("share token is scoped to a different session\n", status=HTTPStatus.FORBIDDEN)
@@ -2228,14 +2067,19 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if not self.accept_websocket():
             return
-        self.bridge_tmux(session, readonly=self.auth_readonly())
+        self.bridge_tmux(session, readonly=self.auth_readonly(), resize_client_id=resize_client_id)
 
     def accept_websocket(self) -> bool:
         key = self.headers.get("Sec-WebSocket-Key")
         if not key:
             self.write_text("missing Sec-WebSocket-Key\n", status=HTTPStatus.BAD_REQUEST)
             return False
-        accept = base64.b64encode(hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()).decode("ascii")
+        try:
+            accept_source = (key + WEBSOCKET_GUID).encode("ascii")
+        except UnicodeEncodeError:
+            self.write_text("invalid Sec-WebSocket-Key\n", status=HTTPStatus.BAD_REQUEST)
+            return False
+        accept = base64.b64encode(hashlib.sha1(accept_source).digest()).decode("ascii")
         self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -2273,33 +2117,26 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.server.broadcast_share_status(token)
         self.bridge_shared_tmux(token, session, viewer_id)
 
-    def bridge_tmux(self, session: str, readonly: bool = False) -> None:
+    def bridge_tmux(self, session: str, readonly: bool = False, resize_client_id: str = "") -> None:
         initial_rows, initial_cols, saw_initial_resize, pending_payloads = self.read_initial_ws_payloads()
         if not saw_initial_resize:
             initial_rows, initial_cols = self.server.host_pty_dimensions_for_session(session)
         if not readonly and saw_initial_resize:
             self.server.record_host_pty_dimensions(session, initial_rows, initial_cols)
-        master_fd, slave_fd = pty.openpty()
-        set_pty_size(slave_fd, initial_rows, initial_cols)
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        configure_session_tmux_options(session)
-        attach_args = tmux_command(["attach-session"])
-        if readonly:
-            attach_args.append("-r")
         target = tmux_session_target(session)
-        attach_args.extend(["-t", target])
+        resize_state = {"rows": initial_rows, "cols": initial_cols}
+        tmux_client_name = ""
+        master_fd: int | None = None
+        slave_fd: int | None = None
+        process: subprocess.Popen[Any] | None = None
 
         def session_exists() -> bool:
-            return subprocess.run(
-                tmux_command(["has-session", "-t", target]),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            ).returncode == 0
+            return tmux(["has-session", "-t", target]).returncode == 0
 
         def attach_tmux() -> subprocess.Popen:
-            return subprocess.Popen(
+            if slave_fd is None:
+                raise OSError("tmux attach pty is closed")
+            attached = subprocess.Popen(
                 attach_args,
                 stdin=slave_fd,
                 stdout=slave_fd,
@@ -2308,12 +2145,33 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 env=env,
                 start_new_session=True,
             )
-
-        process = attach_tmux()
+            refresh_tmux_session_clients_after_attach(session)
+            return attached
 
         try:
+            master_fd, slave_fd = pty.openpty()
+            set_pty_size(slave_fd, initial_rows, initial_cols)
+            tmux_client_name = tmux_client_name_for_fd(slave_fd)
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            configure_session_tmux_options(session)
+            attach_args = tmux_attach_command(readonly=readonly)
+            attach_args.extend(["-t", target])
+            process = attach_tmux()
+            if not readonly and saw_initial_resize:
+                self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)
             for payload in pending_payloads:
-                self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
+                self.handle_ws_payload(
+                    session,
+                    master_fd,
+                    slave_fd,
+                    process,
+                    payload,
+                    readonly=readonly,
+                    resize_state=resize_state,
+                    tmux_client_name=tmux_client_name,
+                    resize_client_id=resize_client_id,
+                )
             connected = True
             while connected:
                 while process.poll() is None:
@@ -2333,7 +2191,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                             continue
                         if opcode not in {1, 2}:
                             continue
-                        self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
+                        self.handle_ws_payload(
+                            session,
+                            master_fd,
+                            slave_fd,
+                            process,
+                            payload,
+                            readonly=readonly,
+                            resize_state=resize_state,
+                            tmux_client_name=tmux_client_name,
+                            resize_client_id=resize_client_id,
+                        )
                 if not connected:
                     break
                 returncode = process.poll()
@@ -2344,24 +2212,24 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-            try:
-                os.close(slave_fd)
-            except OSError:
-                pass
-            if process.poll() is None:
+            for fd in (master_fd, slave_fd):
+                if fd is None:
+                    continue
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if process is not None and process.poll() is None:
                 terminate_process_group(process)
 
     def bridge_shared_tmux(self, token: str, session: str, viewer_id: str = "") -> None:
         viewer = ShareViewerConnection(self.connection, viewer_id)
         upstream = self.server.share_terminal_upstream(token, session)
-        upstream.add_viewer(viewer)
-        writer = threading.Thread(target=viewer.write_loop, name=f"share-viewer-{session}", daemon=True)
-        writer.start()
+        writer: threading.Thread | None = None
         try:
+            upstream.add_viewer(viewer)
+            writer = threading.Thread(target=viewer.write_loop, name=f"share-viewer-{session}", daemon=True)
+            writer.start()
             while not viewer.is_closed():
                 record = self.server.app.verify_share_token(token)
                 if record is None:
@@ -2389,7 +2257,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.server.release_share_terminal_upstream(token, session, viewer)
             self.server.app.unregister_share_viewer(token, viewer_id)
             self.server.broadcast_share_status(token)
-            writer.join(timeout=1.0)
+            if writer is not None:
+                writer.join(timeout=1.0)
 
     def websocket_share_host(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -2566,7 +2435,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         finally:
             self.connection.settimeout(previous_timeout)
 
-    def handle_ws_payload(self, session: str, master_fd: int, resize_fd: int, process: subprocess.Popen[Any], payload: bytes, readonly: bool = False) -> None:
+    def handle_ws_payload(
+        self,
+        session: str,
+        master_fd: int,
+        resize_fd: int,
+        process: subprocess.Popen[Any],
+        payload: bytes,
+        readonly: bool = False,
+        resize_state: dict[str, int] | None = None,
+        tmux_client_name: str = "",
+        resize_client_id: str = "",
+    ) -> None:
         try:
             message = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -2575,7 +2455,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             os.write(master_fd, payload)
             return
         msg_type = message.get("type")
-        if msg_type == "input":
+        if msg_type == "refresh":
+            refresh_tmux_session_clients(session)
+        elif msg_type == "input":
             if readonly:
                 return
             data = message.get("data")
@@ -2583,8 +2465,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 filtered = strip_terminal_query_responses(data)
                 if filtered:
                     os.write(master_fd, filtered.encode("utf-8"))
-                    # DOIT.58 Phase 1: one user-input heartbeat (readonly already returned above).
-                    self.server.app.record_user_input(session, len(filtered))
+                    # Queue input activity outside the PTY echo loop (readonly already returned above).
+                    self.server.app.record_user_input(session, len(filtered), data=filtered)
         elif msg_type == "resize":
             if readonly:
                 return
@@ -2593,14 +2475,24 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             dimensions = ws_resize_dimensions(message, DEFAULT_ROWS, DEFAULT_COLS)
             if dimensions:
                 rows, cols = dimensions
-                set_pty_size(resize_fd, rows, cols)
+                authority_changed = False
+                if message.get("foreground") is True or message.get("activate") is True:
+                    claimer = getattr(self.server, "claim_resize_authority", None)
+                    if callable(claimer):
+                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id, cols))
+                previous = (
+                    resize_state.get("rows"),
+                    resize_state.get("cols"),
+                ) if isinstance(resize_state, dict) else (None, None)
+                size_changed = previous != (rows, cols)
+                if size_changed:
+                    resize_pty_and_signal_process(resize_fd, process, rows, cols)
+                    if isinstance(resize_state, dict):
+                        resize_state["rows"] = rows
+                        resize_state["cols"] = cols
                 recorder = getattr(self.server, "record_host_pty_dimensions", None)
-                if callable(recorder):
+                if callable(recorder) and (size_changed or authority_changed):
                     recorder(session, rows, cols)
-                try:
-                    os.killpg(process.pid, signal.SIGWINCH)
-                except OSError:
-                    pass
         elif msg_type == "tmux-scroll":
             if readonly:
                 return
@@ -2670,17 +2562,24 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_pointer_clicks: dict[str, list[dict[str, Any]]] = {}
         self.share_pointer_threads: dict[str, threading.Thread] = {}
         self.share_pointer_stop = threading.Event()
+        if hasattr(self.app, "start_input_heartbeat_worker"):
+            self.app.start_input_heartbeat_worker()
         if hasattr(self.app, "start_tabber_activity_cache_warmer"):
             self.app.start_tabber_activity_cache_warmer()
-        if hasattr(self.app, "start_client_event_watcher"):
-            self.app.start_client_event_watcher()
+        if hasattr(self.app, "start_stats_history_sampler"):
+            self.app.start_stats_history_sampler()
         if hasattr(self.app, "start_update_check_thread"):
             self.app.start_update_check_thread()
+        start_agent_auth_status_refresh(force=True)
 
     def server_close(self) -> None:
         self.share_pointer_stop.set()
-        if hasattr(self.app, "stop_tmux_signal_event_watcher"):
-            self.app.stop_tmux_signal_event_watcher()
+        if hasattr(self.app, "stop_stats_history_sampler"):
+            self.app.stop_stats_history_sampler()
+        if hasattr(self.app, "stop_client_event_watcher"):
+            self.app.stop_client_event_watcher()
+        if hasattr(self.app, "stop_input_heartbeat_worker"):
+            self.app.stop_input_heartbeat_worker()
         super().server_close()
 
     def record_host_pty_dimensions(self, session: str, rows: int, cols: int) -> None:
@@ -2705,6 +2604,10 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def host_pty_dimensions_for_session(self, session: str) -> tuple[int, int]:
         with self.host_pty_dimensions_lock:
             return self.host_pty_dimensions.get(str(session or ""), (DEFAULT_ROWS, DEFAULT_COLS))
+
+    def claim_resize_authority(self, session: str, tmux_client_name: str, resize_client_id: str = "", active_cols: int | None = None) -> bool:
+        del resize_client_id
+        return claim_tmux_resize_authority(session, tmux_client_name, active_cols)
 
     def share_terminal_upstream(self, token: str, session: str) -> ShareTerminalUpstream:
         key = (str(token or ""), str(session or ""))

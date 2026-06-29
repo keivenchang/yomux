@@ -38,7 +38,8 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.4.10"
+ACTIVITY_MAX_HOURS = 24.0 * 365.0
+YOLOMUX_VERSION = "0.5.11"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -49,10 +50,13 @@ SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fas
 YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
 CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
 STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
-YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME", str(STATE_DIR / "codex-home")))
+YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME") or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
 STATE_PATH = CONFIG_DIR / "state.json"
 EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
+RUN_HISTORY_PATH = STATE_DIR / "run-history.json"
 ACTIVITY_PATH = STATE_DIR / "activity.json"
+TMUX_AI_STATUS_PATH = STATE_DIR / "tmux-AI-status.json"
+LEGACY_ATTENTION_ACKS_PATH = STATE_DIR / "attention-acks.json"
 ACTIVITY_HEARTBEATS_PATH = STATE_DIR / "activity-heartbeats.jsonl"
 WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"
 AUTO_APPROVE_LOCK_DIR = STATE_DIR / "locks"
@@ -65,6 +69,18 @@ TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z][A-Z0-9]{1,9})-\d{1,6}(?![A-Za-z0-9])")
 YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
 SEMVER_RE = re.compile(r"^\s*v?(\d+)\.(\d+)\.(\d+)(?:\D.*)?$")
+
+
+def file_revision(path: Path) -> str:
+    try:
+        stat = path.stat()
+    except OSError:
+        return "0-0"
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
+
+
+def yolomux_client_revision() -> str:
+    return file_revision(STATIC_DIR / "yolomux.js")
 
 
 class ErrorPayload(TypedDict, total=False):
@@ -86,7 +102,7 @@ HTTP_METADATA_TIMEOUT_SECONDS = 2.0
 MAX_EVENT_TAIL_LINES = 500
 GITHUB_API_ROOT = "https://api.github.com"
 LINEAR_API_URL = "https://api.linear.app/graphql"
-DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/team/issue"
+DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/issue"
 OTHER_BRANCH_LIMIT = 8
 # the cache-miss sentinel is owned by cache.py (where the single TtlCache lives) and re-exported
 # here for the modules that import it from common. Same object identity, so `is _CACHE_MISS` holds.
@@ -96,6 +112,7 @@ SERVER_STARTED_AT = time.time()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
 _YOLOMUX_COMMIT_SHA: str | None = None
+_YOLOMUX_COMMIT_COUNT: int | None = None
 _AGENT_PATH_WARNING_KEYS: set[str] = set()
 
 
@@ -121,11 +138,19 @@ def heal_server_path() -> str:
     return os.environ.get("PATH", "")
 
 
+def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
+    values = env or os.environ
+    configured = str(values.get("YOLOMUX_CODEX_HOME") or values.get("CODEX_HOME") or "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+
 def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
-    """Build a Codex subprocess environment with a writable state home."""
-    env = dict(base_env or os.environ)
+    """Build the Codex subprocess environment used by YO!agent."""
+    env = dict(os.environ)
+    if base_env is not None:
+        env.update(base_env)
     heal_server_path()
-    codex_home = Path(env.get("YOLOMUX_CODEX_HOME", str(YOAGENT_CODEX_HOME))).expanduser()
+    codex_home = codex_home_from_env(env)
     codex_home.mkdir(parents=True, exist_ok=True)
     env["PATH"] = os.environ.get("PATH", env.get("PATH", ""))
     env["CODEX_HOME"] = str(codex_home)
@@ -153,6 +178,10 @@ def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def project_git(project: Any) -> dict[str, Any]:
+    return as_dict(as_dict(project).get("git"))
+
+
 def codex_exec_argv(
     *,
     resume_session_id: str | None = None,
@@ -160,6 +189,7 @@ def codex_exec_argv(
     model: str | None = None,
     effort: str | None = None,
     service_tier: str | None = None,
+    search: bool = False,
 ) -> list[str]:
     selected_model = str(model or SUMMARY_CODEX_MODEL).strip() or SUMMARY_CODEX_MODEL
     selected_effort = str(effort or SUMMARY_CODEX_EFFORT).strip() or SUMMARY_CODEX_EFFORT
@@ -177,7 +207,11 @@ def codex_exec_argv(
     if resume_session_id:
         # `codex exec resume` restores the original cwd/sandbox and rejects --sandbox/--cd.
         return ["codex", "exec", "resume", *common, resume_session_id, "-"]
-    args = ["codex", "exec", *common, "--sandbox", "read-only"]
+    args = ["codex"]
+    if search:
+        # `--search` is a top-level Codex flag in 0.141.0; `codex exec --search` is rejected.
+        args.append("--search")
+    args.extend(["exec", *common, "--sandbox", "read-only"])
     if ephemeral:
         args.append("--ephemeral")
     return [*args, "--cd", str(PROJECT_ROOT), "-"]
@@ -311,6 +345,24 @@ def yolomux_commit_sha() -> str:
     return _YOLOMUX_COMMIT_SHA
 
 
+def yolomux_commit_count() -> int:
+    global _YOLOMUX_COMMIT_COUNT
+    if _YOLOMUX_COMMIT_COUNT is not None:
+        return _YOLOMUX_COMMIT_COUNT
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-list", "--count", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+        _YOLOMUX_COMMIT_COUNT = max(0, int(result.stdout.strip()))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+        _YOLOMUX_COMMIT_COUNT = 0
+    return _YOLOMUX_COMMIT_COUNT
+
+
 POPULAR_IDE_XTERM_APP_NAMES = [
     "".join(("Cur", "sor.app")),
     f"{' '.join(('Visual', 'Studio', 'Code'))}.app",
@@ -343,7 +395,12 @@ def positive_env_int(name: str, default: int) -> int:
     return parsed
 
 
-UPLOAD_MAX_BYTES = positive_env_int("YOLOMUX_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)
+_FILE_TRANSFER_MAX_BYTES_DEFAULT = 300 * 1024 * 1024
+if "YOLOMUX_FILE_TRANSFER_MAX_BYTES" in os.environ:
+    FILE_TRANSFER_MAX_BYTES = positive_env_int("YOLOMUX_FILE_TRANSFER_MAX_BYTES", _FILE_TRANSFER_MAX_BYTES_DEFAULT)
+else:
+    FILE_TRANSFER_MAX_BYTES = positive_env_int("YOLOMUX_UPLOAD_MAX_BYTES", _FILE_TRANSFER_MAX_BYTES_DEFAULT)
+UPLOAD_MAX_BYTES = FILE_TRANSFER_MAX_BYTES
 UPLOAD_MAX_FILES = positive_env_int("YOLOMUX_UPLOAD_MAX_FILES", 16)
 DEFAULT_UPLOAD_FILENAME_TEMPLATE = "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
 # Uploads default into a `.uploads/` subdir of the session working dir (keeps the cwd/repo clean and
@@ -556,20 +613,45 @@ def xterm_asset_path(asset: str) -> Path | None:
         "xterm.js": Path("lib") / "xterm.js",
         "xterm.css": Path("css") / "xterm.css",
     }
+    addon_relpaths = {
+        "xterm-addon-unicode11.js": ("addon-unicode11", Path("lib") / "addon-unicode11.js"),
+    }
     relpath = relpaths.get(asset)
-    if relpath is None:
+    addon = addon_relpaths.get(asset)
+    if relpath is None and addon is None:
         return None
-    for root in XTERM_ASSET_ROOTS:
-        path = root / relpath
-        if path.exists():
-            return path
+    if relpath is not None:
+        for root in XTERM_ASSET_ROOTS:
+            path = root / relpath
+            if path.exists():
+                return path
+    if addon is not None:
+        package, addon_relpath = addon
+        for root in XTERM_ASSET_ROOTS:
+            for path in (
+                root.parent / package / addon_relpath,
+                root / package / addon_relpath,
+                root / addon_relpath,
+                root / addon_relpath.name,
+            ):
+                if path.exists():
+                    return path
     for server_dir in POPULAR_IDE_SERVER_DIRS:
-        for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/xterm/{relpath}"):
-            if path.exists():
-                return path
-        for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/xterm/{relpath}"):
-            if path.exists():
-                return path
+        if relpath is not None:
+            for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/xterm/{relpath}"):
+                if path.exists():
+                    return path
+            for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/xterm/{relpath}"):
+                if path.exists():
+                    return path
+        if addon is not None:
+            package, addon_relpath = addon
+            for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/{package}/{addon_relpath}"):
+                if path.exists():
+                    return path
+            for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/{package}/{addon_relpath}"):
+                if path.exists():
+                    return path
     return None
 
 
@@ -586,8 +668,8 @@ def split_csv(values: list[str]) -> list[str]:
 
 def tail_file_lines(path: Path, lines: int) -> str:
     # read a bounded window backward from EOF instead of scanning the whole file front-to-
-    # back. Transcripts are multi-hundred-MB JSONL and this is called on every metadata poll, /api/context,
-    # /api/transcripts, and the summary — a full re-scan each time was the hot path.
+    # back. Transcripts are multi-hundred-MB JSONL and this is called on every metadata poll,
+    # /api/context, /api/session-metadata, and the summary — a full re-scan each time was the hot path.
     want = min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES)
     chunk = 65536
     max_bytes = want * chunk  # generous per-line ceiling; never walk the entire huge file
@@ -616,6 +698,10 @@ def terminate_process_group(process: subprocess.Popen[Any]) -> None:
         return
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
+        try:
+            process.wait(timeout=2.0)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            return
 
 def truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:

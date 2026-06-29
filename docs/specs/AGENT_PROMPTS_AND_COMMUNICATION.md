@@ -10,16 +10,18 @@ This file records the working knowledge YOLOmux uses to detect Claude and Codex 
 
 ## Implementation Owners
 
-- Visible screen state: `yolomux_lib/prompt_detector.py::agent_screen_state`.
-- Approval prompt state: `yolomux_lib/prompt_detector.py::approval_prompt_state`.
+- Visible Claude/Codex tmux pane control: `yolomux_lib/agent_tui.py`. This is the public API for capture, cursor facts, composer state, prompt/screen classification, clearing, paste-submit, and send verification.
+- Pure visible screen state classification: `yolomux_lib/prompt_detector.py::agent_screen_state`.
+- Pure approval prompt classification: `yolomux_lib/prompt_detector.py::approval_prompt_state`.
 - Claude AskUserQuestion text: `yolomux_lib/prompt_detector.py::ask_user_question_prompt_text`.
 - Generic visible user-choice question text: `yolomux_lib/prompt_detector.py::visible_choice_prompt_text`.
 - Transcript activity state: `yolomux_lib/transcripts.py::transcript_activity_state_from_text`.
 - Hybrid approval source order: `yolomux_lib/approvals.py::hybrid_approval_prompt_state`.
-- App status fan-out from pane text, approval state, and transcript state: `yolomux_lib/app.py::TmuxWebtermApp.prompt_and_screen_status`.
+- App status fan-out from pane text, approval state, and transcript state: `yolomux_lib/app.py::TmuxWebtermApp.prompt_and_screen_status`, routed through `agent_tui.classify_agent_pane`.
+- Claude/Codex structured stream normalization for YO!agent and text clients: `yolomux_lib/agent_comms/stream_events.py`. Current Claude CLI stream-json can emit Anthropic-style partials either directly or wrapped as `{"type":"stream_event","event":{...}}`; normalizers must unwrap those events, preserve outer `session_id` metadata, separate assistant-visible text from thinking/tool-call auxiliary rows, and dedupe snapshot tool-use echoes without dropping the later tool output.
 - Regression fixtures: `tests/test_auto_approve_detector.py` and `tests/test_transcripts.py`.
 
-When one tmux session contains multiple detected agent panes, session-level YO status captures the selected/preferred agent pane first. If the selected/preferred pane is not an agent pane, it falls back to a deterministic detected-agent pane. This keeps YO activity tied to the pane the user is actually looking at instead of the first agent discovered by tmux enumeration.
+When one tmux session contains multiple detected Claude/Codex panes, each tmux sub-window keeps its own agent kind, pane target, cwd/path, prompt state, and working/idle evidence. Session-level YO remains a stored user toggle, but status collection fans out to the live agent pane targets; UI surfaces such as the tmux sub-window bar, Tabber, popovers, and Recent Agents must render the per-sub-window rows instead of collapsing them into one session agent. A legacy scalar session status may still choose the selected/preferred agent pane first and then a deterministic fallback, but that scalar is only a summary and must not overwrite per-sub-window state/path/branch rows.
 
 ## State Model
 
@@ -27,16 +29,22 @@ When one tmux session contains multiple detected agent panes, session-level YO s
 | --- | --- | --- | --- |
 | `working` | The agent is currently generating, running a tool, reviewing files, or has a recent pending tool call. | No. Do not inject user text into a live turn. | Newest visible working line or recent transcript activity. |
 | `idle` | The agent is done and the input prompt/composer is available. | Yes, if the target pane is the intended pane. | Bottom prompt/composer with no live working block after it. |
-| `needs-input` | The agent is waiting for a non-permission user decision, such as a multiple-choice question. | Yes, but type/select only the requested answer. | Current visible question block or Claude AskUserQuestion UI. |
+| `needs-input` | The agent is waiting for a non-permission user decision, such as a multiple-choice question. | Only through the question-answer workflow; normal prompt sends must not paste over it. | Current visible question block or Claude AskUserQuestion UI. |
 | `approval` | Claude or Codex is waiting for a permission decision. | Yes, but use the approval action for the selected option; do not type arbitrary text unless rejecting with instructions. | Visible approval prompt block, optionally enriched by transcript/tool context. |
 | `blocked/error` | The agent cannot continue without external correction, a crash recovery action, or a stale session reset. | Usually no; route through session-specific recovery. | Explicit error text, repeated stale state, or app-level health checks. |
 
 ## Detector Principles
 
 - Prefer structured event channels over terminal scraping whenever they exist. Terminal text is a fallback because TUI wording, glyphs, and layout change across versions.
+- Claude terminal UI changes very frequently. Keep matching shape-based and evidence-based, preserve raw/styled captures plus cursor facts with the installed CLI version, and update fixtures from real captures when drift appears. Never make one Claude release, randomized status verb, footer sentence, or prompt glyph the long-term contract.
+- Store prompt corpus examples as `*.yaml` agent_tui captures with `raw_capture`, `styled_capture`, client metadata, cursor facts, operations, failures, and expected detector state. All current prompt-corpus capture and synthetic fixtures use wide canonical `width: 200` and `height: 40` metadata; keep future fixtures at `200x40` with `capture_prompt_fixture.py` unless the case is explicitly about width or height variants, and record the chosen width/height in the fixture metadata. Wide captures are the source of truth because they avoid recording terminal hard-wrap artifacts as semantic rows. `mock <case>` and frozen `fixture <case>` in panes narrower than the source capture re-render from the recorded fixture width to the current pane width. `--dump-fixtures` renders at the fixture source width, normally 200 columns, and must not inject a narrow non-TTY fallback into metadata, paths, or captured rows. Full-width separator-only rows and box-border rows that exactly hit the recorded fixture width are rebuilt at the output width so the right edge remains visible. If a frozen `fixture <case>` pane is at least as wide as the source fixture, it preserves the recorded rows exactly. Re-rendering must not merge menu options, prompts, footers, command/tool rows, or fresh assistant rows. Write multiline capture fields as YAML block scalars so raw terminal text is readable in review. Temporary verifier output may start under `tests/fixtures/prompt_corpus/staging/`, but useful cases should be promoted and staging can be discarded; promoted captures keep `source_staging_file` when staging provenance exists. Every capture filename plus YAML metadata must include the case name, normalized client token, and capture date, with the date or timestamp as the final filename component. Use `case_name__client-token_date.yaml`, where client tokens keep the CLI name and version visually readable, such as `codex-cli-0.141.0`, `claude-code-2.1.183`, or `codex-cli-synthetic`; synthetic cases live under `tests/fixtures/prompt_corpus/synthetic/`, promoted real TUI captures live under `tests/fixtures/prompt_corpus/captures/`, and the root inventory may reference either location for detector coverage.
+- Prompt corpus parity is semantic. Do not assume every Claude capture needs a same-name Codex capture or the reverse. `working_command_counter` is Codex-only by name because the live repro was a command-send scenario, but its Claude counterpart is `working_visible_counter`; both are the `visible-working-counter` group and both prove `Working`. Product-specific surfaces stay one-sided when the other client has a different product feature: Claude file/tool/Bash permissions are not Codex network/sandbox/MCP approvals, and Claude interrupted `What should Claude do instead?` has no current Codex question counterpart. Synthetic-only rows that still need live evidence are listed under `live_capture_targets` in `tests/fixtures/prompt_corpus/inventory.yaml`; replace those with real captures when the exact upstream prompt is available instead of inventing a cross-product pair.
+- For YO!agent send-result watchers, transcript result text wins first, transcript-derived edited-file deltas win next, and visible pane scraping is only a final fallback when those stronger signals are missing or stale.
 - Use the newest bounded visible block. Do not scan the whole scrollback and treat an old prompt as current.
 - A live working line wins over older questions above it. A current approval prompt wins over an older working header above it.
-- Footer/chrome/task rows are not later activity by themselves. Examples include `esc to interrupt`, `bypass permissions`, context usage, model/effort labels, Ctrl-T task rows, and composer boxes.
+- Visible status counters are screen-local activity evidence. A shape match such as a spinner/status marker plus elapsed time, token count, effort/progress text, or interrupt hint can mark the pane `working`; advancement of elapsed time, tokens, or tool-use counts across captures is stronger evidence than one copied row, and repeated unchanged counters may become stale when no transcript/file/tool activity still proves work is active.
+- Footer/chrome/task rows are not later activity or user questions by themselves. Examples include `esc to interrupt`, `bypass permissions`, `⏸ plan mode`, context usage, model/effort labels, Ctrl-T task rows, Claude `Tip:` rows, and composer boxes.
+- Composer ghost detection must use cursor facts when available. Claude can leave NBSP/suggestion-looking spacing after the user types into the composer; if the cursor has advanced past the candidate text, treat it as a real draft that can be cleared, not a ghost suggestion.
 - A real shell prompt below a working row means the working row is stale.
 - A bare user prompt at the bottom must stop stale-question scanning. Example: an old `❯ Where are the DOIT files?` above a current `❯ ` prompt is not `needs-input`.
 - Tests should use raw copied panes with an expected state. When a new Claude/Codex version changes a glyph or footer, add the fixture before relaxing the detector.
@@ -53,6 +61,9 @@ Claude working rows often use a leading glyph, a randomized verb, elapsed time, 
 ✶ Thinking… (1s · ↑ 26.9k tokens · esc to interrupt)
 ● Lollygagging… (2m 1s · ↓ 8.0k tokens · thinking with xhigh effort)
 ● Honking… (1m 12s · ↓ 5.8k tokens)
+✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)
+. Tomfoolering… (10m 35s · ↓ 55.4K tokens)
+· Tomfoolering… (12m 49s · ↑ 64.3k tokens)
 ```
 
 Claude may also show multi-agent progress instead of a single "Thinking" row.
@@ -64,6 +75,8 @@ Claude may also show multi-agent progress instead of a single "Thinking" row.
 
 (ctrl+b to run in background)
 ```
+
+Claude background-agent rows can also carry live counters. A row such as `○general-purpose Audit ui_tree followups DOIT 2m 15s · ↓ 69.1K tokens` is activity evidence when the elapsed, token, or tool-use counter advances.
 
 Claude chrome below a live working row should not make the detector think the turn is done.
 
@@ -142,7 +155,7 @@ This stale example is idle, not `needs-input`, because the current bottom prompt
 ```text
 ❯ Where are the DOIT files?
 
-● They're gone from ~/yolomux.dev2 — and that's by the project's design, not a loss.
+● They're gone from ~/yolomux.dev8002 — and that's by the project's design, not a loss.
 
 ✻ Baked for 1m 33s · 1 shell still running
 
@@ -190,7 +203,7 @@ Codex working rows commonly use `◦`, `•`, or `○`, a short activity label, 
 ○ Working (4m 09s • esc to interrupt)
 ```
 
-Codex can show a working row above an input-looking composer and model line. The working row is still current unless a real prompt or real later activity proves it stale.
+Codex can show a working row above an input-looking composer and model line. The working row is still current unless a real prompt or real later activity proves it stale. Codex goal-status suffixes such as `Pursuing goal (<duration>)` and `Goal achieved (<duration>)` are status chrome; when paired with a live working row, their duration is the cumulative goal elapsed time for display.
 
 ```text
 ○ Working (33m 05s · esc to interrupt)
@@ -198,8 +211,10 @@ Codex can show a working row above an input-looking composer and model line. The
 │ Use /skills to list available skills       │
 │ >                                          │
 ╰────────────────────────────────────────────╯
-gpt-5.5 xhigh   ~/yolomux.dev2
+gpt-5.5 xhigh   ~/yolomux.dev8002
 ```
+
+The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
 
 Codex working examples embedded in explanatory text are not live state when a bottom composer follows them as part of an old response.
 
@@ -212,7 +227,7 @@ Codex working examples embedded in explanatory text are not live state when a bo
 
 › Explain this codebase
 
-  gpt-5.5 xhigh · ~
+  gpt-5.4-mini medium · ~
 ```
 
 ## Codex Done And Typeable Signals
@@ -222,7 +237,7 @@ Codex is typeable when the bottom composer prompt is visible and there is no cur
 ```text
 › Explain this codebase
 
-  gpt-5.5 xhigh · ~
+  gpt-5.4-mini medium · ~
 ```
 
 A real shell prompt below a Codex working line makes the working line stale.
@@ -280,6 +295,7 @@ Use these examples to test the difference between prompts the agent presents to 
 | AskUserQuestion footer `Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel` | `needs-input` | It is a modal decision UI, not a permission prompt. |
 | `Do you want to make this edit to SKILL.md?` with Yes/No options | `approval` | It is a tool/file permission decision. |
 | `Would you like to run the following command?` with `$ <command>` and Codex options | `approval` | It is a command permission decision. |
+| Bottom composer ghost suggestion text such as `❯ commit the APP_PARSER_DEBUG change` or dim Codex text like `› Summarize recent commits` | `idle` | It is placeholder UI exposed by tmux capture, not a draft the user typed; Claude can preserve NBSP spacing and Codex can preserve ANSI dim styling. |
 | Old `❯ Where are the DOIT files?` above a current bare `❯ ` prompt | `idle` | The bottom prompt proves the old question is scrollback. |
 | Text explaining `• Working (10s • esc to interrupt)` followed by the bottom Codex composer | `idle` | The working row is an example in conversation, not live chrome. |
 
@@ -294,7 +310,7 @@ Use these examples to test the difference between prompts the agent presents to 
 | File or JSONL mailbox in the workspace | Simple, durable, inspectable by humans, and works across tools with no TUI dependency. | Not realtime; needs locking, schema, ownership, and cleanup; easy to create ambiguous half-written records. | Use for durable task handoff, DOIT-style queues, and cross-agent notes. Prefer JSONL for machine state and Markdown for human work queues. |
 | Local MCP/tool server | Structured bidirectional actions, typed tools, and clearer capability boundaries. | Setup overhead, versioning, auth, and lifecycle management are real costs. | Recommended for richer cross-agent workflows once the tool boundary is known. |
 | Tmux text injection and visible-screen scraping | Universal, easy to debug, and works when no structured channel exists. | Brittle against TUI wording/layout changes, can hit the wrong pane, can type during a live turn if state is wrong. | Fallback only. Keep fixtures current and gate injection on `idle`, `needs-input`, or `approval`. |
-| Shared tmux windows with labeled panes | Human-readable and useful for manual handoff or emergency recovery. | Weak structured state, naming collisions, no reliable acknowledgement by itself. | Use as a human-facing coordination surface, not as the only state source. |
+| Shared tmux sub-windows with labeled panes | Human-readable and useful for manual handoff or emergency recovery. | Weak structured state, naming collisions, no reliable acknowledgement by itself. | Use as a human-facing coordination surface, not as the only state source. |
 | OSC 52 clipboard bridge | Useful for copy/paste flows when terminal selection is unreliable. | Clipboard is global-ish user state, not a command/control channel; can overwrite user clipboard. | Use only for explicit copy bridge features, not agent orchestration. |
 
 ## Recommended Channel Order
@@ -307,7 +323,7 @@ Use these examples to test the difference between prompts the agent presents to 
 
 ## Test Guidance
 
-- Add a copied raw terminal fixture for every detector bug before changing the detector.
+- Add a copied raw terminal fixture for every detector bug before changing the detector. For Claude, include the installed client version and enough raw/styled/cursor evidence to prove the match is based on UI shape, counters, and position rather than the current novelty text.
 - Assert both the low-level helper and `agent_screen_state`, because the browser badge path depends on the combined state.
 - Include stale scrollback cases: old approval above later activity, old question above bare prompt, old working example in a response, and real shell prompt below working text.
 - Include trailing chrome cases: composer boxes, effort/model labels, context lines, task lists, and interrupt footers.

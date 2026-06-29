@@ -10,7 +10,7 @@ const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
 function agentLoggedIn(agent) {
   const entry = agentAuth[agent];
   // Unknown (term, or no status yet) counts as logged-in so we never block a usable agent.
-  return !entry || !entry.installed || entry.logged_in === true;
+  return !entry || !entry.installed || entry.logged_in !== false;
 }
 function agentLoginCommand(agent) {
   return agentLoginCommands[agent] || '';
@@ -18,6 +18,18 @@ function agentLoginCommand(agent) {
 function agentUnavailableReason(agent) {
   const entry = agentAuth[agent];
   return entry?.unavailable_reason || '';
+}
+function applyAgentAvailabilityPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (payload.agentAuth && typeof payload.agentAuth === 'object') agentAuth = payload.agentAuth;
+  if (Array.isArray(payload.availableAgents)) {
+    availableAgents.clear();
+    payload.availableAgents.forEach(agent => {
+      const name = String(agent || '').trim();
+      if (name) availableAgents.add(name);
+    });
+  }
+  return true;
 }
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
@@ -157,7 +169,6 @@ let shareGeometryDigestTimer = null;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
 const shareDebugReportLimit = 20;
-const shareDebugProfileUploadMinIntervalMs = 5000;
 let shareDebugProfileLastUploadAtByKind = new Map();
 let shareLastGeometryDigest = null;
 let shareLastGeometryDigestResult = null;
@@ -241,6 +252,7 @@ const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenTogg
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileExplorerQuickAccess = document.getElementById('fileExplorerQuickAccess');
 const fileExplorerExpanded = new Set();
+const fileExplorerPendingExpansions = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
@@ -253,6 +265,7 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerOpenIntentStorageKey = 'yolomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
+const fileExplorerTabberLookbackHoursStorageKey = 'yolomux.fileExplorer.tabberLookbackHours.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
@@ -455,7 +468,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
   }},
-  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
+  // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
+  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -560,6 +575,9 @@ const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 const pendingFileEditorLineTargets = new Map();  // layout item -> line target to apply after async CodeMirror load
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
+let layoutUrlStateFromQuery = null;
+let layoutUrlStateApplied = false;
+let layoutUrlStateRefreshTimer = null;
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = shareBootstrapFinderRoot() || null;
@@ -614,6 +632,7 @@ let fileExplorerSessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesLoading = false;
 const fileExplorerSessionFilesGuard = makeGenerationGuard();
 let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
+let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const fileExplorerExpandedBySyncTarget = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
 const fileExplorerSyncManualCollapsedByTarget = new Map();
@@ -622,6 +641,9 @@ let fileExplorerVisibleSyncSession = '';
 let fileExplorerVisibleSyncRoot = '';
 let fileExplorerLastInteractionAt = 0;
 let fileExplorerRefreshDeferred = false;
+const fileExplorerSelectedPaths = new Set();
+let fileExplorerSelectionAnchor = null;
+let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
 let sessionFilesSortMode = 'newest';
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
@@ -663,20 +685,41 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+let clientSettingsMetadataDeferred = clientSettingsPayload.deferred_metadata === true;
+let clientSettingsMetadataRefreshPromise = null;
+let clientSettingsMetadataRefreshTimer = null;
+const SETTING_FALLBACKS = Object.freeze({
+  'appearance.date_time_hour_cycle': '24',
+  'appearance.editor_font_size': 13,
+  'appearance.file_explorer_font_size': 13,
+  'appearance.terminal_font_size': 13,
+  'editor.autosave_delay_seconds': 2.5,
+  'file_explorer.image_open_mode': 'same-tab',
+  'file_explorer.image_preview_max_px': 320,
+  'general.auto_focus': false,
+  'general.startup_tips': true,
+  'terminal_editor.scrollback': 5000,
+  'uploads.max_bytes': 300 * 1024 * 1024,
+});
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 let shareResolvedGlobalThemeMode = '';
 let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
-let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle', '24') === '12' ? '12' : '24';
+let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle') === '12' ? '12' : '24';
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
-fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
 let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
+const ensureSessionPromises = new Map();
+const terminalStartupPromises = new Map();
+const pendingTmuxSessions = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
+const promptAttentionClears = new Map();
+const attentionAcknowledgementTimers = new Map();
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
@@ -690,9 +733,9 @@ const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
 const shareViewFitStorageKey = 'yolomux.share.viewFit.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
-// YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
-// sub-tab is remembered across reloads.
+// Legacy merged-pane sub-tab compatibility only. YO!info and YO!agent now have separate virtual tabs.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
+const infoLookbackHoursStorageKey = 'yolomux.infoPanel.lookbackHours.v1';
 const transcriptPreviewMessages = 200;
 let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms');
 // The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
@@ -702,8 +745,8 @@ let latencyRefreshMs = initialSetting('performance.latency_refresh_ms');
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms');
 let tmuxSignalState = null;
 tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
-let redReminderMs = initialSetting('appearance.red_reminder_ms');
-let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms');
+let agentStatusPulsePeriodMs = initialSetting('performance.agent_status_pulse_period_ms');
+let workflowTransitionGlowSeconds = initialSetting('performance.workflow_transition_glow_seconds');
 const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms');
 const toastMaxLines = 3;
@@ -721,26 +764,32 @@ const fileEditorScrollSyncSuppressMs = 150;
 let serverWatchRootsSignature = '';
 let serverWatchRootsInFlight = false;
 let serverWatchRootsSyncedAt = 0;
+let serverWatchRootsTimer = null;
+let serverWatchRootsPendingOptions = {};
+let fileExplorerFilesystemWatchToken = '';
+let fileExplorerFilesystemLastFullAt = 0;
+const fileExplorerFilesystemKeyframeMs = 60001;
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms');
-let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
-let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
-let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);
+let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px');
+let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode');
+let uploadMaxBytes = initialSetting('uploads.max_bytes');
 const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
-let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
+let terminalFontSize = initialSetting('appearance.terminal_font_size');
 const terminalFontFamily = '"YOLOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
-let editorFontSize = initialSetting('appearance.editor_font_size', 13);
+let editorFontSize = initialSetting('appearance.editor_font_size');
 let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);
-let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
-let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
-let autoFocusEnabled = initialSetting('general.auto_focus', false);
-let startupHelpersEnabled = initialSetting('general.startup_tips', true) !== false;
+let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size');
+let terminalScrollback = initialSetting('terminal_editor.scrollback');
+let autoFocusEnabled = initialSetting('general.auto_focus');
+let startupHelpersEnabled = initialSetting('general.startup_tips') !== false;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
 const terminalWheelPixelLinePx = 35;
 const terminalWheelMaxLinesPerEvent = 12;
 const maxSessionTabs = bootstrap.maxSessionTabs;
+const linearIssueBaseUrl = String(bootstrap.linearIssueBaseUrl || 'https://linear.app/issue').replace(/\/+$/, '');
 const basePaneKeys = ['left', 'right'];
 const splitPaneKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
 const paneKeys = [...basePaneKeys, ...splitPaneKeys];
@@ -765,9 +814,11 @@ function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 function yoagentTabLabel() { return t('brand.tab.agent'); }
-// the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
+// Legacy share/deeplink compatibility only. YO!info and YO!agent are separate tabs.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
+const searchHistoryItemId = '__search_history__';
+function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const emptyPaneParam = '__empty_pane__';
@@ -783,13 +834,23 @@ function urlFlagEnabled(name) {
     return false;
   }
 }
-const debugModeEnabled = urlFlagEnabled('debug');
+const jsDebugCollectionEnabled = true;
+const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
+let debugModeEnabled = debugModeExplicitUrlEnabled;
 const jsDebugEventLimit = 200;
 const jsDebugRenderDebounceMs = 500;
 let jsDebugEventSeq = 0;
 let jsDebugEvents = [];
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
+const clientPerfCounterLimit = 80;
+const clientPerfLongTaskSampleLimit = 40;
+const clientPerfCounters = new Map();
+let clientPerfLongTaskSamples = [];
+let clientPerfLongTaskObserverInstalled = false;
+const terminalRemovalLatencyPending = new Map();
+let terminalRemovalLatencySamples = [];
+const terminalRemovalLatencySampleLimit = 40;
 const CLS = Object.freeze({
   active: 'active',
   collapsed: 'collapsed',
@@ -801,6 +862,51 @@ const CLS = Object.freeze({
   selected: 'selected',
   tabDragOver: 'tab-drag-over',
   tabDropPreview: 'tab-drop-preview',
+});
+const THEME_CLASS_BY_MODE = Object.freeze({
+  system: 'theme-system',
+  dark: 'theme-dark',
+  light: 'theme-light',
+});
+const THEME_RESOLVED_CLASS_BY_MODE = Object.freeze({
+  dark: 'theme-resolved-dark',
+  light: 'theme-resolved-light',
+});
+const THEME_BODY_CLASSES = Object.freeze([
+  ...Object.values(THEME_CLASS_BY_MODE),
+  ...Object.values(THEME_RESOLVED_CLASS_BY_MODE),
+]);
+const EDITOR_THEME_CLASS_BY_MODE = Object.freeze({
+  system: 'editor-theme-system',
+  dark: 'editor-theme-dark',
+  light: 'editor-theme-light',
+});
+const EDITOR_THEME_BODY_CLASSES = Object.freeze(Object.values(EDITOR_THEME_CLASS_BY_MODE));
+const EDITOR_PREVIEW_VANILLA_CLASS = 'editor-preview-vanilla';
+const PREVIEW_POPOUT_BODY_CLASSES = Object.freeze([
+  THEME_CLASS_BY_MODE.light,
+  THEME_CLASS_BY_MODE.dark,
+  EDITOR_THEME_CLASS_BY_MODE.light,
+  EDITOR_THEME_CLASS_BY_MODE.dark,
+  EDITOR_PREVIEW_VANILLA_CLASS,
+]);
+const STATE_KEY = Object.freeze({
+  approval: 'approval',
+  blocked: 'blocked',
+  interrupted: 'interrupted',
+  needsApproval: 'needs-approval',
+  needsInput: 'needs-input',
+  working: 'working',
+  idle: 'idle',
+});
+const STATE_CLASS = Object.freeze({
+  needsAttention: 'needs-attention',
+  needsInput: STATE_KEY.needsInput,
+  needsExec: 'needs-exec',
+  needsBlocked: 'needs-blocked',
+  needsInputPane: `${STATE_KEY.needsInput}-pane`,
+  needsExecPane: 'needs-exec-pane',
+  needsBlockedPane: 'needs-blocked-pane',
 });
 const DROP_PREVIEW_CLASSES = Object.freeze([
   CLS.dragOver,
@@ -866,6 +972,17 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    canPopout: item => {
+      const path = fileItemPath(item);
+      return Boolean(path && editorPreviewModeAvailable(path, openFiles.get(path)));
+    },
+    popoutDisabledReason: item => fileItemPath(item)
+      ? 'file editor popout needs a preview-capable file'
+      : 'file editor popout needs a file path',
+    openPopout: item => {
+      const path = fileItemPath(item);
+      return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
+    },
     className,
     icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -874,28 +991,53 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
 }
 const TAB_TYPES = [
   {
-    // YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
-    // toggle. The legacy yoagent/yosup aliases resolve here so saved layouts and bookmarked
-    // ?…=yoagent URLs open the merged pane (the boot deep-link scan pre-selects the YO!agent sub-tab).
+    // YO!info and YO!agent are independent virtual tabs. Legacy yoagent/yosup aliases
+    // resolve to the standalone YO!agent item below.
     key: 'info',
     id: infoItemId,
-    aliases: ['info', infoItemId, 'yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
-    match: item => item === infoItemId || item === yoagentItemId || item === legacyYosupItemId,
+    aliases: ['info', 'info2', 'yo-info2', 'yoinfo2', infoItemId, '__info2__'],
+    match: item => item === infoItemId || item === '__info2__',
     label: () => infoTabLabel(),
     shortLabel: () => infoTabLabel(),
     terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
     param: () => 'info',
-    detail: () => t('info.subtitle'),
+    detail: () => t('menu.file.info.detail'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
+    canPopout: true,
+    popoutRenderer: item => panePopoutPanelSnapshot(item),
     renderAttached: () => {
-      applyInfoSubTab();
       renderInfoPanel();
-      renderYoagentPanel({preserveDraft: true, scrollBottom: false});
     },
     className: () => 'info',
     icon: 'branch-info',
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
+    key: 'yoagent',
+    id: yoagentItemId,
+    aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
+    match: item => item === yoagentItemId || item === legacyYosupItemId,
+    label: () => yoagentTabLabel(),
+    shortLabel: () => yoagentTabLabel(),
+    terminalTitle: () => t('tab.unavailableFor', {name: yoagentTabLabel()}),
+    sortRank: 0.1,
+    param: () => 'yoagent',
+    detail: () => t('menu.file.yoagent.detail'),
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: () => createYoagentPanel(),
+    renderAttached: () => {
+      renderYoagentPanel({preserveDraft: true, scrollBottom: true});
+      showYoagentStartupInfoOnce();
+      loadYoagentConversation({silent: true, scrollBottom: true});
+      loadYoagentJobs({silent: true, scrollBottom: true});
+      prewarmYoagent({scrollBottom: true});
+    },
+    className: () => 'yoagent',
+    icon: 'yoagent',
+    popoutDisabledReason: 'interactive YO!agent popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -914,7 +1056,28 @@ const TAB_TYPES = [
     createPanel: () => createFileExplorerPanel(),
     className: () => 'file-explorer',
     icon: 'finder',
+    popoutDisabledReason: 'interactive Finder/Tabber popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
+    key: 'search-history',
+    id: searchHistoryItemId,
+    aliases: ['search', 'history', 'run-history', 'search-history', searchHistoryItemId],
+    match: item => item === searchHistoryItemId,
+    label: () => searchHistoryTabLabel(),
+    shortLabel: () => t('tab.searchHistory.short'),
+    terminalTitle: () => t('tab.unavailableFor', {name: searchHistoryTabLabel()}),
+    sortRank: 0.6,
+    param: () => 'search-history',
+    detail: () => t('searchHistory.detail'),
+    rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
+    createPanel: () => createSearchHistoryPanel(),
+    renderAttached: () => loadSearchHistoryPanelData({silent: true}),
+    className: () => 'search-history-item',
+    icon: 'document',
+    popoutDisabledReason: 'interactive Search & Runs popout is disabled in phase 1',
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
   {
@@ -930,12 +1093,13 @@ const TAB_TYPES = [
     detail: () => compactHomePath(settingsConfigPath()),
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
+    popoutDisabledReason: 'interactive Preferences popout is disabled in phase 1',
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
-  ...(debugModeEnabled ? [{
+  {
     key: 'debug',
     id: debugPaneItemId,
     aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
@@ -948,12 +1112,17 @@ const TAB_TYPES = [
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
-    renderAttached: () => renderDebugPanels(),
+    canPopout: true,
+    popoutRenderer: item => panePopoutPanelSnapshot(item),
+    renderAttached: () => {
+      enableDebugMode();
+      renderDebugPanels();
+    },
     className: () => 'debug-item',
     icon: 'tab-meta',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
-  }] : []),
+  },
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -983,6 +1152,7 @@ function tabTypeForParam(value) {
 }
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
+function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
@@ -1092,9 +1262,7 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 function virtualTabItems() {
-  return debugModeEnabled
-    ? [infoItemId, fileExplorerItemId, prefsItemId, debugPaneItemId]
-    : [infoItemId, fileExplorerItemId, prefsItemId];
+  return [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1105,18 +1273,30 @@ let transcriptMetaLoading = false;
 let transcriptMetaLoaded = false;
 let transcriptMetaLoadError = '';
 let transcriptMetaRefreshPromise = null;
+let infoPanelRenderPending = false;
+let infoPanelLastRenderSignature = '';
+let infoPanelLastRenderHtml = '';
 let clientEventsSource = null;
 let clientEventsConnected = false;
+const clientPushEventQueue = new Map();
+let clientPushEventFrame = 0;
 let reconnectResyncTimer = null;
 const reconnectResyncDebounceMs = 751;
-const autoApproveDisconnectedPollMs = 5003;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
 let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
+let backgroundOwnerStatusPayload = null;
+let backgroundOwnerStatusLoading = false;
+let backgroundOwnerStatusLoaded = false;
+let backgroundOwnerStatusError = '';
+let backgroundOwnerStatusRefreshPromise = null;
+let yoagentStartupActivitySummaryPayload = null;
 let yoagentMessages = [];
 let yoagentPendingWaits = [];
+let yoagentJobs = [];
+let yoagentJobsLoading = false;
 let yoagentConversationLoaded = false;
 let yoagentConversationLoading = false;
 let yoagentConversationPath = '';
@@ -1126,6 +1306,9 @@ let yoagentPrewarming = false;
 let yoagentPrewarmStarted = false;
 let yoagentStartupLlmRequested = false;
 let yoagentStreamingMessages = new Map();
+let yoagentActiveChatRequest = null;
+let yoagentChatQueue = [];
+let yoagentChatQueueSerial = 0;
 let yoagentError = '';
 let yoagentDraft = '';
 let yoagentHistoryCursor = null;
@@ -1134,8 +1317,14 @@ let yoagentNotice = null;
 let yoagentScrollbackLocked = false;
 let yoagentStartupInfoShown = false;
 let yoagentStartupInfoVisible = false;
+let searchHistoryQuery = '';
+let searchHistoryPayload = {query: '', results: []};
+let searchHistoryLoading = false;
+let searchHistoryError = '';
+let runHistoryPayload = {runs: []};
+let runHistoryLoading = false;
+let runHistoryError = '';
 let notificationsEnabled = false;
-let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
@@ -1153,18 +1342,7 @@ function setLimitedMapEntry(map, key, value, limit) {
   }
 }
 
-let infoBranchSort = {key: 'updated', dir: 'desc'};
 let shareInfoBranchRowsOverride = null;
-const infoBranchColumnWidthStorageKey = 'yolomux.infoBranchColumnWidth.v1';
-const infoBranchColumnDefaultWidthPx = 320;
-const infoBranchColumnMinWidthPx = 230;
-const infoBranchColumnMaxWidthPx = 900;
-const infoDescColumnWidthStorageKey = 'yolomux.infoDescColumnWidth.v1';
-const infoDescColumnDefaultWidthPx = 310;
-const infoDescColumnMinWidthPx = 310;
-const infoDescColumnMaxWidthPx = 1600;
-let infoBranchColumnWidthPx = readStoredInfoColumnWidth('branch');
-let infoDescColumnWidthPx = readStoredInfoColumnWidth('desc');
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
@@ -1186,6 +1364,7 @@ let pendingLayoutRender = null;
 let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
+let nativeDragImagePreview = null;
 let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
@@ -1198,12 +1377,9 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
-const watchedPrContextMenu = createContextMenuController();   // "Watch this PR" on YO!info PR cells
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
+const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
-const fileExplorerSelectedPaths = new Set();
-let fileExplorerSelectionAnchor = null;
-let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
 let fileExplorerPathError = '';
@@ -1217,6 +1393,8 @@ let pasteUploadInFlight = false;
 let layoutResizeState = null;
 let responsiveLayoutPruneTimer = null;
 let topbarResizeObserver = null;
+const tabStripOverflowCheckSet = new Set();
+let tabStripOverflowCheckFrame = null;
 let latencySamples = [];
 let tabMetaVisible = readStoredTabMetaVisible();
 let authRedirectStarted = false;

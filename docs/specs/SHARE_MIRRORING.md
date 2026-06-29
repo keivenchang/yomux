@@ -296,6 +296,15 @@ The server should not render YOLOmux DOM. It should coordinate host-authored fra
 
 If the host disconnects, viewers should enter a host-disconnected state. The server may keep the last keyframe for a short grace period, but it must not pretend the mirror is live.
 
+### Connection lifecycle invariants (learned)
+
+These are hard requirements on the share terminal transport, each tied to a concrete crash/leak that occurred when it was missing:
+
+- **`verify_share_token` returns a deep snapshot, never the live record.** `share_record_snapshot` (`app.py:1053`) `deepcopy`s the record and rebuilds `viewer_ids` as fresh dicts. The bug it fixes: a shallow `dict(record)` shares the live nested `viewer_ids`, so `share_status_*` iterated it without `share_tokens_lock` while `register_share_viewer`/`unregister_share_viewer` mutated it under the lock — a `RuntimeError: dictionary changed size during iteration` that killed the status broadcast on every viewer connect/disconnect.
+- **Viewer sends use a socket send timeout.** `ShareViewerConnection.send_frame` (`server.py:693`) sets `SHARE_VIEWER_SEND_TIMEOUT_SECONDS` (5s) around `sendall` and restores the prior timeout in `finally`. Without it a half-open viewer (suspended laptop, dropped link) wedges the writer thread until the OS TCP timeout (minutes), and `writer.join(timeout=1.0)` just gives up while the thread leaks.
+- **Register the viewer and start the writer inside the `try`.** In `bridge_shared_tmux`, `add_viewer` and the writer-thread start must be inside the `try` whose `finally` releases the upstream and unregisters the viewer; doing them before the `try` leaks the registration if anything in between raises. Same rule as the PTY fd-leak invariant in TMUX.md.
+- **Drop late frames after a viewer terminal is replaced/disposed.** The client `socket.onmessage` guards `terminals.get(session) === item && item.term` and wraps `term.write` in try/catch, closing the item on failure. `WebSocket.close()` is async, so a buffered frame can arrive after `closeTerminalItem` -> `dispose()`; writing into a disposed terminal otherwise throws in the viewer.
+
 ## Security Requirements
 
 DOM replay makes sanitization mandatory.

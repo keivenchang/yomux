@@ -2,6 +2,8 @@ import logging
 import os
 import subprocess
 
+import pytest
+
 from yolomux_lib import common
 from yolomux_lib import workdir
 from yolomux_lib.workdir import agent_auth_status
@@ -9,11 +11,27 @@ from yolomux_lib.workdir import agent_command
 from yolomux_lib.workdir import available_agent_commands
 
 
+@pytest.fixture(autouse=True)
+def clear_agent_auth_status_cache():
+    workdir._clear_agent_auth_status_cache_for_tests()
+    yield
+    workdir._clear_agent_auth_status_cache_for_tests()
+
+
 def test_agent_command_uses_plain_agent_cli_unless_dangerously_yolo():
     assert agent_command("claude", dangerously_yolo=False) == "claude"
     assert agent_command("codex", dangerously_yolo=False) == "codex"
     assert agent_command("claude", dangerously_yolo=True) == "claude --dangerously-skip-permissions"
     assert agent_command("codex", dangerously_yolo=True) == "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+
+
+def test_numeric_session_workdir_uses_matching_yolomux_dev_checkout(monkeypatch, tmp_path):
+    dev_checkout = tmp_path / "yolomux.dev8002"
+    dev_checkout.mkdir()
+    monkeypatch.setattr(workdir.Path, "home", lambda: tmp_path)
+
+    assert workdir.session_workdir("8002") == dev_checkout
+    assert workdir.numbered_session_workdir("8002") == dev_checkout
 
 
 def _fake_run(results: dict[str, subprocess.CompletedProcess]):
@@ -38,6 +56,48 @@ def test_agent_auth_status_parses_claude_json_and_codex_text(monkeypatch):
     status = agent_auth_status(force=True)
     assert status["claude"] == {"installed": True, "logged_in": True}
     assert status["codex"] == {"installed": True, "logged_in": True}
+
+
+def test_codex_runtime_env_defaults_to_user_codex_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+
+    env = common.codex_runtime_env({"PATH": "/usr/bin"})
+
+    assert env["CODEX_HOME"] == str(tmp_path / ".codex")
+    assert env["TERM"] == "xterm-256color"
+    assert env["NO_COLOR"] == "1"
+
+
+def test_codex_runtime_env_respects_yolomux_codex_home_override(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+
+    env = common.codex_runtime_env({"PATH": "/usr/bin"})
+
+    assert env["CODEX_HOME"] == str(codex_home)
+    assert codex_home.is_dir()
+
+
+def test_agent_auth_status_probes_codex_with_runtime_env(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    seen: dict[str, dict[str, str] | None] = {}
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(workdir.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def run(cmd, *args, **kwargs):
+        seen[cmd[0]] = kwargs.get("env")
+        if cmd[0] == "claude":
+            return _completed(cmd, 0, stdout='{"loggedIn": true}')
+        return _completed(cmd, 0, stdout="Logged in using ChatGPT")
+
+    monkeypatch.setattr(workdir.subprocess, "run", run)
+    status = agent_auth_status(force=True)
+
+    assert status["codex"]["logged_in"] is True
+    assert seen["claude"] is None
+    assert seen["codex"]["CODEX_HOME"] == str(codex_home)
 
 
 def test_agent_auth_status_treats_logged_out_and_missing_as_not_logged_in(monkeypatch):
@@ -110,7 +170,7 @@ def test_missing_agent_path_warning_skips_resolvable_agent(monkeypatch, tmp_path
     assert [record.getMessage() for record in caplog.records] == []
 
 
-def test_agent_auth_status_nonzero_exit_and_timeout_are_not_logged_in(monkeypatch):
+def test_agent_auth_status_nonzero_exit_and_timeout_are_unknown(monkeypatch):
     monkeypatch.setattr(workdir.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def run(cmd, *args, **kwargs):
@@ -119,8 +179,10 @@ def test_agent_auth_status_nonzero_exit_and_timeout_are_not_logged_in(monkeypatc
         raise subprocess.TimeoutExpired(cmd, 4.0)
     monkeypatch.setattr(workdir.subprocess, "run", run)
     status = agent_auth_status(force=True)
-    assert status["claude"]["logged_in"] is False
-    assert status["codex"]["logged_in"] is False
+    assert status["claude"]["logged_in"] is None
+    assert status["claude"]["unavailable_reason"] == "auth-unknown"
+    assert status["codex"]["logged_in"] is None
+    assert status["codex"]["unavailable_reason"] == "auth-unknown"
 
 
 def test_agent_auth_status_caches_until_forced(monkeypatch):
@@ -137,3 +199,38 @@ def test_agent_auth_status_caches_until_forced(monkeypatch):
     assert calls["n"] == first
     agent_auth_status(force=True)  # forced — probes again
     assert calls["n"] > first
+
+
+def test_agent_auth_status_nonblocking_cold_returns_unknown_and_schedules_refresh(monkeypatch):
+    starts = []
+    monkeypatch.setattr(workdir.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(workdir, "start_agent_auth_status_refresh", lambda force=False: starts.append(force) or True)
+    monkeypatch.setattr(workdir.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cold snapshot must not probe")))
+
+    status = agent_auth_status(block=False, allow_stale=True, refresh=True)
+
+    assert starts == [True]
+    assert status["claude"] == {"installed": True, "logged_in": None, "unavailable_reason": "auth-unknown"}
+    assert status["codex"] == {"installed": True, "logged_in": None, "unavailable_reason": "auth-unknown"}
+
+
+def test_agent_auth_background_refresh_preserves_previous_known_state_on_transient_unknown(monkeypatch):
+    monkeypatch.setattr(workdir.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(workdir.subprocess, "run", _fake_run({
+        "claude": _completed(["claude"], 0, stdout='{"loggedIn": true}'),
+        "codex": _completed(["codex"], 0, stdout="Logged in using ChatGPT"),
+    }))
+
+    assert agent_auth_status(force=True)["codex"]["logged_in"] is True
+
+    def timeout_run(cmd, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 4.0)
+
+    monkeypatch.setattr(workdir.subprocess, "run", timeout_run)
+    refreshed = workdir._refresh_agent_auth_status(preserve_previous_known=True)
+
+    assert refreshed["claude"] == {"installed": True, "logged_in": True}
+    assert refreshed["codex"] == {"installed": True, "logged_in": True}
+    forced = agent_auth_status(force=True)
+    assert forced["claude"]["logged_in"] is None
+    assert forced["claude"]["unavailable_reason"] == "auth-unknown"

@@ -196,7 +196,7 @@ body.share-view-mode {
 .share-mirror-stage {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-share-mirror-stage);
   overflow: hidden;
   background: var(--share-stage-bg);
 }
@@ -338,8 +338,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 .share-view-fit-toggle:hover,
 .share-view-fit-toggle:focus-visible {
   border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-  color: var(--active-control-text);
 }
 .share-ghost-cursor {
   position: fixed;
@@ -578,14 +576,57 @@ body.app-vw-lte-1100 .topbar-search {
   max-width: none;
   padding: 0 6px;
 }
-/* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
-.topbar-activity {
+.topbar-owner-status {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: var(--compact-control-height);
-  padding: 0 9px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-owner-status[hidden] {
+  display: none;
+}
+.topbar-owner-status:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.topbar-owner-status.has-follower {
+  border-color: color-mix(in srgb, var(--accent-gold) 56%, var(--line));
+}
+.topbar-owner-status.has-error {
+  border-color: var(--accent-gold);
+}
+.topbar-owner-status-key {
+  color: var(--text-muted-cool);
+  font-weight: 700;
+}
+.topbar-owner-status-part[data-owner-role="leader"] .topbar-owner-status-value {
+  color: var(--brand-green);
+  font-weight: 700;
+}
+.topbar-owner-status-part[data-owner-role="follower"] .topbar-owner-status-value,
+.topbar-owner-status-part[data-owner-role="loading"] .topbar-owner-status-value,
+.topbar-owner-status-part[data-owner-role="error"] .topbar-owner-status-value {
+  color: var(--accent-gold);
+  font-weight: 700;
+}
+/* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
+.topbar-activity {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--compact-control-height);
+  padding: 0 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
@@ -605,15 +646,28 @@ body.app-vw-lte-1100 .topbar-search {
 .topbar-activity.has-attention {
   border-color: var(--brand-green);
 }
-.topbar-activity-run.active {
-  color: var(--brand-green);
+.topbar-activity-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   font-weight: 600;
 }
-.topbar-activity-attn {
-  color: var(--accent-gold);
-  font-weight: 600;
+.topbar-activity-count-number {
+  min-width: 1ch;
+  text-align: right;
+}
+.topbar-activity-ball.agent-window-activity {
+  --agent-status-ball-size: var(--agent-status-ball-size-base);
+  width: var(--agent-status-ball-size);
+  min-width: var(--agent-status-ball-size);
+  min-height: var(--agent-status-ball-size);
+  margin-inline-start: 0;
 }
 .topbar-activity-sep {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  margin-inline: -1px;
   opacity: 0.5;
 }
 body.app-vw-lte-1100 .topbar-activity-idle {
@@ -697,8 +751,8 @@ body.app-vw-lte-760 .topbar-search {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 7px;
-  color: #e7ecf3;
-  background: #111820;
+  color: var(--chrome-text-strong);
+  background: var(--overlay-surface);
   border: 1px solid var(--sep-muted);
   border-radius: 8px;
   box-shadow:
@@ -725,7 +779,7 @@ body.app-vw-lte-760 .topbar-search {
   margin-block: 2px 5px;
   margin-inline: var(--app-submenu-inline-offset) 0;
   padding: 4px;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   background: #0d131b;
   border: 1px solid #2f3a4b;
   border-radius: 7px;
@@ -924,6 +978,9 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-ui-icon-document {
   --app-menu-ui-icon: var(--icon-document);
 }
+.app-menu-ui-icon-shell {
+  --app-menu-ui-icon: var(--icon-shell);
+}
 .app-menu-ui-icon-share {
   --app-menu-ui-icon: var(--icon-share);
 }
@@ -1079,7 +1136,7 @@ body.theme-light .app-menu-button-badge {
 body.theme-light .transport-warning::after {
   color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
   background: #fdeaec;
-  border-color: #d56b7a;
+  border-color: var(--danger-border-soft);
 }
 body.theme-light .app-menu-tab-command + .app-menu-tab-command {
   border-top-color: rgba(70, 80, 95, 0.22);  /* a visible row separator on the white menu */
@@ -1104,7 +1161,7 @@ body.theme-light .app-menu-popover {
 }
 body.theme-light .app-submenu-popover {
   color: var(--text);
-  background: #f8fafc;
+  background: var(--app-submenu-light-bg);
   border-color: var(--line);
   box-shadow:
     0 -2px 10px rgb(var(--overlay-slate-rgb) / 0.10),

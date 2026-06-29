@@ -1,4 +1,6 @@
+import json
 import os
+import subprocess
 from pathlib import Path
 
 from yolomux_lib import github_client
@@ -27,6 +29,16 @@ def _pane(session, index, path):
         target=f"{session}:0.{index}", current_path=str(path), command="zsh",
         active=index == 0, window_active=True, title="", pid=10 + index,
     )
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "init")
 
 
 def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
@@ -85,6 +97,134 @@ def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
     assert roots == {root}
 
 
+def test_indexed_repo_summaries_discovers_repos_under_indexed_root_without_branch_cap(tmp_path):
+    indexed = tmp_path / "indexed"
+    indexed.mkdir()
+    repo_a = indexed / "repo-a"
+    repo_b = indexed / "repo-b"
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+    current_branch = _git(repo_a, "branch", "--show-current").stdout.strip()
+    branch_names = [f"feature/{index}" for index in range(metadata.OTHER_BRANCH_LIMIT + 3)]
+    for branch in branch_names:
+        _git(repo_a, "branch", branch)
+    _git(repo_a, "checkout", current_branch)
+
+    summaries = metadata.indexed_repo_summaries([str(indexed)], cache=MetadataCache(), allow_network=False)
+    by_root = {summary["root"]: summary for summary in summaries}
+    repo_a_root = str(repo_a.resolve())
+    repo_b_root = str(repo_b.resolve())
+    repo_a_branches = {branch["name"] for branch in by_root[repo_a_root]["other_branches"]["branches"]}
+
+    assert {repo_a_root, repo_b_root}.issubset(by_root)
+    assert all(branch in repo_a_branches for branch in branch_names)
+    assert by_root[repo_a_root]["other_branches"]["hidden_count"] == 0
+    assert by_root[repo_a_root]["indexed"] is True
+
+
+def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):
+    indexed = tmp_path / "indexed"
+    indexed.mkdir()
+    repo = indexed / "repo"
+    _init_repo(repo)
+    current_branch = _git(repo, "branch", "--show-current").stdout.strip()
+    remote_branch = "keivenchang/OPS-6052__fix-markup-analysis-normal-text"
+    _git(repo, "checkout", "-b", remote_branch)
+    (repo / "remote.txt").write_text("remote\n", encoding="utf-8")
+    _git(repo, "add", "remote.txt")
+    _git(repo, "commit", "-m", "remote branch")
+    remote_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", current_branch)
+    _git(repo, "branch", "-D", remote_branch)
+    _git(repo, "update-ref", f"refs/remotes/origin/{remote_branch}", remote_sha)
+
+    summaries = metadata.indexed_repo_summaries([str(indexed)], cache=MetadataCache(), allow_network=False)
+    branches = {branch["name"]: branch for branch in summaries[0]["other_branches"]["branches"]}
+
+    assert remote_branch not in branches
+
+
+def test_indexed_repo_summaries_includes_linked_worktree_current_branch(tmp_path):
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    _init_repo(main)
+    _git(main, "worktree", "add", "-q", str(wt), "-b", "feature-linked")
+
+    summaries = metadata.indexed_repo_summaries([str(tmp_path)], cache=MetadataCache(), allow_network=False)
+    by_root = {summary["root"]: summary for summary in summaries}
+    wt_root = str(wt.resolve())
+    wt_branch_names = [branch["name"] for branch in by_root[wt_root]["other_branches"]["branches"]]
+
+    assert wt_root in by_root
+    assert wt_branch_names == ["feature-linked"]
+
+
+def test_session_repo_summaries_dedupes_same_repo_candidates_before_summary(monkeypatch):
+    info = SessionInfo(session="s9", panes=[], selected_pane=None, agents=[])
+    calls = []
+    candidates = [
+        ("/repo/src", 0),
+        ("/repo/tests", 0),
+        ("/repo", 10),
+        ("/other", 10),
+    ]
+
+    monkeypatch.setattr(metadata, "candidate_session_cwd_entries", lambda _info: candidates)
+    monkeypatch.setattr(metadata, "git_root_for_cwd", lambda cwd: "/repo" if str(cwd).startswith("/repo") else str(cwd))
+
+    def fake_repo_summary(cwd):
+        calls.append(cwd)
+        root = "/repo" if str(cwd).startswith("/repo") else str(cwd)
+        return {"root": root, "cwd": cwd, "activity_ts": 1, "activity_source": "dirty"}
+
+    monkeypatch.setattr(metadata, "repo_summary", fake_repo_summary)
+
+    summaries = session_repo_summaries(info, "/repo")
+
+    assert [summary["root"] for summary in summaries] == ["/repo", "/other"]
+    assert calls == ["/repo/src", "/other"]
+
+
+def test_session_project_metadata_empty_shape_has_repos_and_loading(monkeypatch):
+    info = SessionInfo(session="empty", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(metadata, "session_git_inventory", lambda _info: None)
+
+    project = metadata.session_project_metadata(info, MetadataCache(), allow_network=False)
+
+    assert project == {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": False}
+
+
+def test_session_to_json_loading_project_uses_empty_metadata_shape():
+    info = SessionInfo(session="loading", panes=[], selected_pane=None, agents=[])
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False, include_metadata=False)
+
+    assert payload["project"] == {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": True}
+    assert payload["metadata_loading"] is True
+
+
+def test_session_to_json_includes_window_metadata(tmp_path):
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+    _git(repo_b, "checkout", "-b", "feature/repo-b")
+    panes = [
+        PaneInfo(session="s2", window="0", pane="0", pane_id="%20", target="s2:0.0", current_path=str(repo_a), command="codex", active=True, window_active=False, title="", pid=20, window_name="codex"),
+        PaneInfo(session="s2", window="1", pane="0", pane_id="%21", target="s2:1.0", current_path=str(repo_b), command="claude", active=True, window_active=True, title="", pid=21, window_name="claude"),
+    ]
+    info = SessionInfo(session="s2", panes=panes, selected_pane=panes[1], agents=[])
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
+    rows = {row["window"]: row for row in payload["window_metadata"]}
+
+    assert rows["0"]["path"] == str(repo_a)
+    assert rows["0"]["git"]["root"] == str(repo_a.resolve())
+    assert rows["1"]["path"] == str(repo_b)
+    assert rows["1"]["git"]["root"] == str(repo_b.resolve())
+    assert rows["1"]["git"]["branch"] == "feature/repo-b"
+
+
 def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
     repos = []
     for name in ("old", "recent"):
@@ -109,6 +249,129 @@ def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
     assert git_data["root"] == str(repos[1].resolve())
     assert summaries[0]["root"] == str(repos[1].resolve())
     assert summaries[0]["activity_source"] == "dirty"
+
+
+def test_session_git_inventory_prefers_current_branch_pr_within_same_signal(monkeypatch, tmp_path):
+    config_repo = tmp_path / "ai-config"
+    work_repo = tmp_path / "vortex4"
+    _init_repo(config_repo)
+    _init_repo(work_repo)
+    _git(work_repo, "checkout", "-b", "keivenchang/ABC-2228__lark3-coder-tool-calls-v2")
+    _git(work_repo, "update-ref", "refs/remotes/origin/pull-request/10853", "HEAD")
+    (config_repo / "f.txt").write_text("newer config edit\n", encoding="utf-8")
+    os.utime(config_repo / "f.txt", (2_000_000_000, 2_000_000_000))
+    panes = [_pane("4", 0, config_repo)]
+    info = SessionInfo(session="4", panes=panes, selected_pane=panes[0], agents=[])
+
+    monkeypatch.setattr(
+        metadata,
+        "candidate_session_cwd_entries",
+        lambda _info: [(str(config_repo), 0), (str(work_repo), 0)],
+    )
+
+    git_data = session_git_inventory(info)
+    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+
+    assert git_data is not None
+    assert git_data["root"] == str(work_repo.resolve())
+    assert summaries[0]["root"] == str(work_repo.resolve())
+    assert summaries[0]["primary"] is True
+    assert metadata.summary_current_branch_pull_request(summaries[0])["number"] == 10853
+
+
+def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tmp_path):
+    # A claude launched from a NON-repo cwd (e.g. $HOME) that edits files in a real repo must still
+    # surface that repo: the transcript-touched dir is fed into candidate_session_cwds, so repo
+    # detection finds it even though the live pane cwd has no git checkout. This is the "8003 says
+    # 'no git checkout detected' while actually working in ~/yolomux.dev8003" bug.
+    repo = tmp_path / "project"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.py").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.py")
+    _git(repo, "commit", "-m", "init")
+    repo_root = str(repo.resolve())
+
+    home_like = tmp_path / "home"   # a non-repo dir standing in for $HOME
+    home_like.mkdir()
+
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(repo / "f.py")}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    # isolate the session-number fallbacks so only the live cwd + transcript signal matter
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+
+    pane = _pane("8003", 0, home_like)
+    agent = AgentInfo(
+        session="8003", kind="claude", pid=1, pane_target="8003:0.0", command="claude",
+        cwd=str(home_like), status="running", session_id=None, transcript=str(transcript), error=None,
+    )
+    info = SessionInfo(session="8003", panes=[pane], selected_pane=pane, agents=[agent])
+
+    candidates = metadata.candidate_session_cwds(info)
+    assert repo_root in candidates, "the transcript-touched repo dir is a candidate cwd"
+
+    git_data = session_git_inventory(info)
+    assert git_data is not None, "repo detected from the transcript even though the pane cwd is a non-repo"
+    assert git_data["root"] == repo_root
+    roots = {s["root"] for s in session_repo_summaries(info, repo_root)}
+    assert repo_root in roots
+
+
+def test_session_git_inventory_prefers_transcript_edit_over_recent_live_repo(monkeypatch, tmp_path):
+    edited_repo = tmp_path / "edited"
+    live_repo = tmp_path / "live"
+    _init_repo(edited_repo)
+    _init_repo(live_repo)
+    edited_root = str(edited_repo.resolve())
+    live_root = str(live_repo.resolve())
+    (live_repo / "f.txt").write_text("newer live edit\n", encoding="utf-8")
+    os.utime(live_repo / "f.txt", (2_000_000_000, 2_000_000_000))
+
+    home_like = tmp_path / "home"
+    home_like.mkdir()
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(edited_repo / "f.txt")}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+    monkeypatch.setattr(metadata, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
+
+    pane = _pane("8002", 0, live_repo)
+    agent = AgentInfo(
+        session="8002", kind="claude", pid=1, pane_target="8002:0.0", command="claude",
+        cwd=str(home_like), status="running", session_id=None, transcript=str(transcript), error=None,
+    )
+    info = SessionInfo(session="8002", panes=[pane], selected_pane=pane, agents=[agent])
+
+    candidates = metadata.candidate_session_cwds(info)
+    assert candidates.index(edited_root) < candidates.index(live_root)
+
+    git_data = session_git_inventory(info)
+    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+    assert git_data is not None
+    assert git_data["root"] == edited_root
+    assert summaries[0]["root"] == edited_root
+    assert summaries[1]["root"] == live_root
+    assert summaries[1]["activity_source"] == "dirty"
 
 
 REPO = {
@@ -142,6 +405,41 @@ def test_feature_branch_can_use_head_subject_pr_hint():
     assert pr is not None
     assert pr["number"] == 9981
     assert pr["source"] == "head-subject"
+
+
+def test_git_inventory_uses_github_upstream_when_origin_is_local(monkeypatch, tmp_path):
+    # Linked worktrees often use a local origin and the real GitHub repository as upstream; PR lookup
+    # must still resolve the current branch by head branch instead of dropping all GitHub metadata.
+    repo = tmp_path / "parser-toolkits2"
+    _init_repo(repo)
+    branch = "keivenchang/ABC-2267__dsv4-drop-truncated-calls"
+    _git(repo, "checkout", "-b", branch)
+    (repo / "fix.rs").write_text("fix\n", encoding="utf-8")
+    _git(repo, "add", "fix.rs")
+    _git(repo, "commit", "-m", "fix(parsers-v2): drop DWv4 tool calls truncated mid-call to match v1 batch")
+    local_origin = tmp_path / "parser-toolkits"
+    local_origin.mkdir()
+    _git(repo, "remote", "add", "origin", str(local_origin))
+    _git(repo, "remote", "add", "upstream", "git@github.com:ai-vortex/parser-toolkits.git")
+
+    queries = []
+
+    def fake_by_branch(github_repo, queried_branch, cache, allow_network=True):
+        queries.append((github_repo, queried_branch, allow_network))
+        return {"number": 79, "state": "open", "source": "github-api", "title": "fix(parsers-v2): drop DWv4 calls"}
+
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", fake_by_branch)
+
+    git_data = metadata.git_inventory(str(repo))
+    pr = metadata.project_pull_request(git_data, MetadataCache(), allow_network=True)
+
+    assert git_data["github_repo"] == {
+        "owner": "ai-vortex",
+        "name": "parser-toolkits",
+        "url": "https://github.com/ai-vortex/parser-toolkits",
+    }
+    assert pr["number"] == 79
+    assert queries == [(git_data["github_repo"], branch, True)]
 
 
 def test_metadata_public_helpers_remain_available_after_client_split():
@@ -281,7 +579,14 @@ def test_linear_issue_metadata_falls_back_without_network():
 
     assert issue["identifier"] == "OPS-123"
     assert issue["source"] == "local-id"
+    assert issue["url"] == "https://linear.app/issue/OPS-123"
     assert issue["url"].endswith("/OPS-123")
+
+
+def test_linear_issue_url_uses_env_base(monkeypatch):
+    monkeypatch.setenv("YOLOMUX_LINEAR_ISSUE_BASE_URL", "https://linear.app/vortex/issue/")
+
+    assert linear_client.linear_issue_url("OPS-123") == "https://linear.app/vortex/issue/OPS-123"
 
 
 def test_normalize_review_decision_reads_graphql_shape_and_ignores_garbage():
@@ -547,7 +852,7 @@ def test_linked_worktree_inventory_only_reports_checked_out_branch(tmp_path):
     assert wt_names == ["feature"]
 
 
-def test_local_branch_inventory_includes_remote_only_pr_branch(tmp_path):
+def test_local_branch_inventory_excludes_remote_only_pr_branch(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -575,9 +880,82 @@ def test_local_branch_inventory_includes_remote_only_pr_branch(tmp_path):
     inventory = metadata.local_branch_inventory(str(repo), current_branch)
     branches = {branch["name"]: branch for branch in inventory["branches"]}
 
-    assert pr_branch in branches
-    assert branches[pr_branch]["remote"] is True
-    assert branches[pr_branch]["pull_request"]["number"] == 10423
+    assert current_branch in branches
+    assert branches[current_branch]["remote"] is False
+    assert pr_branch not in branches
+
+
+def test_local_branch_inventory_uses_git_branch_default_order(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "init")
+
+    def commit_branch(branch: str, filename: str, value: str, commit_date: str) -> None:
+        _git(repo, "checkout", "-b", branch)
+        (repo / filename).write_text(f"{value}\n", encoding="utf-8")
+        _git(repo, "add", filename)
+        env = os.environ.copy()
+        env["GIT_AUTHOR_DATE"] = commit_date
+        env["GIT_COMMITTER_DATE"] = commit_date
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", value],
+            capture_output=True,
+            check=True,
+            env=env,
+            text=True,
+        )
+
+    commit_branch("z-newer", "newer.txt", "newer", "2030-01-02T00:00:00+0000")
+    _git(repo, "checkout", "master")
+    commit_branch("a-older", "older.txt", "older", "2000-01-02T00:00:00+0000")
+    _git(repo, "checkout", "master")
+
+    default_order = _git(repo, "branch", "--format=%(refname:short)").stdout.splitlines()
+    committerdate_order = _git(
+        repo,
+        "for-each-ref",
+        "--sort=-committerdate",
+        "--format=%(refname:short)",
+        "refs/heads",
+    ).stdout.splitlines()
+    inventory = metadata.local_branch_inventory(str(repo), "master", branch_limit=None)
+
+    assert default_order != committerdate_order
+    assert [branch["name"] for branch in inventory["branches"]] == default_order
+
+
+def test_indexed_repo_summaries_excludes_remote_only_pr_without_local_branch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "init")
+    current_branch = _git(repo, "branch", "--show-current").stdout.strip()
+    pr_branch = "keivenchang/ABC-2064__frontend-coverage"
+    _git(repo, "checkout", "-b", pr_branch)
+    (repo / "frontend.txt").write_text("coverage\n", encoding="utf-8")
+    _git(repo, "add", "frontend.txt")
+    _git(repo, "commit", "-m", "test(frontend): match tooltip conventions")
+    pr_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", current_branch)
+    _git(repo, "branch", "-D", pr_branch)
+    _git(repo, "update-ref", f"refs/remotes/origin/{pr_branch}", pr_sha)
+    _git(repo, "update-ref", "refs/remotes/origin/pull-request/10228", pr_sha)
+
+    summaries = metadata.indexed_repo_summaries([str(repo)], cache=MetadataCache(), allow_network=False)
+    branches = {branch["name"]: branch for branch in summaries[0]["other_branches"]["branches"]}
+
+    assert current_branch in branches
+    assert branches[current_branch]["remote"] is False
+    assert pr_branch not in branches
 
 
 def test_open_pr_on_other_branch_resolves_by_head_branch(monkeypatch):
@@ -633,3 +1011,45 @@ def test_other_branch_with_local_pr_number_still_uses_by_number(monkeypatch):
     pr = git_data["other_branches"]["branches"][0]["pull_request"]
     assert pr["number"] == 9981
     assert branch_queries == []  # by-number path used; no by-branch fallback
+
+
+def test_branch_linear_metadata_includes_pr_and_branch_ids(monkeypatch):
+    seen = []
+
+    def fake_linear_issue_metadata(identifier, cache, allow_network=True):
+        seen.append((identifier, allow_network))
+        return {
+            "identifier": identifier,
+            "title": f"{identifier} title",
+            "state": "In Progress",
+            "url": f"https://linear.test/{identifier}",
+            "source": "test",
+        }
+
+    monkeypatch.setattr(metadata, "linear_issue_metadata", fake_linear_issue_metadata)
+    git_data = {
+        "other_branches": {
+            "branches": [
+                {
+                    "name": "keivenc/ABC-2212__frontend",
+                    "current": False,
+                    "subject": "branch subject references ABC-2213",
+                    "pull_request": {
+                        "title": "PR mentions ABC-2214",
+                        "description": "body mentions ABC-2215",
+                        "linear_ids": ["ABC-2216"],
+                    },
+                },
+                {"name": "main", "current": False, "subject": "main"},
+            ],
+        },
+    }
+
+    metadata.enrich_branch_linear_metadata(git_data, MetadataCache(), allow_network=True)
+    branch = git_data["other_branches"]["branches"][0]
+
+    assert branch["linear_ids"] == ["ABC-2212", "ABC-2213", "ABC-2214", "ABC-2215", "ABC-2216"]
+    assert [item["identifier"] for item in branch["linear"]] == branch["linear_ids"]
+    assert branch["linear"][0]["title"] == "ABC-2212 title"
+    assert seen == [(identifier, True) for identifier in branch["linear_ids"]]
+    assert git_data["other_branches"]["branches"][1]["linear"] == []

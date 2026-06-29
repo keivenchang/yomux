@@ -1,0 +1,107 @@
+agent: claude
+capture_date: '2026-06-21'
+capture_mode: visible
+captured_at: '2026-06-21T18:57:18.952264+00:00'
+case_name: ask_user_question_selected_option
+claude_version: 2.1.185 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.185 (Claude Code)
+client_version_slug: claude-code-2.1.185
+codex_version: ''
+cursor:
+  character: ❯
+  synthesized: true
+  x: 0
+  y: 20
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: Question
+  composer_key: empty
+  reason_code: needs-input
+  screen_key: needs-input
+expected_screen_key: needs-input
+failures: []
+fixture_id: ask_user_question_selected_option__claude-code-2.1.185_20260621
+fixture_scenario: ask_user_question_selected_option
+height: 40
+id: ask_user_question_selected_option__claude-code-2.1.185_20260621
+include_scrollback: false
+launch_agent: ''
+launch_command: ''
+launched_session: ''
+mode: ''
+operations: []
+raw_capture: |
+  ● Done — handled all three requests:
+
+    - After 2s: 2026-06-20 Sat 16:51:12 PDT
+    - After 2s: 2026-06-20 Sat 16:51:18 PDT
+    - After 2s: 2026-06-20 Sat 16:51:20 PDT
+
+  ✻ Sautéed for 16s
+
+
+  ❯ what time it is, then add 5 min to it, and ask if that is the right time
+
+
+    Ran 1 shell command
+
+  ● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PDT.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ☐ Time +5min
+
+  Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?
+
+  ❯ 1. Yes, 09:45 is right
+
+       Confirm 09:45:05 PDT is the intended time.
+
+    2. No, that's wrong
+       The computed time is not what you wanted.
+    3. Type something.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    4. Chat about this
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+ready_text: []
+send_lines: []
+source: real Claude AskUserQuestion highlighted selector from tmux 1:2.0
+styled_capture: |
+  ● Done — handled all three requests:
+
+    - After 2s: 2026-06-20 Sat 16:51:12 PDT
+    - After 2s: 2026-06-20 Sat 16:51:18 PDT
+    - After 2s: 2026-06-20 Sat 16:51:20 PDT
+
+  ✻ Sautéed for 16s
+
+
+  ❯ what time it is, then add 5 min to it, and ask if that is the right time
+
+
+    Ran 1 shell command
+
+  ● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PDT.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ☐ Time +5min
+
+  Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?
+
+  ❯ 1. Yes, 09:45 is right
+
+       Confirm 09:45:05 PDT is the intended time.
+
+    2. No, that's wrong
+       The computed time is not what you wanted.
+    3. Type something.
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    4. Chat about this
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+target: '1:2.0'
+tmux_socket: ''
+wait_text: []
+width: 200

@@ -1,4 +1,5 @@
 import argparse
+import json
 import socket
 import subprocess
 import threading
@@ -54,6 +55,64 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     assert args.sessions == ["1,2", "ant"]
     assert args.dangerously_yolo is True
     assert args.self_signed is True
+    assert args.print_background_owner is False
+    assert args.print_runtime_report is False
+
+
+def test_print_background_owner_status_outputs_json(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": {"port": 8003}, "generations": []})
+
+    assert cli.print_background_owner_status() == 0
+
+    assert json.loads(capsys.readouterr().out) == {"current_owner": {"port": 8003}, "generations": []}
+
+
+def test_parse_args_supports_runtime_report(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["yolomux.py", "--print-runtime-report", "--sessions", "8002"])
+
+    args = cli.parse_args()
+
+    assert args.print_runtime_report is True
+    assert args.sessions == ["8002"]
+
+
+def test_print_runtime_report_outputs_json(monkeypatch, capsys):
+    captured = {}
+
+    class FakeControl:
+        def stop(self):
+            captured["control_stopped"] = True
+
+    class FakeApp:
+        def __init__(self, sessions, dangerously_yolo=False):
+            captured["sessions"] = sessions
+            captured["dangerously_yolo"] = dangerously_yolo
+            self.control_server = FakeControl()
+
+        def runtime_report_payload(self, **kwargs):
+            captured["runtime_kwargs"] = kwargs
+            return {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}
+
+        def stop_auto_approve_all(self):
+            captured["stopped"] = True
+
+    monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
+    monkeypatch.setattr(
+        cli,
+        "runtime_report_background_status",
+        lambda: ({"current_owner": {"port": 8002}}, {"ok": True}, {"status": "owner"}),
+    )
+
+    assert cli.print_runtime_report(["8002"], dangerously_yolo=True) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}
+    assert captured["sessions"] == ["8002"]
+    assert captured["dangerously_yolo"] is True
+    assert captured["runtime_kwargs"]["background_status"] == {"status": "owner"}
+    assert captured["runtime_kwargs"]["owner_debug"] == {"current_owner": {"port": 8002}}
+    assert captured["runtime_kwargs"]["owner_control_response"] == {"ok": True}
+    assert captured["stopped"] is True
+    assert captured["control_stopped"] is True
 
 
 def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
@@ -67,6 +126,8 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         cert=None,
         key=None,
         print_transcripts=False,
+        print_background_owner=False,
+        print_runtime_report=False,
         dev=False,
     )
 
@@ -77,6 +138,10 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
 
         def restore_auto_approve(self):
             return []
+
+        def start_background_owner(self, port=None):
+            captured["background_owner_port"] = port
+            return True
 
         def start_yoagent_backend_prewarm(self, **kwargs):
             captured["yoagent_prewarm"] = kwargs
@@ -112,6 +177,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["address"] == ("0.0.0.0", 19001)
     assert captured["tls_context"] is None
     assert captured["dev"] is False  # dev mode off by default
+    assert captured["background_owner_port"] == 19001
     assert captured["yoagent_prewarm"] == {"reason": "server_start"}
     assert captured["served"] is True
     assert captured["stopped"] is True

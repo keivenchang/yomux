@@ -49,16 +49,17 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     git(repo, "add", "app.py")
     git(repo, "commit", "-m", "base")
     target.write_text("new\n", encoding="utf-8")
+    now = time.time()
+    event_ts = datetime.fromtimestamp(now, timezone.utc).isoformat()
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text(
         "\n".join([
-            json.dumps({"timestamp": "2026-05-31T12:00:00Z", "payload": {"type": "user_message", "message": "Fix editor colors"}}),
+            json.dumps({"timestamp": event_ts, "payload": {"type": "user_message", "message": "Fix editor colors"}}),
             "*** Update File: app.py",
-            json.dumps({"timestamp": "2026-05-31T12:00:01Z", "payload": {"type": "agent_message", "message": "Editing app.py"}}),
+            json.dumps({"timestamp": event_ts, "payload": {"type": "agent_message", "message": "Editing app.py"}}),
         ]),
         encoding="utf-8",
     )
-    now = time.time()
     info = SessionInfo(
         session="5",
         panes=[
@@ -175,8 +176,9 @@ def test_recent_agents_payload_uses_transcript_activity_and_running_state(tmp_pa
         json.dumps({"timestamp": datetime.fromtimestamp(now, timezone.utc).isoformat(), "payload": {"type": "agent_message_delta", "message": "working"}}) + "\n",
         encoding="utf-8",
     )
+    old_event = datetime(2026, 5, 31, 12, 0, 0, tzinfo=timezone.utc)
     old_transcript.write_text(
-        json.dumps({"timestamp": "2026-05-31T12:00:00Z", "payload": {"type": "task_complete"}}) + "\n",
+        json.dumps({"timestamp": old_event.isoformat(), "payload": {"type": "task_complete"}}) + "\n",
         encoding="utf-8",
     )
     os.utime(active_transcript, (now, now))
@@ -271,7 +273,7 @@ def test_recent_agents_payload_uses_transcript_activity_and_running_state(tmp_pa
     assert rows[0]["state"] == "working"
     assert rows[0]["sort_ts"] == pytest.approx(now)
     assert rows[1]["running"] is False
-    assert rows[1]["last_used_ts"] == pytest.approx(old)
+    assert rows[1]["last_used_ts"] == pytest.approx(old_event.timestamp())
 
 
 def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
@@ -351,6 +353,8 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "YOLOmux concepts:" in prompt
     assert "Pane" in prompt
     assert "Context sourcing chain" in prompt
+    assert "rg -M 2000 --max-columns 2000" in prompt
+    assert "broad `cat` or `rg` across generated files" in prompt
     assert "M static/yolomux.js" in prompt
     assert "YO!agent skill `work-next`" in prompt
     assert "old1" not in prompt
@@ -393,8 +397,8 @@ def test_yoagent_help_primer_and_deterministic_help_answers():
     assert "YOLOmux Pane" in pane_reply
     assert "tmux pane is different" in pane_reply
 
-    window_reply = deterministic_yoagent_reply("difference between a tmux window and a YOLOmux tab?", {}, {})
-    assert "tmux window" in window_reply
+    window_reply = deterministic_yoagent_reply("difference between a tmux sub-window and a YOLOmux tab?", {}, {})
+    assert "tmux sub-window" in window_reply
     assert "YOLOmux Tab" in window_reply
 
     context_reply = deterministic_yoagent_reply("where do your insights come from?", {}, {})
@@ -471,6 +475,201 @@ def test_deterministic_yoagent_reply_prioritizes_active_work_without_listing_eve
     assert summary_reply.count("](?yoagent-session=") == 2
     assert "[`5`](?yoagent-session=5)" in summary_reply
     assert "[`9`](?yoagent-session=9)" in summary_reply
+
+
+def test_work_next_ranking_uses_prompt_and_metadata_signals():
+    now = time.time()
+    activity = {
+        "global": {"headline": "Four sessions have cached activity.", "lines": []},
+        "sessions": {
+            "1": {
+                "session": "1",
+                "agent": "claude",
+                "agent_label": "Claude opus",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/docs"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "docs cleanup",
+                "last_activity_text": "1 minute ago",
+                "last_activity_ts": now - 60,
+            },
+            "2": {
+                "session": "2",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "state": {"key": "needs-input", "text": "Approve running the focused pytest?"},
+                "activity_label": "needs-input",
+                "repos": ["/repo/yolomux"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "approval prompt",
+                "last_activity_text": "10 minutes ago",
+                "last_activity_ts": now - 600,
+            },
+            "3": {
+                "session": "3",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/vortex"],
+                "files": {"count": 2, "added": 10, "removed": 1},
+                "work": "parser fix",
+                "last_activity_text": "5 minutes ago",
+                "last_activity_ts": now - 300,
+            },
+            "4": {
+                "session": "4",
+                "agent": "claude",
+                "agent_label": "Claude sonnet",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/frontend"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "frontend PR",
+                "last_activity_text": "2 minutes ago",
+                "last_activity_ts": now - 120,
+            },
+        },
+        "session_info": {
+            "3": {"project": {"git": {"dirty_count": 2}}},
+            "4": {"project": {"pull_request": {"checks": {"state": "failing", "summary": "CI failing: unit"}}}},
+        },
+        "errors": [],
+    }
+
+    reply = deterministic_yoagent_reply("what should I work on?", activity, {})
+
+    priority = reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+    assert priority.count("- **") == 3
+    assert priority.index("approval prompt") < priority.index("frontend PR") < priority.index("parser fix")
+    assert "needs input: Approve running the focused pytest?" in priority
+    assert "CI failing: unit" in priority
+    assert "2 dirty files" in priority
+    assert "docs cleanup" not in priority
+
+    full_reply = deterministic_yoagent_reply("what should I work on? full inventory", activity, {})
+    full_priority = full_reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+    assert full_priority.count("- **") == 4
+    assert "docs cleanup" in full_priority
+
+
+def test_work_next_ranking_covers_blockers_tests_reviews_local_priorities_and_stale_work():
+    now = time.time()
+    activity = {
+        "global": {"headline": "Six sessions have cached activity.", "lines": []},
+        "sessions": {
+            "1": {
+                "session": "1",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/release"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "blocked release",
+                "blockers": ["waiting for deploy access"],
+                "last_activity_text": "30 minutes ago",
+                "last_activity_ts": now - 1800,
+            },
+            "2": {
+                "session": "2",
+                "agent": "claude",
+                "agent_label": "Claude sonnet",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/tests"],
+                "files": {"count": 1, "added": 2, "removed": 0},
+                "work": "test failure",
+                "status_text": "unit test failed in test_agent_prompt",
+                "last_activity_text": "20 minutes ago",
+                "last_activity_ts": now - 1200,
+            },
+            "3": {
+                "session": "3",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/review"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "review comments",
+                "last_activity_text": "10 minutes ago",
+                "last_activity_ts": now - 600,
+            },
+            "4": {
+                "session": "4",
+                "agent": "claude",
+                "agent_label": "Claude opus",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/local"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "local roadmap item",
+                "last_activity_text": "1 day ago",
+                "last_activity_ts": now - 86400,
+            },
+            "5": {
+                "session": "5",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/dirty"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "dirty worktree",
+                "last_activity_text": "5 minutes ago",
+                "last_activity_ts": now - 300,
+            },
+            "6": {
+                "session": "6",
+                "agent": "claude",
+                "agent_label": "Claude haiku",
+                "active": True,
+                "activity_label": "recently active",
+                "repos": ["/repo/active"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "active but lower priority",
+                "last_activity_text": "1 minute ago",
+                "last_activity_ts": now - 60,
+            },
+        },
+        "session_info": {
+            "3": {"project": {"pull_request": {"review_decision": "CHANGES_REQUESTED"}}},
+            "5": {"project": {"git": {"dirty_count": 4}}},
+        },
+        "yoagent_skills": {
+            "context_lines": [
+                "YO!agent context `local-priorities`: work-next priority: session 4 - release note is due today.",
+            ],
+        },
+        "errors": [],
+    }
+
+    full_reply = deterministic_yoagent_reply("what should I work on? full inventory", activity, {})
+    priority = full_reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+
+    assert priority.count("- **") == 6
+    assert priority.index("blocked release") < priority.index("test failure") < priority.index("review comments") < priority.index("local roadmap item") < priority.index("dirty worktree") < priority.index("active but lower priority")
+    assert "blocked: waiting for deploy access" in priority
+    assert "tests are failing" in priority
+    assert "review feedback is waiting" in priority
+    assert "local priority: release note is due today." in priority
+    assert "4 dirty files" in priority
+    assert "recently active" in priority
+
+    default_reply = deterministic_yoagent_reply("what should I work on?", activity, {})
+    default_priority = default_reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+    assert default_priority.count("- **") == 3
+    assert "blocked release" in default_priority
+    assert "test failure" in default_priority
+    assert "review comments" in default_priority
+    assert "local roadmap item" not in default_priority
 
 
 def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():

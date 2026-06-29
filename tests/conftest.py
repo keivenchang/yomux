@@ -28,6 +28,10 @@ for _env_var, _prefix in (("YOLOMUX_CONFIG_DIR", "yolomux-test-config-"), ("YOLO
         os.environ.setdefault(_env_var, tempfile.mkdtemp(prefix=_prefix))
 
 
+from yolomux_lib import app as app_module
+from yolomux_lib import file_index
+
+
 SLOWEST_FIRST_TESTS = (
     "tests/test_browser_layout.py::test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry",
     "tests/test_browser_layout.py::test_preview_popout_toolbar_and_state_sync",
@@ -50,6 +54,30 @@ SLOWEST_FIRST_TESTS = (
 SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}
 
 _SOCKET_AVAILABILITY: tuple[bool, str] | None = None
+
+
+@pytest.fixture
+def no_control_socket(monkeypatch):
+    monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
+    monkeypatch.setattr(app_module.YolomuxControlServer, "stop", lambda self: None)
+
+
+@pytest.fixture
+def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
+    state_dir = tmp_path / "yoagent-state"
+    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")
+    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CLI_STATE_PATH", state_dir / "cli-sessions.json")
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", tmp_path / "events.jsonl")
+    monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
+    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")
+
+
+@pytest.fixture
+def isolated_tmux_socket(monkeypatch, tmp_path):
+    sock_dir = tmp_path / "tmux"
+    sock_dir.mkdir()
+    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(sock_dir / "s"))
 
 
 def local_socket_capability() -> tuple[bool, str]:
@@ -75,6 +103,21 @@ def local_socket_capability() -> tuple[bool, str]:
         return _SOCKET_AVAILABILITY
     _SOCKET_AVAILABILITY = (True, "")
     return _SOCKET_AVAILABILITY
+
+
+@pytest.fixture(autouse=True)
+def isolated_file_index_background_hooks():
+    file_index.set_background_owner_checker(None)
+    file_index.set_background_owner_refresh_requester(None)
+    file_index.set_background_owner_bytes_recorder(None)
+    file_index.set_background_owner_done_notifier(None)
+    file_index.clear_memory_indexes()
+    yield
+    file_index.set_background_owner_checker(None)
+    file_index.set_background_owner_refresh_requester(None)
+    file_index.set_background_owner_bytes_recorder(None)
+    file_index.set_background_owner_done_notifier(None)
+    file_index.clear_memory_indexes()
 
 
 def pytest_collection_modifyitems(config, items):

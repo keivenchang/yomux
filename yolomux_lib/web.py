@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from .common import AUTH_CONFIG_DISPLAY_PATH
+from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
@@ -13,6 +14,8 @@ from .common import STATIC_DIR
 from .common import YOLOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
+from .common import yolomux_client_revision
+from .common import yolomux_commit_count
 from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .settings import save_settings
@@ -32,6 +35,7 @@ STATIC_CONTENT_TYPES = {
     "codemirror.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
+    "xterm-addon-unicode11.js": "application/javascript; charset=utf-8",
     "yolomux.css": "text/css; charset=utf-8",
     "yolomux.js": "application/javascript; charset=utf-8",
     "vendor/dockview.css": "text/css; charset=utf-8",
@@ -55,7 +59,7 @@ def static_content_type(asset: str) -> str | None:
 
 
 def static_asset_path(asset: str) -> Path | None:
-    if asset in {"xterm.css", "xterm.js"}:
+    if asset in {"xterm.css", "xterm.js", "xterm-addon-unicode11.js"}:
         return xterm_asset_path(asset)
     if asset in STATIC_CONTENT_TYPES or _LOCALE_ASSET_RE.match(asset) or _FONT_ASSET_RE.match(asset):
         path = STATIC_DIR / asset
@@ -126,7 +130,9 @@ def static_asset_url(asset: str) -> str:
 
 
 def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
-    version_title = html.escape(f"SHA: {yolomux_commit_sha()}\nLast commit: {yolomux_commit_time_pt()}", quote=True)
+    commit_count = yolomux_commit_count()
+    commit_count_line = f"\nCommits: {commit_count}" if commit_count > 0 else ""
+    version_title = html.escape(f"SHA: {yolomux_commit_sha()}\nLast commit: {yolomux_commit_time_pt()}{commit_count_line}", quote=True)
     # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
     # the JS renderBrandWordmark(), so localize the YO/LO glyphs here too — otherwise a Chinese locale
     # showed "YO/LOmux" instead of 優樂mux / 优乐mux. Pass a locale on those pages; the main app leaves it
@@ -147,6 +153,23 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
     )
 
 
+def bootstrap_agent_auth_status() -> dict[str, dict[str, object]]:
+    try:
+        return agent_auth_status(block=False, allow_stale=True, refresh=True)
+    except TypeError:
+        return agent_auth_status()
+
+
+def bootstrap_settings_payload(settings_data: dict) -> dict:
+    """Return first-paint settings without the heavy Preferences-only metadata."""
+    if not isinstance(settings_data, dict):
+        return {}
+    payload = {key: settings_data[key] for key in ("settings", "defaults", "path", "display_path", "mtime_ns", "error") if key in settings_data}
+    if "catalog" in settings_data or "choices" in settings_data:
+        payload["deferred_metadata"] = True
+    return payload
+
+
 def html_page(
     sessions: list[str],
     access_role: str = "admin",
@@ -165,7 +188,7 @@ def html_page(
         "agentLaunchCommands": {agent: agent_command(agent, dangerously_yolo) for agent in ("claude", "codex", "term")},
         # per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
-        "agentAuth": agent_auth_status(),
+        "agentAuth": bootstrap_agent_auth_status(),
         "accessRole": access_role,
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
@@ -173,10 +196,13 @@ def html_page(
         "serverHostname": SERVER_HOSTNAME,
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
+        "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,
         "version": YOLOMUX_VERSION,
+        "clientRevision": yolomux_client_revision(),
         "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
-        "settingsPayload": settings_data,
+        "versionCommitCount": yolomux_commit_count(),
+        "settingsPayload": bootstrap_settings_payload(settings_data),
         # i18n: resolved active locale for first paint ("system" -> en server-side; the client
         # may refine via navigator.language). The active locale's catalog (+ the en fallback) is INLINED
         # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at
@@ -209,6 +235,7 @@ def html_page(
 <link rel="stylesheet" href="{static_asset_url("yolomux.css")}">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
 <script src="{static_asset_url("xterm.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
+<script src="{static_asset_url("xterm-addon-unicode11.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11/lib/addon-unicode11.js';"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" defer></script>
 </head>

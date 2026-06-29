@@ -47,6 +47,8 @@ import subprocess
 import sys
 import time
 
+from yolomux_lib.agent_tui import AgentPaneState
+from yolomux_lib.agent_tui import classify_agent_pane
 from yolomux_lib.prompt_detector import (
     _find_full_path,
     action_for_bash_prompt,
@@ -137,6 +139,33 @@ def standalone_bash_decision(cmd: str | None, target: str = "", dangerously_yolo
     decision["action"] = action
     decision["command_missing"] = False
     return decision
+
+
+def classify_auto_approve_state(target: str, visible_text: str, prompt_source: str = DEFAULT_PROMPT_SOURCE) -> tuple[AgentPaneState, str | None]:
+    pane_capture: dict[str, str | None] = {"text": None}
+
+    def capture_func(_target: str, visible_only: bool = False) -> str | None:
+        if visible_only:
+            return visible_text
+        if pane_capture["text"] is None:
+            pane_capture["text"] = tmux_capture_pane(target)
+        return pane_capture["text"] or visible_text
+
+    def capture_styled_func(_target: str, visible_only: bool = False) -> str:
+        return ""
+
+    state = classify_agent_pane(
+        target,
+        session=target.split(":", 1)[0],
+        prompt_source=prompt_source,
+        include_composer=False,
+        include_cursor=False,
+        include_transcript_activity=False,
+        capture_full_for_bash=True,
+        capture_func=capture_func,
+        capture_styled_func=capture_styled_func,
+    )
+    return state, pane_capture["text"]
 
 # ---------------------------------------------------------------------------
 # Target resolution (multiple args, comma-separated, wildcards)
@@ -445,30 +474,38 @@ def main() -> None:
                 log.warning("[%s] Failed to capture pane. Session still alive?", st.label)
                 continue
 
-            prompt_state = hybrid_approval_prompt_state(st.target, visible_text, prompt_source=args.prompt_source)
-            prompt_type = str(prompt_state.get("type") or "")
+            pane_state, pane_text = classify_auto_approve_state(st.target, visible_text, prompt_source=args.prompt_source)
+            prompt_state = pane_state.prompt
+            approval_state = pane_state.approval or {}
+            prompt_type = str(approval_state.get("approval_type") or prompt_state.get("type") or "")
 
-            if not prompt_type:
+            if pane_state.reason_code == "needs-input":
+                st.last_hash = ""
+                st.last_hash_at = 0.0
+                st.last_blocked_hash = ""
+                log_dedup(logging.DEBUG, f"[{st.label}] Question visible; waiting for manual answer")
+                continue
+
+            if not prompt_type or not approval_state.get("approval_visible"):
                 st.last_hash = ""  # reset so next prompt is always fresh
                 st.last_hash_at = 0.0
                 st.last_blocked_hash = ""
-                reason = str(prompt_state.get("reason") or "")
+                reason = str(prompt_state.get("reason") or prompt_state.get("negative_reason") or pane_state.screen.get("text") or "")
                 suffix = f"; {reason}" if reason else ""
                 log_dedup(logging.DEBUG, f"[{st.label}] No prompt{suffix} (approved={st.approved} blocked={st.blocked})")
                 continue
 
-            selected_option = int(prompt_state.get("selected_option") or 0)
-            prompt_source = str(prompt_state.get("source") or "pane")
+            selected_option = int(approval_state.get("selected_option") or prompt_state.get("selected_option") or 0)
+            prompt_source = str(approval_state.get("source") or prompt_state.get("source") or "pane")
 
             # Prompt is genuinely on screen — now grab the scrollback capture
             # to get enough context for command extraction / full-path lookup.
-            pane_text = tmux_capture_pane(st.target)
+            if pane_text is None:
+                pane_text = tmux_capture_pane(st.target)
             if pane_text is None:
                 pane_text = visible_text
-            if prompt_source == "pane":
-                prompt_state = hybrid_approval_prompt_state(st.target, visible_text, pane_text, prompt_source=args.prompt_source)
 
-            current_hash = str(prompt_state.get("hash") or prompt_hash(visible_text))
+            current_hash = str(approval_state.get("prompt_hash") or prompt_state.get("hash") or prompt_hash(visible_text))
             now = time.monotonic()
             if current_hash == st.last_blocked_hash:
                 log_dedup(logging.DEBUG, f"[{st.label}] Blocked prompt still visible; waiting for manual action")
@@ -484,7 +521,7 @@ def main() -> None:
             # Dispatch based on prompt type -> option mapping. Bash defaults
             # to option 1, except for Codex prompts whose option-2 prefix is
             # generic enough to be useful across future commands (e.g. gh api).
-            action = str(prompt_state.get("action") or "")
+            action = str(approval_state.get("approval_action") or prompt_state.get("action") or "")
             if not action:
                 action = action_for_bash_prompt(visible_text) if prompt_type == "bash" else action_for_prompt(prompt_type)
 
@@ -537,8 +574,57 @@ def main() -> None:
                     return
                 time.sleep(3)
 
+            elif prompt_type == "plan":
+                rule_input = str(approval_state.get("rule_input_text") or prompt_state.get("text") or "plan")
+                decision = yolo_rules.evaluate(rule_input, "plan", "", st.target)
+                rule_action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"
+                if rule_action not in yolo_rules.RULE_ACTIONS:
+                    rule_action = "ask"
+                desc = re.sub(r"\s+", " ", rule_input).strip()[:180] or "plan"
+                if rule_action in {"approve", "decline"}:
+                    send_action = "option2" if rule_action == "decline" else action
+                    opt_label = "opt 2" if send_action == "option2" else "opt 1"
+                    verb = "DECLINE" if rule_action == "decline" else "APPROVE"
+                    if args.dry_run:
+                        log.info("[%s] WOULD %s (plan, %s): %s", st.label, verb, opt_label, desc)
+                    else:
+                        log.info("[%s] %s (plan, %s): %s", st.label, verb, opt_label, desc)
+                        _send(send_action)
+                    st.last_hash = current_hash
+                    st.last_hash_at = time.monotonic()
+                    st.last_blocked_hash = ""
+                    st.approved += 1
+                    if should_exit_once(st, "plan approval"):
+                        return
+                    time.sleep(3)
+                elif rule_action in yolo_rules.PASSIVE_RULE_ACTIONS:
+                    if decision.get("would_action"):
+                        log.info("[%s] DRY-RUN would %s plan: %s", st.label, decision["would_action"], desc)
+                    elif rule_action == "block":
+                        log.info("[%s] BLOCKED (plan, %s): %s", st.label, decision.get("rule_name") or "rule", desc)
+                    elif rule_action == "notify":
+                        log.info("[%s] NOTIFY (plan, %s): %s", st.label, decision.get("rule_name") or "rule", desc)
+                    elif rule_action == "off":
+                        log.info("[%s] YOLO OFF (plan, %s): %s", st.label, decision.get("rule_name") or "rule", desc)
+                    else:
+                        log.info("[%s] ASK (plan, %s): %s", st.label, decision.get("rule_name") or "rule", desc)
+                    st.last_hash = current_hash
+                    st.last_hash_at = time.monotonic()
+                    st.last_blocked_hash = current_hash
+                    st.blocked += 1
+                    if should_exit_once(st, f"plan {rule_action}"):
+                        return
+                else:
+                    log.info("[%s] UNKNOWN YOLO ACTION %s for plan: %s", st.label, rule_action, desc)
+                    st.last_hash = current_hash
+                    st.last_hash_at = time.monotonic()
+                    st.last_blocked_hash = current_hash
+                    st.blocked += 1
+                    if should_exit_once(st, f"plan {rule_action}"):
+                        return
+
             else:  # bash prompt
-                state_command = prompt_state.get("command")
+                state_command = approval_state.get("command") or prompt_state.get("command")
                 cmd = state_command if isinstance(state_command, str) and state_command.strip() else extract_command(pane_text)
                 decision = standalone_bash_decision(cmd, st.target)
                 rule_action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"

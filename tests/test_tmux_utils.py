@@ -5,7 +5,9 @@ from yolomux_lib import tmux_utils
 
 
 def test_tmux_run_converts_timeout_to_completed_process(monkeypatch):
-    def fake_run(args, capture_output, text, timeout, check):
+    def fake_run(args, capture_output, text, encoding, errors, timeout, check):
+        assert encoding == "utf-8"
+        assert errors == "replace"
         raise subprocess.TimeoutExpired(args, timeout, output="partial", stderr="")
 
     monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
@@ -18,7 +20,9 @@ def test_tmux_run_converts_timeout_to_completed_process(monkeypatch):
 
 
 def test_tmux_run_check_raises_after_timeout(monkeypatch):
-    def fake_run(args, capture_output, text, timeout, check):
+    def fake_run(args, capture_output, text, encoding, errors, timeout, check):
+        assert encoding == "utf-8"
+        assert errors == "replace"
         raise subprocess.TimeoutExpired(args, timeout, output="", stderr="hung")
 
     monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
@@ -30,6 +34,22 @@ def test_tmux_run_check_raises_after_timeout(monkeypatch):
         assert exc.stderr == "hung"
     else:
         raise AssertionError("tmux_run(check=True) should raise on timeout")
+
+
+def test_run_cmd_decodes_with_replacement_errors(monkeypatch):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
+
+    result = tmux_utils.run_cmd(["tmux", "capture-pane"])
+
+    assert result.stdout == "ok"
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
 
 
 def test_tmux_command_uses_configured_socket(monkeypatch):
@@ -81,6 +101,23 @@ def test_tmux_exact_target_skips_resolution_for_unambiguous_targets(monkeypatch)
     monkeypatch.setattr(tmux_utils, "cached_session_names", fail_names)
     assert tmux_utils.tmux_exact_target("%3") == "%3"
     assert tmux_utils.tmux_exact_target("1:") == "1:"
+
+
+def test_tmux_clear_input_moves_to_end_before_clearing(monkeypatch):
+    calls = []
+
+    def fake_tmux_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_utils, "tmux_run", fake_tmux_run)
+
+    result = tmux_utils.tmux_clear_input("%6")
+
+    assert result.returncode == 0
+    assert calls == [
+        (("send-keys", "-t", "%6", "C-e", "C-u"), {"check": False, "timeout": 5.0}),
+    ]
 
 
 def test_tmux_paste_text_submits_with_enter_key_not_pasted_newline(monkeypatch):

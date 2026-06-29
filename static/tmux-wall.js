@@ -24,14 +24,35 @@ function paneMeta(slot) {
   return bits.join(' | ');
 }
 
+function paneBadges(slot) {
+  const display = slot.display || {};
+  const badges = [];
+  const attention = display.attention_label || slot.attention_label || '';
+  if (attention) {
+    badges.push({text: attention, kind: display.attention_kind || slot.attention_kind || 'attention'});
+  }
+  const reason = slot.reason_code || '';
+  if (reason && !['idle', 'done'].includes(reason)) {
+    badges.push({text: reason, kind: reason});
+  }
+  const agent = slot.agent_kind || '';
+  if (agent) {
+    badges.push({text: agent, kind: 'agent'});
+  }
+  return badges.map(badge => `<span class="pane-badge ${esc(badge.kind)}">${esc(badge.text)}</span>`).join('');
+}
+
 function renderPane(slot) {
   const text = slot.error && !slot.text ? slot.error : slot.text;
   const div = document.createElement('article');
   div.className = 'pane';
   div.innerHTML = `
     <div class="pane-head">
-      <div class="pane-title" title="${esc(paneTitle(slot))}">${esc(paneTitle(slot))}</div>
-      <div class="pane-meta" title="${esc(paneMeta(slot))}">${esc(paneMeta(slot))}</div>
+      <div class="pane-head-main">
+        <div class="pane-title" title="${esc(paneTitle(slot))}">${esc(paneTitle(slot))}</div>
+        <div class="pane-meta" title="${esc(paneMeta(slot))}">${esc(paneMeta(slot))}</div>
+      </div>
+      <div class="pane-badges">${paneBadges(slot)}</div>
     </div>
     <pre class="term ${slot.error ? 'err' : ''}">${esc(text)}</pre>`;
   return div;

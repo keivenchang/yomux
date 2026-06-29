@@ -113,7 +113,7 @@ The detailed coordination spec lives in [`specs/YOAGENT_COMMON_INTENTS_AND_AGENT
 
 ### Transports
 
-YO!agent skills describe intent; the server selects the transport. Existing visible Claude/Codex panes use `tmux-legacy`, a verified tmux paste-plus-Return fallback with preflight and post-send checks. Managed providers such as Claude SDK, Claude Channels, Codex SDK, Codex app-server, Codex MCP server, `codex-exec`, and Claude stream-json are separate transports with different guarantees around result events, auth, sandbox, opt-in session identity, and completion semantics. A skill should request `preview_send_prompt`, `execute_confirmed_send`, or a watch tool instead of telling an agent to use tmux or contact another session directly.
+YO!agent skills describe intent; the server selects the transport. Existing visible Claude/Codex panes use `tmux-legacy`, a verified tmux paste-plus-Return fallback backed by `yolomux_lib/agent_tui.py` for pane capture, cursor/composer facts, prompt-state preflight, clear, paste-submit, and post-send checks. Managed providers such as Claude SDK, Claude Channels, Codex SDK, Codex app-server, Codex MCP server, `codex-exec`, and Claude stream-json are separate transports with different guarantees around result events, auth, sandbox, opt-in session identity, and completion semantics. A skill should request `preview_send_prompt`, `execute_confirmed_send`, or a watch tool instead of telling an agent to use tmux or contact another session directly.
 
 ### Perspectives
 

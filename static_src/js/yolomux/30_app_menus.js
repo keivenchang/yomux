@@ -41,6 +41,7 @@ function layoutMenuCommand(mode) {
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
 const aboutProjectUrl = 'https://github.com/keivenchang/yolomux';
+const aboutLicenseUrl = 'https://polyformproject.org/licenses/noncommercial/1.0.0';
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
@@ -61,9 +62,11 @@ function aboutCommitShaText() {
 
 function topbarVersionTitle() {
   const sha = aboutCommitShaText();
+  const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
   if (sha) lines.push(`SHA: ${sha}`);
   if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
+  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(`Commits: ${commitCount}`);
   return lines.join('\n') || 'SHA unknown';
 }
 
@@ -113,7 +116,7 @@ function updateBrandTitles() {
 }
 
 function aboutBrandHtml() {
-  return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+  return `<span class="about-brand-yo">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
 }
 
 function showAboutModal() {
@@ -137,9 +140,10 @@ function showAboutModal() {
       <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
       <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
     </dl>
-    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a><span> (to YOLOmux)</span></div>
+    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a></div>
+    <div class="about-license"><a class="about-author about-license-link" href="${esc(aboutLicenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.license'))}</a></div>
   </div>`;
-  modal.classList.add('open');
+  modal.classList.add(CLS.open);
   scheduleSharePopupLayerPublish();
 }
 
@@ -174,12 +178,7 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  const detail = tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
-  // A non-numeric tmux session name (e.g. "PA exploration") is shown in the tab label only as its
-  // assigned number (e.g. "9"), so the real name is otherwise invisible. Surface it in the menu/search
-  // detail so a result like label "9" reads "9 · PA exploration · main · …" and is identifiable.
-  if (numericSessionName(item) === null) return detail ? `${item} · ${detail}` : String(item);
-  return detail;
+  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
 }
 
 function commandPaletteTabDetail(item) {
@@ -206,7 +205,7 @@ function menuTabRowHtml(item, options = {}) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, yoloWorking: sessionYoloIsWorking(item)})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
 }
 
@@ -216,7 +215,6 @@ function menuTabCommand(item, options = {}) {
   const active = item === currentActiveMenuItem();
   const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? t('menu.tabs.minimizedDetail') : t('menu.tabs.inactiveDetail')));
   return menuCommand(itemLabel(item), () => {
-    if (item === infoItemId) return openInfoSubTab('info');
     if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item, {userInitiated: true});
     return selectSession(item, {userInitiated: true});
   }, {
@@ -378,14 +376,6 @@ async function refreshYoloRulesStatus(options = {}) {
 
 function tmuxYoloMenuItems() {
   return [
-    menuNumberSetting('appearance.yolo_rotate_ms', t('pref.appearance.yolo_rotate_ms.label'), {
-      min: 0,
-      max: 60000,
-      step: 250,
-      suffix: 'ms',
-      fallback: 20000,
-      detail: t('pref.appearance.yolo_rotate_ms.help'),
-    }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
       detail: compactHomePath(yoloRulePath()),
@@ -477,6 +467,14 @@ function agentUnavailableDetail(agent) {
   return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
 }
 
+function newTmuxSessionLabel(agent) {
+  return t('menu.tmux.newSession', {name: agentName(agent)});
+}
+
+function newTmuxSessionIcon(agent) {
+  return agent === 'term' ? appMenuUiIcon('shell') : agentIcon(agent);
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -484,10 +482,10 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    // Drop the "+" prefix (label is just the agent name); when launchable, the detail shows the params
-    // actually passed (the --dangerously-* flags in YOLO mode) so you can see what command will run.
-    return menuCommand(agentName(agent), () => createNextSession(agent), {
-      iconHtml: agentIcon(agent),
+    // When launchable, the detail shows the params actually passed (the --dangerously-* flags in YOLO
+    // mode) so you can see what command will run.
+    return menuCommand(newTmuxSessionLabel(agent), () => createNextSession(agent), {
+      iconHtml: newTmuxSessionIcon(agent),
       disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
         ? t('menu.common.adminOnly')
@@ -647,6 +645,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
   const filteredOpenItems = sortTabItemsForMenu(filterTabItemsForSearch(openItems, query));
   const groupedItems = menuGroups(
+    newTmuxSessionItems(),
     filteredOpenItems.map(item => menuTabCommand(item, {toggleYolo: true})),
     backgroundTabMenuItems(),
     inactiveTabMenuItems()
@@ -656,7 +655,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
 }
 
 function fileMenuVirtualCommand(item, detail) {
-  return menuCommand(itemLabel(item), () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})), {
+  return menuCommand(itemLabel(item), () => selectSession(item, {userInitiated: true}), {
     checked: itemInLayout(item),
     detail,
     iconHtml: tabTypeIconHtml(item, {menu: true}),
@@ -671,9 +670,7 @@ function appMenuTree() {
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloWorkingSessions().length;
-  const debugMenuItems = debugModeEnabled ? [
-    fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail')),
-  ] : [];
+  const debugMenuItem = fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'));
   return [
     {
       id: 'file',
@@ -686,17 +683,14 @@ function appMenuTree() {
           }),
           menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
             checked: itemInLayout(fileExplorerItemId),
-            detail: t('menu.file.browseFiles'),
+            detail: appShortcutText('B'),
             iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
             targetItem: fileExplorerItemId,
           }),
+          fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
           fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
-          // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
-          menuCommand(yoagentTabLabel(), () => openInfoSubTab('yoagent'), {
-            checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',
-            detail: t('menu.file.yoagent.detail'),
-            iconHtml: appMenuUiIcon('yoagent'),
-          }),
+          fileMenuVirtualCommand(yoagentItemId, t('menu.file.yoagent.detail')),
+          debugMenuItem,
           menuCommand(t('menu.file.share'), () => showShareModal(), {
             disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
             detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
@@ -708,7 +702,6 @@ function appMenuTree() {
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
             targetItem: prefsItemId,
           }),
-          ...debugMenuItems,
         ],
         [
           menuCommand(t('menu.file.logout'), logOut, {
@@ -754,7 +747,7 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
-        newTmuxSessionItems(),
+        [fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail'))],
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),
@@ -819,6 +812,15 @@ function flushPendingSessionButtonsRender() {
 }
 
 function renderSessionButtons(options = {}) {
+  const perf = clientPerfStart('renderSessionButtons');
+  try {
+    return renderSessionButtonsMeasured(options);
+  } finally {
+    clientPerfEnd(perf, {nodes: sessionButtons?.childElementCount || 0});
+  }
+}
+
+function renderSessionButtonsMeasured(options = {}) {
   if (!sessionButtons) return;
   if (!options.force && appMenuIsOpen()) {
     scheduleTopbarMetricsUpdate();
@@ -866,7 +868,9 @@ function renderSessionButtons(options = {}) {
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarLanguageSwitcher());
+  sessionButtons.appendChild(createTopbarOwnerStatus());
   sessionButtons.appendChild(createTopbarActivityStatus());
+  updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
   if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
@@ -1093,7 +1097,7 @@ function createAppMenu(menu) {
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (wrapper.classList.contains('open')) {
+    if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
       if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
@@ -1103,7 +1107,7 @@ function createAppMenu(menu) {
   });
   button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
   wrapper.append(button, popover);
-  if (openAppMenuId === menu.id) wrapper.classList.add('open');
+  if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
   return wrapper;
 }
@@ -1136,10 +1140,8 @@ function clampAppMenuNumberSetting(item, rawValue) {
 }
 
 function applyAppMenuNumberSettingPreview(path, value) {
-  if (path === 'appearance.yolo_rotate_ms') {
-    yoloRotateMs = Math.max(0, Number(value) || 0);
-    applyCssSettings();
-  }
+  void path;
+  void value;
 }
 
 function createAppMenuNumberSetting(item) {
@@ -1216,13 +1218,13 @@ function createAppSubmenu(item) {
     event.preventDefault();
     event.stopPropagation();
     if (button.disabled) return;
-    wrapper.classList.add('open');
+    wrapper.classList.add(CLS.open);
     button.setAttribute('aria-expanded', 'true');
   });
   button.addEventListener('keydown', event => {
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      wrapper.classList.add('open');
+      wrapper.classList.add(CLS.open);
       button.setAttribute('aria-expanded', 'true');
       focusFirstAppMenuCommand(submenu);
     }
@@ -1425,7 +1427,7 @@ function bindAppMenuHover(wrapper) {
     onOpen: () => {
       const menuId = wrapper.dataset.appMenu || '';
       const currentWrapper = document.querySelector(`.app-menu[data-app-menu="${cssEscape(menuId)}"]`) || wrapper;
-      if (!currentWrapper.classList.contains('open')) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
+      if (!currentWrapper.classList.contains(CLS.open)) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
     },
     onClose: () => {
       const menuId = wrapper.dataset.appMenu || '';
@@ -1442,9 +1444,9 @@ function openAppMenu(wrapper, options = {}) {
   closeAppMenus(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
-  wrapper.classList.add('open');
+  wrapper.classList.add(CLS.open);
   wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
-    submenu.classList.add('open');
+    submenu.classList.add(CLS.open);
     submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
   });
   openAppMenuId = wrapper.dataset.appMenu || null;
@@ -1459,7 +1461,7 @@ function openAppMenu(wrapper, options = {}) {
 function closeAppMenus(keepOpen = null) {
   for (const menu of document.querySelectorAll('.app-menu.open')) {
     if (menu === keepOpen) continue;
-    menu.classList.remove('open');
+    menu.classList.remove(CLS.open);
     menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
   }
   document.querySelectorAll('.app-menu-command.share-mirror-active').forEach(command => {
@@ -1467,7 +1469,7 @@ function closeAppMenus(keepOpen = null) {
   });
   for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
     if (keepOpen?.contains(submenu)) continue;
-    submenu.classList.remove('open');
+    submenu.classList.remove(CLS.open);
     submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'false');
   }
   openAppMenuId = keepOpen?.dataset?.appMenu || null;

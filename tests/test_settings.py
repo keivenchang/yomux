@@ -3,6 +3,7 @@ from pathlib import Path
 import threading
 
 
+from yolomux_lib import settings as settings_module
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.common import UPLOAD_MAX_BYTES
 from yolomux_lib.settings import LEGACY_YOAGENT_DEFAULTS
@@ -12,6 +13,9 @@ from yolomux_lib.settings import save_settings
 from yolomux_lib.settings import sanitize_settings
 from yolomux_lib.settings import settings_catalog
 from yolomux_lib.settings import settings_payload
+from yolomux_lib.settings import write_settings_file
+from yolomux_lib.yoagent.actions import parse_yoagent_action_intent
+from yolomux_lib.yoagent.preferences import parse_settings_write
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +27,48 @@ def test_pane_spacing_default_is_3px():
     assert default_settings()["appearance"]["pane_spacing"] == 3
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
+    assert "red_reminder_ms" not in default_settings()["appearance"]
+    assert default_settings()["performance"]["agent_status_pulse_period_ms"] == 1550
+    assert default_settings()["performance"]["workflow_transition_glow_seconds"] == 60
+    assert "agent_window_cooldown_seconds" not in default_settings()["performance"]
+
+
+def test_stale_agent_window_cooldown_default_migrates_to_workflow_transition_glow():
+    defaults = default_settings()
+
+    migrated = sanitize_settings({"performance": {"agent_window_cooldown_seconds": 0}})
+    assert migrated["performance"]["workflow_transition_glow_seconds"] == defaults["performance"]["workflow_transition_glow_seconds"]
+    assert "agent_window_cooldown_seconds" not in migrated["performance"]
+
+    custom = sanitize_settings({"performance": {"agent_window_cooldown_seconds": 45}})
+    assert custom["performance"]["workflow_transition_glow_seconds"] == 45
+    assert "agent_window_cooldown_seconds" not in custom["performance"]
+
+
+def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp_path):
+    path = tmp_path / "settings.yaml"
+    write_settings_file({"appearance": {"theme": "light"}}, path)
+    calls = []
+    real_safe_load = settings_module.yaml.safe_load
+
+    def counting_safe_load(text):
+        calls.append(text)
+        return real_safe_load(text)
+
+    monkeypatch.setattr(settings_module.yaml, "safe_load", counting_safe_load)
+
+    first = settings_payload(path)
+    second = settings_payload(path)
+
+    assert len(calls) == 1
+    assert first["settings"]["appearance"]["theme"] == "light"
+    assert second["settings"]["appearance"]["theme"] == "light"
+
+    write_settings_file({"appearance": {"theme": "dark"}}, path)
+    third = settings_payload(path)
+
+    assert len(calls) == 2
+    assert third["settings"]["appearance"]["theme"] == "dark"
 
 
 def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text():
@@ -63,9 +109,9 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "updates": {"notify_level": "bogus"},
-            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000},
+            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000, "agent_status_pulse_period_ms": 99, "workflow_transition_glow_seconds": 999},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
-            "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
+            "editor": {"autosave": "yes", "autosave_delay_seconds": 100, "trim_trailing_whitespace_on_save": "yes", "ensure_final_newline_on_save": "no"},
             "uploads": {"max_bytes": 999999999},
             "share": {"ttl_seconds": 1_000_000, "max_viewers": 999, "scheme": "ftp", "read_only": "no"},
             "yoagent": {"backend": "wat", "invocation": "bad", "system_prompt": "Use facts", "intro": "Be terse", "format": "One line"},
@@ -99,6 +145,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["file_explorer"]["image_preview_max_px"] == 1200
     assert settings["editor"]["autosave"] is True
     assert settings["editor"]["autosave_delay_seconds"] == 60
+    assert settings["editor"]["trim_trailing_whitespace_on_save"] is True
+    assert settings["editor"]["ensure_final_newline_on_save"] is False
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
     assert settings["share"]["ttl_seconds"] == 28800
@@ -109,29 +157,36 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["updates"]["notify_level"] == "patch"
     assert sanitize_settings({"updates": {"notify_level": "minor"}})["updates"]["notify_level"] == "minor"
+    assert settings["file_explorer"]["dir_cache_ms"] == 5000
     assert settings["performance"]["latency_refresh_ms"] == 1000
     assert settings["performance"]["event_log_refresh_ms"] == 60000
+    assert settings["performance"]["agent_status_pulse_period_ms"] == 250
+    assert settings["performance"]["workflow_transition_glow_seconds"] == 300
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
-    assert settings["yoagent"]["backend"] == "codex"
+    assert settings["yoagent"]["backend"] == "auto"
     assert settings["yoagent"]["invocation"] == "cli"
+    assert settings["yoagent"]["claude_effort"] == "low"
+    assert settings["yoagent"]["codex_effort"] == "low"
     assert "auto_refresh" not in settings["yoagent"]
-    assert settings["yoagent"]["refresh_interval_seconds"] == 0
+    assert "refresh_interval_seconds" not in settings["yoagent"]
     assert settings["yoagent"]["system_prompt"] == "Use facts"
     assert settings["yoagent"]["intro"] == "Be terse"
     assert settings["yoagent"]["format"] == "One line"
     assert settings["yolo"]["prompt_source"] == "hybrid"
 
 
-def test_legacy_yoagent_auto_refresh_migrates_to_interval():
+def test_legacy_yoagent_auto_refresh_and_interval_are_dropped():
     disabled = sanitize_settings({"yoagent": {"auto_refresh": False, "refresh_interval_seconds": 120}})
     enabled = sanitize_settings({"yoagent": {"auto_refresh": True, "refresh_interval_seconds": 45}})
     enabled_without_interval = sanitize_settings({"yoagent": {"auto_refresh": True}})
 
     assert "auto_refresh" not in disabled["yoagent"]
-    assert disabled["yoagent"]["refresh_interval_seconds"] == 0
-    assert enabled["yoagent"]["refresh_interval_seconds"] == 45
-    assert enabled_without_interval["yoagent"]["refresh_interval_seconds"] == 120
+    assert "refresh_interval_seconds" not in disabled["yoagent"]
+    assert "auto_refresh" not in enabled["yoagent"]
+    assert "refresh_interval_seconds" not in enabled["yoagent"]
+    assert "auto_refresh" not in enabled_without_interval["yoagent"]
+    assert "refresh_interval_seconds" not in enabled_without_interval["yoagent"]
 
 
 def test_legacy_editor_scheme_ids_migrate_to_popular_ide_names():
@@ -167,9 +222,20 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["catalog"]["general.default_sessions"]["gui"]["visible"] is False
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["share"] == {"ttl_seconds": 600, "max_viewers": 2, "read_only": True, "scheme": "http", "view_fit": "cover"}
-    assert payload["settings"]["yoagent"]["backend"] == "codex"
+    assert payload["settings"]["summary"] == {
+        "backend": "codex",
+        "codex_model": "gpt-5.4-mini",
+        "codex_effort": "low",
+        "codex_service_tier": "fast",
+        "lookback_seconds": 3600,
+        "timeout_seconds": 600,
+    }
+    assert payload["settings"]["yoagent"]["backend"] == "auto"
+    assert payload["settings"]["yoagent"]["claude_model"] == "claude-haiku-4-5"
+    assert payload["settings"]["yoagent"]["claude_effort"] == "low"
+    assert payload["settings"]["yoagent"]["codex_effort"] == "low"
     assert "auto_refresh" not in payload["settings"]["yoagent"]
-    assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 0
+    assert "refresh_interval_seconds" not in payload["settings"]["yoagent"]
     assert "normal status-update style" in payload["settings"]["yoagent"]["system_prompt"]
     assert "server-verified sends" in payload["settings"]["yoagent"]["system_prompt"]
     assert "live pane receives the text" in payload["settings"]["yoagent"]["system_prompt"]
@@ -226,6 +292,8 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
 
     assert catalog["appearance.tab_width"]["limits"] == {"min": 120, "max": 420}
     assert catalog["appearance.tab_width"]["units"] == "pixels"
+    assert catalog["performance.workflow_transition_glow_seconds"]["default"] == 60
+    assert catalog["performance.workflow_transition_glow_seconds"]["limits"] == {"min": 0, "max": 300}
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
     assert catalog["uploads.subdir"]["empty_allowed"] is True
     assert catalog["uploads.image_action_order"]["list_limit"] == 9
@@ -236,14 +304,64 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["yoagent.invocation"]["choices"] == ["cli"]
     assert catalog["yoagent.invocation"]["accepted_choices"] == ["api-key", "cli"]
     assert catalog["yoagent.invocation"]["hidden_choices"] == ["api-key"]
+    assert "persistent local app-server" in catalog["yoagent.invocation"]["description"]
+    assert "stream-json CLI subprocess" in catalog["yoagent.invocation"]["description"]
+    assert catalog["yoagent.codex_model"]["default"] == "gpt-5.4-mini"
+    assert catalog["yoagent.codex_model"]["choices"] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
+    assert catalog["yoagent.codex_model"]["choice_labels"]["gpt-5.3-codex-spark"] == "GPT-5.3-Codex-Spark"
+    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-5.5"]["default_effort"] == "low"
+    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-5.3-codex-spark"]["default_effort"] == "low"
+    assert catalog["yoagent.codex_model"]["choice_metadata"]["gpt-5.4-mini"]["effort_options"] == ["low", "medium", "high", "xhigh"]
+    assert "gpt-5-nano" not in catalog["yoagent.codex_model"]["accepted_choices"]
+    assert catalog["yoagent.claude_model"]["choices"] == ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"]
+    assert catalog["summary.codex_model"]["default"] == "gpt-5.4-mini"
+    assert catalog["summary.codex_model"]["choices"] == catalog["yoagent.codex_model"]["choices"]
+    assert catalog["summary.codex_model"]["choice_metadata"] == catalog["yoagent.codex_model"]["choice_metadata"]
+    assert catalog["summary.codex_effort"]["choices"] == ["low", "medium", "high", "xhigh"]
+    assert catalog["summary.codex_service_tier"]["choices"] == ["fast", "auto", "default"]
+    assert catalog["summary.lookback_seconds"]["limits"] == {"min": 60, "max": 86400}
+    assert catalog["summary.timeout_seconds"]["limits"] == {"min": 30, "max": 3600}
     assert catalog["yoagent.system_prompt"]["requires_confirmation"] is True
     assert catalog["yoagent.system_prompt"]["sensitivity"] == "prompt"
     assert catalog["appearance.theme"]["gui"] == {"section": "Appearance", "visible": True}
     assert catalog["share.view_fit"]["gui"] == {"section": "", "visible": False}
 
 
+def test_stale_yoagent_model_settings_revert_to_valid_defaults():
+    sanitized = sanitize_settings({
+        "yoagent": {
+            "codex_model": "gpt-5.3-codex-spark",
+            "claude_model": "claude-fable-5",
+        },
+    })
+
+    assert sanitized["yoagent"]["codex_model"] == "gpt-5.3-codex-spark"
+    assert sanitized["yoagent"]["claude_model"] == "claude-fable-5"
+    assert sanitize_settings({"yoagent": {"claude_model": "claude-fable-6"}})["yoagent"]["claude_model"] == "claude-haiku-4-5"
+
+
+def test_summary_settings_reject_invalid_backend_defaults():
+    sanitized = sanitize_settings({
+        "summary": {
+            "backend": "claude",
+            "codex_model": "gpt-5-nano",
+            "codex_effort": "extreme",
+            "codex_service_tier": "warp",
+            "lookback_seconds": 1,
+            "timeout_seconds": 10_000,
+        },
+    })
+
+    assert sanitized["summary"]["backend"] == "codex"
+    assert sanitized["summary"]["codex_model"] == "gpt-5.4-mini"
+    assert sanitized["summary"]["codex_effort"] == "low"
+    assert sanitized["summary"]["codex_service_tier"] == "fast"
+    assert sanitized["summary"]["lookback_seconds"] == 60
+    assert sanitized["summary"]["timeout_seconds"] == 3600
+
+
 def test_preferences_source_paths_are_in_backend_catalog():
-    source = (REPO_ROOT / "static_src/js/yolomux/80_panes_preferences.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "static_src/js/yolomux/82_preferences_panel.js").read_text(encoding="utf-8")
     paths = set()
     for line in source.splitlines():
         if "{path:" not in line:
@@ -272,6 +390,48 @@ def test_language_setting_accepts_names_and_endonyms():
     assert sanitize_settings({"general": {"language": "Japanese"}})["general"]["language"] == "ja"
     assert sanitize_settings({"general": {"language": "Traditional Chinese"}})["general"]["language"] == "zh-Hant"
     assert sanitize_settings({"general": {"language": "日本語"}})["general"]["language"] == "ja"
+
+
+def test_yoagent_deterministic_preference_alias_write_fixtures():
+    payload = {"settings": default_settings(), "defaults": default_settings(), "catalog": settings_catalog(default_settings())}
+    cases = [
+        ("change background to white", "appearance.theme", "light"),
+        ("change background to black", "appearance.theme", "dark"),
+        ("make tabs wider", "appearance.tab_width", 200),
+        ("tab width 220", "appearance.tab_width", 220),
+        ("make UI smaller", "appearance.ui_font_size", 12),
+        ("terminal font bigger", "appearance.terminal_font_size", 14),
+        ("no notifications", "notifications.notify_transitions", []),
+        ("quiet notifications", "notifications.notify_transitions", []),
+        ("light terminal", "appearance.terminal_theme", "light"),
+        ("dark terminal", "appearance.terminal_theme", "dark"),
+        ("set language to 日本語", "general.language", "ja"),
+        ("set language to Español", "general.language", "es"),
+    ]
+
+    for question, path, value in cases:
+        intent = parse_settings_write(question, payload)
+        assert intent is not None, question
+        assert intent["type"] == "settings_write", question
+        assert intent["path"] == path, question
+        assert intent["value"] == value, question
+
+
+def test_yoagent_deterministic_routing_alias_fixtures():
+    wait = parse_yoagent_action_intent("wait for session 4, send it date, and tell me what it says", [], ["4"])
+    direct = parse_yoagent_action_intent("send date to session 6 and tell me what it says", [], ["6"])
+    no_wait = parse_yoagent_action_intent("send date to session 6 but do not wait for the result", [], ["6"])
+    handoff = parse_yoagent_action_intent("ask session 1 what changed, then ask session 2 if that is correct", [], ["1", "2"])
+
+    assert wait == {"type": "wait_then_send", "session": "4", "text": "tell me the date", "submit": True, "return_result": True}
+    assert direct == {"type": "send_prompt", "session": "6", "text": "tell me the date", "submit": True, "return_result": True}
+    assert no_wait == {"type": "send_prompt", "session": "6", "text": "tell me the date", "submit": True}
+    assert handoff is not None
+    assert handoff["type"] == "session_handoff"
+    assert handoff["session"] == "1"
+    assert handoff["text"] == "what changed"
+    assert handoff["return_result"] is True
+    assert handoff["handoff"] == {"source_session": "1", "session": "2", "instruction": "if that is correct"}
 
 
 def test_save_settings_can_reset_all_values_to_defaults(tmp_path):
@@ -332,12 +492,9 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     ring = save_settings({"appearance": {"pane_ring_opacity": 20}}, path)
     assert ring["coerced"] == []
     assert ring["settings"]["appearance"]["pane_ring_opacity"] == 20
-    interval = save_settings({"yoagent": {"refresh_interval_seconds": 1}}, path)
-    assert "yoagent.refresh_interval_seconds" in interval["coerced"]
-    assert interval["settings"]["yoagent"]["refresh_interval_seconds"] == 30
-    off = save_settings({"yoagent": {"refresh_interval_seconds": 0}}, path)
-    assert off["coerced"] == []
-    assert off["settings"]["yoagent"]["refresh_interval_seconds"] == 0
+    dropped = save_settings({"yoagent": {"refresh_interval_seconds": 1}}, path)
+    assert dropped["coerced"] == []
+    assert "refresh_interval_seconds" not in dropped["settings"]["yoagent"]
     clamped_ring = save_settings({"appearance": {"pane_ring_opacity": 1}}, path)
     assert "appearance.pane_ring_opacity" in clamped_ring["coerced"]
     assert clamped_ring["settings"]["appearance"]["pane_ring_opacity"] == 5
@@ -465,6 +622,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "server_event_poll_ms": 5_009,
             "server_background_file_event_poll_ms": 5_009,
             "server_directory_event_poll_ms": 5_009,
+            "auto_approve_interval_seconds": 0.5,
         },
     })
     defaults = default_settings()
@@ -473,6 +631,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert migrated["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
     assert migrated["performance"]["server_background_file_event_poll_ms"] == defaults["performance"]["server_background_file_event_poll_ms"]
     assert migrated["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
+    assert migrated["performance"]["auto_approve_interval_seconds"] == defaults["performance"]["auto_approve_interval_seconds"]
     rounded_legacy = sanitize_settings({"performance": {"server_event_poll_ms": 5000}})
     assert rounded_legacy["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
     rounded_background_legacy = sanitize_settings({"performance": {"server_background_file_event_poll_ms": 5000}})
@@ -531,11 +690,15 @@ def test_watched_prs_setting_round_trips_in_template(tmp_path):
     assert loaded["github"]["watched_prs"] == ["ai-vortex/parser-toolkits#18", "owner/repo#7"]
 
 
-def test_blame_all_lines_default_and_coercion():
-    # follow-up: the all-lines blame toggle defaults off and coerces to bool.
+def test_editor_boolean_defaults_and_coercion():
+    # Editor save/blame toggles default off and coerce through the shared bool path.
     assert default_settings()["editor"]["blame_all_lines"] is False
     assert sanitize_settings({"editor": {"blame_all_lines": "yes"}})["editor"]["blame_all_lines"] is True
     assert sanitize_settings({"editor": {"blame_all_lines": "no"}})["editor"]["blame_all_lines"] is False
+    assert default_settings()["editor"]["trim_trailing_whitespace_on_save"] is False
+    assert default_settings()["editor"]["ensure_final_newline_on_save"] is False
+    assert sanitize_settings({"editor": {"trim_trailing_whitespace_on_save": "yes"}})["editor"]["trim_trailing_whitespace_on_save"] is True
+    assert sanitize_settings({"editor": {"ensure_final_newline_on_save": "yes"}})["editor"]["ensure_final_newline_on_save"] is True
 
 
 def test_uploads_subdir_defaults_to_dot_uploads():

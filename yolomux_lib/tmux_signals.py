@@ -9,8 +9,10 @@ without attaching clients, so it cannot resize user windows.
 from __future__ import annotations
 
 import ctypes
+import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -61,6 +63,7 @@ TMUX_PANE_SIGNAL_FIELDS = (
     "pane_active",
     "pane_current_path",
     "pane_current_command",
+    "pane_title",
     "pane_dead",
     "pane_dead_status",
     "pane_dead_signal",
@@ -106,6 +109,8 @@ TMUX_SIGNAL_CONTROL_EVENTS = frozenset({
     "layout-change",
     "output",
     "extended-output",
+    "pane-died",
+    "pane-exited",
     "pane-mode-changed",
     "session-changed",
     "session-renamed",
@@ -128,6 +133,7 @@ TMUX_SIGNAL_HOOKS = (
     "client-resized",
     "window-resized",
 )
+TMUX_SIGNAL_HOOK_EVENT_PREFIX = "yolomux-tmux-signal-hook:"
 TMUX_SIGNAL_HOOK_INDEX = 7717
 TMUX_SIGNAL_MONITOR_SILENCE_SECONDS = 60
 TMUX_SIGNAL_EVENT_RETRY_SECONDS = 2.003
@@ -171,8 +177,62 @@ def set_control_client_parent_death_signal() -> None:
         _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
 
 
+def reap_macos_orphaned_tmux_control_clients() -> list[int]:
+    """Terminate monitor clients left behind by a crashed macOS YOLOmux process.
+
+    Linux uses PR_SET_PDEATHSIG above, but macOS has no equivalent. Limit the
+    sweep to orphaned (PPID 1) read-only, ignore-size control clients so it
+    cannot affect an interactive tmux attach or another live server's monitor.
+    """
+    if sys.platform != "darwin":
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-eww", "-o", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    reaped: list[int] = []
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            pid, parent_pid = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        if parent_pid != 1:
+            continue
+        args = fields[2].split()
+        if not args or os.path.basename(args[0]) != "tmux":
+            continue
+        if "-C" not in args or "attach-session" not in args or "read-only,ignore-size" not in args:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        reaped.append(pid)
+    return reaped
+
+
 def tmux_signal_subscription_commands() -> list[list[str]]:
     return [["refresh-client", "-B", f"{name}:{fmt}"] for name, fmt in TMUX_SIGNAL_SUBSCRIPTIONS]
+
+
+def tmux_signal_hook_command(_hook: str) -> str:
+    # `display-message -p` writes to whichever tmux client executes a global
+    # hook. That can be an interactive browser-backed attach, leaking the
+    # internal event token into a visible terminal. Existing control-mode
+    # subscriptions observe the refresh without terminal output.
+    return "refresh-client"
 
 
 def install_tmux_signal_control_subscriptions(process: subprocess.Popen[str]) -> None:
@@ -188,6 +248,8 @@ def install_tmux_signal_control_subscriptions(process: subprocess.Popen[str]) ->
 
 def tmux_control_event_type(line: str) -> str:
     text = str(line or "").strip()
+    if text.startswith(TMUX_SIGNAL_HOOK_EVENT_PREFIX):
+        return text[len(TMUX_SIGNAL_HOOK_EVENT_PREFIX):].split(":", 1)[0]
     if not text.startswith("%"):
         return ""
     return text[1:].split(None, 1)[0]
@@ -213,7 +275,7 @@ def install_tmux_signal_monitoring(sessions: Sequence[str], timeout: float = 1.5
             "set-hook",
             "-g",
             f"{hook}[{TMUX_SIGNAL_HOOK_INDEX}]",
-            "refresh-client",
+            tmux_signal_hook_command(hook),
         ], timeout=timeout)
         if result.returncode != 0:
             errors.append(cmd_error(result, f"tmux set-hook {hook} failed"))
@@ -241,6 +303,7 @@ class TmuxSignalEventWatcher:
         with self.lock:
             if self.thread is not None and self.thread.is_alive():
                 return False
+            reap_macos_orphaned_tmux_control_clients()
             self.stop_event.clear()
             self.thread = threading.Thread(target=self.run, name="tmux-signal-events", daemon=True)
             self.thread.start()
@@ -281,6 +344,7 @@ class TmuxSignalEventWatcher:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 bufsize=1,
                 preexec_fn=set_control_client_parent_death_signal,
             )
@@ -332,6 +396,15 @@ def bool_value(value: Any) -> bool:
 
 def window_key(session: str, window_index: str) -> str:
     return f"{session}:{window_index}"
+
+
+def window_record_key(window: dict[str, Any]) -> str:
+    key = str(window.get("key") or "").strip()
+    if key:
+        return key
+    session = str(window.get("session") or window.get("session_name") or "").strip()
+    window_index = str(window.get("window_index") if window.get("window_index") is not None else window.get("window") or "").strip()
+    return window_key(session, window_index) if session and window_index else ""
 
 
 def row_map(line: str, fields: tuple[str, ...]) -> dict[str, str] | None:
@@ -396,6 +469,7 @@ def parse_pane_signal_row(line: str) -> dict[str, Any] | None:
         "active": bool_value(raw["pane_active"]),
         "current_path": raw["pane_current_path"],
         "current_command": command,
+        "title": raw["pane_title"],
         "agent": command if command in AGENT_COMMANDS else "",
         "dead": bool_value(raw["pane_dead"]),
         "dead_status": int_or_none(raw["pane_dead_status"]),
@@ -489,7 +563,7 @@ def parse_tmux_signal_snapshot(
             continue
         window = parse_window_signal_row(line)
         if window is None:
-            parse_errors.append("invalid tmux window signal row")
+            parse_errors.append("invalid tmux sub-window signal row")
             continue
         windows.append(window)
         windows_by_key[window["key"]] = window
@@ -570,22 +644,27 @@ def parse_tmux_signal_snapshot(
     }
 
 
-def fetch_tmux_signal_snapshot(timeout: float = 3.0) -> dict[str, Any]:
+def fetch_tmux_signal_snapshot(timeout: float = 3.0, session: str = "") -> dict[str, Any]:
     started = time.perf_counter()
     errors: list[str] = []
-    windows_result = tmux(["list-windows", "-a", "-F", tmux_signal_format(TMUX_WINDOW_SIGNAL_FIELDS)], timeout=timeout)
+    target = str(session or "").strip()
+    target_args = ["-t", tmux_session_target(target)] if target else []
+    windows_args = ["list-windows", *target_args, *([] if target else ["-a"]), "-F", tmux_signal_format(TMUX_WINDOW_SIGNAL_FIELDS)]
+    panes_args = ["list-panes", *target_args, *([] if target else ["-a"]), "-F", tmux_signal_format(TMUX_PANE_SIGNAL_FIELDS)]
+    clients_args = ["list-clients", *target_args, "-F", tmux_signal_format(TMUX_CLIENT_SIGNAL_FIELDS)]
+    windows_result = tmux(windows_args, timeout=timeout)
     if windows_result.returncode != 0:
         errors.append(cmd_error(windows_result, "tmux list-windows failed"))
         windows_stdout = ""
     else:
         windows_stdout = windows_result.stdout
-    panes_result = tmux(["list-panes", "-a", "-F", tmux_signal_format(TMUX_PANE_SIGNAL_FIELDS)], timeout=timeout)
+    panes_result = tmux(panes_args, timeout=timeout)
     if panes_result.returncode != 0:
         errors.append(cmd_error(panes_result, "tmux list-panes failed"))
         panes_stdout = ""
     else:
         panes_stdout = panes_result.stdout
-    clients_result = tmux(["list-clients", "-F", tmux_signal_format(TMUX_CLIENT_SIGNAL_FIELDS)], timeout=timeout)
+    clients_result = tmux(clients_args, timeout=timeout)
     if clients_result.returncode != 0:
         errors.append(cmd_error(clients_result, "tmux list-clients failed"))
         clients_stdout = ""

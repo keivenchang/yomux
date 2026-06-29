@@ -222,9 +222,11 @@ function rerenderForLocale(options = {}) {
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});  // rebuilds the app menu bar
   if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
   if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
+  if (typeof relocalizeYoagentPanelChrome === 'function') relocalizeYoagentPanelChrome();
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
   if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
+  if (typeof relocalizeYoagentPanelChrome === 'function') relocalizeYoagentPanelChrome();
   if (options.localeChange === true && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true, silent: true, localeChange: true});
   if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
   if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();

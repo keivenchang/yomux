@@ -1,12 +1,21 @@
 import signal
+from types import SimpleNamespace
 
 from yolomux_lib import tmux_signals
 from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
 from yolomux_lib.tmux_signals import parse_tmux_signal_snapshot
 from yolomux_lib.tmux_signals import tmux_signal_subscription_commands
+from yolomux_lib.tmux_signals import tmux_signal_hook_command
 from yolomux_lib.tmux_signals import tmux_control_attach_command
 from yolomux_lib.tmux_signals import tmux_control_event_relevant
 from yolomux_lib.tmux_signals import tmux_control_event_type
+from yolomux_lib.tmux_signals import window_record_key
+
+
+def test_window_record_key_prefers_record_key_and_falls_back_to_session_window():
+    assert window_record_key({"key": "alpha:2", "session": "ignored", "window_index": 9}) == "alpha:2"
+    assert window_record_key({"session": "alpha", "window_index": 2}) == "alpha:2"
+    assert window_record_key({"session_name": "beta", "window": "3"}) == "beta:3"
 
 
 def test_parse_tmux_signal_snapshot_maps_window_and_pane_fields():
@@ -15,8 +24,8 @@ def test_parse_tmux_signal_snapshot_maps_window_and_pane_fields():
         "alpha\t$1\t1710000010\t1710000000\t1\tclient-a\t1\t@2\tbash\t0\t1710000001\t0\t1\t0\t0\t\t1\t80\t24\t1\tlayout-b\tvisible-b",
     ])
     panes_stdout = "\n".join([
-        "alpha\t0\t@1\t0\t%1\t1\t/home/keivenc/project\tcodex\t0\t\t\t\t1\t0\t\t0\t0\t1234\t120\t36\t4000\t120000",
-        "alpha\t1\t@2\t0\t%2\t1\t/home/keivenc/project\tbash\t1\t2\t\t1710000111\t0\t1\tcopy-mode\t1\t1\t4321\t80\t24\t12\t300",
+        "alpha\t0\t@1\t0\t%1\t1\t/home/keivenc/project\tcodex\t\t0\t\t\t\t1\t0\t\t0\t0\t1234\t120\t36\t4000\t120000",
+        "alpha\t1\t@2\t0\t%2\t1\t/home/keivenc/project\tbash\t\t1\t2\t\t1710000111\t0\t1\tcopy-mode\t1\t1\t4321\t80\t24\t12\t300",
     ])
     clients_stdout = "\n".join([
         "client-a\talpha\t1710000200\t120\t36\tattached,focused\t0\t0\tkeiven",
@@ -96,7 +105,7 @@ def test_parse_tmux_signal_snapshot_reports_bad_rows():
     assert payload["ok"] is False
     assert payload["window_count"] == 0
     assert payload["pane_count"] == 0
-    assert payload["errors"] == ["invalid tmux window signal row", "invalid tmux pane signal row"]
+    assert payload["errors"] == ["invalid tmux sub-window signal row", "invalid tmux pane signal row"]
 
 
 def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
@@ -136,6 +145,32 @@ def test_control_client_parent_death_signal_requests_sigterm(monkeypatch):
     tmux_signals.set_control_client_parent_death_signal()
 
 
+def test_macos_orphaned_control_client_reaper_is_platform_scoped(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tmux_signals.sys, "platform", "linux")
+    monkeypatch.setattr(tmux_signals.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Linux must not inspect macOS orphan clients")))
+
+    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == []
+
+    monkeypatch.setattr(tmux_signals.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        tmux_signals.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "101 1 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
+                "102 999 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
+                "103 1 tmux attach-session -t 1:\n"
+            ),
+        ),
+    )
+    monkeypatch.setattr(tmux_signals.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+
+    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == [101]
+    assert calls == [(101, signal.SIGTERM)]
+
+
 def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
     # run_control_client must spawn the control client with the parent-death preexec hook so the
     # leaked-orphan-on-hard-kill path is closed at the source, not mopped up later.
@@ -170,10 +205,19 @@ def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
 
 def test_tmux_control_event_filter_accepts_signal_notifications():
     assert tmux_control_event_type("%output %1 bytes") == "output"
+    assert tmux_control_event_type("yolomux-tmux-signal-hook:pane-exited:%1") == "pane-exited"
     assert tmux_control_event_relevant("%layout-change @1 layout") is True
     assert tmux_control_event_relevant("%subscription-changed activity 1") is True
+    assert tmux_control_event_relevant("yolomux-tmux-signal-hook:pane-died:%1") is True
+    assert tmux_control_event_relevant("tmux status message") is False
     assert tmux_control_event_relevant("%begin 1 2 3") is False
     assert tmux_control_event_relevant("not a control event") is False
+
+
+def test_tmux_pane_exit_hook_never_writes_into_a_terminal():
+    assert tmux_signal_hook_command("pane-exited") == "refresh-client"
+    assert tmux_signal_hook_command("pane-died") == "refresh-client"
+    assert "display-message" not in tmux_signal_hook_command("pane-exited")
 
 
 def test_tmux_signal_subscriptions_cover_activity_and_layout_formats():
@@ -201,4 +245,6 @@ def test_install_tmux_signal_monitoring_scopes_options_and_hooks(monkeypatch):
     assert len(hook_calls) == len(tmux_signals.TMUX_SIGNAL_HOOKS)
     assert all(f"[{tmux_signals.TMUX_SIGNAL_HOOK_INDEX}]" in args[2] for args in hook_calls)
     assert any("client-resized" in args[2] for args in hook_calls)
-    assert all(args[3] == "refresh-client" for args in hook_calls)
+    assert any(args[2].startswith("pane-exited") and args[3] == "refresh-client" for args in hook_calls)
+    assert any(args[2].startswith("pane-died") and args[3] == "refresh-client" for args in hook_calls)
+    assert all(args[3] == tmux_signal_hook_command(args[2].split("[", 1)[0]) for args in hook_calls)
