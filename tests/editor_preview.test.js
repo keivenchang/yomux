@@ -2161,7 +2161,8 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('boom'), 'debug panel renders JS error rows');
     const debugPaneSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(debugPaneSource.includes('const jsDebugStatsPollMs = 3000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 10000;'), 'YO!stats stats polling uses slower default sample and history flush intervals');
+    assert.ok(debugPaneSource.includes('const jsDebugStatsPollMs = 30000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30000;'), 'YO!stats samples, flushes, and redraws its graphs at a thirty-second cadence');
+    assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');

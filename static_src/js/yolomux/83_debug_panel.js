@@ -42,8 +42,9 @@ const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
 const jsDebugGraphRawBucketMs = 1000;
 const jsDebugGraphRollupBucketMs = 30 * 1000;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
-const jsDebugStatsPollMs = 3000;
-const jsDebugStatsHistoryFlushMs = 10000;
+const jsDebugStatsPollMs = 30000;
+const jsDebugStatsHistoryFlushMs = 30000;
+const jsDebugGraphRefreshMs = 30000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
@@ -144,8 +145,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphSelectionState = null;
   if (!render) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    graph.className = debugGraphClassName();
-    graph.innerHTML = debugGraphInnerHtml();
+    refreshDebugGraphElement(graph, {force: true});
   }
 }
 
@@ -1758,8 +1758,7 @@ function debugGraphClassName(nowMs = Date.now()) {
   return `js-debug-graph${debugGraphDisplayBuckets(nowMs).length ? '' : ' js-debug-graph--empty'}${debugGraphZoomDomainValid() ? ' js-debug-graph--zoomed' : ''}`;
 }
 
-function debugGraphInnerHtml() {
-  const nowMs = Date.now();
+function debugGraphInnerHtml(nowMs = Date.now()) {
   activeJsDebugGraphRangeSeconds(nowMs);
   const controls = debugGraphControlsHtml(nowMs);
   const meta = debugGraphMetaHtml();
@@ -1774,7 +1773,8 @@ function debugGraphInnerHtml() {
 }
 
 function debugGraphHtml() {
-  return `<div class="${debugGraphClassName()}" data-js-debug-graph aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml()}</div>`;
+  const nowMs = Date.now();
+  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
 }
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
@@ -2049,10 +2049,7 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
   const graph = panel.querySelector('[data-js-debug-graph]');
-  if (graph && !jsDebugGraphRangeSliderDragging) {
-    graph.className = debugGraphClassName();
-    graph.innerHTML = debugGraphInnerHtml();
-  }
+  refreshDebugGraphElement(graph, options);
   const log = panel.querySelector('[data-js-debug-log]');
   if (!log || (document.activeElement === log && options.force !== true)) return;
   const text = jsDebugTextForClipboard();
@@ -2062,6 +2059,17 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   const nearBottom = maxScroll - oldTop <= 20;
   log.value = text;
   log.scrollTop = nearBottom || options.force === true ? log.scrollHeight : oldTop;
+}
+
+function refreshDebugGraphElement(graph, {force = false} = {}) {
+  if (!graph || jsDebugGraphRangeSliderDragging) return false;
+  const nowMs = Date.now();
+  const lastRenderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
+  if (!force && Number.isFinite(lastRenderedAt) && nowMs - lastRenderedAt < jsDebugGraphRefreshMs) return false;
+  graph.className = debugGraphClassName(nowMs);
+  graph.innerHTML = debugGraphInnerHtml(nowMs);
+  graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
+  return true;
 }
 
 function applyDebugSubTab(panel) {
@@ -2085,8 +2093,7 @@ function setDebugSubTab(tab) {
 function setDebugGraphScale(value) {
   jsDebugGraphScaleSeconds = normalizedJsDebugGraphScale(value);
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    graph.className = debugGraphClassName();
-    graph.innerHTML = debugGraphInnerHtml();
+    refreshDebugGraphElement(graph, {force: true});
   }
 }
 
@@ -2097,8 +2104,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   if (debugGraphAgentTokenResolution() !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
   if (!render) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    graph.className = debugGraphClassName();
-    graph.innerHTML = debugGraphInnerHtml();
+    refreshDebugGraphElement(graph, {force: true});
   }
 }
 
@@ -2248,8 +2254,7 @@ function handleDebugGraphPointerUp(event, panel) {
       endMs: Number(domain.startMs) + (maxRatio * spanMs),
     };
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-      graph.className = debugGraphClassName();
-      graph.innerHTML = debugGraphInnerHtml();
+      refreshDebugGraphElement(graph, {force: true});
     }
   } else {
     debugGraphSetInteractionLines(panel, end);
