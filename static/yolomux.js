@@ -7185,20 +7185,25 @@ function browserFaviconRoundedRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
-// Favicon background follows the user's Active color preference and the theme (no hardcoded
-// hex): it reads --active-accent, which flips with the theme and the active_color choice
-// (green/blue/orange/yellow/purple/white), falling back to the legacy green if the var is
-// unavailable (e.g. before CSS loads). The "Y" glyph stays a fixed dark color (below) — it
-// reads fine on every (bright) accent and keeps the original look.
+// Favicon background AND the "Y" follow the user's Active color preference + theme (no
+// hardcoded hex): the background is --active-accent and the "Y" is its theme-aware contrast
+// color --active-accent-text (dark glyph on light accents like green/yellow/white, light
+// glyph on dark accents like blue/purple). Both flip with the active_color choice and the
+// dark/light theme — and the favicon repaints on either change because applyActiveColor()
+// (called on active-color change AND on every theme switch) forces a refresh. Falls back to
+// the legacy lime background / dark glyph if the vars aren't ready (e.g. before CSS loads).
 function browserFaviconAccentColors() {
   const fallbackBg = '#99d441';
+  const fallbackText = '#111111';
   try {
     const root = document.documentElement;
-    if (!root || typeof getComputedStyle !== 'function') return {bg: fallbackBg};
-    const bg = (getComputedStyle(root).getPropertyValue('--active-accent') || '').trim();
-    return {bg: bg || fallbackBg};
+    if (!root || typeof getComputedStyle !== 'function') return {bg: fallbackBg, text: fallbackText};
+    const cs = getComputedStyle(root);
+    const bg = (cs.getPropertyValue('--active-accent') || '').trim();
+    const text = (cs.getPropertyValue('--active-accent-text') || '').trim();
+    return {bg: bg || fallbackBg, text: text || fallbackText};
   } catch (_) {
-    return {bg: fallbackBg};
+    return {bg: fallbackBg, text: fallbackText};
   }
 }
 
@@ -7218,7 +7223,7 @@ function renderBrowserFaviconDataUrl(count) {
   const label = browserFaviconBadgeLabel(count);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#111111';
+  ctx.fillStyle = faviconAccent.text;
   ctx.font = '900 86px Arial, sans-serif';
   ctx.save();
   ctx.translate(25, 39);
@@ -7259,7 +7264,7 @@ function updateBrowserFavicon(options = {}) {
   // Include the accent in the dedupe signature so a theme/active-color change re-renders
   // on the next refresh tick even when the badge count is unchanged.
   const accent = browserFaviconAccentColors();
-  const signature = `${count}|${accent.bg}`;
+  const signature = `${count}|${accent.bg}|${accent.text}`;
   if (!options.force && browserFaviconLastBadge === signature) return false;
   const dataUrl = renderBrowserFaviconDataUrl(count);
   if (!dataUrl) return false;
