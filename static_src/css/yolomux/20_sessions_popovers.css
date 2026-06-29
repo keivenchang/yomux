@@ -2,8 +2,9 @@
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  min-width: 1ch;
+  /* Keep the branch and description column stable as the numeric session changes on reload. */
+  justify-content: flex-start;
+  min-width: 4ch;
   color: inherit;
   background: transparent;
   border: 0;

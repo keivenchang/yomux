@@ -27117,21 +27117,11 @@ function dockviewSyncHeaderBackgroundDragSources() {
   });
 }
 
-function dockviewClearTabRowBreaks(tabsContainer) {
-  Array.from(tabsContainer?.children || [])
-    .filter(node => node.classList?.contains('dockview-tab-row-break'))
-    .forEach(node => node.remove());
-}
-
 function dockviewSyncHeaderActionReservations() {
   if (!dockviewLayoutActive()) return;
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
     if (!header) return;
-    const tabsContainer = header.querySelector('.dv-tabs-container');
-    dockviewClearTabRowBreaks(tabsContainer);
-    const tabs = Array.from(tabsContainer?.children || [])
-      .filter(node => node.classList?.contains('dv-tab'));
     const actions = group.querySelector('.dockview-pane-header-actions:not([hidden])');
     const width = actions ? Math.ceil(appSpaceRect(actions).width || actions.offsetWidth || 0) : 0;
     const reservedWidth = width > 0 ? width + 8 : 0;
@@ -27145,17 +27135,6 @@ function dockviewSyncHeaderActionReservations() {
       : Math.max(minTabWidth, preferredTabWidth);
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
-    if (!tabsContainer || tabs.length < 2 || reservedWidth <= 0 || headerWidth <= reservedWidth) return;
-    const tabStyle = getComputedStyle(tabs[0]);
-    const tabInlineGap = (Number.parseFloat(tabStyle.marginLeft) || 0) + (Number.parseFloat(tabStyle.marginRight) || 0);
-    const tabOuterWidth = Math.max(1, tabWidth + tabInlineGap);
-    const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
-    const firstRowCapacity = Math.max(1, Math.min(tabs.length, Math.floor((firstRowWidth + tabInlineGap) / tabOuterWidth)));
-    if (firstRowCapacity >= tabs.length) return;
-    const rowBreak = document.createElement('span');
-    rowBreak.className = 'dockview-tab-row-break';
-    rowBreak.setAttribute('aria-hidden', 'true');
-    tabsContainer.insertBefore(rowBreak, tabs[firstRowCapacity]);
   });
 }
 

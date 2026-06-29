@@ -2028,8 +2028,9 @@ body.theme-light .latency-meter {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  min-width: 1ch;
+  /* Keep the branch and description column stable as the numeric session changes on reload. */
+  justify-content: flex-start;
+  min-width: 4ch;
   color: inherit;
   background: transparent;
   border: 0;
@@ -5247,7 +5248,7 @@ button:disabled:hover { border-color: var(--line); }
   background: var(--pane-bar-bg, var(--panel2));
   align-items: flex-start;
   height: auto;
-  min-height: calc(var(--pane-tab-height) + 2px);
+  min-height: var(--pane-tab-height);
   overflow: visible;
 }
 .yolomux-dockview .dv-tabs-container {
@@ -5258,8 +5259,10 @@ button:disabled:hover { border-color: var(--line); }
   inline-size: 100%;
   max-inline-size: 100%;
   min-width: 0;
+  /* Reserve the pinned pane controls on every flex row, not just the first. */
+  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
   height: auto;
-  min-height: calc(var(--pane-tab-height) + 2px);
+  min-height: var(--pane-tab-height);
   max-height: none;
   overflow: visible;
   scrollbar-width: none;
@@ -5268,17 +5271,6 @@ button:disabled:hover { border-color: var(--line); }
   width: 0;
   height: 0;
   display: none;
-}
-.yolomux-dockview .dockview-tab-row-break {
-  flex: 0 0 100%;
-  inline-size: 100%;
-  block-size: 0;
-  min-block-size: 0;
-  max-block-size: 0;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  pointer-events: none;
 }
 .yolomux-dockview .dv-right-actions-container {
   position: absolute;

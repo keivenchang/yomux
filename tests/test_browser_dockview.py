@@ -65,6 +65,71 @@ def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
     assert inactive_matches >= 4, {"bg": inactive["bg"], "samples": inactive_samples}
 
 
+def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, tmp_path):
+    stopped_ts = int(time.time()) - 5
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,7777&layout=left&tabs=left:1,7777",
+        sessions=["1", "7777"],
+        transcript_sessions={
+            "1": {"panes": [{"target": "%1", "window": 1, "window_name": "claude", "active": True, "process_label": "claude"}]},
+            "7777": {"panes": [{"target": "%77", "window": 77, "window_name": "codex", "active": True, "process_label": "codex"}]},
+        },
+        auto_approve_payload={
+            "session_order": ["1", "7777"],
+            "sessions": {
+                "1": {
+                    "target": "1",
+                    "enabled": False,
+                    "agent_windows": [{"kind": "claude", "state": "idle", "window_index": 1, "working_stopped_ts": stopped_ts}],
+                },
+                "7777": {
+                    "target": "7777",
+                    "enabled": False,
+                    "agent_windows": [
+                        {"kind": "codex", "state": "working", "window_index": 77},
+                        {"kind": "claude", "state": "idle", "window_index": 78, "working_stopped_ts": stopped_ts},
+                    ],
+                },
+            },
+            "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+        },
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    metrics = browser.execute_script(
+        """
+        return ['1', '7777'].map(item => {
+          const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${item}"]`);
+          const core = tab?.querySelector('.pane-tab-core');
+          const status = tab?.querySelector('.session-agent-activity-marker');
+          const prefix = tab?.querySelector('.session-button-prefix');
+          const number = tab?.querySelector('.session-button-number');
+          const text = tab?.querySelector('.session-button-text');
+          if (!tab || !core || !status || !prefix || !number || !text) return null;
+          const coreRect = core.getBoundingClientRect();
+          const statusRect = status.getBoundingClientRect();
+          const prefixRect = prefix.getBoundingClientRect();
+          const textRect = text.getBoundingClientRect();
+          return {
+            item,
+            statusWidth: statusRect.width,
+            statusOffset: statusRect.left - coreRect.left,
+            prefixWidth: prefixRect.width,
+            prefixOffset: prefixRect.left - coreRect.left,
+            numberJustifyContent: getComputedStyle(number).justifyContent,
+            textOffset: textRect.left - coreRect.left,
+          };
+        });
+        """
+    )
+    assert all(metrics), metrics
+    assert all(item["numberJustifyContent"] == "flex-start" for item in metrics), metrics
+    for key in ("statusWidth", "statusOffset", "prefixWidth", "prefixOffset", "textOffset"):
+        assert max(item[key] for item in metrics) - min(item[key] for item in metrics) < 0.1, {key: metrics}
+
+
 def test_dockview_tab_hover_shows_session_detail_popover(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
@@ -788,6 +853,92 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
     assert metrics["headerHeight"] >= (metrics["tabHeight"] * 2) - 2
     assert metrics["maxActionButtonHeight"] <= 20
     assert metrics["maxActionButtonHeight"] <= metrics["tabHeight"] + 1
+
+
+def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser, tmp_path):
+    sessions = [str(index) for index in range(1, 8)]
+    expected_rows_by_width = {1800: 1, 1300: 2, 1000: 3, 900: 4, 700: 7}
+    transcript_sessions = {
+        session: {
+            "panes": [
+                {
+                    "target": f"%{session}",
+                    "window": 0,
+                    "window_name": "codex",
+                    "window_active": True,
+                    "active": True,
+                    "process_label": "codex",
+                }
+            ]
+        }
+        for session in sessions
+    }
+
+    for grid_width, expected_rows in expected_rows_by_width.items():
+        browser.set_window_size(grid_width + 100, 700)
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            f"?sessions={','.join(sessions)}&layout=left&tabs=left:{','.join(sessions)}",
+            sessions=sessions,
+            grid_width=grid_width,
+            transcript_sessions=transcript_sessions,
+        )
+        wait_for_dockview(browser, min_tabs=len(sessions))
+        metrics = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const sessionTab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+                const group = sessionTab?.closest('.dv-groupview');
+                const header = group?.querySelector('.dv-tabs-and-actions-container');
+                const tabsContainer = header?.querySelector('.dv-tabs-container');
+                const actions = group?.querySelector('.dockview-pane-header-actions:not([hidden])');
+                const tabs = Array.from(tabsContainer?.querySelectorAll('.dv-tab') || []);
+                const panel = group?.querySelector('.panel');
+                const infoBar = panel?.querySelector('.pane-info-bar, .panel-detail-row');
+                const windowButton = infoBar?.querySelector('.tmux-window-button');
+                if (!header || !tabsContainer || !actions || !infoBar || !windowButton || tabs.length !== arguments[0]) return false;
+                const rect = node => {
+                  const value = node.getBoundingClientRect();
+                  return {left: value.left, right: value.right, top: value.top, bottom: value.bottom, width: value.width};
+                };
+                const tabRects = tabs.map(rect);
+                const rows = [...new Set(tabRects.map(value => Math.round(value.top)))].sort((left, right) => left - right)
+                  .map(top => tabRects.filter(value => Math.round(value.top) === top));
+                const style = getComputedStyle(tabsContainer);
+                const lastTabBottom = Math.max(...tabRects.map(value => value.bottom));
+                const infoBarRect = infoBar.getBoundingClientRect();
+                const windowButtonRect = windowButton.getBoundingClientRect();
+                return {
+                  rowCount: rows.length,
+                  tabs: tabRects,
+                  rows: rows.map(row => row.map(value => ({left: value.left, right: value.right, width: value.width}))),
+                  tabsLeft: tabsContainer.getBoundingClientRect().left,
+                  contentRight: tabsContainer.getBoundingClientRect().right - Number.parseFloat(style.paddingRight || '0'),
+                  paddingRight: Number.parseFloat(style.paddingRight || '0'),
+                  actionLeft: actions.getBoundingClientRect().left,
+                  headerBottom: header.getBoundingClientRect().bottom,
+                  tabsBottom: tabsContainer.getBoundingClientRect().bottom,
+                  lastTabBottom,
+                  infoBarTop: infoBarRect.top,
+                  windowButtonTop: windowButtonRect.top,
+                };
+                """,
+                len(sessions),
+            )
+        )
+        assert metrics["rowCount"] == expected_rows, {"grid_width": grid_width, **metrics}
+        assert metrics["paddingRight"] > 0, metrics
+        assert metrics["contentRight"] <= metrics["actionLeft"] + 1, metrics
+        assert abs(metrics["headerBottom"] - metrics["lastTabBottom"]) < 0.1, metrics
+        assert abs(metrics["tabsBottom"] - metrics["lastTabBottom"]) < 0.1, metrics
+        assert abs(metrics["infoBarTop"] - metrics["lastTabBottom"]) < 0.1, metrics
+        assert abs(metrics["windowButtonTop"] - metrics["lastTabBottom"] - 1) < 0.1, metrics
+        for row in metrics["rows"]:
+            assert abs(row[0]["left"] - metrics["tabsLeft"]) < 0.1, metrics
+            assert row[-1]["right"] <= metrics["contentRight"] + 0.1, metrics
+            for previous, current in zip(row, row[1:]):
+                assert abs(current["left"] - previous["right"] - 1) < 0.1, metrics
 
 
 def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
@@ -2860,7 +3011,7 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
     assert metrics["tabsOverflowX"] == "visible", metrics
     assert metrics["tabsScrollWidth"] <= metrics["tabsClientWidth"] + 1, metrics
     assert metrics["firstRowRight"] <= metrics["actionLeft"] - 1, metrics
-    assert metrics["laterRowRight"] >= metrics["actionLeft"] + 20, metrics
+    assert metrics["laterRowRight"] <= metrics["actionLeft"] - 1, metrics
     assert metrics["tabsOverlapToolbar"] == [], metrics
     assert metrics["header"]["height"] >= (metrics["tabHeight"] * 2) - 2, metrics
     assert metrics["activeTab"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
