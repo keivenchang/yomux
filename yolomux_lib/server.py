@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import codecs
 import copy
+from functools import lru_cache
 import gzip
 import hashlib
 import html
@@ -307,11 +308,32 @@ def clean_resize_authority_client_id(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.:-]+", "-", text)[:RESIZE_AUTHORITY_CLIENT_ID_MAX]
 
 
+@lru_cache(maxsize=1)
+def tmux_supports_ignore_size_flag() -> bool:
+    """Whether this tmux accepts client flags on attach-session.
+
+    tmux 1.9a, still shipped on the ITSS VDI image, predates both
+    ``attach-session -f`` and the ``ignore-size`` client flag. Probe against a
+    deliberately nonexistent target: supported tmux versions reject only the
+    target, while older versions explicitly reject the option or flag.
+    """
+    result = tmux([
+        "attach-session",
+        "-f",
+        "ignore-size",
+        "-t",
+        "__yolomux_ignore_size_capability_probe__",
+    ], timeout=1.0)
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    return "unknown option" not in output and "unknown flag" not in output
+
+
 def tmux_attach_command(readonly: bool = False) -> list[str]:
     args = tmux_command(["attach-session"])
     if readonly:
         args.append("-r")
-    args.extend(["-f", "ignore-size"])
+    if tmux_supports_ignore_size_flag():
+        args.extend(["-f", "ignore-size"])
     return args
 
 
@@ -336,7 +358,7 @@ def tmux_client_has_flag(row: dict[str, Any], flag: str) -> bool:
 
 
 def refresh_tmux_client_ignore_size(client_name: str, ignore_size: bool) -> bool:
-    if not client_name:
+    if not client_name or not tmux_supports_ignore_size_flag():
         return False
     result = tmux(["refresh-client", "-t", client_name, "-f", "ignore-size" if ignore_size else "!ignore-size"])
     return result.returncode == 0
@@ -420,11 +442,13 @@ def configure_session_tmux_options(session: str) -> None:
       from stretching the focused surface.
     """
     target = tmux_session_target(session)
-    for args in (
+    commands = [
         ["set-option", "-s", "set-clipboard", "on"],
-        ["set-option", "-t", target, "window-size", "largest"],
         ["set-option", "-wg", "aggressive-resize", "on"],
-    ):
+    ]
+    if tmux_supports_ignore_size_flag():
+        commands.insert(1, ["set-option", "-t", target, "window-size", "largest"])
+    for args in commands:
         tmux(args)
 
 

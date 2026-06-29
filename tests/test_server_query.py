@@ -362,6 +362,7 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
     monkeypatch.setattr(server_module, "tmux", lambda args: calls.append(list(args)))
+    monkeypatch.setattr(server_module, "tmux_supports_ignore_size_flag", lambda: True)
 
     server_module.configure_session_tmux_options("3")
 
@@ -370,6 +371,27 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     assert ["set-option", "-wg", "aggressive-resize", "on"] in calls
     assert server_module.tmux_attach_command(readonly=False) == ["tmux", "attach-session", "-f", "ignore-size"]
     assert server_module.tmux_attach_command(readonly=True) == ["tmux", "attach-session", "-r", "-f", "ignore-size"]
+
+
+def test_tmux_attach_command_falls_back_when_client_flags_are_unsupported(monkeypatch):
+    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    monkeypatch.setattr(server_module, "tmux_supports_ignore_size_flag", lambda: False)
+
+    assert server_module.tmux_attach_command(readonly=False) == ["tmux", "attach-session"]
+    assert server_module.tmux_attach_command(readonly=True) == ["tmux", "attach-session", "-r"]
+
+
+def test_configure_session_tmux_options_skips_newer_window_size_option_on_legacy_tmux(monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(server_module, "tmux", lambda args: calls.append(list(args)))
+    monkeypatch.setattr(server_module, "tmux_supports_ignore_size_flag", lambda: False)
+
+    server_module.configure_session_tmux_options("3")
+
+    assert calls == [
+        ["set-option", "-s", "set-clipboard", "on"],
+        ["set-option", "-wg", "aggressive-resize", "on"],
+    ]
 
 
 def _client_list_runner(stdout, calls):
