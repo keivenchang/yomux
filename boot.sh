@@ -376,18 +376,41 @@ restart_port() {
 }
 
 ensure_xterm_assets() {
+  local xterm_js="$repo_root/node_modules/@xterm/xterm/lib/xterm.js"
+  local xterm_css="$repo_root/node_modules/@xterm/xterm/css/xterm.css"
+  local unicode_addon="$repo_root/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"
+  local packaged_js="$repo_root/static/xterm.js"
+  local packaged_css="$repo_root/static/xterm.css"
+  local packaged_addon="$repo_root/static/xterm-addon-unicode11.js"
   # yolomux serves /static/{xterm.js,xterm.css,xterm-addon-unicode11.js} by resolving @xterm/*
-  # from node_modules (see yolomux_lib/common.py XTERM_ASSET_ROOTS). On a dev machine it can
-  # borrow them from an installed IDE bundle, but a headless host has none — so install the
-  # declared deps (package.json) once. Skipped when already present; warns (never fails) on miss.
-  [[ -f "$repo_root/node_modules/@xterm/xterm/lib/xterm.js" ]] && return 0
-  if ! command -v npm >/dev/null 2>&1; then
-    printf 'warn: npm not found; web terminal xterm.js will 404 (install Node.js, then run `npm install` in %s)\n' "$repo_root" >&2
+  # from node_modules (see yolomux_lib/common.py XTERM_ASSET_ROOTS). Require the complete runtime
+  # set. VDI boxes have no compatible npm, so they use the pinned UMD files in static/ instead.
+  [[ ( -f "$xterm_js" && -f "$xterm_css" && -f "$unicode_addon" ) \
+    || ( -f "$packaged_js" && -f "$packaged_css" && -f "$packaged_addon" ) ]] && return 0
+  if command -v npm >/dev/null 2>&1; then
+    printf 'boot.sh: installing web-terminal assets (npm install) in %s ...\n' "$repo_root" >&2
+    ( cd "$repo_root" && npm install --no-audit --no-fund --silent ) || true
+    [[ -f "$xterm_js" && -f "$xterm_css" && -f "$unicode_addon" ]] && return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    printf 'warn: curl unavailable and xterm runtime assets are missing; terminals cannot attach\n' >&2
     return 0
   fi
-  printf 'boot.sh: installing web-terminal assets (npm install) in %s ...\n' "$repo_root" >&2
-  ( cd "$repo_root" && npm install --no-audit --no-fund --silent ) \
-    || printf 'warn: npm install failed; web terminal xterm.js may 404 (see npm output above)\n' >&2
+  printf 'boot.sh: downloading static xterm assets for this host ...\n' >&2
+  mkdir -p "$repo_root/static"
+  fetch_xterm_asset() {
+    local url="$1"
+    local destination="$2"
+    local temporary="${destination}.$$"
+    rm -f "$temporary"
+    curl -fsSL --connect-timeout 10 --retry 2 "$url" -o "$temporary" \
+      && [[ -s "$temporary" ]] \
+      && mv -f "$temporary" "$destination"
+  }
+  fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js "$packaged_js" \
+    && fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css "$packaged_css" \
+    && fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.9.0/lib/addon-unicode11.js "$packaged_addon" \
+    || printf 'warn: static xterm asset download failed; terminals cannot attach\n' >&2
 }
 
 if [[ "$print_command" -eq 1 ]]; then

@@ -8806,6 +8806,57 @@ def test_self_update_dryrun_is_noop_with_plan():
     assert any("git pull" in step for step in result["plan"])
 
 
+def test_self_update_requires_xterm_assets_before_restart(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(app_module.common, "git", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(app_module, "ensure_xterm_runtime_assets", lambda _root: (False, "npm is required to install xterm runtime assets"))
+    monkeypatch.setattr(webapp, "_spawn_self_restart", lambda: (_ for _ in ()).throw(AssertionError("must not restart without xterm assets")))
+
+    result = webapp.perform_self_update()
+
+    assert result["ok"] is False
+    assert result["restarting"] is False
+    assert "xterm" in result["error"]
+    assert any("xterm assets" in step for step in result["plan"])
+
+
+def test_self_update_restarts_after_xterm_assets_are_ready(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    calls = []
+    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(app_module.common, "git", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(app_module, "ensure_xterm_runtime_assets", lambda root: calls.append(root) or (True, ""))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(webapp, "_spawn_self_restart", lambda: True)
+
+    result = webapp.perform_self_update()
+
+    assert result["ok"] is True
+    assert result["restarting"] is True
+    assert calls == [str(tmp_path)]
+
+
+def test_ensure_xterm_runtime_assets_downloads_static_fallback_without_npm(monkeypatch, tmp_path):
+    downloads = []
+
+    def fake_which(name):
+        return "/usr/bin/curl" if name == "curl" else None
+
+    def fake_run(args, **_kwargs):
+        downloads.append(args)
+        output = Path(args[args.index("--output") + 1])
+        output.write_text("asset", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(app_module.shutil, "which", fake_which)
+    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+
+    assert app_module.ensure_xterm_runtime_assets(tmp_path) == (True, "")
+    assert app_module.xterm_runtime_assets_ready(tmp_path) is True
+    assert [args[-1] for args in downloads] == [details["url"] for details in app_module.XTERM_RUNTIME_ASSETS.values()]
+
+
 def _self_restart_context(monkeypatch, tmp_path, argv, *, main_module_name=None):
     checkout_root = tmp_path / "xyz"
     checkout_root.mkdir()

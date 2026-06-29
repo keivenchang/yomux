@@ -609,6 +609,11 @@ def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.Com
 
 
 def xterm_asset_path(asset: str) -> Path | None:
+    # VDI boxes have no compatible Node/npm. boot.sh downloads these pinned UMD assets into
+    # static/ there, so prefer that self-contained runtime package before node_modules/IDE roots.
+    packaged_path = STATIC_DIR / asset
+    if packaged_path.is_file():
+        return packaged_path
     relpaths = {
         "xterm.js": Path("lib") / "xterm.js",
         "xterm.css": Path("css") / "xterm.css",

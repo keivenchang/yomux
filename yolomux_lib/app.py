@@ -539,6 +539,78 @@ SELF_RESTART_ENV_KEYS = (
     "YOLOMUX_TEST_AUTH_BYPASS",
     "VIRTUAL_ENV",
 )
+XTERM_RUNTIME_ASSETS = {
+    "xterm.js": {
+        "node_path": Path("node_modules/@xterm/xterm/lib/xterm.js"),
+        "url": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js",
+    },
+    "xterm.css": {
+        "node_path": Path("node_modules/@xterm/xterm/css/xterm.css"),
+        "url": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css",
+    },
+    "xterm-addon-unicode11.js": {
+        "node_path": Path("node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"),
+        "url": "https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.9.0/lib/addon-unicode11.js",
+    },
+}
+
+
+def xterm_runtime_assets_ready(root: str | Path) -> bool:
+    root_path = Path(root)
+    return all(
+        (root_path / "static" / name).is_file() or (root_path / details["node_path"]).is_file()
+        for name, details in XTERM_RUNTIME_ASSETS.items()
+    )
+
+
+def ensure_xterm_runtime_assets(root: str | Path) -> tuple[bool, str]:
+    """Install the declared xterm packages when an update leaves any runtime asset absent."""
+    root_path = Path(root)
+    if xterm_runtime_assets_ready(root_path):
+        return True, ""
+    npm = shutil.which("npm")
+    if npm:
+        try:
+            result = subprocess.run(
+                [npm, "install", "--no-audit", "--no-fund", "--silent"],
+                cwd=root_path,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            result = None
+        if result is not None and result.returncode == 0 and xterm_runtime_assets_ready(root_path):
+            return True, ""
+    curl = shutil.which("curl")
+    if not curl:
+        return False, "curl is required to download xterm runtime assets"
+    static_dir = root_path / "static"
+    static_dir.mkdir(parents=True, exist_ok=True)
+    for name, details in XTERM_RUNTIME_ASSETS.items():
+        destination = static_dir / name
+        if destination.is_file() or (root_path / details["node_path"]).is_file():
+            continue
+        temporary = destination.with_name(f".{name}.{os.getpid()}.tmp")
+        try:
+            result = subprocess.run(
+                [curl, "--fail", "--location", "--silent", "--show-error", "--connect-timeout", "10", "--retry", "2", "--output", str(temporary), details["url"]],
+                cwd=root_path,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
+                detail = (result.stderr or result.stdout or "download failed").strip()
+                temporary.unlink(missing_ok=True)
+                return False, f"xterm asset download failed: {detail[:400]}"
+            temporary.replace(destination)
+        except (OSError, subprocess.SubprocessError) as exc:
+            temporary.unlink(missing_ok=True)
+            return False, f"xterm asset download failed: {exc}"
+    return (True, "") if xterm_runtime_assets_ready(root_path) else (False, "xterm assets are still missing")
 
 
 @dataclass(frozen=True)
@@ -3888,7 +3960,7 @@ class TmuxWebtermApp:
 
     def perform_self_update(self, dryrun: bool = False) -> dict[str, Any]:
         root = str(common.PROJECT_ROOT)
-        plan = ["git pull --ff-only origin main", "python3 tools/static_build.py", "restart server"]
+        plan = ["git pull --ff-only origin main", "install or download xterm assets", "python3 tools/static_build.py", "restart server"]
         if dryrun:
             return {"ok": True, "dryrun": True, "restarting": False, "plan": plan,
                     "message": "dryrun: nothing pulled, server not restarted"}
@@ -3898,6 +3970,11 @@ class TmuxWebtermApp:
             return {"ok": False, "dryrun": False, "restarting": False, "plan": plan,
                     "error": (pull.stderr or "git pull --ff-only failed").strip()[:400],
                     "message": "update blocked: checkout is not a clean fast-forward; sync it manually"}
+        assets_ready, assets_error = ensure_xterm_runtime_assets(root)
+        if not assets_ready:
+            return {"ok": False, "dryrun": False, "restarting": False, "plan": plan,
+                    "error": assets_error,
+                    "message": "updated, but xterm assets are unavailable; install dependencies before restarting"}
         try:
             subprocess.run(["python3", "tools/static_build.py"], cwd=root,
                            capture_output=True, text=True, timeout=120, check=False)

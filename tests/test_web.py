@@ -77,6 +77,16 @@ def test_xterm_unicode11_addon_asset_resolves_from_sibling_package(monkeypatch, 
     assert web.static_content_type("xterm-addon-unicode11.js") == "application/javascript; charset=utf-8"
 
 
+def test_xterm_asset_path_prefers_packaged_static_asset(monkeypatch, tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    packaged_asset = static_dir / "xterm.js"
+    packaged_asset.write_text("window.Terminal = {};", encoding="utf-8")
+    monkeypatch.setattr(common, "STATIC_DIR", static_dir)
+
+    assert common.xterm_asset_path("xterm.js") == packaged_asset
+
+
 def test_html_page_loads_xterm_unicode11_addon_after_xterm():
     page = web.html_page([])
 
