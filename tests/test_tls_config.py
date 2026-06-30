@@ -240,3 +240,42 @@ def test_tls_socket_peek_waits_for_delayed_plaintext_first_byte():
     finally:
         server_socket.close()
         client_socket.close()
+
+
+def test_tls_socket_peek_does_not_wrap_an_idle_plaintext_preconnect():
+    server_socket, client_socket = socket.socketpair()
+
+    class FakeTlsContext:
+        def wrap_socket(self, *_args, **_kwargs):
+            raise AssertionError("idle plaintext preconnect must not be TLS-wrapped")
+
+    try:
+        fake_server = SimpleNamespace(tls_context=FakeTlsContext(), tls_peek_timeout_seconds=0.01)
+
+        prepared = TmuxWebtermHTTPServer.prepare_request_socket(fake_server, server_socket)
+
+        assert prepared is server_socket
+        assert server_socket.gettimeout() is None
+    finally:
+        server_socket.close()
+        client_socket.close()
+
+
+def test_tls_socket_peek_does_not_wrap_tls_like_bytes_with_http_redirect_sentinel():
+    server_socket, client_socket = socket.socketpair()
+
+    class FakeTlsContext:
+        def wrap_socket(self, *_args, **_kwargs):
+            raise AssertionError("plain HTTP share redirect sentinel must not wrap a connection")
+
+    try:
+        client_socket.sendall(b"\x16")
+        fake_server = SimpleNamespace(tls_context=FakeTlsContext(), tls_peek_timeout_seconds=0.01)
+
+        prepared = TmuxWebtermHTTPServer.prepare_request_socket(fake_server, server_socket)
+
+        assert prepared is server_socket
+        assert server_socket.recv(1) == b"\x16"
+    finally:
+        server_socket.close()
+        client_socket.close()

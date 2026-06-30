@@ -1923,7 +1923,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           <div class="brand-cell"><div class="brand brand-title title" aria-label="YOLOmux test"><span class="brand-yolo brand-nv">YO</span><span class="brand-lo brand-nv">LO</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
           <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
           <div class="actions">
-            <div id="latencyMeter" class="latency-meter"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
+            <div id="latencyMeter" class="latency-meter topbar-status-surface"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
             <button id="notifyToggle">Notify</button>
             <button id="refreshMeta">Refresh</button>
             <button id="logoutButton">Log out</button>
@@ -2160,7 +2160,9 @@ def load_dockview_runtime_boot_fixture(browser, tmp_path, search="", **fixture_k
 
 
 def wait_for_dockview(browser, min_tabs=1):
-    WebDriverWait(browser, 5).until(
+    # Full-gate browser workers contend for CPU; Dockview is a fixture boot readiness condition, not
+    # a product latency budget, so leave enough room for the concurrent lane to schedule it.
+    WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
             """
             return typeof dockviewLayoutActive === 'function'

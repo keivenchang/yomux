@@ -859,7 +859,9 @@ def test_search_index_follower_missing_index_timing_regression(monkeypatch, tmp_
 
     assert payload["index_state"] == "follower"
     assert slow_walk_calls == []
-    assert elapsed < 0.2
+    # The contract is that the follower does no filesystem work (asserted above). Keep a bounded
+    # scheduling allowance for the concurrent full gate; either deliberately slow helper takes 350ms.
+    assert elapsed < 0.3
 
 
 def test_watch_roots_follower_poll_skips_directory_signature_timing_regression(monkeypatch, tmp_path):

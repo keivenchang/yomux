@@ -1239,7 +1239,7 @@ async function runTabberSuite() {
     const repoRow = rows.find(row => row.type === 'repo' && row.repoRoot === '/home/u/proj');
     assert.equal(claudeRow?.date, api.sessionFileTimeText(2000), 'Claude/Codex child date text uses the same transcript timestamp as row mtime');
     assert.equal(bashRow?.date, api.sessionFileTimeText(3000), 'bash/non-agent child date text uses the same ledger timestamp as row mtime');
-    assert.equal(sessionRow?.date, api.sessionFileTimeText(3000), 'parent date text uses the max child semantic mtime');
+    assert.equal(sessionRow?.date, '', 'parent session rows omit aggregate timestamps because child sub-windows own the recency');
     assert.equal(repoRow?.date, api.sessionFileTimeText(9000), 'touched-path rows still display touched-file recency');
     assert.notEqual(claudeRow?.date, 'working for 1h 00m', 'working status does not replace the Tabber date column timestamp');
   });
@@ -1348,7 +1348,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('function setTreeItemAria(row') && (source.match(/setTreeItemAria\(row/g) || []).length >= 2, 'DOIT.61 B5: treeitem aria is shared');
     assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
     assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
-    assert.ok(/function tabberWindowButtonHtml\(data, label\)[\s\S]*tmuxWindowButtonHtml\(\{[\s\S]*classes:\s*\['tabber-window-button'\][\s\S]*showNumberLabel:\s*false[\s\S]*const pidHtml = Number\.isFinite\(pid\) && pid > 0 \? `<span class="tabber-window-pid"> \(pid=\$\{esc\(String\(Math\.floor\(pid\)\)\)\}\)<\/span>` : ''[\s\S]*stripTitleAttrs\(buttonHtml\)\}\$\{pidHtml\}/.test(source) && source.includes('function agentWindowPayloadCurrent(agent)'), 'DOIT.61 B7/PD: Tabber tmux sub-window rows route through the shared compact button helper while showing separate pid text and stripping native titles');
+    assert.ok(/function tabberWindowButtonHtml\(data, label\)[\s\S]*tmuxWindowButtonHtml\(\{[\s\S]*classes:\s*\['tabber-window-button'\][\s\S]*showNumberLabel:\s*false[\s\S]*const pidText = tmuxWindowPidText\(data\?\.pid\)[\s\S]*const pidHtml = pidText \? `<span class="tabber-window-pid"> \$\{esc\(pidText\)\}<\/span>` : ''[\s\S]*stripTitleAttrs\(buttonHtml\)\}\$\{pidHtml\}/.test(source) && source.includes('function agentWindowPayloadCurrent(agent)'), 'DOIT.61 B7/PD: Tabber tmux sub-window rows route through the shared compact button helper and PID formatter while stripping native titles');
     assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux sub-window record source as Tabber');
     assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux sub-window pid formatter');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');
@@ -1428,6 +1428,12 @@ async function runTabberSuite() {
     assert.equal(repos.some(row => /\/home\/u\/proj\/src/.test(row.tabber.label)), false, 'L3: descendant paths fold into the known repo root');
     assert.equal(repos.some(row => /^\/tmp/.test(row.tabber.label)), false, 'L3: non-repo touched paths are omitted from Tabber');
     assert.equal(entriesByDir.has('/' + s1.name + '/' + claudeWin.name + '/' + repos[0].name), false, 'L3: Tabber does not list individual files under the path row');
+    const defaultCollapsedRows = api.tabberRenderedRowsForTest({defaultCollapsed: true});
+    const defaultSessionRow = defaultCollapsedRows.find(row => row.type === 'session' && row.path === `/${s1.name}`);
+    const defaultWindowRow = defaultCollapsedRows.find(row => row.type === 'window' && row.path === `/${s1.name}/${claudeWin.name}`);
+    assert.equal(defaultSessionRow?.ariaExpanded, 'true', 'Tabber defaults to expanding each session Tab');
+    assert.equal(defaultWindowRow?.ariaExpanded, 'false', 'Tabber defaults to collapsing the directories inside sub-window buttons');
+    assert.equal(defaultCollapsedRows.some(row => row.type === 'repo' && row.path.startsWith(`/${s1.name}/${claudeWin.name}/`)), false, 'Tabber hides sub-window directories until the user expands that window');
 
     api.setTranscriptInfoForTest('3', {
       project: {git: {branch: 'scoped', root: '/home/u/codex-a'}},
@@ -1614,7 +1620,7 @@ async function runTabberSuite() {
     assert.equal(/tmux-window-button tabber-window-button[\s\S]*tmux-window-name-text[^>]*>0:claude<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), false, 'Claude icon no longer renders after the canonical window name');
     assert.equal(/agent-icon[\s\S]*tmux-window-name-text[^>]*>1:bash</.test(shellWindowRow?.nameHtml || ''), false, 'bash Tabber rows do not gain a leading agent icon');
     assert.ok(/agent-icon claude[^"]*agent-window-agent-icon--working[\s\S]*tmux-window-name-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'working agent glyph stays before the canonical window name');
-    assert.ok(/agent-window-agent-icon--working[\s\S]*?status-indicator--dot[\s\S]*?status-indicator--working[\s\S]*?tmux-window-name-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'working Tabber rows render the green status ball (a working-tone status dot) beside the static agent symbol');
+    assert.ok(/status-indicator--dot[\s\S]*?status-indicator--working[\s\S]*?agent-window-agent-icon--working[\s\S]*?tmux-window-name-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'working Tabber rows render the green status ball before the static agent icon and canonical label');
     api.setFileExplorerTreeSortModeForTest('newest');
     api.setTabberActivityForTest({activity: {'1:1': {last_user_input_ts: 99999}, '1:0': {last_user_input_ts: 1}}});
     api.setTabberCollapsedForTest(['/s_1']);

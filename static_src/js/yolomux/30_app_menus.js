@@ -391,7 +391,7 @@ function tmuxCurrentYoloCommand(session) {
   const payload = hasSession ? autoApproveStates.get(session) : null;
   const enabled = hasSession ? autoApproveEnabledHere(payload) : false;
   const elsewhere = hasSession ? autoApproveEnabledElsewhere(payload) : false;
-  const label = hasSession ? t(enabled ? 'menu.tmux.yo.on' : elsewhere ? 'menu.tmux.yo.elsewhere' : 'menu.tmux.yo.off') : t('menu.tmux.yo.none');
+  const label = t('menu.tmux.yo.on');
   return menuCommand(label, async () => {
     if (!hasSession) return;
     await toggleAutoApprove(session);

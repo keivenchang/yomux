@@ -18,6 +18,8 @@ from .backends import strip_yoagent_stream_hidden_thinking
 from .conversation import bounded_auxiliary_lines
 from .conversation import bounded_stream_items
 from .conversation import sanitized_auxiliary_preview
+from .conversation import YOAGENT_AUXILIARY_TOTAL_LIMIT
+from .conversation import YOAGENT_STREAM_ITEMS_TOTAL_LIMIT
 from .stream_events import ASSISTANT_DELTA
 from .stream_events import ERROR
 from .stream_events import HIDDEN_WORK_DELTA
@@ -73,13 +75,20 @@ class YoagentStreamStateStore:
         safe_stream_id = str(stream_id or "").strip()
         if not safe_stream_id:
             return
-        clean_lines, lines_truncated = bounded_auxiliary_lines(auxiliary_lines)
+        if stream_items_sanitized:
+            clean_lines = auxiliary_lines
+            lines_truncated = False
+        else:
+            clean_lines, lines_truncated = bounded_auxiliary_lines(auxiliary_lines)
         clean_preview, preview_truncated = sanitized_auxiliary_preview(auxiliary_preview, "\n".join(clean_lines[-1:]))
-        clean_stream_items, stream_items_truncated = bounded_stream_items(stream_items)
+        if stream_items_sanitized:
+            clean_stream_items = stream_items
+            stream_items_truncated = False
+        else:
+            clean_stream_items, stream_items_truncated = bounded_stream_items(stream_items)
         with self.lock:
             self.states[safe_stream_id] = {
                 "auxiliaryLines": clean_lines,
-                "auxiliaryText": "\n".join(clean_lines),
                 "auxiliaryPreview": clean_preview,
                 "streamItems": clean_stream_items,
                 "auxiliaryDone": bool(auxiliary_done),
@@ -176,13 +185,21 @@ class YoagentStreamPublisher:
             payload["hidden_thinking_removed"] = True
         if events:
             payload["events"] = events
-        clean_auxiliary_lines, auxiliary_lines_truncated = bounded_auxiliary_lines(auxiliary_lines)
+        if stream_items_sanitized:
+            clean_auxiliary_lines = list(auxiliary_lines)
+            auxiliary_lines_truncated = False
+        else:
+            clean_auxiliary_lines, auxiliary_lines_truncated = bounded_auxiliary_lines(auxiliary_lines)
         if clean_auxiliary_lines:
             payload["auxiliary_lines"] = clean_auxiliary_lines
         clean_preview, auxiliary_preview_truncated = sanitized_auxiliary_preview(auxiliary_preview)
         if clean_preview:
             payload["auxiliary_preview"] = clean_preview
-        clean_stream_items, stream_items_truncated = bounded_stream_items(stream_items)
+        if stream_items_sanitized:
+            clean_stream_items = list(stream_items)
+            stream_items_truncated = False
+        else:
+            clean_stream_items, stream_items_truncated = bounded_stream_items(stream_items)
         if clean_stream_items:
             payload["stream_items"] = clean_stream_items
         if hidden_work_active:
@@ -204,6 +221,7 @@ class YoagentStreamPublisher:
             "last_content": None,
             "hidden_thinking_removed": False,
             "auxiliary_lines": [],
+            "auxiliary_lines_length": 0,
             "hidden_work_prefix": "",
             "hidden_work_text": "",
             "hidden_work_active": False,
@@ -211,11 +229,22 @@ class YoagentStreamPublisher:
             "auxiliary_done": False,
             "auxiliary_truncated": False,
             "stream_items": [],
+            "stream_items_length": 0,
         }
 
         def publish(events: list[dict[str, Any]], phase: str = "") -> None:
-            lines, lines_truncated = bounded_auxiliary_lines(state.get("auxiliary_lines"))
-            stream_items, stream_items_truncated = bounded_stream_items(state.get("stream_items"))
+            lines = state["auxiliary_lines"]
+            stream_items = state["stream_items"]
+            lines_truncated = False
+            stream_items_truncated = False
+            if state["auxiliary_lines_length"] > YOAGENT_AUXILIARY_TOTAL_LIMIT:
+                while len(lines) > 1 and state["auxiliary_lines_length"] > YOAGENT_AUXILIARY_TOTAL_LIMIT:
+                    state["auxiliary_lines_length"] -= len(lines.pop(0)) + 1
+                    lines_truncated = True
+            if state["stream_items_length"] > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT:
+                while len(stream_items) > 1 and state["stream_items_length"] > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT:
+                    state["stream_items_length"] -= len(str(stream_items.pop(0).get("text") or "")) + 1
+                    stream_items_truncated = True
             if lines_truncated or stream_items_truncated:
                 state["auxiliary_truncated"] = True
                 state["auxiliary_lines"] = lines
@@ -295,9 +324,18 @@ class YoagentStreamPublisher:
                 state["stream_items"] = items
             if merge and items and items[-1].get("kind") == safe_kind:
                 joiner = "" if safe_kind == "assistant" else "\n"
-                items[-1]["text"] = str(items[-1].get("text") or "") + joiner + value
+                previous = str(items[-1].get("text") or "")
+                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": previous + joiner + value}])
+                if not clean:
+                    return
+                items[-1]["text"] = clean[0]["text"]
+                state["stream_items_length"] += len(clean[0]["text"]) - len(previous)
             else:
-                items.append({"kind": safe_kind, "text": value})
+                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": value}])
+                if not clean:
+                    return
+                items.append(clean[0])
+                state["stream_items_length"] += len(clean[0]["text"]) + (1 if len(items) > 1 else 0)
 
         def replace_or_append_stream_item(kind: str, text: str) -> None:
             safe_kind = str(kind or "").strip().lower()
@@ -309,9 +347,18 @@ class YoagentStreamPublisher:
                 items = []
                 state["stream_items"] = items
             if items and items[-1].get("kind") == safe_kind:
-                items[-1]["text"] = value
+                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": value}])
+                if not clean:
+                    return
+                previous = str(items[-1].get("text") or "")
+                items[-1]["text"] = clean[0]["text"]
+                state["stream_items_length"] += len(clean[0]["text"]) - len(previous)
             else:
-                items.append({"kind": safe_kind, "text": value})
+                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": value}])
+                if not clean:
+                    return
+                items.append(clean[0])
+                state["stream_items_length"] += len(clean[0]["text"]) + (1 if len(items) > 1 else 0)
 
         def hidden_work_stream_item_text(event: dict[str, Any]) -> str:
             prefix = str(state.get("hidden_work_prefix") or hidden_work_prefix(event) or "thinking")
@@ -324,6 +371,24 @@ class YoagentStreamPublisher:
             if compact_text:
                 return f"{prefix}: {compact_text}"
             return yoagent_stream_event_auxiliary_line(event)
+
+        def append_clean_auxiliary_line(lines: list[str], value: str) -> None:
+            clean, _truncated = bounded_auxiliary_lines([value])
+            if not clean:
+                return
+            lines.append(clean[0])
+            state["auxiliary_lines_length"] += len(clean[0]) + (1 if len(lines) > 1 else 0)
+
+        def replace_clean_auxiliary_line(lines: list[str], value: str) -> None:
+            clean, _truncated = bounded_auxiliary_lines([value])
+            if not clean:
+                return
+            previous = lines[-1] if lines else ""
+            if lines:
+                lines[-1] = clean[0]
+            else:
+                lines.append(clean[0])
+            state["auxiliary_lines_length"] += len(clean[0]) - len(previous) + (1 if not previous and len(lines) > 1 else 0)
 
         def append_auxiliary_line(event: dict[str, Any]) -> None:
             line = yoagent_stream_event_auxiliary_line(event)
@@ -356,24 +421,24 @@ class YoagentStreamPublisher:
                     else:
                         next_text = previous_text + raw_text
                     state["hidden_work_text"] = next_text
-                    lines[-1] = hidden_work_auxiliary_line(prefix, next_text)
+                    replace_clean_auxiliary_line(lines, hidden_work_auxiliary_line(prefix, next_text))
                 else:
                     state["hidden_work_prefix"] = prefix
                     state["hidden_work_text"] = compact_text if hidden_work_text_is_heartbeat(prefix, compact_text) else raw_text
-                    lines.append(hidden_work_auxiliary_line(prefix, compact_text))
+                    append_clean_auxiliary_line(lines, hidden_work_auxiliary_line(prefix, compact_text))
             elif event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA, TOOL_CALL_FINISHED}:
                 state["hidden_work_prefix"] = ""
                 state["hidden_work_text"] = ""
                 value = str(line).strip()
                 if value:
-                    lines.append(value)
+                    append_clean_auxiliary_line(lines, value)
             else:
                 state["hidden_work_prefix"] = ""
                 state["hidden_work_text"] = ""
                 for part in str(line).splitlines() or [line]:
                     value = part.strip()
                     if value:
-                        lines.append(value)
+                        append_clean_auxiliary_line(lines, value)
 
         def callback(event: dict[str, Any]) -> None:
             normalized = normalize_yoagent_stream_event(event, backend=backend)

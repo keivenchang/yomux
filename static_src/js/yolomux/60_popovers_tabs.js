@@ -443,8 +443,9 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
 }
 
 function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  // A Tab has one circle. Its color follows the most urgent visible child (red, then yellow, then
-  // green), while its opacity pulse follows every child: if any child is pulsing, the parent pulses.
+  // A Tab has one circle. It shows the two most urgent distinct child colors (red, yellow, green)
+  // as equal segments, while its opacity pulse follows every child: if any child is pulsing, the
+  // parent pulses. A screen-only working signal still falls back to the current/first agent window.
   // A screen-only working signal still falls back to the current/first agent window.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
@@ -484,16 +485,27 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
   if (!selected) return null;
   const childIsPulsing = visibleItems.some(({item}) => item.pulseActive === true);
   const childTransitionIsPulsing = visibleItems.some(({item}) => item.transitionPulseActive === true);
+  const allAggregateTones = ['attention', 'cooldown', STATE_KEY.working]
+    .filter(tone => visibleItems.some(item => item.tone === tone));
+  const aggregateTones = allAggregateTones;
   const item = {
     ...selected.item,
     pulseActive: childIsPulsing,
     transitionPulseActive: childTransitionIsPulsing,
+    aggregateTones,
+    allAggregateTones,
   };
   return {...selected, item, label: item.label || agentLabel(selected.agent?.kind)};
 }
 
 function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
   return sessionStatusAgentWindowSummaryForTab(session, info, payload)?.agent || null;
+}
+
+function sessionStatusBallPlaceholderHtml() {
+  // Every session Tab reserves the same ball column. Keeping the placeholder inside the canonical
+  // activity wrapper makes its geometry follow the real red/yellow/green status ball exactly.
+  return '<span class="session-agent-activity-marker session-agent-activity-marker--placeholder" aria-hidden="true"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span>';
 }
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
@@ -516,13 +528,15 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
   }
-  if (!offerYolo) return '';
-  return yoloMarkerHtml(session, auto, {
-    ...options,
-    enabledOnly: false,
-    yoloWorking: sessionYoloIsWorking(session, payload),
-    payload,
-  });
+  const fallbackYoloHtml = offerYolo
+    ? yoloMarkerHtml(session, auto, {
+      ...options,
+      enabledOnly: false,
+      yoloWorking: sessionYoloIsWorking(session, payload),
+      payload,
+    })
+    : '';
+  return `${fallbackYoloHtml}${sessionStatusBallPlaceholderHtml()}`;
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {

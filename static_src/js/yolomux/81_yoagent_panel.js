@@ -869,7 +869,7 @@ function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
   if (!tmuxSignalAgentCommands.has(kind)) return '';
-  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="Create a new ${esc(agentLabel(kind))} session">Restart</button>`;
+  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
 function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {

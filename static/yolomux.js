@@ -266,6 +266,7 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerOpenIntentStorageKey = 'yolomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
+const fileExplorerTabberExpandedStorageKey = 'yolomux.fileExplorer.tabberExpanded.v1';
 const fileExplorerTabberLookbackHoursStorageKey = 'yolomux.fileExplorer.tabberLookbackHours.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
@@ -616,11 +617,10 @@ let preferencesScrollFlushTimer = null;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 const changesFolderAutoCollapsed = new Set();
-// Tabber (Finder pane 3rd mode) COLLAPSED set, keyed by synthetic node path (s_<id>/w_<i>/r_<n>).
-// The Tabber defaults to fully expanded; collapsing a node adds it here (like the Differ's
-// changesFolderCollapsed). Persisted so the open/closed tree survives reloads. Threaded through the
-// shared row pipeline as options.collapsedSet.
+// Tabber session rows start expanded while each sub-window's directory branch starts collapsed.
+// Persist both explicit choices, so a refresh cannot undo a user's disclosure click.
 const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedStorageKey);
+const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}, agents: []};
@@ -6660,6 +6660,9 @@ function attentionAcknowledgementKeysFromPayload(payload = {}) {
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   const value = String(key || '');
   if (!value) return false;
+  // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
+  // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
+  if (payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) return false;
   if (promptAttentionClears.has(value)) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
@@ -6675,6 +6678,31 @@ function recordAttentionAcknowledgementKey(key) {
 function applyAttentionAcknowledgementResponse(payload = {}) {
   const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
+  for (const [session, current] of autoApproveStates) {
+    if (!current || typeof current !== 'object') continue;
+    const next = {...current};
+    let changed = false;
+    if (keys.includes(String(next.prompt_attention_key || next.prompt?.attention_key || ''))) {
+      next.prompt_attention_acknowledged = true;
+      if (next.prompt && typeof next.prompt === 'object') next.prompt = {...next.prompt, attention_acknowledged: true};
+      changed = true;
+    }
+    if (Array.isArray(next.agent_windows)) {
+      next.agent_windows = next.agent_windows.map(agent => {
+        if (!agent || typeof agent !== 'object') return agent;
+        if (keys.includes(String(agent.attention_key || ''))) {
+          changed = true;
+          return {...agent, attention_acknowledged: true};
+        }
+        if (keys.includes(String(agent.cooldown_attention_key || ''))) {
+          changed = true;
+          return {...agent, cooldown_acknowledged: true};
+        }
+        return agent;
+      });
+    }
+    if (changed) autoApproveStates.set(session, next);
+  }
   if (payload?.auto_approve && typeof applyAutoApprovePayload === 'function') {
     applyAutoApprovePayload(payload.auto_approve);
   } else {
@@ -7443,10 +7471,10 @@ function createTopbarActivityStatus() {
   const button = document.createElement('button');
   button.type = 'button';
   button.id = 'topbarActivity';
-  button.className = 'topbar-activity';
-  button.title = 'Open the cross-session AI activity summary';
-  button.setAttribute('aria-label', 'AI activity summary across all sessions');
-  button.onclick = () => selectSession(yoagentItemId, {userInitiated: true});
+  button.className = 'topbar-activity topbar-status-surface';
+  button.title = 'Open Tabber for cross-session AI activity';
+  button.setAttribute('aria-label', 'Open Tabber for AI activity across all sessions');
+  button.onclick = () => openTabberActivityOverview();
   return button;
 }
 
@@ -7563,7 +7591,7 @@ function createTopbarOwnerStatus() {
   const button = document.createElement('button');
   button.type = 'button';
   button.id = 'topbarOwnerStatus';
-  button.className = 'topbar-owner-status';
+  button.className = 'topbar-owner-status topbar-status-surface';
   button.title = 'Refresh connected server ownership status';
   button.setAttribute('aria-label', 'Connected server ownership status');
   button.onclick = () => {
@@ -7595,6 +7623,7 @@ function updateTopbarOwnerStatus() {
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
+let attentionAnimationClockDurationMs = 0;
 
 function attentionAnimationDurationMs(durationMs = agentStatusPulsePeriodMs) {
   const duration = Math.max(1, Number(durationMs) || Number(agentStatusPulsePeriodMs) || 1);
@@ -7616,8 +7645,9 @@ function attentionAnimationDelay(now = Date.now(), durationMs = agentStatusPulse
 }
 
 function attentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
+  const duration = attentionAnimationDurationMs(durationMs);
   const current = document?.documentElement?.style?.getPropertyValue?.(attentionAnimationDelayProperty)?.trim();
-  return current || setAttentionAnimationClockDelay(now, durationMs);
+  return current && attentionAnimationClockDurationMs === duration ? current : setAttentionAnimationClockDelay(now, duration);
 }
 
 function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulsePeriodMs, property = attentionAnimationDelayProperty) {
@@ -7628,8 +7658,10 @@ function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulse
 }
 
 function setAttentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
-  const delay = attentionAnimationDelay(now, durationMs);
+  const duration = attentionAnimationDurationMs(durationMs);
+  const delay = attentionAnimationDelay(now, duration);
   document?.documentElement?.style?.setProperty?.(attentionAnimationDelayProperty, delay);
+  attentionAnimationClockDurationMs = duration;
   return delay;
 }
 
@@ -7848,14 +7880,14 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
       {label: t('share.title'), keys: appShortcutText('K')},
-      {label: 'Open YO!agent in a right pane', keys: appShortcutText('B', {alt: true})},
+      {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
       {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
     {section: t('shortcuts.section.terminal'), items: [
-      {label: 'Copy visible terminal selection', keys: appShortcutText('C')},
+      {label: t('shortcuts.copyVisibleTerminalSelection'), keys: appShortcutText('C')},
       {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
     ]},
@@ -7879,29 +7911,33 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
     ]},
-    {section: `${fileExplorerLabel()} / Differ`, items: [
-      {label: 'Move selection', keys: '↑ / ↓ / Home / End'},
-      {label: 'Extend selection', keys: 'Shift+↑ / ↓ / Home / End'},
-      {label: 'Expand / collapse folders', keys: '→ / ←'},
-      {label: 'Rename selected file', keys: 'Return'},
-      {label: 'Open selected file or folder', keys: appShortcutText('↓')},
-      {label: 'Open enclosing folder', keys: appShortcutText('↑')},
-      {label: 'Quick preview', keys: 'Space'},
-      {label: 'Select all rows', keys: appShortcutText('A')},
-      {label: 'Delete selected rows', keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
+    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel()}), items: [
+      {label: t('shortcuts.finderDiffer.moveSelection'), keys: '↑ / ↓ / Home / End'},
+      {label: t('shortcuts.finderDiffer.extendSelection'), keys: 'Shift+↑ / ↓ / Home / End'},
+      {label: t('shortcuts.finderDiffer.expandCollapseFolders'), keys: '→ / ←'},
+      {label: t('shortcuts.finderDiffer.renameSelectedFile'), keys: 'Return'},
+      {label: t('shortcuts.finderDiffer.openSelected'), keys: appShortcutText('↓')},
+      {label: t('shortcuts.finderDiffer.openEnclosingFolder'), keys: appShortcutText('↑')},
+      {label: t('shortcuts.finderDiffer.quickPreview'), keys: 'Space'},
+      {label: t('shortcuts.finderDiffer.selectAllRows'), keys: appShortcutText('A')},
+      {label: t('shortcuts.finderDiffer.deleteSelectedRows'), keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
     ]},
-    {section: 'Menus, palettes, and pickers', items: [
-      {label: 'Move through menus or results', keys: '↑ / ↓'},
-      {label: 'Open submenu or move across menu bar', keys: '← / →'},
-      {label: 'Run focused command', keys: 'Enter / Space'},
-      {label: 'Open selected quick-open file in a split', keys: appShortcutText('Enter')},
-      {label: 'Close menu, palette, or picker', keys: 'Esc'},
-      {label: 'Choose numbered Tabber, drop, or paste item', keys: '1-9'},
+    {section: t('shortcuts.section.menus'), items: [
+      {label: t('shortcuts.menus.move'), keys: '↑ / ↓'},
+      {label: t('shortcuts.menus.openSubmenu'), keys: '← / →'},
+      {label: t('shortcuts.menus.runFocused'), keys: 'Enter / Space'},
+      {label: t('shortcuts.menus.openSplit'), keys: appShortcutText('Enter')},
+      {label: t('shortcuts.menus.close'), keys: 'Esc'},
+      {label: t('shortcuts.menus.chooseNumbered'), keys: '1-9'},
     ]},
   ];
 }
 
-function keyboardLegendStatusSample(kind, text = '●') {
+function keyboardLegendStatusSample(kind, text = '●', options = {}) {
+  if (options.glyph === true && ['working', 'cooldown', 'attention'].includes(kind)) {
+    const classes = `${statusIndicatorDotClasses(kind, 'agent-window-status-dot', {pulse: options.pulse === true})}${options.pulse === true ? ' agent-window-status-dot--subwindow-pulse' : ''}`;
+    return `<span class="tmux-window-button keyboard-legend-status-glyph" aria-hidden="true"><span class="agent-window-activity"><span class="${esc(classes)}">${esc(text)}</span></span></span>`;
+  }
   if (kind === 'working') return `<span class="status-indicator status-indicator--dot status-indicator--working">${esc(text)}</span>`;
   if (kind === 'cooldown') return `<span class="status-indicator status-indicator--dot status-indicator--cooldown">${esc(text)}</span>`;
   if (kind === 'attention') return `<span class="status-indicator status-indicator--dot status-indicator--attention">${esc(text)}</span>`;
@@ -7911,27 +7947,32 @@ function keyboardLegendStatusSample(kind, text = '●') {
 
 function keyboardLegendCatalog() {
   return [
-    {section: 'Color meanings', items: [
-      {sampleHtml: keyboardLegendStatusSample('working'), label: 'Green', detail: 'Working, passing, healthy, or active. Agent balls use green for active work.'},
-      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: 'Yellow', detail: 'Recent attention transition or cooldown glow. It is less urgent than red.'},
-      {sampleHtml: keyboardLegendStatusSample('attention'), label: 'Red', detail: 'Needs input, needs approval, blocked, disconnected, failing CI, or another user-visible problem.'},
-      {sampleHtml: keyboardLegendStatusSample('merged'), label: 'Purple', detail: 'Merged GitHub PR. Purple is reserved for merged state.'},
-      {sampleHtml: keyboardLegendStatusSample('closed'), label: 'Gray', detail: 'Closed, done, idle, inactive, or unavailable state.'},
-      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: 'Metadata colors', detail: 'YO!info and Info Bars tint Path, Git BRANCH, Linear, GitHub PR, Tab, and AI fields so repeated rows scan by type.'},
+    {section: t('legend.section.agentStatus'), items: [
+      {sampleHtml: keyboardLegendStatusSample('working', '●', {glyph: true}), label: t('legend.shape.working.label'), detail: t('legend.shape.working.detail')},
+      {sampleHtml: keyboardLegendStatusSample('cooldown', '●', {glyph: true}), label: t('legend.shape.cooldown.label'), detail: t('legend.shape.cooldown.detail')},
+      {sampleHtml: keyboardLegendStatusSample('attention', '●', {glyph: true}), label: t('legend.shape.attention.label'), detail: t('legend.shape.attention.detail')},
     ]},
-    {section: 'Icon meanings', items: [
-      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: 'YO!info branch, PR, Linear, Tab, AI, and path map.'},
-      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: 'YO!agent chat, skills, jobs, waits, and handoffs.'},
-      {sampleHtml: appMenuUiIcon('gear'), label: 'Gear', detail: 'Preferences and configurable settings.'},
-      {sampleHtml: appMenuUiIcon('tab-meta'), label: 'Tab metadata', detail: 'Metadata/debug surfaces and the tab metadata toggle.'},
-      {sampleHtml: appMenuUiIcon('share'), label: 'Share', detail: 'YO!share link and viewer controls.'},
-      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: 'Pin', detail: 'Pinned tabs stay at the front and are protected from tab eviction.'},
+    {section: t('legend.section.colors'), items: [
+      {sampleHtml: keyboardLegendStatusSample('working'), label: t('legend.color.green.label'), detail: t('legend.color.green.detail')},
+      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: t('legend.color.yellow.label'), detail: t('legend.color.yellow.detail')},
+      {sampleHtml: keyboardLegendStatusSample('attention'), label: t('legend.color.red.label'), detail: t('legend.color.red.detail')},
+      {sampleHtml: keyboardLegendStatusSample('merged'), label: t('legend.color.purple.label'), detail: t('legend.color.purple.detail')},
+      {sampleHtml: keyboardLegendStatusSample('closed'), label: t('legend.color.gray.label'), detail: t('legend.color.gray.detail')},
+      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: t('legend.color.metadata.label'), detail: t('legend.color.metadata.detail')},
     ]},
-    {section: 'YO button meanings', items: [
-      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: 'Inactive YO', detail: 'YOLO auto-approval is off for this tmux session, or not owned here.'},
-      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: 'Active YO', detail: 'YOLO auto-approval is enabled for this session.'},
-      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: 'Working YO', detail: 'YOLO is enabled while an agent window is working.'},
-      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: 'Locked YO', detail: 'Another YOLOmux process owns the auto-approval lock for that target.'},
+    {section: t('legend.section.icons'), items: [
+      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
+      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
+      {sampleHtml: appMenuUiIcon('gear'), label: t('legend.icon.gear.label'), detail: t('legend.icon.gear.detail')},
+      {sampleHtml: appMenuUiIcon('tab-meta'), label: t('legend.icon.tabMetadata.label'), detail: t('legend.icon.tabMetadata.detail')},
+      {sampleHtml: appMenuUiIcon('share'), label: t('legend.icon.share.label'), detail: t('legend.icon.share.detail')},
+      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: t('legend.icon.pin.label'), detail: t('legend.icon.pin.detail')},
+    ]},
+    {section: t('legend.section.yo'), items: [
+      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: t('legend.yo.inactive.label'), detail: t('legend.yo.inactive.detail')},
+      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: t('legend.yo.active.label'), detail: t('legend.yo.active.detail')},
+      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: t('legend.yo.working.label'), detail: t('legend.yo.working.detail')},
+      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: t('legend.yo.locked.label'), detail: t('legend.yo.locked.detail')},
     ]},
   ];
 }
@@ -10266,7 +10307,7 @@ function tmuxCurrentYoloCommand(session) {
   const payload = hasSession ? autoApproveStates.get(session) : null;
   const enabled = hasSession ? autoApproveEnabledHere(payload) : false;
   const elsewhere = hasSession ? autoApproveEnabledElsewhere(payload) : false;
-  const label = hasSession ? t(enabled ? 'menu.tmux.yo.on' : elsewhere ? 'menu.tmux.yo.elsewhere' : 'menu.tmux.yo.off') : t('menu.tmux.yo.none');
+  const label = t('menu.tmux.yo.on');
   return menuCommand(label, async () => {
     if (!hasSession) return;
     await toggleAutoApprove(session);
@@ -14788,6 +14829,25 @@ function tabberPathToken(value) {
 
 function persistTabberCollapsed() {
   storageSet(fileExplorerTabberCollapsedStorageKey, JSON.stringify(Array.from(fileExplorerTabberCollapsed).sort()));
+  storageSet(fileExplorerTabberExpandedStorageKey, JSON.stringify(Array.from(fileExplorerTabberExpanded).sort()));
+}
+
+function tabberPathDefaultsCollapsed(fullPath) {
+  return /^\/s_[^/]+\/w_/.test(String(fullPath || ''));
+}
+
+function tabberCollapsedPathsForTree(entries, entriesByDir) {
+  const collapsed = new Set(fileExplorerTabberCollapsed);
+  const walk = (list, parentPath) => {
+    for (const entry of list || []) {
+      if (entry.kind !== 'dir') continue;
+      const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+      if (tabberPathDefaultsCollapsed(fullPath) && !fileExplorerTabberExpanded.has(fullPath)) collapsed.add(fullPath);
+      walk(entriesByDir.get(normalizeDirectoryPath(fullPath)), fullPath);
+    }
+  };
+  walk(entries, '/');
+  return collapsed;
 }
 
 // Recency for a ledger key (session "6" or session:window "6:1") is derived by the backend once as active_recency_ts.
@@ -15121,7 +15181,7 @@ function renderTabberTree(groupsEl) {
   if (!groupsEl) return;
   ensureTabberSessionFilesFetches();
   const {entries, entriesByDir} = buildTabberTree();
-  const collapsedSet = new Set(fileExplorerTabberCollapsed);
+  const collapsedSet = tabberCollapsedPathsForTree(entries, entriesByDir);
   if (!entries.length) {
     groupsEl.innerHTML = '<div class="changes-empty">No open tmux sessions</div>';
     return;
@@ -15194,10 +15254,9 @@ function refreshTabberPanels() {
 
 function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const text = String(label || '');
-  const pid = Number(options.pid);
   const nameText = text;
-  const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
-  return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  const pidText = tmuxWindowPidText(options.pid);
+  return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid"> ${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberWindowButtonHtml(data, label) {
@@ -15208,9 +15267,8 @@ function tabberWindowButtonHtml(data, label) {
     return tabberWindowLabelHtml(visibleName, iconHtml, {active: data?.active === true, pid: data?.pid});
   }
   const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;
-  const pid = Number(data?.pid);
-  // Keep the button itself identical to the Info Bar / YO!info window button: agent symbol + status
-  // ball + "<index>:<name>", no pid baked into the label. The pid is printed as a separate suffix after
+  // Keep the button itself identical to the Info Bar / YO!info window button: status glyph + agent
+  // symbol + "<index>:<name>", no pid baked into the label. The pid is printed as a separate suffix after
   // the button so the icon matches everywhere it appears.
   const buttonHtml = tmuxWindowButtonHtml({
     tag: 'span',
@@ -15225,7 +15283,8 @@ function tabberWindowButtonHtml(data, label) {
     attrs: ['data-tabber-window-button="shared"'],
     ariaPressed: false,
   });
-  const pidHtml = Number.isFinite(pid) && pid > 0 ? `<span class="tabber-window-pid"> (pid=${esc(String(Math.floor(pid)))})</span>` : '';
+  const pidText = tmuxWindowPidText(data?.pid);
+  const pidHtml = pidText ? `<span class="tabber-window-pid"> ${esc(pidText)}</span>` : '';
   return `<span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${stripTitleAttrs(buttonHtml)}${pidHtml}</span>`;
 }
 
@@ -15422,7 +15481,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
     disclosureExpanded: expandable ? expanded : undefined,
     nameHtml,
-    dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
+    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : '')),
     dateHtml: data.dateHtml || '',
   });
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
@@ -15434,15 +15493,24 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
 }
 
 function toggleTabberCollapsed(fullPath) {
-  if (fileExplorerTabberCollapsed.has(fullPath)) fileExplorerTabberCollapsed.delete(fullPath);
-  else fileExplorerTabberCollapsed.add(fullPath);
+  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
+  const expanded = !fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath));
+  if (expanded) {
+    fileExplorerTabberExpanded.delete(fullPath);
+    fileExplorerTabberCollapsed.add(fullPath);
+  } else {
+    fileExplorerTabberCollapsed.delete(fullPath);
+    if (defaultsCollapsed) fileExplorerTabberExpanded.add(fullPath);
+  }
   persistTabberCollapsed();
   scheduleShareUiStatePublish();
 }
 
 function expandTabberPath(fullPath) {
-  if (!fileExplorerTabberCollapsed.has(fullPath)) return;
+  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
+  if (!fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath))) return;
   fileExplorerTabberCollapsed.delete(fullPath);
+  if (defaultsCollapsed) fileExplorerTabberExpanded.add(fullPath);
   persistTabberCollapsed();
   scheduleShareUiStatePublish();
 }
@@ -15452,7 +15520,19 @@ function expandTabberPath(fullPath) {
 function setAllTabberCollapsed(collapsed) {
   if (!collapsed) {
     fileExplorerTabberCollapsed.clear();
+    fileExplorerTabberExpanded.clear();
+    const {entries, entriesByDir} = buildTabberTree();
+    const walk = (list, parent) => {
+      for (const entry of list || []) {
+        if (entry.kind !== 'dir') continue;
+        const path = parent === '/' ? `/${entry.name}` : `${parent}/${entry.name}`;
+        fileExplorerTabberExpanded.add(path);
+        walk(entriesByDir.get(normalizeDirectoryPath(path)), path);
+      }
+    };
+    walk(entries, '/');
   } else {
+    fileExplorerTabberExpanded.clear();
     const {entries, entriesByDir} = buildTabberTree();
     const walk = (list, parent) => {
       for (const entry of list || []) {
@@ -15467,6 +15547,12 @@ function setAllTabberCollapsed(collapsed) {
   persistTabberCollapsed();
   refreshTabberPanels();
   scheduleShareUiStatePublish();
+}
+
+async function openTabberActivityOverview() {
+  await openFileExplorerPane();
+  setFileExplorerMode('tabber', {force: true});
+  return true;
 }
 
 function tabberSessionPath(session) {
@@ -16034,6 +16120,20 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
   }
 }
 
+function restartAgentWindowActivityPulseAnimations(root = document) {
+  const scope = root?.querySelectorAll ? root : document;
+  const nodes = Array.from(scope?.querySelectorAll?.(agentWindowActivityPulseSelector) || []);
+  for (const node of nodes) {
+    const animations = typeof node?.getAnimations === 'function' ? node.getAnimations({subtree: true}) : [];
+    for (const animation of animations) {
+      if (!agentWindowActivityPulseAnimationNames.has(String(animation?.animationName || '').trim())) continue;
+      animation.cancel?.();
+      animation.play?.();
+    }
+  }
+  syncAgentWindowActivityAnimationDelays(scope);
+}
+
 function scheduleAgentWindowActivityAnimationSync(root = document) {
   if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) disconnectAgentWindowActivityMutationObserver();
   ensureAgentWindowActivityMutationObserver();
@@ -16111,7 +16211,9 @@ function agentWindowActivityAcknowledgementKeyIsRecorded(key, options = {}) {
   if (!key) return false;
   if (options.attention_acknowledged === true || options.cooldown_acknowledged === true) return true;
   return typeof attentionAcknowledgementKeyIsRecorded === 'function'
-    ? attentionAcknowledgementKeyIsRecorded(key)
+    // A live per-window snapshot is more recent than the browser's optimistic acknowledgement
+    // cache. Passing it through prevents an identical later ASK from inheriting the old ACK.
+    ? attentionAcknowledgementKeyIsRecorded(key, options)
     : false;
 }
 
@@ -16339,6 +16441,19 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const aggregateTones = Array.isArray(item.aggregateTones)
+    ? item.aggregateTones.filter(value => ['attention', 'cooldown', STATE_KEY.working].includes(value)).slice(0, 3)
+    : [];
+  const allAggregateTones = Array.isArray(item.allAggregateTones)
+    ? item.allAggregateTones.filter(value => ['attention', 'cooldown', STATE_KEY.working].includes(value))
+    : aggregateTones;
+  const aggregateToneClasses = aggregateTones.length > 1
+    ? [
+      'agent-window-status-dot--segmented',
+      `agent-window-status-dot--${aggregateTones.join('-')}`,
+      ...allAggregateTones.map(value => `agent-window-status-dot--tone-${value}`),
+    ]
+    : [];
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -16347,6 +16462,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
+    aggregateToneClasses,
     {pulse},
   );
   return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
@@ -16389,6 +16505,9 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   ].filter(Boolean).join(' ');
   const markerHtml = acknowledged ? '' : agentWindowStatusDotHtml(item, {animate: options.animate !== false, subwindowGlyphPulse});
   if (statusOnly && !markerHtml) return '';
+  const placeholderHtml = options.reserveStatusSlot === true && !statusOnly && !markerHtml
+    ? '<span class="agent-window-status-placeholder" aria-hidden="true"></span>'
+    : '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = agentWindowActivityStyleAttribute(tone, item, {subwindowGlyphPulse});
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
@@ -16399,7 +16518,9 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     statusOnly ? 'agent-window-activity--status-only' : '',
   ].filter(Boolean).join(' ');
   const agentHtml = statusOnly ? '' : agentIcon(kind, {label, className: agentClasses});
-  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentHtml}${markerHtml}</span>`;
+  const statusHtml = `${markerHtml}${placeholderHtml}`;
+  const contentHtml = options.statusBeforeAgent === true ? `${statusHtml}${agentHtml}` : `${agentHtml}${statusHtml}`;
+  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${contentHtml}</span>`;
 }
 
 function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '', extraOptions = {}) {
@@ -21150,7 +21271,17 @@ function applyCssSettings() {
   const statusPulsePeriodMs = Math.max(1, agentStatusPulsePeriodMs);
   root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
   root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
-  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 250))));
+  // Quantize the opacity pulse into ~125ms steps (steps(N) timing): step size = period / N with
+  // N = round(period / 125). 125ms (~8 opacity updates/sec at the 2.55s default) was chosen over:
+  //   - 250ms (the old value): ~4/sec read as a perceptible staircase on the 0.16->1 ramp;
+  //   - 50ms: ~20/sec is near-continuous but pays close to full 60fps repaint cost on EVERY status
+  //     ball (per-window, tabs, YO!info, topbar) -- the stepping exists to avoid exactly that;
+  //   - 500ms: ~3 samples per cycle looks like a strobe, not a breathing pulse.
+  // 125ms is the smoothness/cost midpoint: visibly smoother than 250ms yet still far fewer repaints
+  // than a per-frame animation. We pin the STEP size (not a fixed step count) so repaint rate and
+  // perceived smoothness stay ~constant across the whole 250-10000ms period preference; a fixed
+  // count would over-repaint short periods and look chunky on long ones.
+  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 125))));
   if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
@@ -21260,6 +21391,7 @@ function applySettingsPayload(payload, options = {}) {
   if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
+  const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
   clientSettingsPayload = payload;
   clientSettingsMetadataDeferred = payload.deferred_metadata === true;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
@@ -21315,6 +21447,12 @@ function applySettingsPayload(payload, options = {}) {
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
+  if (previousAgentStatusPulsePeriodMs !== agentStatusPulsePeriodMs) {
+    // Retiming an existing stepped CSS animation is browser-dependent. Reuse the status owner to
+    // clear phase state and restart only these animations after the new duration is on :root.
+    if (typeof restartAgentWindowActivityPulseAnimations === 'function') restartAgentWindowActivityPulseAnimations();
+    else if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync();
+  }
   if (typeof updateEditorPreviewFontControls === 'function') updateEditorPreviewFontControls();
   if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
   applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
@@ -21891,8 +22029,9 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
 }
 
 function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  // A Tab has one circle. Its color follows the most urgent visible child (red, then yellow, then
-  // green), while its opacity pulse follows every child: if any child is pulsing, the parent pulses.
+  // A Tab has one circle. It shows the two most urgent distinct child colors (red, yellow, green)
+  // as equal segments, while its opacity pulse follows every child: if any child is pulsing, the
+  // parent pulses. A screen-only working signal still falls back to the current/first agent window.
   // A screen-only working signal still falls back to the current/first agent window.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
@@ -21932,16 +22071,27 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
   if (!selected) return null;
   const childIsPulsing = visibleItems.some(({item}) => item.pulseActive === true);
   const childTransitionIsPulsing = visibleItems.some(({item}) => item.transitionPulseActive === true);
+  const allAggregateTones = ['attention', 'cooldown', STATE_KEY.working]
+    .filter(tone => visibleItems.some(item => item.tone === tone));
+  const aggregateTones = allAggregateTones;
   const item = {
     ...selected.item,
     pulseActive: childIsPulsing,
     transitionPulseActive: childTransitionIsPulsing,
+    aggregateTones,
+    allAggregateTones,
   };
   return {...selected, item, label: item.label || agentLabel(selected.agent?.kind)};
 }
 
 function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
   return sessionStatusAgentWindowSummaryForTab(session, info, payload)?.agent || null;
+}
+
+function sessionStatusBallPlaceholderHtml() {
+  // Every session Tab reserves the same ball column. Keeping the placeholder inside the canonical
+  // activity wrapper makes its geometry follow the real red/yellow/green status ball exactly.
+  return '<span class="session-agent-activity-marker session-agent-activity-marker--placeholder" aria-hidden="true"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span>';
 }
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
@@ -21964,13 +22114,15 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
   }
-  if (!offerYolo) return '';
-  return yoloMarkerHtml(session, auto, {
-    ...options,
-    enabledOnly: false,
-    yoloWorking: sessionYoloIsWorking(session, payload),
-    payload,
-  });
+  const fallbackYoloHtml = offerYolo
+    ? yoloMarkerHtml(session, auto, {
+      ...options,
+      enabledOnly: false,
+      yoloWorking: sessionYoloIsWorking(session, payload),
+      payload,
+    })
+    : '';
+  return `${fallbackYoloHtml}${sessionStatusBallPlaceholderHtml()}`;
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
@@ -24057,11 +24209,18 @@ function pullRequestCiStatusClass(pr) {
   return pullRequestStatusClass(pr);
 }
 
+function pullRequestStatusBadgeHtml(session, text, statusClass, options = {}) {
+  const label = String(text || '').trim();
+  if (!label) return '';
+  const labelHtml = options.labelHtml === undefined ? esc(label) : String(options.labelHtml || '');
+  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${statusClass || 'pr-status-unknown'}`)}">${labelHtml}</span>`;
+}
+
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
   if (!['draft', 'closed'].includes(status)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${esc(pullRequestStatusDisplay(pr))}</span>`;
+  return pullRequestStatusBadgeHtml(session, pullRequestStatusDisplay(pr), pullRequestStatusClass(pr));
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
@@ -29025,12 +29184,9 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     : options.showLeading === false
     ? ''
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
-  // The fixed-width session number keeps activity-bearing tabs aligned. Without the status ball it
-  // only creates dead space before the branch/PR metadata, so mark that shared content variant compact.
-  const statusBallClass = leadingHtml.includes('agent-window-status-dot') ? '' : ' pane-tab-core--without-status-ball';
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
-  return `<span class="pane-tab-core${statusBallClass}">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
 
@@ -29911,8 +30067,14 @@ function tmuxWindowProcessPid(pane) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
 }
 
+function tmuxWindowPidText(pid) {
+  const value = Number(pid);
+  return Number.isFinite(value) && value > 0 ? `(pid=${Math.floor(value)})` : '';
+}
+
 function tmuxWindowDisplayLabel(name, pid) {
-  return pid ? `${name} (pid=${pid})` : name;
+  const pidText = tmuxWindowPidText(pid);
+  return pidText ? `${name} ${pidText}` : name;
 }
 
 function tmuxWindowRecords(panes) {
@@ -29984,7 +30146,7 @@ function tmuxWindowButtonHtml(options = {}) {
   const agentStatus = options.agentStatus || null;
   const activityIconHtml = options.activityIconHtml !== undefined
     ? String(options.activityIconHtml || '')
-    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false});
+    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false, reserveStatusSlot: true, statusBeforeAgent: true});
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
   const numberLabel = String(options.numberLabel || options.indexText || visibleName);
   const numberHtml = options.showNumberLabel === false ? '' : `<span class="tmux-window-number-label">${esc(numberLabel)}</span>`;
@@ -30425,7 +30587,7 @@ function infoGroupingControlsHtml() {
   const optionHtml = level => {
     const dimensions = dimensionsForLevel(level);
     return [
-      `<option value="">None</option>`,
+      `<option value="">${esc(t('info.group.none'))}</option>`,
       ...dimensions.map(dimension => `<option value="${esc(dimension.key)}"${grouping[level] === dimension.key ? ' selected' : ''}>${esc(dimension.label)}</option>`),
     ].join('');
   };
@@ -30435,17 +30597,17 @@ function infoGroupingControlsHtml() {
     const active = grouping.join('|') === preset.grouping.join('|');
     return `<button type="button" class="info-tree-preset${active ? ' active' : ''}" data-info-preset="${esc(preset.key)}" aria-pressed="${active ? 'true' : 'false'}" title="${esc(preset.title)}">${esc(preset.label)}</button>`;
   }).join('');
-  const searchHtml = `<label class="info-tree-search-control"><span>Search</span><input type="search" data-info-search value="${esc(search)}" placeholder="Search YO!info" aria-label="Search YO!info"></label>`;
-  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="Order by level ${index + 1}">${optionHtml(index)}</select></label>`).join('');
-  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="Sort order">
-          <label class="info-tree-group-select"><span>Sort</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
+  const searchHtml = `<label class="info-tree-search-control"><span>${esc(t('info.search.label'))}</span><input type="search" data-info-search value="${esc(search)}" placeholder="${esc(t('info.search.placeholder'))}" aria-label="${esc(t('info.search.placeholder'))}"></label>`;
+  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="${esc(t('info.group.orderByLevel', {level: index + 1}))}">${optionHtml(index)}</select></label>`).join('');
+  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="${esc(t('info.sort.order'))}">
+          <label class="info-tree-group-select"><span>${esc(t('changes.sort'))}</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
         </div>`;
   return `
         <div class="info-tree-primary-controls">
-          <div class="info-tree-presets" role="group" aria-label="Grouping presets">${presetHtml}</div>
+          <div class="info-tree-presets" role="group" aria-label="${esc(t('info.group.presets'))}">${presetHtml}</div>
           ${searchHtml}
         </div>
-        <div class="info-tree-group-selects" role="group" aria-label="Grouping levels"><span class="info-tree-order-label">Order by:</span>${selects}</div>
+        <div class="info-tree-group-selects" role="group" aria-label="${esc(t('info.group.levels'))}"><span class="info-tree-order-label">${esc(t('info.group.orderBy'))}</span>${selects}</div>
         ${sortControls}`;
 }
 
@@ -31723,7 +31885,7 @@ function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
   if (!tmuxSignalAgentCommands.has(kind)) return '';
-  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="Create a new ${esc(agentLabel(kind))} session">Restart</button>`;
+  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
 function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {
@@ -32646,7 +32808,7 @@ function preferenceSections() {
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
-      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help')},
+      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help'), exampleHtml: () => `<span class="preferences-status-pulse-example">${keyboardLegendStatusSample('working', '●', {glyph: true, pulse: true})}${keyboardLegendStatusSample('cooldown', '●', {glyph: true, pulse: true})}${keyboardLegendStatusSample('attention', '●', {glyph: true, pulse: true})}</span>`},
       {path: 'performance.workflow_transition_glow_seconds', label: t('pref.performance.workflow_transition_glow_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.workflow_transition_glow_seconds.help')},
       {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
     ]},
@@ -32983,9 +33145,10 @@ function preferenceControlHtml(item, query = '') {
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
+  const example = typeof item.exampleHtml === 'function' ? item.exampleHtml(value) : String(item.exampleHtml || '');
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
-  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
+  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
 }
 
 function preferenceNumberDisplayValue(item, value) {
@@ -33350,6 +33513,7 @@ let jsDebugGraphScaleSeconds = jsDebugGraphDefaultScaleSeconds;
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugStatsPollTimer = null;
 let jsDebugStatsPollInFlight = false;
+let jsDebugStatsFirstSampleReceived = false;
 let jsDebugStatsHistoryFlushTimer = null;
 let jsDebugStatsHistoryFlushInFlight = false;
 let jsDebugStatsServerSequence = 0;
@@ -33383,7 +33547,9 @@ const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
 const jsDebugGraphRawBucketMs = 1000;
 const jsDebugGraphRollupBucketMs = 30 * 1000;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
+const jsDebugStatsPollFastMs = 2000;
 const jsDebugStatsPollMs = 30000;
+const jsDebugStatsPollTimeoutMs = 5000;
 const jsDebugStatsHistoryFlushMs = 30000;
 const jsDebugGraphRefreshMs = 30000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
@@ -34120,6 +34286,18 @@ function recordJsDebugStatsSample(payload = {}) {
   if (Number.isFinite(nextPid)) jsDebugStatsServerPid = nextPid;
   if (Number.isFinite(nextStartedAt)) jsDebugStatsServerStartedAt = nextStartedAt;
   if (Number.isFinite(Number(payload.rss_bytes))) jsDebugStatsServerRssBytes = Number(payload.rss_bytes);
+  const sampleApplied = Object.prototype.hasOwnProperty.call(payload, 'history') || [
+    payload.uptime_seconds,
+    payload.pid,
+    payload.started_at,
+    payload.rss_bytes,
+    payload.cpu_percent,
+    payload.system_cpu_percent,
+  ].some(value => Number.isFinite(Number(value)));
+  if (sampleApplied && !jsDebugStatsFirstSampleReceived) {
+    jsDebugStatsFirstSampleReceived = true;
+    armJsDebugStatsPolling();
+  }
   debugGraphApplyServerHistory(payload.history);
   if (payload.history && typeof payload.history === 'object') {
     scheduleJsDebugPanelRefresh();
@@ -34330,6 +34508,11 @@ function debugGraphBucketRate(bucket, value) {
 function debugGraphAgentTokenBucketValue(bucket, item) {
   const tokens = Number(item?.tokens);
   if (Number.isFinite(tokens) && tokens > 0) {
+    // `seconds` is the real elapsed span over which the transcript counter advanced. It remains
+    // correct after the server folds raw samples into 2/5-minute history buckets; using the rendered
+    // bucket width here made the same activity look like a different tokens/min rate as the view changed.
+    const seconds = Number(item?.seconds);
+    if (Number.isFinite(seconds) && seconds > 0) return (tokens / seconds) * 60;
     const minutes = Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
     return tokens / minutes;
   }
@@ -34595,7 +34778,8 @@ function debugGraphMetaHtml() {
     const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
     items.push(`total ${uploadedMb}/${downloadedMb} MB up/down`);
   }
-  return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${esc(items.join(' | ') || 'waiting for server stats')}</div>`;
+  const metaHtml = items.length ? esc(items.join(' | ')) : textWithMovingEllipsisHtml(t('debug.waitingForServerStats'));
+  return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
 }
 
 function debugGraphAgentTokenSeriesDefs(buckets) {
@@ -34838,7 +35022,7 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesKeys) {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
-    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc('No client communication data collected')}</title></rect>`;
+    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(t('debug.noCommunicationData'))}</title></rect>`;
   }).join('');
 }
 
@@ -35196,6 +35380,33 @@ function stopJsDebugStatsPolling() {
   jsDebugStatsPollTimer = null;
 }
 
+function jsDebugStatsPollIntervalMs() {
+  return jsDebugStatsFirstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
+}
+
+function armJsDebugStatsPolling({pollNow = false} = {}) {
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) {
+    stopJsDebugStatsPolling();
+    return;
+  }
+  stopJsDebugStatsPolling();
+  if (pollNow) pollJsDebugStatsSample();
+  if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
+}
+
+async function fetchJsDebugStatsJson(url, options = {}) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timeoutId = null;
+  try {
+    if (controller && typeof setTimeout === 'function') {
+      timeoutId = setTimeout(() => controller.abort(), jsDebugStatsPollTimeoutMs);
+    }
+    return await apiFetchJsonQuiet(url, {...options, ...(controller ? {signal: controller.signal} : {})});
+  } finally {
+    if (timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(timeoutId);
+  }
+}
+
 async function pollJsDebugStatsSample() {
   if (!jsDebugCollectionEnabled) return;
   if (!jsDebugStatsPanelVisible()) {
@@ -35212,7 +35423,7 @@ async function pollJsDebugStatsSample() {
     const tokenHistory = tokenResolution
       ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
       : '';
-    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}${tokenHistory}`, {cache: 'no-store'});
+    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}${tokenHistory}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {
@@ -35273,6 +35484,7 @@ async function flushJsDebugStatsHistory() {
 }
 
 function clearJsDebugServerHistory() {
+  jsDebugStatsFirstSampleReceived = false;
   jsDebugStatsServerSequence = 0;
   jsDebugStatsServerUptimeSeconds = null;
   jsDebugStatsServerPid = null;
@@ -35282,6 +35494,7 @@ function clearJsDebugServerHistory() {
     clearTimeout(jsDebugStatsHistoryFlushTimer);
     jsDebugStatsHistoryFlushTimer = null;
   }
+  if (jsDebugStatsPollTimer) armJsDebugStatsPolling({pollNow: true});
   if (typeof apiFetchJsonQuiet !== 'function') return;
   apiFetchJsonQuiet('/api/stats-history', {
     method: 'POST',
@@ -35296,8 +35509,7 @@ function clearJsDebugServerHistory() {
 function startJsDebugStatsPolling() {
   if (!jsDebugCollectionEnabled || jsDebugStatsPollTimer) return;
   if (!jsDebugStatsPanelVisible()) return;
-  pollJsDebugStatsSample();
-  if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollMs);
+  armJsDebugStatsPolling({pollNow: true});
 }
 
 if (typeof document !== 'undefined' && document?.addEventListener) {
@@ -36319,7 +36531,9 @@ function positionDiffRefPopover(input, compact) {
   const viewportHeight = Math.max(240, viewport.height || 720);
   const edgePadding = 24;
   const availableWidth = Math.max(280, viewportWidth - edgePadding * 2);
-  const width = availableWidth;
+  // Both Differ and editor ref pickers need enough room for real commit descriptions, but must leave
+  // substantial browser context visible. One responsive width owner keeps the two surfaces in sync.
+  const width = Math.min(availableWidth, Math.round(viewportWidth * (2 / 3)));
   const left = Math.max(edgePadding, Math.min(rect.left, viewportWidth - width - edgePadding));
   const top = Math.min(rect.bottom + 4, viewportHeight - 48);
   popover.style.width = `${Math.round(width)}px`;
@@ -47924,7 +48138,9 @@ async function applyShareFinderState(finder = {}) {
   const session = String(finder.session || '').trim();
   const previousRoot = normalizeDirectoryPath(fileExplorerRoot || '');
   const previousExpandedSignature = shareSetSignature(fileExplorerExpanded);
+  const previousMode = normalizeFileExplorerMode(fileExplorerMode);
   if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
+  const modeChanged = previousMode !== fileExplorerMode;
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
@@ -47946,6 +48162,10 @@ async function applyShareFinderState(finder = {}) {
   if ('tabberCollapsed' in finder) shareReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
   const expandedChanged = previousExpandedSignature !== shareSetSignature(fileExplorerExpanded);
   applyFileExplorerMode();
+  // A semantic share frame can move Differ directly to Tabber while the root remains unchanged.
+  // Rebuild the shared mode panel before awaiting any root work so the Tabber renderer has its own
+  // shell instead of trying to hydrate the stale Differ DOM after the host state has moved on.
+  if (modeChanged) renderFileExplorerChangesPanels({force: true});
   renderFileExplorerRootModeControls();
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);
@@ -50140,8 +50360,8 @@ function paneFrameControlsHtml(session, options = {}) {
   }
   if (includePopout) {
     controls.push(disabled
-      ? `<button class="tab pane-popout" ${disabledAttrs('Pop out tab')}></button>`
-      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="Pop out tab" aria-label="Pop out tab"></button>`);
+      ? `<button class="tab pane-popout" ${disabledAttrs(t('tab.popout'))}></button>`
+      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="${esc(t('tab.popout'))}" aria-label="${esc(t('tab.popout'))}"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -51036,6 +51256,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         aiPaneTarget: String(agent?.pane_target || ''),
         aiCurrent: agent?.current === true,
         aiWindowActive: agent?.window_active === true,
+        aiPid: tmuxWindowProcessPid(agent),
         aiWorkingStoppedTs: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
         aiIdleSince: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
         aiLastActiveTs: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
@@ -51047,6 +51268,8 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         pathKey: infoNormalizedPath(path) || '__no_path__',
         pathLabel: String(row?.pathLabel || compactHomePath(path) || 'No path'),
         pathTitle: String(row?.pathTitle || path || 'No path'),
+        pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
+        pathActivitySource: String(row?.pathActivitySource || ''),
         branchKey: branch || '__no_branch__',
         branchLabel: branch || 'No branch',
         branchTitle: branch || 'No branch',
@@ -51071,6 +51294,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         updated: String(row?.updatedText || row?.updated || ''),
         updatedTitle: String(row?.updatedTitle || row?.updated || ''),
         updatedTs: Number.isFinite(row?.updatedTs) ? row.updatedTs : 0,
+        updatedSource: String(row?.updatedSource || ''),
       });
     }
   }
@@ -51468,18 +51692,18 @@ function infoPullRequestCiClass(pr) {
   return pullRequestCiStatusClass(pr);
 }
 
-function infoStatusBadgeHtml(text, className, options = {}) {
+function infoStatusBadgeHtml(record, text, className, options = {}) {
   const label = String(text || '').trim();
   if (!label) return '';
   const labelHtml = options.highlight ? infoSearchHighlightHtml(label) : esc(label);
-  return `<span class="meta-pr-status info-tree-status-badge ${esc(className || 'pr-status-unknown')}">${labelHtml}</span>`;
+  return pullRequestStatusBadgeHtml(record?.tabSession, label, className, {labelHtml});
 }
 
 function infoRecordPrStatusHtml(record) {
   const parts = [];
   const highlight = infoRecordSearchKindMatches(record, 'pr');
-  if (record?.prLifecycleText) parts.push(infoStatusBadgeHtml(record.prLifecycleText, record.prLifecycleClass, {highlight}));
-  if (record?.prCiText) parts.push(infoStatusBadgeHtml(record.prCiText, record.prCiClass, {highlight}));
+  if (record?.prLifecycleText) parts.push(infoStatusBadgeHtml(record, record.prLifecycleText, record.prLifecycleClass, {highlight}));
+  if (record?.prCiText) parts.push(infoStatusBadgeHtml(record, record.prCiText, record.prCiClass, {highlight}));
   return parts.filter(Boolean).join(' ');
 }
 
@@ -51582,6 +51806,7 @@ function infoRecordAgentPayload(record) {
     working_stopped_ts: record.aiWorkingStoppedTs,
     idle_since: record.aiIdleSince,
     last_active_ts: record.aiLastActiveTs,
+    pid: record.aiPid,
   };
   return agent;
 }
@@ -51631,10 +51856,21 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const record = status.record;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
+  const info = transcriptMeta.sessions?.[session] || {};
+  const summary = typeof sessionStatusAgentWindowSummaryForTab === 'function'
+    ? sessionStatusAgentWindowSummaryForTab(session, info, autoApproveStates.get(session))
+    : null;
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
+  const agent = summary?.agent || infoRecordAgentPayload(record);
+  const activityHtml = summary?.item
+    ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
+      ...agentWindowActivityOptionsForStatus(agent, session),
+      item: summary.item,
+      statusOnly: true,
+    })
+    : agentWindowActivityIconHtmlForStatus(agent, record.aiKind, session, {statusOnly: true});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
@@ -51673,24 +51909,61 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
   });
 }
 
+function infoRecordAiRecencyHtml(record) {
+  const agent = infoRecordAgentPayload(record);
+  const lastActive = Number(agent.idle_since || agent.last_active_ts || 0);
+  if (!Number.isFinite(lastActive) || lastActive <= 0) return '';
+  const text = typeof sessionPopoverAgentRecencyText === 'function'
+    ? sessionPopoverAgentRecencyText(agent)
+    : sessionFileRelativeTimeText(lastActive);
+  return text ? `<span class="info-tree-ai-recency info-tree-trailing-meta">${esc(text)}</span>` : '';
+}
+
+function infoRecordAiPidHtml(record) {
+  const pidText = tmuxWindowPidText(record?.aiPid);
+  return pidText ? `<span class="info-tree-ai-pid">${esc(pidText)}</span>` : '';
+}
+
 function infoRecordAiValueHtml(record, options = {}) {
   if (!infoRecordHasAi(record)) return '';
   const buttonHtml = infoRecordAiWindowButtonHtml(record, options);
   if (!buttonHtml) return '';
   const status = infoAgentAttentionHtml(record);
-  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}</span>`;
+  const pid = infoRecordAiPidHtml(record);
+  const recency = infoRecordAiRecencyHtml(record);
+  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}${pid}${recency}</span>`;
+}
+
+function infoRecordUpdatedMetaHtml(record) {
+  if (infoRecordMissingValue(record?.updated)) return '';
+  const source = record?.updatedSource === 'git-commit' ? t('info.meta.gitCommit') : '';
+  const text = [source, record.updated].filter(Boolean).join(' ');
+  const title = [source, String(record?.updatedTitle || record.updated)].filter(Boolean).join(': ');
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  return `<span class="info-tree-meta-updated info-tree-trailing-meta"${titleAttr}>${infoRecordSearchValueHtml(record, 'updated', text)}</span>`;
+}
+
+function infoRecordPathActivityMetaHtml(record) {
+  const timestamp = Number(record?.pathActivityTs || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  const text = relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - timestamp));
+  const title = `Latest repository path activity: ${text}`;
+  return `<span class="info-tree-meta-updated info-tree-meta-path-activity" title="${esc(title)}">${esc(text)}</span>`;
 }
 
 function infoRecordMainChipsHtml(record, options = {}) {
   const hiddenDimensions = new Set(Array.isArray(options.hiddenDimensions) ? options.hiddenDimensions : []);
   const fields = [];
-  if (!hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__') {
+  const pathVisible = !hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__';
+  const branchVisible = !hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__';
+  const updatedMeta = infoRecordUpdatedMetaHtml(record);
+  if (pathVisible) {
     const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
-    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>`, record.pathTitle));
+    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}`, record.pathTitle));
   }
-  if (!hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__') {
+  if (branchVisible) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>`, record.branchTitle));
+    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
   }
   const linearDesc = infoRecordLinearDescHtml(record);
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
@@ -51701,9 +51974,6 @@ function infoRecordMainChipsHtml(record, options = {}) {
   }
   if (!hiddenDimensions.has('tmux-window') && infoRecordHasAi(record)) {
     fields.push(infoRecordFieldHtml('ai', infoRecordAiValueHtml(record), record.aiTitle));
-  }
-  if (!infoRecordMissingValue(record?.updated)) {
-    fields.push(infoRecordFieldHtml('updated', `<span class="info-tree-value-text info-tree-meta-updated">${infoRecordSearchValueHtml(record, 'updated', record.updated)}</span>`, record.updatedTitle));
   }
   return fields.join('');
 }
@@ -51734,7 +52004,8 @@ function infoGroupLabelHtml(group = {}) {
   const label = String(group.label || '');
   if (group.dimension === 'path' && !infoRecordMissingValue(label) && String(group.key || '') !== '__no_path__') {
     const path = String(group.key || group.title || label);
-    return `<button type="button" class="info-tree-group-label info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>`;
+    const activity = infoRecordPathActivityMetaHtml(infoGroupRepresentativeRecord(group));
+    return `<span class="info-tree-group-label info-tree-group-label-path"><button type="button" class="info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>${activity}</span>`;
   }
   const representative = infoGroupRepresentativeRecord(group);
   if (group.dimension === 'tmux-window') {
@@ -52084,6 +52355,7 @@ function infoTabAgentEntry(session, agent = null) {
     pane_target: String(agent?.pane_target || ''),
     current: agentWindowPayloadCurrent(agent) === true,
     window_active: agent?.window_active === true,
+    pid: tmuxWindowProcessPid(agent),
     working_stopped_ts: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
     idle_since: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
     last_active_ts: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
@@ -52174,6 +52446,17 @@ function rowWithInfoTabAgents(row, tabAgents) {
   };
 }
 
+function infoPathActivityForSource(source = {}) {
+  const root = infoGitRoot(source.git);
+  const repos = Array.isArray(source?.project?.repos) ? source.project.repos : [];
+  const repo = repos.find(item => infoNormalizedPath(item?.root) === infoNormalizedPath(root));
+  const timestamp = Number(repo?.activity_ts ?? source?.git?.activity_ts ?? 0);
+  return {
+    timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
+    source: String(repo?.activity_source || source?.git?.activity_source || ''),
+  };
+}
+
 function infoBranchRowForSource(source, branch, ownsSession) {
   const {session, info, project, git, primary} = source;
   const useCurrentProjectMetadata = ownsSession && primary;
@@ -52224,11 +52507,14 @@ function infoBranchRowForSource(source, branch, ownsSession) {
       || '',
     180,
   );
+  const pathActivity = infoPathActivityForSource(source);
   return {
     session: '',
     path: infoGitRoot(git),
     pathLabel: infoPathLabel(git),
     pathTitle: infoPathTitle(git),
+    pathActivityTs: pathActivity.timestamp,
+    pathActivitySource: pathActivity.source,
     branch: branch.name || '',
     branchHtml: branchLinkHtml(git, branch.name),
     desc,
@@ -52236,6 +52522,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     updatedText: branchUpdatedText(branch),
     updatedTitle: branch.updated || branchUpdatedText(branch),
     updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
+    updatedSource: 'git-commit',
     prHtml: prHtml || '',
     prTitle,
     prDescriptionTitle,
@@ -52327,12 +52614,15 @@ function shareInfoRowSnapshot(row = {}) {
     path: shareInfoString(row.path, 1000),
     pathLabel: shareInfoString(row.pathLabel, 1000),
     pathTitle: shareInfoString(row.pathTitle, 1000),
+    pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
+    pathActivitySource: shareInfoString(row.pathActivitySource, 100),
     branch: shareInfoString(row.branch, 500),
     desc: shareInfoString(row.desc, 1000),
     updated: shareInfoString(row.updated, 200),
     updatedText: shareInfoString(row.updatedText, 200),
     updatedTitle: shareInfoString(row.updatedTitle, 500),
     updatedTs: Number.isFinite(row.updatedTs) ? row.updatedTs : 0,
+    updatedSource: shareInfoString(row.updatedSource, 100),
     prTitle: shareInfoString(row.prTitle, 1000),
     prUrl: shareInfoString(row.prUrl, 1000),
     prLabel: shareInfoString(row.prLabel, 100),

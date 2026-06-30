@@ -572,7 +572,7 @@ def test_background_refresh_control_uses_nested_payload(monkeypatch):
     assert calls == [(app_module.BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same", "reason": "follower"})]
 
 
-def test_stats_sample_payload_records_shared_agent_activity_and_token_rates(monkeypatch, tmp_path):
+def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     wall_times = iter([1000.0, 1060.0])
     monotonic_times = iter([50.0, 110.0])
@@ -613,13 +613,16 @@ def test_stats_sample_payload_records_shared_agent_activity_and_token_rates(monk
     monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
     monkeypatch.setattr(webapp, "stats_agent_window_rows", fake_agent_rows)
     try:
-        first = webapp.stats_sample_payload(token_consumer=True)
-        second = webapp.stats_sample_payload(token_consumer=True)
+        first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
+        second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
+        with webapp.stats_history_lock:
+            history = webapp.stats_history_payload_locked(0, client_id="client-a")
     finally:
         webapp.control_server.stop()
 
-    assert first["history"]["records"]
-    records = second["history"]["records"]
+    assert first["time"] == 1000.0
+    assert second["time"] == 1060.0
+    records = history["records"]
     assert sum(record["active_agent_total"] for record in records) == 4
     assert sum(record["inactive_agent_total"] for record in records) == 2
     assert sum(record["ask_agent_total"] for record in records) == 2
@@ -673,6 +676,32 @@ def test_stats_sampler_skips_token_scans_without_consumer(monkeypatch):
     assert sum(record["agent_token_samples"] for record in history["records"]) == 0
 
 
+def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    calls = []
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}])
+
+    def slow_token_count(_row):
+        calls.append(time.monotonic())
+        time.sleep(0.15)
+        return 100.0
+
+    monkeypatch.setattr(webapp, "stats_agent_token_count", slow_token_count)
+    try:
+        started = time.monotonic()
+        payload = webapp.stats_sample_payload(token_consumer=True)
+        response_elapsed = time.monotonic() - started
+        webapp.stats_sample_cached_monotonic = None
+        webapp.record_stats_global_sample(trigger="sampler")
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["pid"] == os.getpid()
+    assert payload["uptime_seconds"] >= 0
+    assert response_elapsed < 0.1
+    assert len(calls) == 1
+
+
 def test_stats_token_sampling_uses_slower_consumer_cadence(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     sample_times = iter([1000.0, 1005.0, 1011.0])
@@ -694,15 +723,15 @@ def test_stats_token_sampling_uses_slower_consumer_cadence(monkeypatch):
     monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/rollout.jsonl"}])
     monkeypatch.setattr(webapp, "stats_agent_token_count", lambda _row: next(token_totals))
     try:
-        first = webapp.stats_sample_payload(token_consumer=True)
-        second = webapp.stats_sample_payload(token_consumer=True)
-        third = webapp.stats_sample_payload(token_consumer=True)
+        first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
+        second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
+        third = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
     finally:
         webapp.control_server.stop()
 
-    assert first["ok"] is True
-    assert second["ok"] is True
-    assert third["ok"] is True
+    assert first["time"] == 1000.0
+    assert second["time"] == 1005.0
+    assert third["time"] == 1011.0
     with webapp.stats_history_lock:
         history = webapp.stats_history_payload_locked(0, client_id="client-a")
     token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
@@ -987,6 +1016,29 @@ def test_attention_acknowledgement_is_server_owned(monkeypatch, tmp_path):
         assert payload["prompt"]["attention_acknowledged"] is True
     finally:
         webapp.control_server.stop()
+
+
+def test_agent_window_attention_key_uses_per_window_hash_transitions():
+    webapp = app_module.TmuxWebtermApp(["1"])
+    first_screen = {"key": "approval", "question_text": "Do you want to proceed?", "prompt_hash": "command-a"}
+    second_screen = {"key": "approval", "question_text": "Do you want to proceed?", "prompt_hash": "command-b"}
+    try:
+        signature = lambda screen: webapp.agent_window_attention_instance_signature(
+            "8001", "1", "%15", "claude", "approval", webapp.agent_window_attention_signature("approval", screen)
+        )
+        first_a = signature(first_screen)
+        repeated_a = signature(first_screen)
+        first_b = signature(second_screen)
+        returned_a = signature(first_screen)
+        webapp.agent_window_attention_instance_signature("8001", "1", "%15", "claude", "idle", "")
+        after_idle_a = signature(first_screen)
+    finally:
+        webapp.control_server.stop()
+
+    assert first_a == repeated_a == "command-a:1"
+    assert first_b == "command-b:2"
+    assert returned_a == "command-a:3"
+    assert after_idle_a == "command-a:4"
 
 
 def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):

@@ -2977,16 +2977,21 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def prepare_request_socket(self, request: socket.socket) -> socket.socket:
         if not self.tls_context or isinstance(request, ssl.SSLSocket):
             return request
+        # Test and plain-HTTP share hosts may retain a context-shaped redirect sentinel so Handler can
+        # issue HTTP policy responses. Only a real SSLContext is authorized to transform a connection.
+        if not isinstance(self.tls_context, ssl.SSLContext):
+            return request
         previous_timeout = request.gettimeout()
         request.settimeout(self.tls_peek_timeout_seconds)
         try:
             first = request.recv(1, socket.MSG_PEEK)
         except (socket.timeout, BlockingIOError):
-            # Idle preconnect socket. This runs in the per-connection worker thread, so this longer
-            # wait does not block accept(); wrapping keeps browser TLS preconnects from surfacing as
-            # ERR_CONNECTION_CLOSED.
+            # No protocol byte means this is only an idle preconnect, not evidence of TLS. Wrapping it
+            # guessed wrong for plaintext share preconnects and killed later HTTP requests. Definite
+            # TLS records still take the branch below; a real client has sent its first byte by this
+            # deliberately generous classifier timeout.
             request.settimeout(previous_timeout)
-            return self.tls_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+            return request
         if first and first[0] in TLS_FIRST_BYTES:
             request.settimeout(previous_timeout)
             return self.tls_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)

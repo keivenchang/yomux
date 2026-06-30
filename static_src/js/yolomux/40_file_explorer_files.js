@@ -3431,6 +3431,25 @@ function tabberPathToken(value) {
 
 function persistTabberCollapsed() {
   storageSet(fileExplorerTabberCollapsedStorageKey, JSON.stringify(Array.from(fileExplorerTabberCollapsed).sort()));
+  storageSet(fileExplorerTabberExpandedStorageKey, JSON.stringify(Array.from(fileExplorerTabberExpanded).sort()));
+}
+
+function tabberPathDefaultsCollapsed(fullPath) {
+  return /^\/s_[^/]+\/w_/.test(String(fullPath || ''));
+}
+
+function tabberCollapsedPathsForTree(entries, entriesByDir) {
+  const collapsed = new Set(fileExplorerTabberCollapsed);
+  const walk = (list, parentPath) => {
+    for (const entry of list || []) {
+      if (entry.kind !== 'dir') continue;
+      const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+      if (tabberPathDefaultsCollapsed(fullPath) && !fileExplorerTabberExpanded.has(fullPath)) collapsed.add(fullPath);
+      walk(entriesByDir.get(normalizeDirectoryPath(fullPath)), fullPath);
+    }
+  };
+  walk(entries, '/');
+  return collapsed;
 }
 
 // Recency for a ledger key (session "6" or session:window "6:1") is derived by the backend once as active_recency_ts.
@@ -3764,7 +3783,7 @@ function renderTabberTree(groupsEl) {
   if (!groupsEl) return;
   ensureTabberSessionFilesFetches();
   const {entries, entriesByDir} = buildTabberTree();
-  const collapsedSet = new Set(fileExplorerTabberCollapsed);
+  const collapsedSet = tabberCollapsedPathsForTree(entries, entriesByDir);
   if (!entries.length) {
     groupsEl.innerHTML = '<div class="changes-empty">No open tmux sessions</div>';
     return;
@@ -3837,10 +3856,9 @@ function refreshTabberPanels() {
 
 function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const text = String(label || '');
-  const pid = Number(options.pid);
   const nameText = text;
-  const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
-  return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  const pidText = tmuxWindowPidText(options.pid);
+  return `<span class="tabber-window-label">${stripTitleAttrs(iconHtml)}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid"> ${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberWindowButtonHtml(data, label) {
@@ -3851,9 +3869,8 @@ function tabberWindowButtonHtml(data, label) {
     return tabberWindowLabelHtml(visibleName, iconHtml, {active: data?.active === true, pid: data?.pid});
   }
   const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;
-  const pid = Number(data?.pid);
-  // Keep the button itself identical to the Info Bar / YO!info window button: agent symbol + status
-  // ball + "<index>:<name>", no pid baked into the label. The pid is printed as a separate suffix after
+  // Keep the button itself identical to the Info Bar / YO!info window button: status glyph + agent
+  // symbol + "<index>:<name>", no pid baked into the label. The pid is printed as a separate suffix after
   // the button so the icon matches everywhere it appears.
   const buttonHtml = tmuxWindowButtonHtml({
     tag: 'span',
@@ -3868,7 +3885,8 @@ function tabberWindowButtonHtml(data, label) {
     attrs: ['data-tabber-window-button="shared"'],
     ariaPressed: false,
   });
-  const pidHtml = Number.isFinite(pid) && pid > 0 ? `<span class="tabber-window-pid"> (pid=${esc(String(Math.floor(pid)))})</span>` : '';
+  const pidText = tmuxWindowPidText(data?.pid);
+  const pidHtml = pidText ? `<span class="tabber-window-pid"> ${esc(pidText)}</span>` : '';
   return `<span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${stripTitleAttrs(buttonHtml)}${pidHtml}</span>`;
 }
 
@@ -4065,7 +4083,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
     disclosureExpanded: expandable ? expanded : undefined,
     nameHtml,
-    dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
+    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : '')),
     dateHtml: data.dateHtml || '',
   });
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
@@ -4077,15 +4095,24 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
 }
 
 function toggleTabberCollapsed(fullPath) {
-  if (fileExplorerTabberCollapsed.has(fullPath)) fileExplorerTabberCollapsed.delete(fullPath);
-  else fileExplorerTabberCollapsed.add(fullPath);
+  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
+  const expanded = !fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath));
+  if (expanded) {
+    fileExplorerTabberExpanded.delete(fullPath);
+    fileExplorerTabberCollapsed.add(fullPath);
+  } else {
+    fileExplorerTabberCollapsed.delete(fullPath);
+    if (defaultsCollapsed) fileExplorerTabberExpanded.add(fullPath);
+  }
   persistTabberCollapsed();
   scheduleShareUiStatePublish();
 }
 
 function expandTabberPath(fullPath) {
-  if (!fileExplorerTabberCollapsed.has(fullPath)) return;
+  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
+  if (!fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath))) return;
   fileExplorerTabberCollapsed.delete(fullPath);
+  if (defaultsCollapsed) fileExplorerTabberExpanded.add(fullPath);
   persistTabberCollapsed();
   scheduleShareUiStatePublish();
 }
@@ -4095,7 +4122,19 @@ function expandTabberPath(fullPath) {
 function setAllTabberCollapsed(collapsed) {
   if (!collapsed) {
     fileExplorerTabberCollapsed.clear();
+    fileExplorerTabberExpanded.clear();
+    const {entries, entriesByDir} = buildTabberTree();
+    const walk = (list, parent) => {
+      for (const entry of list || []) {
+        if (entry.kind !== 'dir') continue;
+        const path = parent === '/' ? `/${entry.name}` : `${parent}/${entry.name}`;
+        fileExplorerTabberExpanded.add(path);
+        walk(entriesByDir.get(normalizeDirectoryPath(path)), path);
+      }
+    };
+    walk(entries, '/');
   } else {
+    fileExplorerTabberExpanded.clear();
     const {entries, entriesByDir} = buildTabberTree();
     const walk = (list, parent) => {
       for (const entry of list || []) {
@@ -4110,6 +4149,12 @@ function setAllTabberCollapsed(collapsed) {
   persistTabberCollapsed();
   refreshTabberPanels();
   scheduleShareUiStatePublish();
+}
+
+async function openTabberActivityOverview() {
+  await openFileExplorerPane();
+  setFileExplorerMode('tabber', {force: true});
+  return true;
 }
 
 function tabberSessionPath(session) {

@@ -28,7 +28,7 @@ def test_pane_spacing_default_is_3px():
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
     assert "red_reminder_ms" not in default_settings()["appearance"]
-    assert default_settings()["performance"]["agent_status_pulse_period_ms"] == 1550
+    assert default_settings()["performance"]["agent_status_pulse_period_ms"] == 2550
     assert default_settings()["performance"]["workflow_transition_glow_seconds"] == 60
     assert "agent_window_cooldown_seconds" not in default_settings()["performance"]
 

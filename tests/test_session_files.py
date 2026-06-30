@@ -457,22 +457,57 @@ def test_session_files_payload_carries_agent_window_attribution(tmp_path):
     assert item["agent_windows"] == [{"kind": "codex", "window": "0", "window_index": 0, "pane": "0", "pane_target": "s1:0.0"}]
 
 
-def test_scan_claude_transcript_refreshes_cache_on_change(tmp_path):
-    # the (path, mtime, size) cache must not serve stale results after the transcript is appended to.
+def test_scan_claude_transcript_incrementally_scans_complete_appends_and_reuses_raw_parse_for_cwds(tmp_path, monkeypatch):
+    session_files._CLAUDE_TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "c.jsonl"
-    transcript.write_text(
-        json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Edit", "input": {"file_path": "/tmp/a.py"}}]}}) + "\n",
-        encoding="utf-8",
-    )
-    assert session_files.scan_claude_transcript(transcript, None) == {"/tmp/a.py": {"M"}}
-    transcript.write_text(
-        json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/b.py"}}]}}) + "\n\n",
-        encoding="utf-8",
-    )
-    refreshed = session_files.scan_claude_transcript(transcript, None)
-    assert refreshed == {"/tmp/b.py": {"A"}}, "size/mtime change invalidates the cache, no stale hit"
+    first_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 5}, "content": [
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": "a.py"}}]}}) + "\n"
+    second_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 7}, "content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": "b.py"}}]}}) + "\n"
+    transcript.write_text(first_line, encoding="utf-8")
+    root_a = tmp_path / "root-a"
+    root_b = tmp_path / "root-b"
+    first = session_files.scan_claude_transcript_details(transcript, str(root_a))
+    assert first["changes"] == {str(root_a / "a.py"): {"M"}}
+    assert first["usage"]["generated_tokens"] == 5
+
+    transcript.write_text(first_line + second_line, encoding="utf-8")
+    real_loads = session_files.json.loads
+    parsed_lines = []
+
+    def counting_loads(value):
+        parsed_lines.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", counting_loads)
+    second = session_files.scan_claude_transcript_details(transcript, str(root_a))
+    same_raw_parse = session_files.scan_claude_transcript_details(transcript, str(root_b))
+
+    assert [value for value in parsed_lines if isinstance(value, str) and value.endswith("\n")] == [second_line]
+    assert second["changes"] == {str(root_a / "a.py"): {"M"}, str(root_a / "b.py"): {"A"}}
+    assert same_raw_parse["changes"] == {str(root_b / "a.py"): {"M"}, str(root_b / "b.py"): {"A"}}
+    assert second["usage"]["generated_tokens"] == 12
+
+
+def test_scan_claude_transcript_waits_for_partial_lines_and_resets_after_replacement(tmp_path):
+    session_files._CLAUDE_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "c.jsonl"
+    partial_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 5}, "content": [
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": "/tmp/a.py"}}]}})
+    transcript.write_text(partial_line, encoding="utf-8")
+    assert session_files.scan_claude_transcript_details(transcript)["changes"] == {}
+
+    transcript.write_text(partial_line + "\n", encoding="utf-8")
+    complete = session_files.scan_claude_transcript_details(transcript)
+    assert complete["changes"] == {"/tmp/a.py": {"M"}}
+    assert complete["usage"]["generated_tokens"] == 5
+
+    replacement_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 3}, "content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/b.py"}}]}}) + "\n"
+    transcript.write_text(replacement_line, encoding="utf-8")
+    replacement = session_files.scan_claude_transcript_details(transcript)
+    assert replacement["changes"] == {"/tmp/b.py": {"A"}}
+    assert replacement["usage"]["generated_tokens"] == 3
 
 
 def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path):

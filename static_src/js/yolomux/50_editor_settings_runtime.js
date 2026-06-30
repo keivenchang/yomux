@@ -747,7 +747,17 @@ function applyCssSettings() {
   const statusPulsePeriodMs = Math.max(1, agentStatusPulsePeriodMs);
   root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
   root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
-  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 250))));
+  // Quantize the opacity pulse into ~125ms steps (steps(N) timing): step size = period / N with
+  // N = round(period / 125). 125ms (~8 opacity updates/sec at the 2.55s default) was chosen over:
+  //   - 250ms (the old value): ~4/sec read as a perceptible staircase on the 0.16->1 ramp;
+  //   - 50ms: ~20/sec is near-continuous but pays close to full 60fps repaint cost on EVERY status
+  //     ball (per-window, tabs, YO!info, topbar) -- the stepping exists to avoid exactly that;
+  //   - 500ms: ~3 samples per cycle looks like a strobe, not a breathing pulse.
+  // 125ms is the smoothness/cost midpoint: visibly smoother than 250ms yet still far fewer repaints
+  // than a per-frame animation. We pin the STEP size (not a fixed step count) so repaint rate and
+  // perceived smoothness stay ~constant across the whole 250-10000ms period preference; a fixed
+  // count would over-repaint short periods and look chunky on long ones.
+  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 125))));
   if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
@@ -857,6 +867,7 @@ function applySettingsPayload(payload, options = {}) {
   if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
+  const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
   clientSettingsPayload = payload;
   clientSettingsMetadataDeferred = payload.deferred_metadata === true;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
@@ -912,6 +923,12 @@ function applySettingsPayload(payload, options = {}) {
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
+  if (previousAgentStatusPulsePeriodMs !== agentStatusPulsePeriodMs) {
+    // Retiming an existing stepped CSS animation is browser-dependent. Reuse the status owner to
+    // clear phase state and restart only these animations after the new duration is on :root.
+    if (typeof restartAgentWindowActivityPulseAnimations === 'function') restartAgentWindowActivityPulseAnimations();
+    else if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync();
+  }
   if (typeof updateEditorPreviewFontControls === 'function') updateEditorPreviewFontControls();
   if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
   applyGlobalThemeMode({updateEditor: false, updateTerminals: false});

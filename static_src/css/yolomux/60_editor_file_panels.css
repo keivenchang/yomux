@@ -3552,7 +3552,7 @@ body.theme-light .file-tree-row.tabber-row {
    Info Bar / YO!info window button. */
 .file-tree-row.tabber-row .tabber-window-pid {
   flex: 0 0 auto;
-  color: var(--text-muted-cool);
+  color: var(--subwindow-pid-color);
   font: var(--ui-font-size-xs)/1 var(--mono-font);
   white-space: nowrap;
 }
@@ -3624,6 +3624,9 @@ body.theme-light .file-tree-row.tabber-row {
   inline-size: var(--file-tree-date-column-width);
   color: var(--tabber-detail-color);
   font-weight: 600;
+}
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected):not(.current-file)[data-recency] > .file-tree-date {
+  color: var(--subwindow-recency-color);
 }
 .file-tree-row.tabber-row.tabber-status-long .file-tree-date {
   display: block;

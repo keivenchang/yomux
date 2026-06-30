@@ -33,6 +33,8 @@ from yolomux_lib import file_index
 
 
 SLOWEST_FIRST_TESTS = (
+    "tests/test_yoagent_stream_state.py::test_yoagent_stream_callback_truncates_oversized_auxiliary_history",
+    "tests/test_browser_share.py::test_generated_share_link_mirrors_interactive_ui_surface_matrix",
     "tests/test_browser_layout.py::test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry",
     "tests/test_browser_layout.py::test_preview_popout_toolbar_and_state_sync",
     "tests/test_browser_layout.py::test_dockview_pinned_tab_invalid_non_pinned_target_shows_red_dashes",

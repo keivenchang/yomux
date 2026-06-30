@@ -1132,8 +1132,8 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
                 && !visibleText('.file-explorer-changes-panel').includes('TypeError'));
               const differText = visibleText('.file-explorer-changes-panel');
               await applyShareUiState({finder: {root: rootPath, rootMode: 'sync', mode: 'tabber', session: '6'}});
-              const tabberReady = await waitFor(() => Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type="repo"]'))
-                .some(row => row.dataset.tabberRepoRoot === rootPath));
+                  const tabberReady = await waitFor(() => Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type="window"]'))
+                    .some(row => (row.textContent || '').includes('1:codex')));
               const tabberText = visibleText('.file-explorer-changes-panel');
               return {
                 finderReady,
@@ -1169,7 +1169,8 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     assert "finding branch" not in metrics["sessionTabText"], metrics
     assert metrics["bodyHasLoadFailed"] is False, metrics
     assert "DONE.md" in metrics["differText"], metrics
-    assert root_path in metrics["tabberText"], metrics
+    assert "1:codex" in metrics["tabberText"], metrics
+    assert "Compare:" not in metrics["tabberText"], metrics
     assert "valid-share-token" in seen_tokens
 
 
@@ -1854,7 +1855,8 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
         stop_isolated_browser_share_app(runtime)
 
 
-def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, monkeypatch, tmp_path):
+@pytest.mark.parametrize("matrix_section", ("chrome", "finder", "resilience", "popovers"))
+def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, monkeypatch, tmp_path, matrix_section):
     repo_root = tmp_path / "share-matrix-repo"
     (repo_root / "src").mkdir(parents=True)
     (repo_root / "docs").mkdir()
@@ -2457,45 +2459,46 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert initial_metrics["status"] == "mirrored"
         assert_terminal_health(initial_metrics)
 
-        for menu_id in ["file", "view", "tmux", "tabs", "help"]:
-            host = host_phase("menu", menu_id)
-            metrics = wait_viewer_phase(f"menu-{menu_id}")
-            assert host["menuOpen"] == menu_id, host
-            assert metrics["menuOpen"] == menu_id, metrics
-            assert metrics["detail"]["menuId"] == menu_id, metrics
-            assert metrics["menuText"].strip(), metrics
-            assert metrics["menuVisible"] is True, metrics
-            assert metrics["menuCommandCount"] >= 1, metrics
-            assert metrics["menuCommandCount"] == metrics["detail"]["commandCount"], metrics
-            assert metrics["menuActiveCommandCount"] >= 1, metrics
-            assert metrics["menuActiveCommandCount"] == metrics["detail"]["activeCommandCount"], metrics
-            assert metrics["menuRect"]["width"] >= 80 and metrics["menuRect"]["height"] >= 24, metrics
+        if matrix_section == "chrome":
+            for menu_id in ["file", "view", "tmux", "tabs", "help"]:
+                host = host_phase("menu", menu_id)
+                metrics = wait_viewer_phase(f"menu-{menu_id}")
+                assert host["menuOpen"] == menu_id, host
+                assert metrics["menuOpen"] == menu_id, metrics
+                assert metrics["detail"]["menuId"] == menu_id, metrics
+                assert metrics["menuText"].strip(), metrics
+                assert metrics["menuVisible"] is True, metrics
+                assert metrics["menuCommandCount"] >= 1, metrics
+                assert metrics["menuCommandCount"] == metrics["detail"]["commandCount"], metrics
+                assert metrics["menuActiveCommandCount"] >= 1, metrics
+                assert metrics["menuActiveCommandCount"] == metrics["detail"]["activeCommandCount"], metrics
+                assert metrics["menuRect"]["width"] >= 80 and metrics["menuRect"]["height"] >= 24, metrics
 
-        host_phase("shortcuts")
-        shortcuts = wait_viewer_phase("help-shortcuts")
-        assert shortcuts["shortcutsOpen"] is True, shortcuts
-        assert "Keyboard Shortcuts and Legends" in shortcuts["shortcutsText"], shortcuts
+            host_phase("shortcuts")
+            shortcuts = wait_viewer_phase("help-shortcuts")
+            assert shortcuts["shortcutsOpen"] is True, shortcuts
+            assert "Keyboard Shortcuts and Legends" in shortcuts["shortcutsText"], shortcuts
 
-        host_phase("about")
-        about = wait_viewer_phase("help-about")
-        assert any(title.endswith("About") for title in about["modalTitles"]) or "About" in about["modalText"], about
-        assert "Keiven Chang" in about["text"], about
+            host_phase("about")
+            about = wait_viewer_phase("help-about")
+            assert any(title.endswith("About") for title in about["modalTitles"]) or "About" in about["modalText"], about
+            assert "Keiven Chang" in about["text"], about
 
-        host_phase("shareModal")
-        share_modal = wait_viewer_phase("share-modal")
-        assert "share-open" in share_modal["modalClass"], share_modal
-        assert any("YO!share" in title for title in share_modal["modalTitles"]) or "YO!share" in share_modal["modalText"], share_modal
-        assert "debug upload on" in share_modal["text"] or "Debug/profiling upload" in share_modal["text"], share_modal
-        assert share_modal["hasSecretToken"] is False, share_modal
-        assert created["token"] not in share_modal["text"], share_modal
+            host_phase("shareModal")
+            share_modal = wait_viewer_phase("share-modal")
+            assert "share-open" in share_modal["modalClass"], share_modal
+            assert any("YO!share" in title for title in share_modal["modalTitles"]) or "YO!share" in share_modal["modalText"], share_modal
+            assert "debug upload on" in share_modal["text"] or "Debug/profiling upload" in share_modal["text"], share_modal
+            assert share_modal["hasSecretToken"] is False, share_modal
+            assert created["token"] not in share_modal["text"], share_modal
 
-        host_phase("info", "info")
-        info = wait_viewer_phase("info-info")
-        assert "YO!info" in info["text"] or "Session" in info["text"], info
+            host_phase("info", "info")
+            info = wait_viewer_phase("info-info")
+            assert "YO!info" in info["text"] or "Session" in info["text"], info
 
-        host_phase("info", "yoagent")
-        yoagent = wait_viewer_phase("info-yoagent")
-        assert "YO!agent" in yoagent["text"] or "Ask YO!agent" in yoagent["text"], yoagent
+            host_phase("info", "yoagent")
+            yoagent = wait_viewer_phase("info-yoagent")
+            assert "YO!agent" in yoagent["text"] or "Ask YO!agent" in yoagent["text"], yoagent
 
         finder_cases = [
             ("files", "sync", "az", "none"),
@@ -2506,51 +2509,53 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             ("diff", "fixed", "az", "date"),
             ("files", "sync", "az", "relative"),
         ]
-        for mode, root_mode, sort_mode, date_mode in finder_cases:
-            host = host_phase("finder", mode, root_mode, sort_mode, date_mode)
-            metrics = wait_viewer_phase(f"finder-{mode}-{root_mode}-{sort_mode}-{date_mode}")
-            assert host["finderMode"] == mode, host
-            assert host["rootMode"] == root_mode, host
-            assert host["dateMode"] == date_mode, host
-            assert metrics["detail"]["finderMode"] == mode, metrics
-            assert metrics["detail"]["rootMode"] == root_mode, metrics
-            assert metrics["detail"]["dateMode"] == date_mode, metrics
-            assert metrics["detail"]["finderPanelCount"] <= 1, metrics
-            if mode == "diff":
-                assert host["sessionFilesSortMode"] == sort_mode, host
-            else:
-                assert host["treeSortMode"] == sort_mode, host
-            if date_mode == "relative":
-                assert "Ago" in metrics["text"] or "date=relative/Ago" in metrics["text"], metrics
+        if matrix_section == "finder":
+            for mode, root_mode, sort_mode, date_mode in finder_cases:
+                host = host_phase("finder", mode, root_mode, sort_mode, date_mode)
+                metrics = wait_viewer_phase(f"finder-{mode}-{root_mode}-{sort_mode}-{date_mode}")
+                assert host["finderMode"] == mode, host
+                assert host["rootMode"] == root_mode, host
+                assert host["dateMode"] == date_mode, host
+                assert metrics["detail"]["finderMode"] == mode, metrics
+                assert metrics["detail"]["rootMode"] == root_mode, metrics
+                assert metrics["detail"]["dateMode"] == date_mode, metrics
+                assert metrics["detail"]["finderPanelCount"] <= 1, metrics
+                if mode == "diff":
+                    assert host["sessionFilesSortMode"] == sort_mode, host
+                else:
+                    assert host["treeSortMode"] == sort_mode, host
+                if date_mode == "relative":
+                    assert "Ago" in metrics["text"] or "date=relative/Ago" in metrics["text"], metrics
 
-        for visible, mode in [(False, "files"), (True, "files"), (False, "diff"), (True, "diff")]:
-            host = host_phase("visible", visible, mode)
-            metrics = wait_viewer_phase(f"finder-{'show' if visible else 'hide'}-{mode}")
-            assert host["finderOpen"] is visible, host
-            assert metrics["detail"]["finderOpen"] is visible, metrics
-            assert metrics["detail"]["finderPanelCount"] <= 1, metrics
+            for visible, mode in [(False, "files"), (True, "files"), (False, "diff"), (True, "diff")]:
+                host = host_phase("visible", visible, mode)
+                metrics = wait_viewer_phase(f"finder-{'show' if visible else 'hide'}-{mode}")
+                assert host["finderOpen"] is visible, host
+                assert metrics["detail"]["finderOpen"] is visible, metrics
+                assert metrics["detail"]["finderPanelCount"] <= 1, metrics
 
-        host_phase("staleDifferPrecondition")
-        stale_differ = wait_viewer_phase("finder-restore-stale-diff")
-        assert stale_differ["staleDifferSentinel"] is True, stale_differ
-        assert stale_differ["changesPanelCount"] >= 1, stale_differ
-        automatic_restore = host_phase("automaticFinderRestore")
-        assert automatic_restore["topologyPublished"] is True, automatic_restore
-        restored_finder = wait_viewer_phase("finder-restore-topology-keyframe", timeout=14)
-        assert restored_finder["detail"]["finderOpen"] is True, restored_finder
-        assert restored_finder["detail"]["finderMode"] == "files", restored_finder
-        assert restored_finder["detail"]["finderPanelCount"] <= 1, restored_finder
-        assert restored_finder["staleDifferSentinel"] is False, restored_finder
-        assert restored_finder["changesPanelCount"] == 0, restored_finder
+            host_phase("staleDifferPrecondition")
+            stale_differ = wait_viewer_phase("finder-restore-stale-diff")
+            assert stale_differ["staleDifferSentinel"] is True, stale_differ
+            assert stale_differ["changesPanelCount"] >= 1, stale_differ
+            automatic_restore = host_phase("automaticFinderRestore")
+            assert automatic_restore["topologyPublished"] is True, automatic_restore
+            restored_finder = wait_viewer_phase("finder-restore-topology-keyframe", timeout=14)
+            assert restored_finder["detail"]["finderOpen"] is True, restored_finder
+            assert restored_finder["detail"]["finderMode"] == "files", restored_finder
+            assert restored_finder["detail"]["finderPanelCount"] <= 1, restored_finder
+            assert restored_finder["staleDifferSentinel"] is False, restored_finder
+            assert restored_finder["changesPanelCount"] == 0, restored_finder
 
-        before_rapid = viewer_state()
-        rapid_loop = host_phase("finderToggleLoop", 6, 0, "rapid")
-        assert rapid_loop["finderOpen"] is True, rapid_loop
-        rapid = wait_viewer_phase("finder-toggle-loop-rapid", timeout=14)
-        assert rapid["detail"]["finderOpen"] is True, rapid
-        assert rapid["detail"]["count"] == 6, rapid
-        assert_terminal_health(rapid)
-        assert rapid["droppedFrames"] == before_rapid["droppedFrames"], json.dumps({
+        if matrix_section == "resilience":
+            before_rapid = viewer_state()
+            rapid_loop = host_phase("finderToggleLoop", 6, 0, "rapid")
+            assert rapid_loop["finderOpen"] is True, rapid_loop
+            rapid = wait_viewer_phase("finder-toggle-loop-rapid", timeout=14)
+            assert rapid["detail"]["finderOpen"] is True, rapid
+            assert rapid["detail"]["count"] == 6, rapid
+            assert_terminal_health(rapid)
+            assert rapid["droppedFrames"] == before_rapid["droppedFrames"], json.dumps({
             "beforeDropped": before_rapid["droppedFrames"],
             "afterDropped": rapid["droppedFrames"],
             "lastReplayError": rapid["lastReplayError"],
@@ -2558,18 +2563,18 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             "keyframeRequestsSuppressed": rapid["keyframeRequestsSuppressed"],
             "staleFrames": rapid["staleFrames"],
             "status": rapid["status"],
-        }, sort_keys=True)
-        assert rapid["keyframeRequests"] == before_rapid["keyframeRequests"], {"before": before_rapid, "after": rapid}
+            }, sort_keys=True)
+            assert rapid["keyframeRequests"] == before_rapid["keyframeRequests"], {"before": before_rapid, "after": rapid}
 
-        before_paused = viewer_state()
-        paused_loop = host_phase("finderToggleLoop", 6, 140, "paused")
-        assert paused_loop["finderOpen"] is True, paused_loop
-        paused = wait_viewer_phase("finder-toggle-loop-paused", timeout=16)
-        assert paused["detail"]["finderOpen"] is True, paused
-        assert paused["detail"]["count"] == 6, paused
-        assert paused["detail"]["pauseMs"] == 140, paused
-        assert_terminal_health(paused)
-        assert paused["droppedFrames"] == before_paused["droppedFrames"], json.dumps({
+            before_paused = viewer_state()
+            paused_loop = host_phase("finderToggleLoop", 6, 140, "paused")
+            assert paused_loop["finderOpen"] is True, paused_loop
+            paused = wait_viewer_phase("finder-toggle-loop-paused", timeout=16)
+            assert paused["detail"]["finderOpen"] is True, paused
+            assert paused["detail"]["count"] == 6, paused
+            assert paused["detail"]["pauseMs"] == 140, paused
+            assert_terminal_health(paused)
+            assert paused["droppedFrames"] == before_paused["droppedFrames"], json.dumps({
             "beforeDropped": before_paused["droppedFrames"],
             "afterDropped": paused["droppedFrames"],
             "lastReplayError": paused["lastReplayError"],
@@ -2577,20 +2582,20 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             "keyframeRequestsSuppressed": paused["keyframeRequestsSuppressed"],
             "staleFrames": paused["staleFrames"],
             "status": paused["status"],
-        }, sort_keys=True)
-        assert paused["keyframeRequests"] == before_paused["keyframeRequests"], {"before": before_paused, "after": paused}
+            }, sort_keys=True)
+            assert paused["keyframeRequests"] == before_paused["keyframeRequests"], {"before": before_paused, "after": paused}
 
-        before_safari = viewer_state()
-        safari_loop = host_phase("finderToggleLoop", 3, 2000, "safari-cadence", True)
-        assert safari_loop["finderOpen"] is True, safari_loop
-        assert safari_loop["geometryDigests"] == 3, safari_loop
-        safari = wait_viewer_phase("finder-toggle-loop-safari-cadence", timeout=20)
-        assert safari["detail"]["finderOpen"] is True, safari
-        assert safari["detail"]["count"] == 3, safari
-        assert safari["detail"]["pauseMs"] == 2000, safari
-        assert safari["detail"]["geometryDigests"] == 3, safari
-        assert_terminal_health(safari)
-        assert safari["droppedFrames"] == before_safari["droppedFrames"], json.dumps({
+            before_safari = viewer_state()
+            safari_loop = host_phase("finderToggleLoop", 3, 2000, "safari-cadence", True)
+            assert safari_loop["finderOpen"] is True, safari_loop
+            assert safari_loop["geometryDigests"] == 3, safari_loop
+            safari = wait_viewer_phase("finder-toggle-loop-safari-cadence", timeout=20)
+            assert safari["detail"]["finderOpen"] is True, safari
+            assert safari["detail"]["count"] == 3, safari
+            assert safari["detail"]["pauseMs"] == 2000, safari
+            assert safari["detail"]["geometryDigests"] == 3, safari
+            assert_terminal_health(safari)
+            assert safari["droppedFrames"] == before_safari["droppedFrames"], json.dumps({
             "beforeDropped": before_safari["droppedFrames"],
             "afterDropped": safari["droppedFrames"],
             "lastReplayError": safari["lastReplayError"],
@@ -2598,42 +2603,43 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             "keyframeRequestsSuppressed": safari["keyframeRequestsSuppressed"],
             "staleFrames": safari["staleFrames"],
             "status": safari["status"],
-        }, sort_keys=True)
-        assert safari["keyframeRequests"] == before_safari["keyframeRequests"], {"before": before_safari, "after": safari}
+            }, sort_keys=True)
+            assert safari["keyframeRequests"] == before_safari["keyframeRequests"], {"before": before_safari, "after": safari}
 
-        host_phase("expandWithFinder")
-        expanded = wait_viewer_phase("terminal-expand-with-finder")
-        assert expanded["finderPanelCount"] <= 1, expanded
-        assert_terminal_health(expanded)
+        if matrix_section == "popovers":
+            host_phase("expandWithFinder")
+            expanded = wait_viewer_phase("terminal-expand-with-finder")
+            assert expanded["finderPanelCount"] <= 1, expanded
+            assert_terminal_health(expanded)
 
-        browser.execute_script("tabPopoverShowDelayMs = 0; tabPopoverFollowDelayMs = 0;")
-        host_tab = browser.execute_script(
+            browser.execute_script("tabPopoverShowDelayMs = 0; tabPopoverFollowDelayMs = 0;")
+            host_tab = browser.execute_script(
             """
             return Array.from(document.querySelectorAll('.dockview-pane-tab, .pane-tab'))
               .find(tab => tab.__yolomuxDetachedPopover || tab.querySelector(':scope > .session-popover'));
             """
-        )
-        assert host_tab is not None
-        ActionChains(browser).move_to_element(host_tab).perform()
-        host_phase("tabPopover")
-        tab = wait_viewer_phase("tab-hover-popover")
-        assert tab["tabPopoverText"].strip(), tab
-        expected_rect = tab["detail"].get("tabPopoverRect")
-        actual_rect = tab.get("tabPopoverRect")
-        assert expected_rect and actual_rect, tab
-        for key in ("left", "top", "width", "height"):
-            assert abs(int(actual_rect[key]) - int(expected_rect[key])) <= 2, json.dumps(tab, indent=2, sort_keys=True)
-        assert tab["tabPopoverStyle"].get("left") == tab["detail"]["tabPopoverStyle"]["left"], tab
-        assert tab["tabPopoverStyle"].get("top") == tab["detail"]["tabPopoverStyle"]["top"], tab
-        actual_height = float(str(tab["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
-        expected_height = float(str(tab["detail"]["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
-        assert abs(actual_height - expected_height) <= 2, tab
+            )
+            assert host_tab is not None
+            ActionChains(browser).move_to_element(host_tab).perform()
+            host_phase("tabPopover")
+            tab = wait_viewer_phase("tab-hover-popover")
+            assert tab["tabPopoverText"].strip(), tab
+            expected_rect = tab["detail"].get("tabPopoverRect")
+            actual_rect = tab.get("tabPopoverRect")
+            assert expected_rect and actual_rect, tab
+            for key in ("left", "top", "width", "height"):
+                assert abs(int(actual_rect[key]) - int(expected_rect[key])) <= 2, json.dumps(tab, indent=2, sort_keys=True)
+            assert tab["tabPopoverStyle"].get("left") == tab["detail"]["tabPopoverStyle"]["left"], tab
+            assert tab["tabPopoverStyle"].get("top") == tab["detail"]["tabPopoverStyle"]["top"], tab
+            actual_height = float(str(tab["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
+            expected_height = float(str(tab["detail"]["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
+            assert abs(actual_height - expected_height) <= 2, tab
 
-        host_phase("repoPopover")
-        repo = wait_viewer_phase("finder-repo-popover")
-        assert "feature/share-matrix" in repo["repoPopoverText"], repo
-        assert "2 ahead" in repo["repoPopoverText"], repo
-        assert "3 dirty" in repo["repoPopoverText"], repo
+            host_phase("repoPopover")
+            repo = wait_viewer_phase("finder-repo-popover")
+            assert "feature/share-matrix" in repo["repoPopoverText"], repo
+            assert "2 ahead" in repo["repoPopoverText"], repo
+            assert "3 dirty" in repo["repoPopoverText"], repo
 
         final_metrics = viewer_state()
         max_expected_keyframe_requests = int(final_metrics["elapsedMs"] // 10000) + 1
@@ -2642,7 +2648,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert final_metrics["keyframeRequestBackoffMs"] == 0, final_metrics
         assert final_metrics["keyframeRequests"] <= max_expected_keyframe_requests, final_metrics
         assert final_metrics["rootChildren"] > 0, final_metrics
-        assert_terminal_health(final_metrics)
+        # The chrome section ends in YO!agent, whose pane intentionally replaces the visible terminal.
+        # The initial replay assertion above already proves its terminal placeholder/socket contract.
+        if matrix_section != "chrome":
+            assert_terminal_health(final_metrics)
     finally:
         viewer.quit()
         stop_browser_share_server(server, thread)

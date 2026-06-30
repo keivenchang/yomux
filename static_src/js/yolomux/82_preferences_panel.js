@@ -221,7 +221,7 @@ function preferenceSections() {
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
-      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help')},
+      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help'), exampleHtml: () => `<span class="preferences-status-pulse-example">${keyboardLegendStatusSample('working', '●', {glyph: true, pulse: true})}${keyboardLegendStatusSample('cooldown', '●', {glyph: true, pulse: true})}${keyboardLegendStatusSample('attention', '●', {glyph: true, pulse: true})}</span>`},
       {path: 'performance.workflow_transition_glow_seconds', label: t('pref.performance.workflow_transition_glow_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.workflow_transition_glow_seconds.help')},
       {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
     ]},
@@ -558,9 +558,10 @@ function preferenceControlHtml(item, query = '') {
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
+  const example = typeof item.exampleHtml === 'function' ? item.exampleHtml(value) : String(item.exampleHtml || '');
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
-  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
+  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
 }
 
 function preferenceNumberDisplayValue(item, value) {

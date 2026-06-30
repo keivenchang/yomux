@@ -106,6 +106,10 @@
 }
 .js-debug-graph-view {
   --js-debug-idle-agent-status: #3f4754;
+  --js-debug-agent-attention: var(--bad);
+  --js-debug-agent-working: var(--good);
+  --js-debug-agent-transition: var(--accent-gold);
+  --js-debug-agent-area-opacity: 0.7;
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-bad-connection-rgb: 220 38 38;
@@ -122,6 +126,11 @@
 }
 body.theme-light .js-debug-graph-view {
   --js-debug-idle-agent-status: var(--editor-line-number);
+  /* Keep the agent-state chart distinct on white without changing its dark-theme palette. */
+  --js-debug-agent-attention: #cf1625;
+  --js-debug-agent-working: #17813a;
+  --js-debug-agent-transition: #bf6a00;
+  --js-debug-agent-area-opacity: 0.78;
   --js-debug-agent-token-cyan: #0074a4;
   --js-debug-agent-token-orange: var(--icon-archive);
   --js-debug-agent-token-magenta: #b0009f;
@@ -496,13 +505,13 @@ body.theme-light .js-debug-graph-view {
   stroke: var(--link-soft);
 }
 .js-debug-line--askAgents {
-  stroke: var(--bad);
+  stroke: var(--js-debug-agent-attention);
 }
 .js-debug-line--workingAgents {
-  stroke: var(--good);
+  stroke: var(--js-debug-agent-working);
 }
 .js-debug-line--transitionAgents {
-  stroke: var(--accent-gold);
+  stroke: var(--js-debug-agent-transition);
 }
 .js-debug-line--idleAgents {
   stroke: var(--js-debug-idle-agent-status);
@@ -517,20 +526,20 @@ body.theme-light .js-debug-graph-view {
   stroke: var(--js-debug-series-color, var(--js-debug-agent-token-total));
 }
 .js-debug-area--askAgents {
-  fill: var(--bad);
-  opacity: 0.7;
+  fill: var(--js-debug-agent-attention);
+  opacity: var(--js-debug-agent-area-opacity);
 }
 .js-debug-area--workingAgents {
-  fill: var(--good);
-  opacity: 0.7;
+  fill: var(--js-debug-agent-working);
+  opacity: var(--js-debug-agent-area-opacity);
 }
 .js-debug-area--transitionAgents {
-  fill: var(--accent-gold);
-  opacity: 0.7;
+  fill: var(--js-debug-agent-transition);
+  opacity: var(--js-debug-agent-area-opacity);
 }
 .js-debug-area--idleAgents {
   fill: var(--js-debug-idle-agent-status);
-  opacity: 0.7;
+  opacity: var(--js-debug-agent-area-opacity);
 }
 .js-debug-area--tokensPerAgent {
   fill: var(--accent-sky-strong);
@@ -584,13 +593,13 @@ body.theme-light .js-debug-graph-view {
   color: var(--link-soft);
 }
 .js-debug-legend-swatch--askAgents {
-  color: var(--bad);
+  color: var(--js-debug-agent-attention);
 }
 .js-debug-legend-swatch--workingAgents {
-  color: var(--good);
+  color: var(--js-debug-agent-working);
 }
 .js-debug-legend-swatch--transitionAgents {
-  color: var(--accent-gold);
+  color: var(--js-debug-agent-transition);
 }
 .js-debug-legend-swatch--idleAgents {
   color: var(--js-debug-idle-agent-status);
@@ -775,6 +784,7 @@ body.theme-light .js-debug-graph-view {
   display: none;
 }
 .diff-ref-suggestion-popover.compact {
+  min-width: min(520px, 66.667vw);
   max-height: min(230px, 34vh);
 }
 .diff-ref-suggestion-option {
@@ -1907,6 +1917,17 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-help {
   grid-column: 1 / -1;
   margin-top: 3px;
+}
+.preferences-status-pulse-example {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+.preferences-status-pulse-example .tmux-window-button {
+  min-width: 0;
+  padding: 0;
+  background: transparent;
 }
 .preferences-reset,
 .preferences-inline-action {

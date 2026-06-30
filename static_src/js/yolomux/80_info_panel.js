@@ -25,7 +25,7 @@ function infoGroupingControlsHtml() {
   const optionHtml = level => {
     const dimensions = dimensionsForLevel(level);
     return [
-      `<option value="">None</option>`,
+      `<option value="">${esc(t('info.group.none'))}</option>`,
       ...dimensions.map(dimension => `<option value="${esc(dimension.key)}"${grouping[level] === dimension.key ? ' selected' : ''}>${esc(dimension.label)}</option>`),
     ].join('');
   };
@@ -35,17 +35,17 @@ function infoGroupingControlsHtml() {
     const active = grouping.join('|') === preset.grouping.join('|');
     return `<button type="button" class="info-tree-preset${active ? ' active' : ''}" data-info-preset="${esc(preset.key)}" aria-pressed="${active ? 'true' : 'false'}" title="${esc(preset.title)}">${esc(preset.label)}</button>`;
   }).join('');
-  const searchHtml = `<label class="info-tree-search-control"><span>Search</span><input type="search" data-info-search value="${esc(search)}" placeholder="Search YO!info" aria-label="Search YO!info"></label>`;
-  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="Order by level ${index + 1}">${optionHtml(index)}</select></label>`).join('');
-  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="Sort order">
-          <label class="info-tree-group-select"><span>Sort</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
+  const searchHtml = `<label class="info-tree-search-control"><span>${esc(t('info.search.label'))}</span><input type="search" data-info-search value="${esc(search)}" placeholder="${esc(t('info.search.placeholder'))}" aria-label="${esc(t('info.search.placeholder'))}"></label>`;
+  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="${esc(t('info.group.orderByLevel', {level: index + 1}))}">${optionHtml(index)}</select></label>`).join('');
+  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="${esc(t('info.sort.order'))}">
+          <label class="info-tree-group-select"><span>${esc(t('changes.sort'))}</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
         </div>`;
   return `
         <div class="info-tree-primary-controls">
-          <div class="info-tree-presets" role="group" aria-label="Grouping presets">${presetHtml}</div>
+          <div class="info-tree-presets" role="group" aria-label="${esc(t('info.group.presets'))}">${presetHtml}</div>
           ${searchHtml}
         </div>
-        <div class="info-tree-group-selects" role="group" aria-label="Grouping levels"><span class="info-tree-order-label">Order by:</span>${selects}</div>
+        <div class="info-tree-group-selects" role="group" aria-label="${esc(t('info.group.levels'))}"><span class="info-tree-order-label">${esc(t('info.group.orderBy'))}</span>${selects}</div>
         ${sortControls}`;
 }
 

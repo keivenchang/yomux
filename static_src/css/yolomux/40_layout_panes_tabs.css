@@ -1302,12 +1302,12 @@ body.theme-light .drop-slot.drag-over {
   flex: 0 0 auto;
   min-width: 0;
   overflow: visible;
-  gap: 2px;
+  gap: 0;
 }
 .tmux-pane-tab-token .session-button-text {
   flex: 1 1 auto;
   min-width: 0;
-  gap: 3px;
+  gap: 1px;
 }
 .tmux-pane-tab-token .tab-inline-detail {
   flex: 1 1 auto;
@@ -1560,12 +1560,12 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   flex: 0 0 auto;
   min-width: 0;
   overflow: visible;
-  gap: 2px;
+  gap: 0;
 }
 .pane-tab .session-button-text {
   flex: 1 1 auto;
   min-width: 0;
-  gap: 3px;
+  gap: 1px;
 }
 .pane-tab .session-button-name {
   max-width: 72px;
@@ -1581,7 +1581,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   flex: 1 1 auto;
   overflow: hidden;
 }
@@ -1741,7 +1741,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   flex: 0 1 auto;
   min-width: 18px;
   max-width: 96px;
-  padding-inline: 4px;
+  padding-inline: 2px;
   /* DOIT.57: window buttons read in the normal UI font, not the condensed/bold .tab control font. */
   font-family: var(--ui-font);
   font-stretch: normal;
@@ -1776,7 +1776,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 2px;
+  /* One shared minimum separates state glyph, agent identity, and the window label. */
+  gap: 1px;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -1803,7 +1804,21 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   --agent-status-ball-size: var(--agent-status-ball-size-base);
   margin-inline-start: 0;
-  margin-inline-end: 1px;
+  margin-inline-end: 0;
+}
+.tmux-window-button .agent-window-activity {
+  --subwindow-status-glyph-scale: 0.66;
+  --subwindow-status-slot-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  /* Keep the state glyph and stable agent identity visually distinct without wasting label space. */
+  gap: 3px;
+}
+.tmux-window-button .agent-window-status-placeholder {
+  inline-size: var(--subwindow-status-slot-size);
+  min-inline-size: var(--subwindow-status-slot-size);
+  block-size: var(--subwindow-status-slot-size);
+  flex: 0 0 var(--subwindow-status-slot-size);
+  opacity: 0;
+  pointer-events: none;
 }
 .tmux-window-button .agent-window-activity .agent-icon,
 .session-agent-row .agent-window-activity .agent-icon {
@@ -1821,7 +1836,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot {
   --subwindow-status-attention-fill: var(--danger-strong);
   --subwindow-status-cooldown-fill: var(--agent-status-cooldown);
-  --subwindow-status-glyph-scale: 0.8;
+  --subwindow-status-glyph-scale: 0.66;
+  --subwindow-status-slot-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
   --subwindow-status-glyph-fill: currentColor;
   --subwindow-status-glyph-border-color: color-mix(in srgb, var(--text) 84%, var(--bg) 16%);
   --subwindow-status-glyph-border-color-active: var(--active-control-text);
@@ -1829,10 +1845,13 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  inline-size: var(--subwindow-status-slot-size);
+  min-inline-size: var(--subwindow-status-slot-size);
+  block-size: var(--subwindow-status-slot-size);
+  flex: 0 0 var(--subwindow-status-slot-size);
   border-radius: 0;
   color: transparent !important;
-  margin-inline-start: calc(var(--agent-window-icon-size) * 0.16);
-  margin-inline-end: calc(var(--agent-window-icon-size) * 0.25);
+  margin-inline: 0;
 }
 .tmux-window-button .agent-window-status-dot.heartbeat-pulse,
 .tmux-window-button .agent-window-status-dot.attention-pulse,

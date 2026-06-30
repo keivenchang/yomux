@@ -177,6 +177,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function statusIndicatorToneClasses\(tone, options = \{\}\)[\s\S]*const pulseEnabled = options\.pulse !== false && statusPulseAnimationEnabled\(\)[\s\S]*tone === STATE_KEY\.working[\s\S]*status-indicator--working', pulseEnabled \? 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', pulseEnabled \? 'heartbeat-pulse'[\s\S]*pulseEnabled \? 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', pulseEnabled \? 'heartbeat-pulse'[\s\S]*pulseEnabled \? 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === STATE_KEY\.idle[\s\S]*status-indicator--idle/.test(layoutSource), 'attention/activity-dot status tones are centralized and can omit pulse classes per rendered item');
     assert.ok(/function updateTopbarActivityStatus\(\)[\s\S]*node\.innerHTML = html[\s\S]*scheduleAgentWindowActivityAnimationSync\(node\)/.test(layoutSource), 'topbar attention rerenders explicitly resync the shared attention animation phase');
     assert.ok(/function topbarActivityCountBallHtml\(count, tone/.test(layoutSource) && /statusIndicatorInlineClasses\('',\s*'topbar-activity-count'/.test(layoutSource) && /statusIndicatorDotClasses\(tone,\s*'agent-window-status-dot',\s*\{pulse:\s*false\}\)/.test(layoutSource), 'topbar activity counts inherit shared inline and dot status behavior');
+    assert.ok(/function createTopbarActivityStatus\(\)[\s\S]*button\.onclick = \(\) => openTabberActivityOverview\(\)/.test(layoutSource), 'the topbar AI activity summary opens Tabber instead of YO!agent');
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'text status badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'attention status labels inherit shared status-indicator tone behavior without badge text-transform');
     assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*const tone = agentWindowStatusToneForItem\(item\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(activitySource), 'tmux sub-window status dots inherit shared dot behavior through the shared activity-tone helper');
@@ -203,16 +204,22 @@ async function runEditorPreviewSuite() {
     assert.equal(/#a9ff7a/.test(sessionsCss), false, 'working balls do not peak into the old yellow-lime tone');
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'the --active agent glyph keeps the glow-cadence; status states use a static symbol plus an opacity-pulsed ball');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*display:\s*inline-flex[\s\S]*gap:\s*2px/.test(sessionsCss), 'agent status symbols and balls render side by side through the shared inline-flex activity wrapper');
+    assert.ok(/\.pane-tab-core\s*\{[\s\S]*gap:\s*2px/.test(paneTabsCss), 'session tab chrome keeps each leading icon only 2px from the next item');
+    assert.ok(/\.pane-tab \.session-button-prefix\s*\{[\s\S]*gap:\s*0/.test(paneTabsCss), 'the session number touches its metadata group without a wasted prefix gap');
+    assert.ok(/\.pane-tab \.session-button-text\s*\{[\s\S]*gap:\s*1px/.test(paneTabsCss), 'tab metadata and description use the compact 1px content gap');
+    assert.ok(/\.tmux-window-button\s*\{[\s\S]*padding-inline:\s*2px/.test(paneTabsCss), 'sub-window buttons use compact horizontal padding');
+    assert.ok(/\.tmux-window-button \.tmux-window-name-label\s*\{[\s\S]*gap:\s*1px/.test(paneTabsCss), 'sub-window agent identity and labels share a visible one-pixel minimum gap');
+    assert.ok(/\.tmux-window-button \.agent-window-activity\s*\{[\s\S]*--subwindow-status-slot-size:\s*calc\(var\(--agent-status-ball-size\) \* var\(--subwindow-status-glyph-scale\)\)[\s\S]*gap:\s*3px/.test(paneTabsCss) && /\.tmux-window-button \.agent-window-status-placeholder\s*\{[\s\S]*inline-size:\s*var\(--subwindow-status-slot-size\)[\s\S]*flex:\s*0 0 var\(--subwindow-status-slot-size\)/.test(paneTabsCss), 'sub-window state glyphs and invisible holders share one compact slot with a visible three-pixel icon gap');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)/.test(sessionsCss), 'the shared activity wrapper owns the base agent status-ball size token');
     assert.ok(/\.tmux-window-button \.agent-window-activity,\s*\.session-agent-row \.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)/.test(paneTabsCss), 'tmux sub-window buttons and popover rows use the Tab status-ball size as their 100% reference');
     assert.ok(/--agent-status-cooldown:\s*#ffd633[\s\S]*--agent-status-cooldown-rgb:\s*255 214 51/.test(tokensCss), 'agent cooldown yellow has a dedicated vibrant token separate from generic accent gold');
-    assert.ok(/\.tmux-window-button \.agent-window-status-dot,\s*\.session-agent-row \.agent-window-status-dot,\s*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\s*\{[\s\S]*--subwindow-status-attention-fill:\s*var\(--danger-strong\)[\s\S]*--subwindow-status-cooldown-fill:\s*var\(--agent-status-cooldown\)[\s\S]*--subwindow-status-glyph-scale:\s*0\.8[\s\S]*--subwindow-status-glyph-fill:\s*currentColor[\s\S]*--subwindow-status-glyph-border-color:[\s\S]*border-radius:\s*0[\s\S]*color:\s*transparent/.test(paneTabsCss), 'tmux sub-window, popover row, and Tabber window status dots hide the shared circle glyph with flat 80% play/stop/pause shapes and a shared border owner');
+    assert.ok(/\.tmux-window-button \.agent-window-status-dot,\s*\.session-agent-row \.agent-window-status-dot,\s*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\s*\{[\s\S]*--subwindow-status-attention-fill:\s*var\(--danger-strong\)[\s\S]*--subwindow-status-cooldown-fill:\s*var\(--agent-status-cooldown\)[\s\S]*--subwindow-status-glyph-scale:\s*0\.66[\s\S]*--subwindow-status-glyph-fill:\s*currentColor[\s\S]*--subwindow-status-glyph-border-color:[\s\S]*border-radius:\s*0[\s\S]*color:\s*transparent/.test(paneTabsCss), 'tmux sub-window, popover row, and Tabber window status dots hide the shared circle glyph with flat 66% play/stop/pause shapes and a shared border owner');
     assert.ok(/\.tmux-window-button \.agent-window-status-dot\.status-indicator--working,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.status-indicator--working\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--pr-status-passing\)/.test(paneTabsCss), 'working sub-window glyph fill does not depend on hidden text currentColor');
     assert.ok(/\.tmux-window-button \.agent-window-status-dot\.status-indicator--attention,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--subwindow-status-attention-fill\)/.test(paneTabsCss), 'attention sub-window glyph fill uses the scoped saturated stop-red token, not hidden text currentColor');
     assert.ok(/\.tmux-window-button \.agent-window-status-dot\.status-indicator--cooldown,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.status-indicator--cooldown\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--subwindow-status-cooldown-fill\)/.test(paneTabsCss), 'cooldown sub-window glyph fill uses the scoped yellow owner, not hidden text currentColor or global accent gold');
     assert.equal(/\.tmux-window-button \.agent-window-status-dot,[\s\S]*?\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\s*\{[\s\S]*?(?:overflow:\s*hidden|text-indent:\s*-999px|border-radius:\s*max\(1px, calc\(var\(--agent-status-ball-size-base\) \* 0\.08\)\))/.test(paneTabsCss), false, 'sub-window status dot containers do not clip glyph glow into a rounded box');
     assert.equal(/--subwindow-status-glyph-scale:\s*0\.4/.test(paneTabsCss), false, 'sub-window glyphs never shrink to a stale 40% size');
-    assert.ok(/\.tmux-window-button \.agent-window-status-dot\.status-indicator--working,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.status-indicator--working\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--pr-status-passing\)/.test(paneTabsCss), 'working/play sub-window glyphs stay vibrant green through the shared 80% scale');
+    assert.ok(/\.tmux-window-button \.agent-window-status-dot\.status-indicator--working,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.status-indicator--working\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--pr-status-passing\)/.test(paneTabsCss), 'working/play sub-window glyphs stay vibrant green through the shared 66% scale');
     assert.equal(/agent-window-status-dot--acknowledged|subwindow-status-acknowledged/.test(paneTabsCss + sessionsCss), false, 'acknowledged attention has no gray status-marker styling because it is removed');
     assert.ok(/const agentWindowActivityAcknowledgeDelayMs\s*=\s*700;/.test(activitySource), 'sub-window acknowledgement removes its marker after the 700ms interaction hold');
     assert.equal(/subwindowPulseActive:\s*true/.test(activitySource), false, 'working/play sub-window glyphs use the shared pulseActive path instead of a parallel forever-pulse override');
@@ -235,9 +242,12 @@ async function runEditorPreviewSuite() {
     assert.equal(/(?:\.pane-tab|\.dockview-pane-tab)[^{]*\.agent-window-status-dot::before/.test(paneTabsCss + sessionsCss), false, 'Dockview Tab status dots keep the original shared circle glyph and never get sub-window glyph pseudo-elements');
     assert.ok(/\.agent-window-status-dot\s*\{[\s\S]*font-family:\s*var\(--ui-font\)[\s\S]*font-stretch:\s*normal/.test(sessionsCss), 'agent status dots reset inherited condensed tab text so Tabber session-tab balls do not shrink');
     assert.ok(/\.session-agent-activity-marker \.agent-window-status-dot\s*\{[\s\S]*background:\s*var\(--agent-status-ball-fill, currentColor\)[\s\S]*border:\s*1px solid[\s\S]*filter:\s*none/.test(sessionsCss), 'aggregate Tab status balls are filled and bordered without a static halo');
-    assert.equal(/agent-window-status-dot--segmented|agent-status-segment-bg|conic-gradient\(/.test(sessionsCss + activitySource), false, 'session tabs never render segmented or multi-color status circles');
+    assert.ok(/agent-window-status-dot--segmented[\s\S]*agent-window-status-dot--\$\{aggregateTones\.join\('-'\)\}/.test(activitySource), 'the shared renderer marks mixed parent Tab balls with their complete tone identity');
+    assert.ok(/agent-window-status-dot--attention-cooldown[\s\S]*conic-gradient\(var\(--bad\)[\s\S]*var\(--agent-status-cooldown\)/.test(sessionsCss), 'mixed red/yellow parent Tab balls use crisp conic segments instead of an averaged brown');
+    assert.ok(/agent-window-status-dot--attention-working[\s\S]*conic-gradient\(var\(--bad\)[\s\S]*var\(--pr-status-passing\)/.test(sessionsCss), 'mixed red/green parent Tab balls use the shared two-tone fill');
+    assert.ok(/agent-window-status-dot--attention-cooldown-working[\s\S]*conic-gradient\(var\(--bad\) 0 33\.333%[\s\S]*var\(--agent-status-cooldown\) 33\.333% 66\.666%[\s\S]*var\(--pr-status-passing\) 66\.666% 100%/.test(sessionsCss), 'mixed red/yellow/green parent Tab balls use three equal, crisp segments');
     assert.ok(/function agentWindowStatusToneForItem\(item\)[\s\S]*item\?\.acknowledged === true\) return ''[\s\S]*agentWindowActivityTone\(item\.state\)[\s\S]*\['attention', 'cooldown', STATE_KEY\.working\]\.includes\(tone\)/.test(activitySource), 'one shared status-tone classifier removes acknowledged windows from sub-window glyphs and parent circles');
-    assert.ok(/function sessionStatusAgentWindowSummaryForTab\(session, info, payload = autoApproveStates\.get\(session\)\)[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*const childIsPulsing = visibleItems\.some\(\(\{item\}\) => item\.pulseActive === true\)[\s\S]*pulseActive: childIsPulsing/.test(popoverSource), 'the parent circle takes its color from the selected child and its opacity pulse from any visible child');
+    assert.ok(/function sessionStatusAgentWindowSummaryForTab\(session, info, payload = autoApproveStates\.get\(session\)\)[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*const allAggregateTones = \['attention', 'cooldown', STATE_KEY\.working\][\s\S]*const aggregateTones = allAggregateTones;[\s\S]*pulseActive: childIsPulsing[\s\S]*aggregateTones/.test(popoverSource), 'the parent circle retains every visible child tone while inheriting opacity pulse from any visible child');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared sub-window 100% reference owner');
     assert.ok(/function agentWindowActivityIconHtml\(agentKey, state, idleSeconds, options = \{\}\)[\s\S]*const acknowledged = item\?\.acknowledged === true;[\s\S]*if \(acknowledged && statusOnly\) return ''[\s\S]*const markerHtml = acknowledged \? '' : agentWindowStatusDotHtml/.test(activitySource), 'acknowledgement removes the transient ball/play/pause/stop glyph while preserving the stable sub-window agent identity');
@@ -273,7 +283,9 @@ async function runEditorPreviewSuite() {
     let syncDotCurrentTime = -1;
     const syncDotAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 1550})},
+      effect: {getTiming: () => ({duration: 2550})},
+      cancel() { this.cancelled = (this.cancelled || 0) + 1; },
+      play() { this.played = (this.played || 0) + 1; },
       set currentTime(value) { syncDotCurrentTime = value; },
       get currentTime() { return syncDotCurrentTime; },
     };
@@ -285,7 +297,9 @@ async function runEditorPreviewSuite() {
     let syncAttentionLabelCurrentTime = -2;
     const syncAttentionLabelAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 1550})},
+      effect: {getTiming: () => ({duration: 2550})},
+      cancel() { this.cancelled = (this.cancelled || 0) + 1; },
+      play() { this.played = (this.played || 0) + 1; },
       set currentTime(value) { syncAttentionLabelCurrentTime = value; },
       get currentTime() { return syncAttentionLabelCurrentTime; },
     };
@@ -303,12 +317,18 @@ async function runEditorPreviewSuite() {
     const firstSyncedDelay = api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay');
     api.syncAgentWindowActivityAnimationDelaysForTest(syncRoot);
     assert.equal(api.documentElementStyleForTest().getPropertyValue('--attention-animation-delay'), firstSyncedDelay, 'a second sync keeps the same root animation delay instead of restarting the CSS animation');
+    api.restartAgentWindowActivityPulseAnimationsForTest(syncRoot);
+    assert.equal(syncDotAnimation.cancelled, 1, 'a pulse-period change restarts an existing status-dot animation without a DOM mutation');
+    assert.equal(syncDotAnimation.played, 1, 'the restarted status dot uses the new CSS duration');
+    assert.equal(syncAttentionLabelAnimation.cancelled, 1, 'the shared owner also restarts matching attention-label pulses');
+    assert.equal(syncAttentionLabelAnimation.played, 1, 'the shared owner resumes every matching active pulse');
     assert.ok(/let agentStatusPulsePeriodMs = initialSetting\('performance\.agent_status_pulse_period_ms'\)/.test(bootstrapSource), 'status ball pulse period initializes from the persisted setting');
     assert.ok(/agentStatusPulsePeriodMs = numberSetting\('performance\.agent_status_pulse_period_ms'\)/.test(settingsRuntimeSource), 'status ball pulse period live-updates from settings changes');
     assert.ok(/const statusPulsePeriodMs = Math\.max\(1, agentStatusPulsePeriodMs\)/.test(settingsRuntimeSource) && /root\.setProperty\('--pulse-duration', `\$\{statusPulsePeriodMs \/ 1000\}s`\)/.test(settingsRuntimeSource), 'status balls use the shared setting-backed transition pulse cadence');
-    assert.ok(/root\.setProperty\('--status-pulse-step-count', String\(Math\.max\(1, Math\.round\(statusPulsePeriodMs \/ 250\)\)\)\)/.test(settingsRuntimeSource), 'status ball transition pulse uses one discrete step per roughly 250ms');
-    assert.ok(/--pulse-duration:\s*1\.55s/.test(tokensCss), 'status pulse duration fallback matches the 1550ms default');
-    assert.ok(/--status-pulse-step-count:\s*6/.test(tokensCss) && /--status-pulse-timing:\s*steps\(var\(--status-pulse-step-count\),\s*end\)/.test(tokensCss), 'status pulse timing defaults to six roughly-250ms visual steps per 1550ms period');
+    assert.ok(/root\.setProperty\('--status-pulse-step-count', String\(Math\.max\(1, Math\.round\(statusPulsePeriodMs \/ 125\)\)\)\)/.test(settingsRuntimeSource), 'status ball transition pulse uses one discrete step per roughly 125ms');
+    assert.ok(/const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;[\s\S]*agentStatusPulsePeriodMs = numberSetting\('performance\.agent_status_pulse_period_ms'\)[\s\S]*previousAgentStatusPulsePeriodMs !== agentStatusPulsePeriodMs[\s\S]*restartAgentWindowActivityPulseAnimations\(\)/.test(settingsRuntimeSource), 'a runtime pulse-period update restarts existing status animations through the shared synchronization owner');
+    assert.ok(/--pulse-duration:\s*2\.55s/.test(tokensCss), 'status pulse duration fallback matches the 2550ms default');
+    assert.ok(/--status-pulse-step-count:\s*20/.test(tokensCss) && /--status-pulse-timing:\s*steps\(var\(--status-pulse-step-count\),\s*end\)/.test(tokensCss), 'status pulse timing defaults to twenty roughly-125ms visual steps per 2550ms period');
     assert.ok(/\.agent-window-status-dot--transition-pulse:not\(\.heartbeat-pulse\)\s*\{[\s\S]*animation-timing-function:\s*var\(--status-pulse-timing\)/.test(sessionsCss), 'transition status balls use the stepped timing token');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
     assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation-name:\s*metadata-badge-pulse;[^}]*animation-duration:\s*var\(--pulse-duration\);[^}]*animation-timing-function:\s*var\(--pulse-easing\);[^}]*animation-iteration-count:\s*infinite;/.test(sessionsCss), 'metadata pulse repeats until the server-window class is removed');
@@ -908,6 +928,19 @@ async function runEditorPreviewSuite() {
     const staleWorking = api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey, nowSeconds: 1065, scheduleRefresh: false});
     assert.equal(staleWorking.pulseActive, true, 'working/play keeps glowing while the agent is still working');
     assert.equal(staleWorking.transitionPulseActive, true, 'working/play keeps pulsing while the agent is still working');
+    const alwaysPulsingGreenHtml = api.agentWindowActivityIconHtmlForStatusForTest({kind: 'codex', state: 'working', window_index: 8, window_label: '8:codex'}, 'codex', '1');
+    assert.ok(/status-indicator--working[^"]*agent-window-status-dot--transition-glow|agent-window-status-dot--transition-glow[^"]*status-indicator--working/.test(alwaysPulsingGreenHtml), 'green working status uses the independent transition-pulse class even when broad status animation is disabled');
+    const greenToAskKey = '1:8:green-to-ask';
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: greenToAskKey, nowSeconds: 2000, scheduleRefresh: false}).pulseActive, true, 'green work starts in the continuously pulsing state');
+    const greenToAsk = api.agentWindowActivityIconForTest('codex', 'approval', 0, {transitionKey: greenToAskKey, attention_key: 'green-to-ask-attention', attention_acknowledged: false, nowSeconds: 2001, scheduleRefresh: false});
+    assert.equal(greenToAsk.state, 'attention', 'working can transition directly to the red ASK state');
+    assert.equal(greenToAsk.pulseActive, true, 'green-to-red ASK starts the configured opacity pulse');
+    assert.equal(greenToAsk.transitionPulseActive, true, 'green-to-red ASK uses the shared transition pulse class');
+    const settledGreenToAsk = api.agentWindowActivityIconForTest('codex', 'approval', 0, {transitionKey: greenToAskKey, attention_key: 'green-to-ask-attention', attention_acknowledged: false, nowSeconds: 2065, scheduleRefresh: false});
+    assert.equal(settledGreenToAsk.state, 'attention', 'red ASK remains present after the configured pulse period');
+    assert.equal(settledGreenToAsk.pulseActive, false, 'red ASK becomes steady when its configured pulse period ends');
+    const acknowledgedGreenToAsk = api.agentWindowActivityIconForTest('codex', 'approval', 0, {transitionKey: greenToAskKey, attention_key: 'green-to-ask-attention', attention_acknowledged: true, nowSeconds: 2066, scheduleRefresh: false});
+    assert.equal(acknowledgedGreenToAsk.acknowledged, true, 'explicit acknowledgement removes the red ASK marker after its acknowledgement delay');
     const freshStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1005, scheduleRefresh: false});
     assert.equal(freshStopped.state, 'cooldown', 'a window that just stopped working shows yellow');
     assert.equal(freshStopped.pulseActive, true, 'a fresh stopped marker glows during the configured glow window');
@@ -985,6 +1018,32 @@ async function runEditorPreviewSuite() {
     const backgroundAskWindow = backgroundAskWindowBarHtml.match(/<button[^>]*data-window-index="2"[\s\S]*?<\/button>/)?.[0] || '';
     assert.ok(backgroundAskWindow.includes('agent-icon codex'), 'inactive Codex sub-windows retain their identity icon');
     assert.ok(/agent-window-status-dot[^>]*status-indicator--attention/.test(backgroundAskWindow), 'an unacknowledged approval in inactive 2:codex renders the red stop square');
+    const repeatedAskKey = '8001:2:repeat-ask';
+    const repeatedAskPayload = {agent_windows: [
+      {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', screen_text: 'Would you like to run the following command?', attention_key: repeatedAskKey, attention_acknowledged: false},
+    ]};
+    api.setAutoApproveStateForTest('1', repeatedAskPayload);
+    const repeatedAskPaneInfo = {panes: [
+      {window: '2', window_name: 'codex', process_label: 'codex', window_active: true, active: true},
+    ]};
+    const repeatedAskBeforeAck = api.tmuxWindowBarHtml('1', repeatedAskPaneInfo);
+    const repeatedAskParentBeforeAck = api.tmuxPaneTabHtml('1', repeatedAskPaneInfo, null, false);
+    assert.ok(/agent-window-status-dot[^>]*status-indicator--attention/.test(repeatedAskBeforeAck), 'a fresh ASK displays the red stop in its sub-window');
+    assert.ok(/session-agent-activity-marker[\s\S]*status-indicator--attention/.test(repeatedAskParentBeforeAck), 'a fresh ASK propagates the red stop to its parent Tab');
+    api.applyAttentionAcknowledgementResponseForTest({acknowledged: [repeatedAskKey]});
+    const repeatedAskOptimisticAck = api.tmuxWindowBarHtml('1', repeatedAskPaneInfo);
+    const repeatedAskOptimisticParentAck = api.tmuxPaneTabHtml('1', repeatedAskPaneInfo, null, false);
+    assert.equal(repeatedAskOptimisticAck.includes('agent-window-status-dot'), false, 'the acknowledgement response immediately clears the red stop while the next backend poll is pending');
+    assert.ok(repeatedAskOptimisticAck.includes('agent-window-status-placeholder'), 'an acknowledged sub-window keeps an invisible play/pause/stop slot before its AI icon');
+    assert.ok(repeatedAskOptimisticParentAck.includes('session-agent-activity-marker--placeholder'), 'the optimistic acknowledgement clears the parent red ball but preserves its invisible layout column');
+    assert.equal(/status-indicator--attention/.test(repeatedAskOptimisticParentAck), false, 'the optimistic acknowledgement clears the parent red state');
+    // A later identical prompt is a new server-owned state. Its explicit false must override the
+    // local key cache so the browser never loses a visible ASK because its text was repeated.
+    api.setAutoApproveStateForTest('1', repeatedAskPayload);
+    const repeatedAskRearmed = api.tmuxWindowBarHtml('1', repeatedAskPaneInfo);
+    const repeatedAskParentRearmed = api.tmuxPaneTabHtml('1', repeatedAskPaneInfo, null, false);
+    assert.ok(/agent-window-status-dot[^>]*status-indicator--attention/.test(repeatedAskRearmed), 'a fresh backend false re-arms the same-key red stop after a prior acknowledgement');
+    assert.ok(/session-agent-activity-marker[\s\S]*status-indicator--attention/.test(repeatedAskParentRearmed), 'the parent Tab re-arms with exactly the same red state as its child');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'codex', state: 'working', window_index: 3, last_active_ts: nowSeconds, window_label: '3:codex'},
       {kind: 'codex', state: 'idle', window_index: 2, last_active_ts: nowSeconds - 120, idle_since: nowSeconds - 120, window_label: '2:codex'},
@@ -1008,8 +1067,8 @@ async function runEditorPreviewSuite() {
     assert.equal(mergedRunRows.find(row => row.kind === 'codex' && row.window_index === 1)?.state, 'working', 'newer /api/activity Codex working row overrides stale auto-approve idle row');
     const activityRunWindowBarHtml = api.tmuxWindowBarHtml('1', {panes: runWindowPanes});
     assert.ok(activityRunWindowBarHtml.includes('0:claude') && activityRunWindowBarHtml.includes('1:codex'), 'activity refresh preserves the canonical window labels');
-    assert.ok(/agent-icon claude[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working[\s\S]*0:claude/.test(activityRunWindowBarHtml), 'activity refresh keeps the Claude icon and play glyph with its canonical label');
-    assert.ok(/agent-icon codex[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working[\s\S]*1:codex/.test(activityRunWindowBarHtml), 'activity refresh keeps the Codex icon and play glyph with its canonical label');
+    assert.ok(/agent-window-status-dot[\s\S]*status-indicator--working[\s\S]*agent-icon claude[\s\S]*0:claude/.test(activityRunWindowBarHtml), 'activity refresh places the Claude play glyph before its icon and canonical label');
+    assert.ok(/agent-window-status-dot[\s\S]*status-indicator--working[\s\S]*agent-icon codex[\s\S]*1:codex/.test(activityRunWindowBarHtml), 'activity refresh places the Codex play glyph before its icon and canonical label');
     const manyWindows = Array.from({length: 9}, (_unused, index) => ({
       window: String(index + 1),
       window_name: `w${index + 1}`,
@@ -1823,9 +1882,10 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
     assertNoStandalonePrBadge(html, 'merged default-branch tab');
     const noStatusBallHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
-    assert.ok(noStatusBallHtml.includes('pane-tab-core--without-status-ball'), 'a tab without a status ball marks its session-number prefix compact');
+    assert.ok(/session-agent-activity-marker--placeholder[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot/.test(noStatusBallHtml), 'a tab without a status keeps the invisible canonical ball column');
+    assert.equal(noStatusBallHtml.includes('pane-tab-core--without-status-ball'), false, 'all session tabs use one shared status-ball layout path');
     const statusBallHtml = api.tmuxPaneTabHtml('4', info, {key: 'working'}, true, {leadingHtml: '<span class="agent-window-status-dot"></span>'});
-    assert.equal(statusBallHtml.includes('pane-tab-core--without-status-ball'), false, 'a tab with a status ball preserves its aligned session-number prefix');
+    assert.equal(statusBallHtml.includes('pane-tab-core--without-status-ball'), false, 'a tab with a status ball uses the shared status-ball layout path');
     // #42: a source-inferred PR with no explicit status_label still reports no status (we don't trust a
     // raw merged flag on an inferred PR)...
     assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, merged: true}), '');
@@ -1998,8 +2058,7 @@ async function runEditorPreviewSuite() {
     ]});
     const redTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
     const redMarkerHtml = tabActivityMarkerHtml(redTabHtml);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)/.test(redMarkerHtml), 'red+yellow tab status follows the red child with one red parent ball');
-    assert.equal(/agent-window-status-dot--segmented|agent-window-status-dot--tone-/.test(redMarkerHtml), false, 'red parent ball does not segment child colors');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)[^"]*agent-window-status-dot--attention-cooldown/.test(redMarkerHtml), 'red+yellow tab status renders one dual red/yellow parent ball');
     assert.equal(redMarkerHtml.includes('agent-icon'), false, 'red+yellow tab status does not render any agent symbol');
     api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: '4:1::codex', scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
@@ -2008,8 +2067,7 @@ async function runEditorPreviewSuite() {
     ]});
     const yellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
     const yellowMarkerHtml = tabActivityMarkerHtml(yellowTabHtml);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--cooldown)/.test(yellowMarkerHtml), 'yellow+green tab status follows the yellow child with one yellow parent ball');
-    assert.equal(/agent-window-status-dot--segmented|agent-window-status-dot--tone-/.test(yellowMarkerHtml), false, 'yellow parent ball does not segment child colors');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--cooldown)[^"]*agent-window-status-dot--cooldown-working/.test(yellowMarkerHtml), 'yellow+green tab status renders one dual yellow/green parent ball');
     assert.equal(yellowMarkerHtml.includes('agent-icon'), false, 'yellow+green tab status does not render any agent symbol');
     api.agentWindowActivityIconForTest('claude', 'working', 0, {transitionKey: '4:2::claude', nowSeconds: 5000, scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
@@ -2018,7 +2076,7 @@ async function runEditorPreviewSuite() {
     ]});
     const transitionYellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
     assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--cooldown)/.test(transitionYellowTabHtml), 'tab status keeps the yellow child state when it comes from frontend transition state');
-    assert.equal(/agent-window-status-dot--segmented|agent-window-status-dot--tone-/.test(transitionYellowTabHtml), false, 'frontend transition parent ball does not segment child colors');
+    assert.ok(transitionYellowTabHtml.includes('agent-window-status-dot--cooldown-working'), 'a frontend yellow transition plus another working child uses the same dual yellow/green parent ball');
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude'},
       {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', working_stopped_ts: Math.floor(Date.now() / 1000) - 5},
@@ -2026,8 +2084,7 @@ async function runEditorPreviewSuite() {
     ]});
     const triTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
     const triMarkerHtml = tabActivityMarkerHtml(triTabHtml);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)/.test(triMarkerHtml), 'red+yellow+green tab status follows the red child with one red parent ball');
-    assert.equal(/agent-window-status-dot--segmented|agent-window-status-dot--tone-/.test(triMarkerHtml), false, 'tri-state parent ball does not segment child colors');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)[^"]*agent-window-status-dot--attention-cooldown-working/.test(triMarkerHtml), 'red+yellow+green tab status uses all three colors in one parent ball');
     assert.equal(triMarkerHtml.includes('agent-icon'), false, 'red+yellow+green tab status does not render any agent symbol');
     const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
     for (const file of localeFiles) {
@@ -2191,7 +2248,8 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('boom'), 'debug panel renders JS error rows');
     const debugPaneSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(debugPaneSource.includes('const jsDebugStatsPollMs = 30000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30000;'), 'YO!stats samples, flushes, and redraws its graphs at a thirty-second cadence');
+    assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2000;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30000;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 5000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30000;'), 'YO!stats retries cold-start samples every two seconds, then keeps its thirty-second steady cadence and a bounded request timeout');
+    assert.ok(debugPaneSource.includes("textWithMovingEllipsisHtml(t('debug.waitingForServerStats'))"), 'YO!stats waiting metadata uses the shared localized moving ellipsis');
     assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/if \(event\.type === 'pointerdown'\)[\s\S]*jsDebugGraphRangeSliderDragging = true;[\s\S]*return true;[\s\S]*if \(event\.type === 'change'\)[\s\S]*jsDebugGraphRangeSliderDragging = false;[\s\S]*setDebugGraphRangeFromSlider/.test(debugPaneSource), 'YO!stats range dragging preserves the native input and commits only on change');
     assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
@@ -2454,6 +2512,37 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.agentTokenResolutionSeconds, 300, '24-hour token history retains the server-selected five-minute resolution');
     assert.equal(summary.agentTokenBuckets, 12, 'wide token history stores only server-aggregated points');
     assert.equal(api.debugGraphAgentTokenDisplayBucketsForTest(now).length, 12, 'Agent tokens/min chart reads the downsampled server point series');
+  });
+
+  test('YO!stats token rates use the sampled elapsed time rather than the selected history bucket width', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(4 * 60 * 60);
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 41,
+      records: [{
+        start: Math.floor(now / 1000),
+        duration: 1,
+        sequence: 41,
+        cpu_total_percent: 1,
+        cpu_count: 1,
+      }],
+      agent_token_history: {
+        sequence: 41,
+        resolution_seconds: 120,
+        snapshot: true,
+        records: [{
+          start: Math.floor((now - 120000) / 1000 / 120) * 120,
+          duration: 120,
+          sequence: 41,
+          agent_token_samples: 1,
+          agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
+        }],
+      },
+    });
+    const html = api.debugPanelHtmlForTest();
+    assert.ok(/data-js-debug-axis-max="agentTokens"[^>]*>100</.test(html), '100 tokens over one sampled minute stays 100 tokens/min after the server stores it in a two-minute history bucket');
   });
 
   test('YO!stats split charts render deterministic Y-axis max labels with units', () => {
@@ -2917,6 +3006,80 @@ async function runEditorPreviewSuite() {
 
     assert.equal(requests.length, 0, 'inactive Debug instrumentation does not call stats-sample or stats-history');
     assert.equal(api.jsDebugEventsForTest().length, 1, 'event capture remains available for later YO!stats inspection');
+  });
+
+  await testAsync('YO!stats retries timed-out cold starts quickly, then switches to steady polling after its first sample', async () => {
+    let nextTimerId = 0;
+    const intervals = new Map();
+    const activeIntervals = new Set();
+    const timeouts = new Map();
+    const clearedTimeouts = new Set();
+    const api = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setInterval(callback, ms) {
+        const id = ++nextTimerId;
+        intervals.set(id, {callback, ms});
+        activeIntervals.add(id);
+        return id;
+      },
+      clearInterval(id) {
+        activeIntervals.delete(id);
+      },
+      setTimeout(callback, ms) {
+        const id = ++nextTimerId;
+        timeouts.set(id, {callback, ms});
+        return id;
+      },
+      clearTimeout(id) {
+        clearedTimeouts.add(id);
+      },
+    });
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    let requests = 0;
+    let abortSignal = null;
+    api.setFetchForTest((_url, options = {}) => {
+      requests += 1;
+      if (requests === 1) {
+        abortSignal = options.signal;
+        return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('stats request timed out')), {once: true}));
+      }
+      return Promise.resolve(jsonResponse({
+        pid: 4242,
+        started_at: 1700000000,
+        uptime_seconds: 12,
+        rss_bytes: 1024,
+        cpu_percent: 1,
+        history: {sequence: 1, records: []},
+      }));
+    });
+
+    api.startJsDebugStatsPollingForTest();
+    const coldInterval = [...activeIntervals].map(id => ({id, ...intervals.get(id)})).at(-1);
+    const timeout = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 5000).at(-1);
+    assert.equal(coldInterval.ms, 2000, 'cold-start polling uses the two-second retry cadence');
+    assert.ok(abortSignal, 'the cold-start stats request receives an abort signal');
+    assert.ok(timeout, 'the cold-start stats request arms the five-second timeout');
+    timeout.callback();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(abortSignal.aborted, true, 'the timeout aborts a stalled stats request');
+    assert.equal(api.jsDebugStatsPollingStateForTest().inFlight, false, 'an aborted stats request releases the in-flight guard for the next fast retry');
+
+    coldInterval.callback();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    const steadyInterval = [...activeIntervals].map(id => ({id, ...intervals.get(id)})).at(-1);
+    assert.equal(requests, 2, 'the next cold cadence tick retries the stats request');
+    assert.equal(api.jsDebugStatsPollingStateForTest().firstSampleReceived, true, 'a real stats payload records the first successful sample');
+    assert.equal(steadyInterval.ms, 30000, 'first success re-arms polling at the unchanged thirty-second steady cadence');
+    assert.ok(clearedTimeouts.has(timeout.id), 'the aborted request clears its timeout handle');
+    assert.ok([...timeouts.entries()].some(([id, timer]) => timer.ms === 5000 && clearedTimeouts.has(id)), 'the successful request also clears its timeout handle');
+
+    const waitingHtml = api.debugGraphMetaHtmlForTest();
+    assert.equal(waitingHtml.includes('Waiting for server stats'), false, 'server metadata replaces the waiting state after a successful sample');
+    const waitingApi = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const waitingHtmlBeforeSample = waitingApi.debugGraphMetaHtmlForTest();
+    assert.ok(waitingHtmlBeforeSample.includes('Waiting for server stats') && waitingHtmlBeforeSample.includes('moving-ellipsis'), 'the localized empty state uses the shared animated dots before the first sample');
   });
 
   await testAsync('YO!stats records disconnected client gaps with full-height bad-connection overlays', async () => {
@@ -3945,14 +4108,14 @@ async function runEditorPreviewSuite() {
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Git branch:</span>') && pathOnlyHtml.includes('feature/app') && pathOnlyHtml.includes('lib-main'), 'YO!info leaf rows show labeled Git branch identities when Branch is not already supplied by an ancestor group');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">GitHub PR:</span>') && pathOnlyHtml.includes('#11') && pathOnlyHtml.includes('App feature PR linked through path'), 'YO!info leaf rows show labeled PR descriptions when a PR exists');
     assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path/.test(pathOnlyHtml), 'YO!info generated rows make the PR number clickable and render the PR description after it');
-    assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/10"[\s\S]*>#10<\/a>[\s\S]*App main PR full description[\s\S]*info-tree-status-badge pr-status-open[\s\S]*OPEN[\s\S]*info-tree-status-badge pr-status-failing[\s\S]*CI error/.test(pathOnlyHtml), 'YO!info PR rows show Open lifecycle and CI error badges beside the full description');
-    assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path[\s\S]*info-tree-status-badge pr-status-merged[\s\S]*MERGED/.test(pathOnlyHtml), 'YO!info PR rows reserve purple merged styling for merged PR badges');
+    assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/10"[\s\S]*>#10<\/a>[\s\S]*App main PR full description[\s\S]*ci-indicator tab-symbol pr-status-open[\s\S]*OPEN[\s\S]*ci-indicator tab-symbol pr-status-failing[\s\S]*CI error/.test(pathOnlyHtml), 'YO!info PR rows reuse the same compact status badges as tabs beside the full description');
+    assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path[\s\S]*ci-indicator tab-symbol pr-status-merged[\s\S]*MERGED/.test(pathOnlyHtml), 'YO!info PR rows reuse the shared purple merged badge');
     assert.ok(/<span class="info-tree-field-label">Linear:<\/span>[\s\S]*<a href="https:\/\/linear\.test\/DYN-10"[\s\S]*>DYN-10<\/a>[\s\S]*Main Linear description/.test(pathOnlyHtml), 'YO!info generated rows make the Linear identifier clickable and render the Linear description after it');
     assert.ok(pathOnlyHtml.includes('data-info-open-tab="tab-a"') && pathOnlyHtml.includes('data-info-open-ai-window="0"'), 'YO!info Tab and AI fields are actionable links to the owning tab/window');
     assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && !/\bA(?:S)K\b/.test(pathOnlyHtml), 'YO!info AI rows show shared working/attention activity indicators without a text attention label');
     assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">tmux sub-window:</span>'), 'YO!info leaf rows label Tab session and window actions');
-    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows show labeled branch recency');
+    assert.ok(/info-tree-field-branch[\s\S]*?info-tree-meta-updated/.test(pathOnlyHtml) && !pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows attach branch recency to the Git branch instead of rendering a detached Updated row');
     const pathBranchHtml = api.infoTreeHtmlForTest(records, ['path', 'branch']);
     assert.equal((pathBranchHtml.match(/info-tree-field-path|info-tree-field-branch/g) || []).length, 0, 'YO!info hides every identity row already supplied by ancestor groups');
     assert.ok(pathBranchHtml.includes('<span class="info-tree-group-dimension">Git branch:</span>'), 'YO!info Branch group headers render as Git branch');
@@ -4031,6 +4194,11 @@ async function runEditorPreviewSuite() {
     assert.ok(noOwnerMain.includes('/repo/orphan'), 'YO!info still shows a path in the record box when no ancestor group supplies it');
     assert.ok(noOwnerMain.includes('orphan-branch'), 'YO!info shows the local branch identity for otherwise unowned path rows');
     assert.equal(/No tab|No AI|No PR|No Linear/.test(noOwnerMain), false, 'YO!info leaf rows omit missing Tab, AI, PR, and Linear placeholders');
+    const pathFreshnessRecord = {...noOwnerRecord, id: 'path-freshness', branchKey: '__no_branch__', branchLabel: 'No branch', branchTitle: 'No branch', updated: '4 days ago', updatedTitle: '4 days ago', updatedTs: 4, updatedSource: 'git-commit', pathActivityTs: Math.floor(Date.now() / 1000) - (5 * 60), pathActivitySource: 'dirty'};
+    const pathFreshnessHtml = api.infoRecordHtmlForTest(pathFreshnessRecord);
+    assert.ok(/info-tree-field-path[\s\S]*?info-tree-meta-path-activity[\s\S]*?5 minutes ago/.test(pathFreshnessHtml) && pathFreshnessHtml.includes('title="Latest repository path activity: 5 minutes ago"') && !pathFreshnessHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info gives Path its own repository activity recency instead of reusing a Git commit date');
+    const groupedPathFreshnessHtml = api.infoTreeHtmlForTest([pathFreshnessRecord], ['path']);
+    assert.ok(/info-tree-group-label-path[\s\S]*?info-tree-meta-path-activity[\s\S]*?5 minutes ago/.test(groupedPathFreshnessHtml), 'YO!info Path group headers retain the same path activity recency when the leaf Path field is hidden');
     const describedRecord = {
       id: 'described',
       tabKey: 'tab-a',
@@ -4042,6 +4210,8 @@ async function runEditorPreviewSuite() {
       aiWindow: '2',
       aiLabel: '2:claude',
       aiTitle: 'Open tab-a window 2',
+      aiPid: 2345,
+      aiIdleSince: Math.floor(Date.now() / 1000) - (10 * 60),
       pathKey: '/repo/app',
       pathLabel: '/repo/app',
       pathTitle: '/repo/app',
@@ -4060,9 +4230,12 @@ async function runEditorPreviewSuite() {
       updated: '3 days ago',
       updatedTitle: '3 days ago',
       updatedTs: 12,
+      updatedSource: 'git-commit',
     };
     const describedMain = api.infoRecordHtmlForTest(describedRecord, {hiddenDimensions: ['path']});
     assert.ok(!describedMain.includes('/repo/app') && describedMain.includes('<span class="info-tree-field-label">Git branch:</span>') && describedMain.includes('>main<') && describedMain.includes('<span class="info-tree-field-label">GitHub PR:</span>') && describedMain.includes('#12') && describedMain.includes('PR title exists') && describedMain.includes('<span class="info-tree-field-label">Linear:</span>') && describedMain.includes('DYN-12') && describedMain.includes('Linear title exists') && describedMain.includes('data-info-open-tab="tab-a"') && describedMain.includes('data-info-open-ai-window="2"') && describedMain.includes('3 days ago'), 'YO!info leaf rows contain only requested labeled fields, with ancestor path suppressed and visible branch identity');
+    assert.ok(/info-tree-field-branch[\s\S]*?>main<[\s\S]*?info-tree-meta-updated[\s\S]*?Git commit 3 days ago/.test(describedMain) && describedMain.includes('title="Git commit: 3 days ago"') && !describedMain.includes('<span class="info-tree-field-label">Updated:</span>'), 'YO!info identifies the Git commit date beside its Git branch instead of rendering a detached Updated row');
+    assert.ok(/info-tree-ai-window-token[\s\S]*?info-tree-ai-pid">\(pid=2345\)<\/span>[\s\S]*?info-tree-ai-recency info-tree-trailing-meta">10 min ago<\/span>/.test(describedMain), 'YO!info keeps the PID inline after its tmux sub-window button and the recency trailing');
     assert.ok(describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>') < describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>'), 'YO!info leaf rows render Linear before PR');
     const fullCss = fs.readFileSync('static/yolomux.css', 'utf8');
     const infoTreeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
@@ -4157,7 +4330,14 @@ async function runEditorPreviewSuite() {
     assert.equal(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showLeading:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showState:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showBadges:\s*false/.test(infoSource), false, 'YO!info Tab values do not suppress the real tab YO marker, state badge path, or status indicators');
     assert.ok(/function tmuxPaneTabTokenHtml\(session, options = \{\}\)[\s\S]*tabIsPinned\(item\)[\s\S]*pinnedTabIconHtml\(item\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'shared compact tmux pane-tab tokens include the same pinned-tab icon helper as real tabs');
     assert.ok(/function infoRecordAiWindowButtonHtml\(record,[\s\S]*data-info-open-ai-window[\s\S]*tmuxWindowButtonHtml\(\{[\s\S]*classes:\s*\['info-tree-ai-window-button'\][\s\S]*title,/.test(infoSource) && !/function infoRecordAiWindowButtonHtml\(record,[\s\S]*activityAnimate:\s*false/.test(infoSource), 'YO!info AI values use the shared animated Info Bar button helper');
-    assert.ok(/\.info-tree-ai-value\.tmux-window-bar\s*\{[\s\S]*justify-content:\s*flex-start[\s\S]*\.info-tree-status-badge\s*\{[\s\S]*text-transform:\s*uppercase/.test(infoTreeCss), 'YO!info keeps the shared tmux sub-window button inline while preserving compact status badges');
+	    assert.ok(/\.info-tree-ai-value\.tmux-window-bar\s*\{[\s\S]*justify-content:\s*flex-start[\s\S]*\.info-tree-field-ai \.info-tree-ai-value\.tmux-window-bar\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*width:\s*100%/.test(infoTreeCss), 'YO!info sub-window rows stretch the shared button container so trailing metadata can align with Tabber dates');
+	    assert.ok(/function pullRequestStatusBadgeHtml\(session, text, statusClass, options = \{\}\)[\s\S]*ci-indicator tab-symbol[\s\S]*function infoStatusBadgeHtml\(record, text, className, options = \{\}\)[\s\S]*pullRequestStatusBadgeHtml\(record\?\.tabSession/.test(`${fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')}\n${infoSource}`), 'YO!info PR status labels reuse the same badge renderer as MAIN and tab DRAFT badges');
+	    assert.ok(/\.info-tree-field-branch \.info-tree-field-value,[\s\S]*\.info-tree-field-ai \.info-tree-field-value\s*\{[\s\S]*display:\s*flex[\s\S]*\.info-tree-field-branch \.info-tree-meta-updated,[\s\S]*\.info-tree-field-ai \.info-tree-trailing-meta\s*\{[\s\S]*margin-inline-start:\s*auto/.test(infoTreeCss), 'YO!info branch and sub-window recency share the right-aligned trailing metadata parent');
+	    assert.ok(/\.info-tree-trailing-meta\s*\{[\s\S]*color:\s*var\(--subwindow-recency-color\)[\s\S]*font:\s*var\(--ui-font-size-2xs\)\/1 var\(--mono-font\)/.test(infoTreeCss), 'YO!info Git commit and sub-window recency inherit one shared trailing-metadata style');
+	    assert.ok(/function infoRecordAiValueHtml\(record, options = \{\}\) \{[\s\S]*\$\{buttonHtml\}\$\{status\}\$\{pid\}\$\{recency\}/.test(infoSource), 'YO!info places PID inline after the button/status and keeps recency trailing');
+	    assert.ok(/\.info-tree-ai-pid\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*color:\s*var\(--subwindow-pid-color\)/.test(infoTreeCss), 'YO!info PID stays inline with its muted shared metadata color');
+	    assert.ok(/:root\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-soft\)[\s\S]*--subwindow-recency-color:\s*var\(--text-muted-soft\)[\s\S]*body\.theme-light\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-cool\)[\s\S]*--subwindow-recency-color:\s*var\(--muted\)/.test(tokenCss), 'sub-window metadata is subdued only in dark mode while preserving the existing light colors');
+	    assert.ok(/function infoRecordAiRecencyHtml\(record\)[\s\S]*function infoRecordAiPidHtml\(record\)[\s\S]*tmuxWindowPidText\(record\?\.aiPid\)/.test(infoSource), 'YO!info reuses the shared PID formatter and existing recency formatter');
     assert.ok(/\.info-tree-group-child-count\s*\{[\s\S]*margin-inline-start:\s*6px[\s\S]*color:\s*var\(--muted\)/.test(infoTreeCss), 'YO!info child counts render inline beside group labels in a less prominent color');
     assert.equal(infoTreeCss.includes('.info-tree-group-count'), false, 'YO!info CSS no longer defines the detached count bubble');
     assert.ok(/\.info-tree-group\[data-info-depth="0"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*0[\s\S]*z-index:\s*4[\s\S]*\.info-tree-group\[data-info-depth="1"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*var\(--info-tree-sticky-level-block\)[\s\S]*z-index:\s*5[\s\S]*\.info-tree-group\[data-info-depth="3"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*calc\(var\(--info-tree-sticky-level-block\) \* 3\)/.test(infoTreeCss), 'YO!info sticky parent headers stack by tree depth instead of piling on top of each other');
@@ -4174,7 +4354,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/delegate\(panel, 'click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
     assert.ok(infoPanelSource.includes('data-info-search') && infoPanelSource.includes('setInfoSearch'), 'YO!info toolbar exposes a search box that filters relationship records');
     assert.ok(infoPanelSource.includes('data-info-refresh title="${esc(t(\'meta.refresh\'))}"') && infoPanelSource.includes('setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t(\'meta.refresh\'), t(\'meta.refresh\'))'), 'YO!info metadata refresh button uses the compact Refresh label');
-    assert.ok(infoPanelSource.includes('info-tree-order-label">Order by:</span>') && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render as Order by: select > select > select > select');
+    assert.ok(infoPanelSource.includes("info-tree-order-label\">${esc(t('info.group.orderBy'))}</span>") && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render their localized Order by: label before select > select > select > select');
     assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
     assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');
     assert.ok(/delegate\(panel, 'click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
@@ -6377,6 +6557,9 @@ async function runEditorPreviewSuite() {
     // the English brand text, while the two Chinese catalogs render the requested glyphs (asserted below).
     assert.equal(en['brand.tab.info'], 'YO!info', 'en YO!info tab label');
     assert.equal(en['brand.tab.agent'], 'YO!agent', 'en YO!agent tab label');
+    assert.equal(en['menu.tmux.yo.on'], 'YO (auto approve; YOLO)', 'the tmux YO menu identifies YO as auto-approve / YOLO');
+    assert.equal(en['menu.tmux.yolo.enableFor'], "Enable YOLO (auto-approve) for Tmux Session '{session}'", 'the overflow YOLO action states its auto-approve behavior');
+    assert.ok(/function tmuxCurrentYoloCommand\(session\)[\s\S]*const label = t\('menu\.tmux\.yo\.on'\)/.test(fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')), 'the tmux dropdown uses the explicit YO auto-approve label regardless of its current state');
     assert.equal(es['menu.file'], 'Archivo', 'Phase 1: es translates a representative menu label');
     assert.equal(es['pref.reset.cancel'], 'Cancelar', 'Phase 1: es translates the reset cancel button');
     assert.ok(es['pref.appearance.file_explorer_font_size.label'].includes('{name}'), 'Phase 1: es preserves interpolation placeholders');

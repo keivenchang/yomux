@@ -265,6 +265,7 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerOpenIntentStorageKey = 'yolomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
+const fileExplorerTabberExpandedStorageKey = 'yolomux.fileExplorer.tabberExpanded.v1';
 const fileExplorerTabberLookbackHoursStorageKey = 'yolomux.fileExplorer.tabberLookbackHours.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
@@ -615,11 +616,10 @@ let preferencesScrollFlushTimer = null;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 const changesFolderAutoCollapsed = new Set();
-// Tabber (Finder pane 3rd mode) COLLAPSED set, keyed by synthetic node path (s_<id>/w_<i>/r_<n>).
-// The Tabber defaults to fully expanded; collapsing a node adds it here (like the Differ's
-// changesFolderCollapsed). Persisted so the open/closed tree survives reloads. Threaded through the
-// shared row pipeline as options.collapsedSet.
+// Tabber session rows start expanded while each sub-window's directory branch starts collapsed.
+// Persist both explicit choices, so a refresh cannot undo a user's disclosure click.
 const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedStorageKey);
+const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}, agents: []};

@@ -2,18 +2,11 @@
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  /* Keep the branch and description column stable as the numeric session changes on reload. */
   justify-content: flex-start;
-  min-width: 4ch;
   color: inherit;
   background: transparent;
   border: 0;
   font-weight: 500;
-}
-/* A status ball establishes the tab's visual leading column. Without one, preserve no empty column
-   before the branch/PR content; the shared pane-tab renderer adds this state for every tab surface. */
-.pane-tab-core--without-status-ball .session-button-number {
-  min-width: 0;
 }
 .session-button-prefix {
   flex: 0 0 auto;
@@ -257,6 +250,20 @@
   filter: none;
   box-shadow: none;
 }
+/* Parent Tabs summarize every visible child state with equal, crisp colors instead of averaging them
+   into an unreadable brown. The child glyphs remain single-state symbols. */
+.session-agent-activity-marker .agent-window-status-dot--attention-cooldown {
+  --agent-status-ball-fill: conic-gradient(var(--bad) 0 50%, var(--agent-status-cooldown) 50% 100%);
+}
+.session-agent-activity-marker .agent-window-status-dot--attention-working {
+  --agent-status-ball-fill: conic-gradient(var(--bad) 0 50%, var(--pr-status-passing) 50% 100%);
+}
+.session-agent-activity-marker .agent-window-status-dot--cooldown-working {
+  --agent-status-ball-fill: conic-gradient(var(--agent-status-cooldown) 0 50%, var(--pr-status-passing) 50% 100%);
+}
+.session-agent-activity-marker .agent-window-status-dot--attention-cooldown-working {
+  --agent-status-ball-fill: conic-gradient(var(--bad) 0 33.333%, var(--agent-status-cooldown) 33.333% 66.666%, var(--pr-status-passing) 66.666% 100%);
+}
 .session-agent-activity-marker .agent-window-status-dot.status-indicator--working.heartbeat-pulse,
 .session-agent-activity-marker .agent-window-status-dot.status-indicator--cooldown.heartbeat-pulse,
 .session-agent-activity-marker .agent-window-status-dot.status-indicator--attention.heartbeat-pulse {
@@ -427,6 +434,15 @@ html.status-pulse-disabled .ci-indicator.pr-status-failing {
   transform: none !important;
   transition: none !important;
 }
+/* Green play is continuous work, not the optional broad status animation. It must keep its shared
+   opacity pulse even when attention/cooldown animation is disabled in Preferences. */
+html.status-pulse-disabled .status-indicator--dot.status-indicator--working.heartbeat-pulse {
+  animation-name: agent-status-opacity-pulse !important;
+  animation-duration: var(--pulse-duration) !important;
+  animation-delay: var(--attention-animation-delay, 0s) !important;
+  animation-timing-function: var(--status-pulse-timing) !important;
+  animation-iteration-count: infinite !important;
+}
 html.status-pulse-disabled .status-indicator--dot,
 html.status-pulse-disabled .agent-window-status-dot,
 html.status-pulse-disabled .agent-window-agent-icon--active {
@@ -458,6 +474,10 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+.session-agent-activity-marker--placeholder {
+  visibility: hidden;
+  pointer-events: none;
 }
 .session-agent-activity-marker[data-auto-session] {
   cursor: pointer;

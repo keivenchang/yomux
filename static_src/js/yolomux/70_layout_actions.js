@@ -967,11 +967,18 @@ function pullRequestCiStatusClass(pr) {
   return pullRequestStatusClass(pr);
 }
 
+function pullRequestStatusBadgeHtml(session, text, statusClass, options = {}) {
+  const label = String(text || '').trim();
+  if (!label) return '';
+  const labelHtml = options.labelHtml === undefined ? esc(label) : String(options.labelHtml || '');
+  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${statusClass || 'pr-status-unknown'}`)}">${labelHtml}</span>`;
+}
+
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
   if (!['draft', 'closed'].includes(status)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${esc(pullRequestStatusDisplay(pr))}</span>`;
+  return pullRequestStatusBadgeHtml(session, pullRequestStatusDisplay(pr), pullRequestStatusClass(pr));
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {

@@ -410,6 +410,13 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 #status:empty {
   display: none;
 }
+.topbar-status-surface {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+  color: var(--muted);
+  font: inherit;
+}
 .latency-meter {
   height: 24px;
   min-width: 82px;
@@ -418,10 +425,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   align-items: center;
   gap: 7px;
   padding: 2px 6px;
-  color: var(--muted);
-  border: 1px solid #273142;
-  border-radius: 8px;
-  background: #10151d;
 }
 .latency-meter.good { color: var(--good); }
 .latency-meter.warn { color: var(--accent-gold); }
@@ -583,11 +586,6 @@ body.app-vw-lte-1100 .topbar-search {
   gap: 6px;
   height: var(--compact-control-height);
   padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--panel2) 72%, transparent);
-  color: var(--muted);
-  font: inherit;
   font-size: var(--ui-font-size-2xs);
   cursor: pointer;
   white-space: nowrap;
@@ -598,12 +596,6 @@ body.app-vw-lte-1100 .topbar-search {
 .topbar-owner-status:hover {
   border-color: var(--accent);
   color: var(--text);
-}
-.topbar-owner-status.has-follower {
-  border-color: color-mix(in srgb, var(--accent-gold) 56%, var(--line));
-}
-.topbar-owner-status.has-error {
-  border-color: var(--accent-gold);
 }
 .topbar-owner-status-key {
   color: var(--text-muted-cool);
@@ -627,11 +619,6 @@ body.app-vw-lte-1100 .topbar-search {
   gap: 4px;
   height: var(--compact-control-height);
   padding: 0 6px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
   font-size: var(--ui-font-size-2xs);
   cursor: pointer;
   white-space: nowrap;
@@ -644,7 +631,13 @@ body.app-vw-lte-1100 .topbar-search {
   color: var(--text);
 }
 .topbar-activity.has-attention {
-  border-color: var(--brand-green);
+  border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
+  background: color-mix(in srgb, var(--danger-strong) 12%, var(--panel2));
+  color: var(--text);
+}
+.topbar-activity.has-attention:hover {
+  border-color: var(--danger-strong);
+  background: color-mix(in srgb, var(--danger-strong) 18%, var(--panel2));
 }
 .topbar-activity-count {
   display: inline-flex;
@@ -1239,10 +1232,6 @@ body.theme-light .app-menu-tab-command:focus-visible {
   color: var(--pc-control-hover-fg);
   background: #e8f0fb;
   border-color: var(--menu-accent);
-}
-body.theme-light .latency-meter {
-  background: #ffffff;
-  border-color: var(--line);
 }
 /* this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
    concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify

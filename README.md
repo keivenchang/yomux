@@ -82,6 +82,7 @@ When a Tab is a tmux session, that session has its own internal hierarchy — tm
 Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md); this list is the daily-driver essentials.)
 
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
+- Press `?` for Keyboard Shortcuts and Legends, including the green play, yellow pause, and red stop status glyph meanings.
 - Hover a tmux tab to see each Claude/Codex tmux sub-window in that session near the top of the popover, with working agents first, idle durations from recent activity, and path/branch/git metadata under the matching AI tmux sub-window when sub-windows differ.
 - Drag a tab between pane tab bars to move it, drop near a pane edge to split that pane, or drop on the outer root edge for a full-span pane. Pane splits are percentage-based and encode into the shareable page URL.
 - Pinned tabs stay at the front of their pane and cannot be dragged into another pane.

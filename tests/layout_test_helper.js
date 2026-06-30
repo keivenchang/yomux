@@ -463,10 +463,13 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     host: 'localhost:7777',
     reload() { context.__reloadCount = (context.__reloadCount || 0) + 1; },
   };
-  const testSetTimeout = (callback, ms) => {
+  const testSetTimeout = options.setTimeout || ((callback, ms) => {
     if ((fireAllTimeouts || ms === 8) && typeof callback === 'function') return setImmediate(callback);
     return 0;
-  };
+  });
+  const testClearTimeout = options.clearTimeout || (() => {});
+  const testSetInterval = options.setInterval || (() => {});
+  const testClearInterval = options.clearInterval || (() => {});
   const element = id => {
     if (!elements.has(id)) elements.set(id, new TestElement(id));
     const node = elements.get(id);
@@ -481,8 +484,9 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     URLSearchParams,
     WebSocket: TestWebSocket,
     __testWebSocketInstances: TestWebSocket.instances,
-    clearInterval() {},
-    clearTimeout() {},
+    AbortController,
+    clearInterval: testClearInterval,
+    clearTimeout: testClearTimeout,
     document: {
       __listeners: documentListeners,
       addEventListener(type, listener) {
@@ -538,7 +542,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     Notification: {permission: 'denied'},
     performance: {now: () => 0},
     requestAnimationFrame(callback) { return callback(); },
-    setInterval() {},
+    setInterval: testSetInterval,
     // The bundle schedules the batched /api/fs/batch directory-listing flush via
     // setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs) — and 8ms is UNIQUE to that flush
     // (verified: no other bundle timer uses an 8ms delay). All other bundle timers (polls, debounces,
@@ -554,7 +558,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(listener);
       },
-      clearTimeout() {},
+      clearTimeout: testClearTimeout,
       confirm: () => true,
       EventSource: TestEventSource,
       innerHeight: 800,
@@ -846,11 +850,15 @@ globalThis.__layoutTestApi = {
   debugModeExplicitUrlEnabledForTest() { return debugModeExplicitUrlEnabled; },
   debugPaneItemId,
   debugPanelHtmlForTest: debugPanelHtml,
+  debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
   debugGraphAgentTokenDisplayBucketsForTest: debugGraphAgentTokenDisplayBuckets,
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
+  jsDebugStatsPollingStateForTest() { return {firstSampleReceived: jsDebugStatsFirstSampleReceived, inFlight: jsDebugStatsPollInFlight}; },
+  startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
+  stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
   flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
   jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
@@ -1063,6 +1071,7 @@ globalThis.__layoutTestApi = {
   applyTranscriptsPayloadForTest: applyTranscriptsPayload,
   applyTmuxSignalsPayloadForTest: applyTmuxSignalsPayload,
   syncAgentWindowActivityAnimationDelaysForTest: syncAgentWindowActivityAnimationDelays,
+  restartAgentWindowActivityPulseAnimationsForTest: restartAgentWindowActivityPulseAnimations,
   scheduleTmuxWindowReadbackForTest: scheduleTmuxWindowReadback,
   setTmuxWindowActiveIndexOverrideForTest: setTmuxWindowActiveIndexOverride,
   setTmuxWindowActiveIndexPendingForTest: setTmuxWindowActiveIndexPending,
@@ -1247,8 +1256,10 @@ globalThis.__layoutTestApi = {
   sessionConfirmedGone,
   globalActivityCounts,
   globalActivityStatusLineHtml,
+  openTabberActivityOverviewForTest: openTabberActivityOverview,
   clearPromptAttentionForSessionForTest(session, options = {}) { return clearPromptAttentionForSession(session, {...options, localOnly: options.localOnly !== false}); },
   attentionAcknowledgementKeyIsRecordedForTest: attentionAcknowledgementKeyIsRecorded,
+  applyAttentionAcknowledgementResponseForTest: applyAttentionAcknowledgementResponse,
   terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
   updateSessionButtonStatesForTest: updateSessionButtonStates,
   browserFaviconBadgeCount,
@@ -1798,11 +1809,26 @@ globalThis.__layoutTestApi = {
   },
   setTabberCollapsedForTest(paths) {
     fileExplorerTabberCollapsed.clear();
+    fileExplorerTabberExpanded.clear();
     for (const path of paths || []) fileExplorerTabberCollapsed.add(path);
   },
   tabberRenderedRowsForTest(options = {}) {
-    // Default-expanded: clearing the collapsed set renders the whole tree.
-    if (options.preserveCollapsed !== true) fileExplorerTabberCollapsed.clear();
+    if (options.preserveCollapsed !== true) {
+      fileExplorerTabberCollapsed.clear();
+      fileExplorerTabberExpanded.clear();
+      if (options.defaultCollapsed !== true) {
+        const {entries, entriesByDir} = buildTabberTree();
+        const expandAll = (list, parent) => {
+          for (const entry of list || []) {
+            if (entry.kind !== 'dir') continue;
+            const path = parent === '/' ? '/' + entry.name : parent + '/' + entry.name;
+            fileExplorerTabberExpanded.add(path);
+            expandAll(entriesByDir.get(normalizeDirectoryPath(path)), path);
+          }
+        };
+        expandAll(entries, '/');
+      }
+    }
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);

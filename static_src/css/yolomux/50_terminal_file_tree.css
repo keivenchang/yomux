@@ -1885,7 +1885,9 @@ body.theme-light .yoagent-global {
 }
 body.theme-light .yoagent-chat,
 body.theme-light .yoagent-message {
-  color: var(--lt-text);
+  --yoagent-content-text: var(--pc-control-hover-fg);
+  --yoagent-detail-text: #334155;
+  color: var(--yoagent-content-text);
   background: var(--panel);
   border-color: var(--line);
 }
@@ -1904,7 +1906,7 @@ body.theme-light .yoagent-message,
 body.theme-light .yoagent-message-body,
 body.theme-light .yoagent-message-body.markdown-body,
 body.theme-light .yoagent-message-body.markdown-body * {
-  color: var(--lt-text);
+  color: var(--yoagent-content-text);
 }
 body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
@@ -1916,16 +1918,16 @@ body.theme-light .yoagent-empty,
 body.theme-light .yoagent-message-role,
 body.theme-light .yoagent-message-time,
 body.theme-light .yoagent-message-latency {
-  color: var(--lt-muted-strong);
+  color: var(--yoagent-detail-text);
 }
 body.theme-light .yoagent-global .markdown-body {
   color: var(--lt-text);
 }
 body.theme-light .yoagent-message-details summary {
-  color: var(--lt-muted-strong);
+  color: var(--yoagent-detail-text);
 }
 body.theme-light .yoagent-details-preview {
-  color: var(--text-muted-soft);
+  color: var(--yoagent-detail-text);
 }
 body.theme-light .yoagent-message-details pre {
   color: var(--lt-text);
@@ -1933,12 +1935,12 @@ body.theme-light .yoagent-message-details pre {
   border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-message-details pre.yoagent-auxiliary-stream {
-  color: var(--text-muted-soft);
+  color: var(--yoagent-detail-text);
   background: #f7f8fa;
   border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-details-note {
-  color: var(--text-muted-soft);
+  color: var(--yoagent-detail-text);
 }
 body.theme-light .yoagent-chat-queue {
   color: var(--lt-text);
@@ -2325,6 +2327,13 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-field-value {
   color: var(--text);
 }
+.info-tree-field-branch .info-tree-field-value,
+.info-tree-field-ai .info-tree-field-value {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .info-tree-ai-value {
   min-width: 0;
   display: inline-flex;
@@ -2339,6 +2348,10 @@ button.info-tree-tab-token.active:focus-visible {
   justify-content: flex-start;
   overflow: visible;
   vertical-align: middle;
+}
+.info-tree-field-ai .info-tree-ai-value.tmux-window-bar {
+  flex: 1 1 auto;
+  width: 100%;
 }
 .info-tree-ai-window-button {
   min-width: 0;
@@ -2472,8 +2485,21 @@ button.info-tree-tab-token.active:focus-visible {
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
-.info-tree-meta-updated {
-  color: var(--muted);
+.info-tree-field-branch .info-tree-meta-updated,
+.info-tree-field-ai .info-tree-trailing-meta {
+  margin-inline-start: auto;
+  text-align: end;
+}
+.info-tree-trailing-meta {
+  color: var(--subwindow-recency-color);
+  font: var(--ui-font-size-2xs)/1 var(--mono-font);
+  white-space: nowrap;
+}
+.info-tree-ai-pid {
+  flex: 0 0 auto;
+  color: var(--subwindow-pid-color);
+  font: var(--ui-font-size-2xs)/1 var(--mono-font);
+  white-space: nowrap;
 }
 .info-empty {
   padding: 14px;

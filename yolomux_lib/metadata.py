@@ -299,6 +299,7 @@ def local_branch_inventory(
                 "source": source,
                 "name": name,
                 "sha": sha,
+                # This is the branch HEAD commit's committer date, never a working-tree file mtime.
                 "updated_ts_text": updated_ts_text,
                 "updated": updated,
                 "subject": subject,

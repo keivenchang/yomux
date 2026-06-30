@@ -126,8 +126,10 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     )
     assert all(metrics), metrics
     assert all(item["numberJustifyContent"] == "flex-start" for item in metrics), metrics
-    for key in ("statusWidth", "statusOffset", "prefixWidth", "prefixOffset", "textOffset"):
+    for key in ("statusWidth", "statusOffset", "prefixOffset"):
         assert max(item[key] for item in metrics) - min(item[key] for item in metrics) < 0.1, {key: metrics}
+    assert metrics[0]["prefixWidth"] < metrics[1]["prefixWidth"], metrics
+    assert metrics[1]["textOffset"] - metrics[0]["textOffset"] < 20, metrics
 
 
 def test_dockview_tab_hover_shows_session_detail_popover(browser, tmp_path):

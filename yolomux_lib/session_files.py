@@ -36,12 +36,12 @@ SHELL_COMMAND_BREAK_TOKENS = {"&&", "||", ";", "|"}
 SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
 SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
-_CODEX_TRANSCRIPT_SCAN_CACHE_MAX = 64
+_TRANSCRIPT_SCAN_CACHE_MAX = 64
+_TRANSCRIPT_SCAN_TAIL_BYTES = 512
 _CODEX_TRANSCRIPT_SCAN_VERSION = 2
-_CODEX_TRANSCRIPT_SCAN_TAIL_BYTES = 512
+_CLAUDE_TRANSCRIPT_SCAN_VERSION = 2
 _CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str, str, bool], dict[str, Any]] = {}
-_CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX = 64
-_CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, float, int], dict[str, Any]] = {}
+_CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str], dict[str, Any]] = {}
 
 
 def classify_change(markers: set[str]) -> str:
@@ -96,56 +96,45 @@ def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[
 
 
 def scan_claude_transcript_details(path: Path, cwd: str | None = None) -> dict[str, Any]:
-    # Same (path, mtime, size) memoization the codex scanner uses: candidate_session_cwds now scans
-    # transcripts on the hot metadata-refresh path, so an unchanged transcript must read from disk once.
-    cache_key = claude_transcript_scan_cache_key(path, cwd)
-    if cache_key is not None:
-        cached = _CLAUDE_TRANSCRIPT_SCAN_CACHE.get(cache_key)
-        if cached is not None:
-            return copy_transcript_scan_details(cached)
-    changes: dict[str, set[str]] = {}
-    generated_tokens = 0.0
+    # Cache the raw file once. candidate_session_cwds can ask about the same transcript from more
+    # than one cwd; resolving paths only after parsing avoids repeating a growing JSONL scan per cwd.
+    cache_key = claude_transcript_scan_cache_key(path)
+    state, current_size = incremental_transcript_scan_state(
+        path,
+        _CLAUDE_TRANSCRIPT_SCAN_CACHE,
+        cache_key,
+        new_claude_transcript_scan_state,
+    )
+    if int(state.get("offset") or 0) >= current_size:
+        state["size"] = current_size
+        return claude_transcript_scan_state_details(state, cwd)
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if record.get("type") != "assistant":
-                    continue
-                message = record.get("message")
-                if not isinstance(message, dict):
-                    continue
-                generated_tokens += claude_usage_generated_tokens(message.get("usage"))
-                for item in message.get("content", []) or []:
-                    if not isinstance(item, dict) or item.get("type") != "tool_use":
-                        continue
-                    tool = item.get("name")
-                    if tool not in CLAUDE_EDIT_TOOLS:
-                        continue
-                    payload = item.get("input")
-                    file_path = payload.get("file_path") if isinstance(payload, dict) else None
-                    resolved = resolved_change_path(file_path or "", cwd)
-                    if resolved is None:
-                        continue
-                    changes.setdefault(str(resolved), set()).add("A" if tool == "Write" else "M")
+        offset = int(state.get("offset") or 0) if cache_key is not None else 0
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+        lines, consumed = complete_transcript_lines(chunk)
+        for line in lines:
+            update_claude_transcript_scan_state(state, line)
+        update_transcript_scan_tail(state, chunk[:consumed])
+        state["offset"] = offset + consumed
+        state["size"] = current_size if cache_key is not None else offset + consumed
     except OSError:
-        return transcript_scan_details(changes, generated_tokens)
-    details = transcript_scan_details(changes, generated_tokens)
-    if cache_key is not None:
-        if len(_CLAUDE_TRANSCRIPT_SCAN_CACHE) >= _CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX:
-            _CLAUDE_TRANSCRIPT_SCAN_CACHE.pop(next(iter(_CLAUDE_TRANSCRIPT_SCAN_CACHE)))
-        _CLAUDE_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_transcript_scan_details(details)
-    return details
+        return claude_transcript_scan_state_details(state, cwd)
+    return claude_transcript_scan_state_details(state, cwd)
 
 
-def claude_transcript_scan_cache_key(path: Path, cwd: str | None) -> tuple[str, str, float, int] | None:
+def claude_transcript_scan_cache_key(path: Path) -> tuple[int, int, int, str] | None:
     try:
         stat = path.stat()
     except OSError:
         return None
-    return (str(path.expanduser().resolve(strict=False)), str(cwd or ""), stat.st_mtime, stat.st_size)
+    return (
+        _CLAUDE_TRANSCRIPT_SCAN_VERSION,
+        int(stat.st_dev),
+        int(stat.st_ino),
+        str(path.expanduser().resolve(strict=False)),
+    )
 
 
 def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, set[str]]:
@@ -154,31 +143,15 @@ def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text
 
 def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, Any]:
     cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text)
-    state: dict[str, Any] | None = None
-    current_size = 0
-    if cache_key is not None:
-        try:
-            current_size = path.stat().st_size
-        except OSError:
-            current_size = 0
-        cached = _CODEX_TRANSCRIPT_SCAN_CACHE.get(cache_key)
-        if cached is not None:
-            state = cached
-            if codex_transcript_scan_state_needs_reset(path, current_size, state):
-                state = new_codex_transcript_scan_state()
-                _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = state
-        else:
-            state = new_codex_transcript_scan_state()
-            if len(_CODEX_TRANSCRIPT_SCAN_CACHE) >= _CODEX_TRANSCRIPT_SCAN_CACHE_MAX:
-                oldest_key = next(iter(_CODEX_TRANSCRIPT_SCAN_CACHE), None)
-                if oldest_key is not None:
-                    _CODEX_TRANSCRIPT_SCAN_CACHE.pop(oldest_key, None)
-            _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = state
-        if int(state.get("offset") or 0) >= current_size:
-            state["size"] = current_size
-            return codex_transcript_scan_state_details(state)
-    if state is None:
-        state = new_codex_transcript_scan_state()
+    state, current_size = incremental_transcript_scan_state(
+        path,
+        _CODEX_TRANSCRIPT_SCAN_CACHE,
+        cache_key,
+        new_codex_transcript_scan_state,
+    )
+    if int(state.get("offset") or 0) >= current_size:
+        state["size"] = current_size
+        return codex_transcript_scan_state_details(state)
     try:
         offset = int(state.get("offset") or 0) if cache_key is not None else 0
         with path.open("rb") as handle:
@@ -187,7 +160,7 @@ def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_pa
         lines, consumed = complete_transcript_lines(chunk)
         for line in lines:
             update_codex_transcript_scan_state(state, line, cwd, include_patch_text)
-        update_codex_transcript_scan_tail(state, chunk[:consumed])
+        update_transcript_scan_tail(state, chunk[:consumed])
         state["offset"] = offset + consumed
         state["size"] = current_size if cache_key is not None else offset + consumed
     except OSError:
@@ -221,7 +194,38 @@ def new_codex_transcript_scan_state() -> dict[str, Any]:
     }
 
 
-def codex_transcript_scan_state_needs_reset(path: Path, current_size: int, state: dict[str, Any]) -> bool:
+def new_claude_transcript_scan_state() -> dict[str, Any]:
+    return {
+        "offset": 0,
+        "size": 0,
+        "raw_changes": {},
+        "generated_tokens": 0.0,
+        "parsed_tail": b"",
+    }
+
+
+def incremental_transcript_scan_state(path: Path, cache: dict[Any, dict[str, Any]], cache_key: Any, new_state: Any) -> tuple[dict[str, Any], int]:
+    try:
+        current_size = path.stat().st_size
+    except OSError:
+        return new_state(), 0
+    if cache_key is None:
+        return new_state(), current_size
+    state = cache.get(cache_key)
+    if state is not None and transcript_scan_state_needs_reset(path, current_size, state):
+        state = new_state()
+        cache[cache_key] = state
+    elif state is None:
+        state = new_state()
+        if len(cache) >= _TRANSCRIPT_SCAN_CACHE_MAX:
+            oldest_key = next(iter(cache), None)
+            if oldest_key is not None:
+                cache.pop(oldest_key, None)
+        cache[cache_key] = state
+    return state, current_size
+
+
+def transcript_scan_state_needs_reset(path: Path, current_size: int, state: dict[str, Any]) -> bool:
     offset = int(state.get("offset") or 0)
     if current_size < offset:
         return True
@@ -248,12 +252,51 @@ def complete_transcript_lines(chunk: bytes) -> tuple[list[str], int]:
     return [line.decode("utf-8", errors="replace") for line in lines], consumed
 
 
-def update_codex_transcript_scan_tail(state: dict[str, Any], parsed_chunk: bytes) -> None:
+def update_transcript_scan_tail(state: dict[str, Any], parsed_chunk: bytes) -> None:
     if not parsed_chunk:
         return
     previous = state.get("parsed_tail")
     previous_tail = previous if isinstance(previous, bytes) else b""
-    state["parsed_tail"] = (previous_tail + parsed_chunk)[-_CODEX_TRANSCRIPT_SCAN_TAIL_BYTES:]
+    state["parsed_tail"] = (previous_tail + parsed_chunk)[-_TRANSCRIPT_SCAN_TAIL_BYTES:]
+
+
+def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> None:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    if record.get("type") != "assistant":
+        return
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return
+    state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + claude_usage_generated_tokens(message.get("usage"))
+    raw_changes = state.get("raw_changes")
+    if not isinstance(raw_changes, dict):
+        raw_changes = {}
+        state["raw_changes"] = raw_changes
+    for item in message.get("content", []) or []:
+        if not isinstance(item, dict) or item.get("type") != "tool_use":
+            continue
+        tool = item.get("name")
+        if tool not in CLAUDE_EDIT_TOOLS:
+            continue
+        payload = item.get("input")
+        file_path = payload.get("file_path") if isinstance(payload, dict) else None
+        raw_path = str(file_path or "").strip()
+        if raw_path:
+            raw_changes.setdefault(raw_path, set()).add("A" if tool == "Write" else "M")
+
+
+def claude_transcript_scan_state_details(state: dict[str, Any], cwd: str | None) -> dict[str, Any]:
+    changes: dict[str, set[str]] = {}
+    raw_changes = state.get("raw_changes") if isinstance(state, dict) else {}
+    if isinstance(raw_changes, dict):
+        for raw_path, markers in raw_changes.items():
+            resolved = resolved_change_path(str(raw_path), cwd)
+            if resolved is not None and isinstance(markers, set):
+                changes.setdefault(str(resolved), set()).update(markers)
+    return transcript_scan_details(changes, numeric_token_value(state.get("generated_tokens") if isinstance(state, dict) else 0.0))
 
 
 def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: str | None, include_patch_text: bool) -> None:

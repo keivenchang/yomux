@@ -375,8 +375,8 @@ async function runShareThemeSuite() {
     // changes panel and the file-editor diff-ref toolbar) instead of two inline copies.
     assert.ok(/function openDiffRefPickerForInput\([^)]*\)\s*\{[\s\S]*?showDiffRefPicker\(input, \{showAll: true\}\)/.test(changedFilesSource), 'clicking/focusing a filled ref input still shows available options (via shared openDiffRefPickerForInput)');
     assert.ok(changedFilesSource.includes('openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('), 'changes panel routes ref-input focus/pointer through the shared picker-open helper');
-    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup uses the available viewport width with an edge inset');
-    assert.ok(/const width = availableWidth/.test(changedFilesSource), 'diff-ref popup gives commit and branch descriptions all available horizontal space');
+    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup respects the available viewport width with an edge inset');
+    assert.ok(/const width = Math\.min\(availableWidth, Math\.round\(viewportWidth \* \(2 \/ 3\)\)\)/.test(changedFilesSource), 'Differ and editor ref pickers share a responsive two-thirds-browser maximum so full commit descriptions remain readable');
     assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
@@ -1880,12 +1880,13 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*padding:\s*0 5px 5px/.test(preferencesCss), 'Finder Modified-files panel has no top padding before its header');
     assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*var\(--z-sticky-pane-head\)[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
     assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
+    assert.ok(/\.diff-ref-suggestion-popover\.compact\s*\{[\s\S]*min-width:\s*min\(520px,\s*66\.667vw\)[\s\S]*max-height:\s*min\(230px,\s*34vh\)/.test(preferencesCss), 'compact Differ ref suggestions retain a readable minimum without exceeding the shared two-thirds-browser maximum');
     assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
     assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*grid-template-columns:\s*8ch\s*minmax\(0,\s*1fr\)\s*max-content\s*max-content/.test(preferencesCss), 'diff-ref popup reserves its flexible width for the subject while date and author size to content');
     assert.ok(/\.changes-repo-refs \.diff-ref-inline-reset\s*\{[^}]*margin-inline-start:\s*auto[^}]*margin-inline-end:\s*-4px/.test(preferencesCss), 'Differ Reset sits near the right pane edge on the Compare row');
     assert.ok(changedFilesSource.includes('diff-ref-suggestion-date') && changedFilesSource.includes('diff-ref-suggestion-author'), 'diff-ref popup renders date and author in separate cells so both columns line up');
-    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup uses the available viewport width with an edge inset');
-    assert.ok(/const width = availableWidth/.test(changedFilesSource), 'diff-ref popup gives commit and branch descriptions all available horizontal space');
+    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup respects the available viewport width with an edge inset');
+    assert.ok(/const width = Math\.min\(availableWidth, Math\.round\(viewportWidth \* \(2 \/ 3\)\)\)/.test(changedFilesSource), 'compact Differ and noncompact editor pickers share the two-thirds-browser maximum');
     assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in dark mode');
     assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in light mode');
     assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
@@ -2113,7 +2114,8 @@ async function runShareThemeSuite() {
     const globalPathRowsHtml = preferencesHtml.slice(preferencesHtml.indexOf('<div class="preferences-path-rows"'), preferencesHtml.indexOf('<div class="preferences-sections"'));
     assert.ok(/preferences-path-label">settings<\/span>[\s\S]*settings\.yaml[\s\S]*loaded/.test(globalPathRowsHtml), 'Preferences settings path row shows the loaded age inline');
     assert.equal(globalPathRowsHtml.includes('YOLO rules'), false, 'global Preferences path rows no longer show the YOLO rules path');
-    assert.equal(preferencesHtml.includes('preferences-status'), false, 'Preferences does not render a separate loaded/status line');
+    assert.equal(/class="preferences-status"/.test(preferencesHtml), false, 'Preferences does not render a separate loaded/status line');
+    assert.ok(preferencesHtml.includes('preferences-status-pulse-example'), 'Status-pulse preference renders the reusable live glyph example');
     const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="YOLO"');
     const yoloSectionEnd = preferencesHtml.indexOf('data-preference-section="', yoloSectionStart + 1);
     const yoloSectionHtml = preferencesHtml.slice(yoloSectionStart, yoloSectionEnd >= 0 ? yoloSectionEnd : undefined);
@@ -3931,7 +3933,7 @@ async function runShareThemeSuite() {
     const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
     const tabsMenu = menus.find(menu => menu.id === 'tabs');
     const tabsMenuLabels = tabsMenu.items.map(item => item.label).filter(Boolean);
-    assert.equal(tmuxMenu.items[0].label, 'YO off');
+    assert.equal(tmuxMenu.items[0].label, 'YO (auto approve; YOLO)');
     assert.equal(tmuxMenu.items[0].keepOpen, true);
     assert.ok(tmuxMenuLabels.includes('YO!info'), 'tmux menu exposes YO!info alongside session commands');
     assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
@@ -3962,7 +3964,7 @@ async function runShareThemeSuite() {
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
       assert.ok(/body\.theme-light\s*\{[\s\S]*--info-pane-bg:\s*#ffffff[\s\S]*--info-tree-group-bg:\s*#f6f9fd/.test(infoTreeCss), 'YO!info light mode uses an opaque light pane surface');
-      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-tree-border:\s*#8793a3[\s\S]*--info-tree-line:\s*rgb\(100 116 139 \/ 0\.16\)/.test(infoTreeCss), 'YO!info light mode keeps connector lines visible while parent connector lines stay subtle');
+      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-tree-border:\s*#8793a3[\s\S]*--info-tree-line:\s*rgb\(71 85 105 \/ 0\.42\)/.test(infoTreeCss), 'YO!info light mode keeps connector lines visibly dark enough against its white pane');
       assert.ok(/\.info-pane\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss) && /\.info-list\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss), 'YO!info pane and list surfaces inherit the theme-aware pane background');
       assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-connector-arm-start:\s*calc\(var\(--info-tree-connector-x\) \+ var\(--info-tree-connector-line-width\)\)[\s\S]*--info-tree-summary-connector-y:\s*13px[\s\S]*--info-tree-record-connector-y:\s*13px[\s\S]*\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*inset-inline-start:\s*var\(--info-tree-connector-arm-start\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item::after\s*\{[\s\S]*inset-block-start:\s*calc\(\(var\(--info-tree-children-gap\) \/ -2\) - var\(--info-tree-connector-line-width\)\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item-last::after\s*\{[\s\S]*height:\s*calc\(var\(--info-tree-record-connector-y\) \+ \(var\(--info-tree-connector-line-width\) \* 2\) \+ \(var\(--info-tree-children-gap\) \/ 2\)\)/.test(infoTreeCss), 'YO!info tree renders overlapping connector lines aligned to text midlines and stops the last item as a 90-degree angle');
       assert.ok(/\.info-tree-group summary\s*\{[\s\S]*border:\s*0[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info group summaries are compact sticky text rows, not boxed cards');
@@ -4000,7 +4002,7 @@ async function runShareThemeSuite() {
     const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
     assert.equal(yoloTabsMenu.badgeText, '1');
     assert.equal(yoloTabsMenu.badgeTitle, '1 running YOLO job');
-    assert.equal(yoloTmuxMenu.items[0].label, 'YO on');
+    assert.equal(yoloTmuxMenu.items[0].label, 'YO (auto approve; YOLO)');
     assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
     assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
     assert.equal(yoloTmuxMenu.items.find(item => item.label === 'YOLO').items.some(item => item.label.startsWith('Sessions')), false);
@@ -5073,10 +5075,10 @@ async function runShareThemeSuite() {
     namedSessionApi.activatePaneTab('left', 'dynamo2');
     assert.equal(namedSessionApi.currentSessionActionTarget(), 'dynamo2');
     assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === "Rename tmux session 'dynamo2'").disabled, false);
-    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO off');
-    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO for Tmux Session 'dynamo2'"), false);
+    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (auto approve; YOLO)');
+    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO (auto-approve) for Tmux Session 'dynamo2'"), false);
     const sessionActions = api.tmuxSessionActionCommands('1');
-    assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Kill tmux session '1'"]);
     assert.equal(sessionActions.some(item => item.disabled), false);
     assert.equal(sessionActions.find(item => item.label === "Rename tmux session '1'").detail, '');
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
@@ -5086,7 +5088,7 @@ async function runShareThemeSuite() {
     assert.ok(contextMenu.children[0].innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
     assert.equal(contextMenu.children[0].getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');

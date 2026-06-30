@@ -891,12 +891,9 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     : options.showLeading === false
     ? ''
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
-  // The fixed-width session number keeps activity-bearing tabs aligned. Without the status ball it
-  // only creates dead space before the branch/PR metadata, so mark that shared content variant compact.
-  const statusBallClass = leadingHtml.includes('agent-window-status-dot') ? '' : ' pane-tab-core--without-status-ball';
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
-  return `<span class="pane-tab-core${statusBallClass}">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
 
@@ -1777,8 +1774,14 @@ function tmuxWindowProcessPid(pane) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
 }
 
+function tmuxWindowPidText(pid) {
+  const value = Number(pid);
+  return Number.isFinite(value) && value > 0 ? `(pid=${Math.floor(value)})` : '';
+}
+
 function tmuxWindowDisplayLabel(name, pid) {
-  return pid ? `${name} (pid=${pid})` : name;
+  const pidText = tmuxWindowPidText(pid);
+  return pidText ? `${name} ${pidText}` : name;
 }
 
 function tmuxWindowRecords(panes) {
@@ -1850,7 +1853,7 @@ function tmuxWindowButtonHtml(options = {}) {
   const agentStatus = options.agentStatus || null;
   const activityIconHtml = options.activityIconHtml !== undefined
     ? String(options.activityIconHtml || '')
-    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false});
+    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false, reserveStatusSlot: true, statusBeforeAgent: true});
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
   const numberLabel = String(options.numberLabel || options.indexText || visibleName);
   const numberHtml = options.showNumberLabel === false ? '' : `<span class="tmux-window-number-label">${esc(numberLabel)}</span>`;

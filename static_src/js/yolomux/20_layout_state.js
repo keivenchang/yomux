@@ -1398,6 +1398,9 @@ function attentionAcknowledgementKeysFromPayload(payload = {}) {
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   const value = String(key || '');
   if (!value) return false;
+  // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
+  // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
+  if (payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) return false;
   if (promptAttentionClears.has(value)) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
@@ -1413,6 +1416,31 @@ function recordAttentionAcknowledgementKey(key) {
 function applyAttentionAcknowledgementResponse(payload = {}) {
   const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
+  for (const [session, current] of autoApproveStates) {
+    if (!current || typeof current !== 'object') continue;
+    const next = {...current};
+    let changed = false;
+    if (keys.includes(String(next.prompt_attention_key || next.prompt?.attention_key || ''))) {
+      next.prompt_attention_acknowledged = true;
+      if (next.prompt && typeof next.prompt === 'object') next.prompt = {...next.prompt, attention_acknowledged: true};
+      changed = true;
+    }
+    if (Array.isArray(next.agent_windows)) {
+      next.agent_windows = next.agent_windows.map(agent => {
+        if (!agent || typeof agent !== 'object') return agent;
+        if (keys.includes(String(agent.attention_key || ''))) {
+          changed = true;
+          return {...agent, attention_acknowledged: true};
+        }
+        if (keys.includes(String(agent.cooldown_attention_key || ''))) {
+          changed = true;
+          return {...agent, cooldown_acknowledged: true};
+        }
+        return agent;
+      });
+    }
+    if (changed) autoApproveStates.set(session, next);
+  }
   if (payload?.auto_approve && typeof applyAutoApprovePayload === 'function') {
     applyAutoApprovePayload(payload.auto_approve);
   } else {
@@ -2181,10 +2209,10 @@ function createTopbarActivityStatus() {
   const button = document.createElement('button');
   button.type = 'button';
   button.id = 'topbarActivity';
-  button.className = 'topbar-activity';
-  button.title = 'Open the cross-session AI activity summary';
-  button.setAttribute('aria-label', 'AI activity summary across all sessions');
-  button.onclick = () => selectSession(yoagentItemId, {userInitiated: true});
+  button.className = 'topbar-activity topbar-status-surface';
+  button.title = 'Open Tabber for cross-session AI activity';
+  button.setAttribute('aria-label', 'Open Tabber for AI activity across all sessions');
+  button.onclick = () => openTabberActivityOverview();
   return button;
 }
 
@@ -2301,7 +2329,7 @@ function createTopbarOwnerStatus() {
   const button = document.createElement('button');
   button.type = 'button';
   button.id = 'topbarOwnerStatus';
-  button.className = 'topbar-owner-status';
+  button.className = 'topbar-owner-status topbar-status-surface';
   button.title = 'Refresh connected server ownership status';
   button.setAttribute('aria-label', 'Connected server ownership status');
   button.onclick = () => {
@@ -2333,6 +2361,7 @@ function updateTopbarOwnerStatus() {
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
+let attentionAnimationClockDurationMs = 0;
 
 function attentionAnimationDurationMs(durationMs = agentStatusPulsePeriodMs) {
   const duration = Math.max(1, Number(durationMs) || Number(agentStatusPulsePeriodMs) || 1);
@@ -2354,8 +2383,9 @@ function attentionAnimationDelay(now = Date.now(), durationMs = agentStatusPulse
 }
 
 function attentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
+  const duration = attentionAnimationDurationMs(durationMs);
   const current = document?.documentElement?.style?.getPropertyValue?.(attentionAnimationDelayProperty)?.trim();
-  return current || setAttentionAnimationClockDelay(now, durationMs);
+  return current && attentionAnimationClockDurationMs === duration ? current : setAttentionAnimationClockDelay(now, duration);
 }
 
 function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulsePeriodMs, property = attentionAnimationDelayProperty) {
@@ -2366,8 +2396,10 @@ function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulse
 }
 
 function setAttentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
-  const delay = attentionAnimationDelay(now, durationMs);
+  const duration = attentionAnimationDurationMs(durationMs);
+  const delay = attentionAnimationDelay(now, duration);
   document?.documentElement?.style?.setProperty?.(attentionAnimationDelayProperty, delay);
+  attentionAnimationClockDurationMs = duration;
   return delay;
 }
 
@@ -2586,14 +2618,14 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
       {label: t('share.title'), keys: appShortcutText('K')},
-      {label: 'Open YO!agent in a right pane', keys: appShortcutText('B', {alt: true})},
+      {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
       {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
     {section: t('shortcuts.section.terminal'), items: [
-      {label: 'Copy visible terminal selection', keys: appShortcutText('C')},
+      {label: t('shortcuts.copyVisibleTerminalSelection'), keys: appShortcutText('C')},
       {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
     ]},
@@ -2617,29 +2649,33 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
     ]},
-    {section: `${fileExplorerLabel()} / Differ`, items: [
-      {label: 'Move selection', keys: '↑ / ↓ / Home / End'},
-      {label: 'Extend selection', keys: 'Shift+↑ / ↓ / Home / End'},
-      {label: 'Expand / collapse folders', keys: '→ / ←'},
-      {label: 'Rename selected file', keys: 'Return'},
-      {label: 'Open selected file or folder', keys: appShortcutText('↓')},
-      {label: 'Open enclosing folder', keys: appShortcutText('↑')},
-      {label: 'Quick preview', keys: 'Space'},
-      {label: 'Select all rows', keys: appShortcutText('A')},
-      {label: 'Delete selected rows', keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
+    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel()}), items: [
+      {label: t('shortcuts.finderDiffer.moveSelection'), keys: '↑ / ↓ / Home / End'},
+      {label: t('shortcuts.finderDiffer.extendSelection'), keys: 'Shift+↑ / ↓ / Home / End'},
+      {label: t('shortcuts.finderDiffer.expandCollapseFolders'), keys: '→ / ←'},
+      {label: t('shortcuts.finderDiffer.renameSelectedFile'), keys: 'Return'},
+      {label: t('shortcuts.finderDiffer.openSelected'), keys: appShortcutText('↓')},
+      {label: t('shortcuts.finderDiffer.openEnclosingFolder'), keys: appShortcutText('↑')},
+      {label: t('shortcuts.finderDiffer.quickPreview'), keys: 'Space'},
+      {label: t('shortcuts.finderDiffer.selectAllRows'), keys: appShortcutText('A')},
+      {label: t('shortcuts.finderDiffer.deleteSelectedRows'), keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
     ]},
-    {section: 'Menus, palettes, and pickers', items: [
-      {label: 'Move through menus or results', keys: '↑ / ↓'},
-      {label: 'Open submenu or move across menu bar', keys: '← / →'},
-      {label: 'Run focused command', keys: 'Enter / Space'},
-      {label: 'Open selected quick-open file in a split', keys: appShortcutText('Enter')},
-      {label: 'Close menu, palette, or picker', keys: 'Esc'},
-      {label: 'Choose numbered Tabber, drop, or paste item', keys: '1-9'},
+    {section: t('shortcuts.section.menus'), items: [
+      {label: t('shortcuts.menus.move'), keys: '↑ / ↓'},
+      {label: t('shortcuts.menus.openSubmenu'), keys: '← / →'},
+      {label: t('shortcuts.menus.runFocused'), keys: 'Enter / Space'},
+      {label: t('shortcuts.menus.openSplit'), keys: appShortcutText('Enter')},
+      {label: t('shortcuts.menus.close'), keys: 'Esc'},
+      {label: t('shortcuts.menus.chooseNumbered'), keys: '1-9'},
     ]},
   ];
 }
 
-function keyboardLegendStatusSample(kind, text = '●') {
+function keyboardLegendStatusSample(kind, text = '●', options = {}) {
+  if (options.glyph === true && ['working', 'cooldown', 'attention'].includes(kind)) {
+    const classes = `${statusIndicatorDotClasses(kind, 'agent-window-status-dot', {pulse: options.pulse === true})}${options.pulse === true ? ' agent-window-status-dot--subwindow-pulse' : ''}`;
+    return `<span class="tmux-window-button keyboard-legend-status-glyph" aria-hidden="true"><span class="agent-window-activity"><span class="${esc(classes)}">${esc(text)}</span></span></span>`;
+  }
   if (kind === 'working') return `<span class="status-indicator status-indicator--dot status-indicator--working">${esc(text)}</span>`;
   if (kind === 'cooldown') return `<span class="status-indicator status-indicator--dot status-indicator--cooldown">${esc(text)}</span>`;
   if (kind === 'attention') return `<span class="status-indicator status-indicator--dot status-indicator--attention">${esc(text)}</span>`;
@@ -2649,27 +2685,32 @@ function keyboardLegendStatusSample(kind, text = '●') {
 
 function keyboardLegendCatalog() {
   return [
-    {section: 'Color meanings', items: [
-      {sampleHtml: keyboardLegendStatusSample('working'), label: 'Green', detail: 'Working, passing, healthy, or active. Agent balls use green for active work.'},
-      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: 'Yellow', detail: 'Recent attention transition or cooldown glow. It is less urgent than red.'},
-      {sampleHtml: keyboardLegendStatusSample('attention'), label: 'Red', detail: 'Needs input, needs approval, blocked, disconnected, failing CI, or another user-visible problem.'},
-      {sampleHtml: keyboardLegendStatusSample('merged'), label: 'Purple', detail: 'Merged GitHub PR. Purple is reserved for merged state.'},
-      {sampleHtml: keyboardLegendStatusSample('closed'), label: 'Gray', detail: 'Closed, done, idle, inactive, or unavailable state.'},
-      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: 'Metadata colors', detail: 'YO!info and Info Bars tint Path, Git BRANCH, Linear, GitHub PR, Tab, and AI fields so repeated rows scan by type.'},
+    {section: t('legend.section.agentStatus'), items: [
+      {sampleHtml: keyboardLegendStatusSample('working', '●', {glyph: true}), label: t('legend.shape.working.label'), detail: t('legend.shape.working.detail')},
+      {sampleHtml: keyboardLegendStatusSample('cooldown', '●', {glyph: true}), label: t('legend.shape.cooldown.label'), detail: t('legend.shape.cooldown.detail')},
+      {sampleHtml: keyboardLegendStatusSample('attention', '●', {glyph: true}), label: t('legend.shape.attention.label'), detail: t('legend.shape.attention.detail')},
     ]},
-    {section: 'Icon meanings', items: [
-      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: 'YO!info branch, PR, Linear, Tab, AI, and path map.'},
-      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: 'YO!agent chat, skills, jobs, waits, and handoffs.'},
-      {sampleHtml: appMenuUiIcon('gear'), label: 'Gear', detail: 'Preferences and configurable settings.'},
-      {sampleHtml: appMenuUiIcon('tab-meta'), label: 'Tab metadata', detail: 'Metadata/debug surfaces and the tab metadata toggle.'},
-      {sampleHtml: appMenuUiIcon('share'), label: 'Share', detail: 'YO!share link and viewer controls.'},
-      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: 'Pin', detail: 'Pinned tabs stay at the front and are protected from tab eviction.'},
+    {section: t('legend.section.colors'), items: [
+      {sampleHtml: keyboardLegendStatusSample('working'), label: t('legend.color.green.label'), detail: t('legend.color.green.detail')},
+      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: t('legend.color.yellow.label'), detail: t('legend.color.yellow.detail')},
+      {sampleHtml: keyboardLegendStatusSample('attention'), label: t('legend.color.red.label'), detail: t('legend.color.red.detail')},
+      {sampleHtml: keyboardLegendStatusSample('merged'), label: t('legend.color.purple.label'), detail: t('legend.color.purple.detail')},
+      {sampleHtml: keyboardLegendStatusSample('closed'), label: t('legend.color.gray.label'), detail: t('legend.color.gray.detail')},
+      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: t('legend.color.metadata.label'), detail: t('legend.color.metadata.detail')},
     ]},
-    {section: 'YO button meanings', items: [
-      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: 'Inactive YO', detail: 'YOLO auto-approval is off for this tmux session, or not owned here.'},
-      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: 'Active YO', detail: 'YOLO auto-approval is enabled for this session.'},
-      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: 'Working YO', detail: 'YOLO is enabled while an agent window is working.'},
-      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: 'Locked YO', detail: 'Another YOLOmux process owns the auto-approval lock for that target.'},
+    {section: t('legend.section.icons'), items: [
+      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
+      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
+      {sampleHtml: appMenuUiIcon('gear'), label: t('legend.icon.gear.label'), detail: t('legend.icon.gear.detail')},
+      {sampleHtml: appMenuUiIcon('tab-meta'), label: t('legend.icon.tabMetadata.label'), detail: t('legend.icon.tabMetadata.detail')},
+      {sampleHtml: appMenuUiIcon('share'), label: t('legend.icon.share.label'), detail: t('legend.icon.share.detail')},
+      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: t('legend.icon.pin.label'), detail: t('legend.icon.pin.detail')},
+    ]},
+    {section: t('legend.section.yo'), items: [
+      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: t('legend.yo.inactive.label'), detail: t('legend.yo.inactive.detail')},
+      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: t('legend.yo.active.label'), detail: t('legend.yo.active.detail')},
+      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: t('legend.yo.working.label'), detail: t('legend.yo.working.detail')},
+      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: t('legend.yo.locked.label'), detail: t('legend.yo.locked.detail')},
     ]},
   ];
 }

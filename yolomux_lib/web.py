@@ -250,7 +250,7 @@ def html_page(
   </div>
   <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
   <div class="actions">
-    <div id="latencyMeter" class="latency-meter" title="Browser to YOLOmux latency">
+    <div id="latencyMeter" class="latency-meter topbar-status-surface" title="Browser to YOLOmux latency">
       <svg class="latency-graph" viewBox="0 0 44 18" aria-hidden="true">
         <polyline id="latencyLine" class="latency-line" points=""></polyline>
       </svg>

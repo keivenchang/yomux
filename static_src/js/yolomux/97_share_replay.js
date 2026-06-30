@@ -2327,7 +2327,9 @@ async function applyShareFinderState(finder = {}) {
   const session = String(finder.session || '').trim();
   const previousRoot = normalizeDirectoryPath(fileExplorerRoot || '');
   const previousExpandedSignature = shareSetSignature(fileExplorerExpanded);
+  const previousMode = normalizeFileExplorerMode(fileExplorerMode);
   if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
+  const modeChanged = previousMode !== fileExplorerMode;
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
@@ -2349,6 +2351,10 @@ async function applyShareFinderState(finder = {}) {
   if ('tabberCollapsed' in finder) shareReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
   const expandedChanged = previousExpandedSignature !== shareSetSignature(fileExplorerExpanded);
   applyFileExplorerMode();
+  // A semantic share frame can move Differ directly to Tabber while the root remains unchanged.
+  // Rebuild the shared mode panel before awaiting any root work so the Tabber renderer has its own
+  // shell instead of trying to hydrate the stale Differ DOM after the host state has moved on.
+  if (modeChanged) renderFileExplorerChangesPanels({force: true});
   renderFileExplorerRootModeControls();
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);

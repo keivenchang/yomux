@@ -27,6 +27,8 @@
   --danger-border-soft: #d56b7a;
   --text-muted-cool: #9ea8b7;
   --text-muted-soft: #667085;
+  --subwindow-pid-color: var(--text-muted-soft);
+  --subwindow-recency-color: var(--text-muted-soft);
   --neutral-border-strong: #6f7b8c;
   --neutral-text-strong: #52617a;
   --neutral-text-cool: #e2e8f0;
@@ -471,9 +473,13 @@
   --editor-preview-bg: #342f22;
   --topbar-height: 38px;
   /* Default for --pulse-duration; Preferences -> Notifications -> performance.agent_status_pulse_period_ms overrides this at runtime. */
-  --pulse-duration: 1.55s;
+  --pulse-duration: 2.55s;
   --pulse-easing: ease-in-out;
-  --status-pulse-step-count: 6;
+  /* Opacity-pulse step granularity. Step size = --pulse-duration / count; we target ~125ms steps
+     (see 50_editor_settings_runtime.js for the 125ms smoothness-vs-repaint-cost rationale). This
+     default matches the 2.55s --pulse-duration above: round(2550/125) = 20. JS overrides it per the
+     user's pulse-period preference. */
+  --status-pulse-step-count: 20;
   --status-pulse-timing: steps(var(--status-pulse-step-count), end);
   --red-reminder-duration: var(--pulse-duration);
   --red-reminder-easing: var(--pulse-easing);
@@ -596,11 +602,14 @@ body.theme-light {
   --input-bg: var(--panel2);
   --text: #17202c;
   --muted: #5b6573;
+  --subwindow-pid-color: var(--text-muted-cool);
+  --subwindow-recency-color: var(--muted);
   --line: #c9d2df;
   --tree-indent-line: rgba(100, 116, 139, 0.12);
   --info-pane-bg: #ffffff;
   --info-tree-border: #8793a3;
-  --info-tree-line: rgb(100 116 139 / 0.16);
+  /* Tree connectors and record outlines need to remain visible against the white Info pane. */
+  --info-tree-line: rgb(71 85 105 / 0.42);
   --info-tree-record-border: var(--info-tree-line);
   --info-tree-group-bg: #f6f9fd;
   --info-tree-chip-bg: #ffffff;
@@ -613,8 +622,9 @@ body.theme-light {
   --brand-green: #5f9800;
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
-  --agent-status-cooldown: #ffd633;
-  --agent-status-cooldown-rgb: 255 214 51;
+  /* Thin pause glyphs need an amber with enough contrast on light pane backgrounds. */
+  --agent-status-cooldown: #c28a00;
+  --agent-status-cooldown-rgb: 194 138 0;
   --accent: #2563eb;
   --menu-accent: #1d4ed8;
   --icon-code: #0369a1;

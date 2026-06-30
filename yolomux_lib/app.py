@@ -2255,7 +2255,7 @@ class TmuxWebtermApp:
                 record_cpu_sample = True
         return sample, record_cpu_sample
 
-    def record_stats_global_sample(self, trigger: str = "sampler", token_consumer: bool = False) -> dict[str, Any]:
+    def record_stats_global_sample(self, trigger: str = "sampler", token_consumer: bool = False, defer_token_scan: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
         shared_enabled = self.stats_history_uses_shared_status()
         if shared_enabled and not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
@@ -2275,7 +2275,9 @@ class TmuxWebtermApp:
         if shared_enabled:
             self.merge_shared_stats_history(max_age_seconds=None)
         sample, record_cpu_sample = self.current_stats_sample()
-        include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample else False
+        # A first stats HTTP response must never wait for a cold transcript scan. The sampler sees the
+        # same consumer interest and fills token history on its next pass.
+        include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample and not defer_token_scan else False
         agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample else None
         agent_token_records = list(agent_record.pop("_agent_token_records", [])) if isinstance(agent_record, dict) else []
         now = float(sample.get("time") or time.time())
@@ -2305,7 +2307,7 @@ class TmuxWebtermApp:
             payload=sample,
             cache_status="sampled" if record_cpu_sample else "cached",
             record_time=sample["time"],
-            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates)},
+            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates), "token_deferred": bool(defer_token_scan)},
         )
         return sample
 
@@ -2349,11 +2351,12 @@ class TmuxWebtermApp:
 
     def stats_sample_payload(self, since: int = 0, client_id: str = "", token_consumer: bool = False, token_since: int = 0, token_resolution_seconds: int = 0) -> dict[str, Any]:
         shared_enabled = self.stats_history_uses_shared_status()
-        if shared_enabled and token_consumer:
+        if token_consumer:
             consumer_until = time.time() + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS
             with self.stats_agent_token_lock:
                 self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, consumer_until)
-            self.write_shared_stats_token_consumer_until(consumer_until)
+            if shared_enabled:
+                self.write_shared_stats_token_consumer_until(consumer_until)
         if shared_enabled and not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
             shared = self.merge_shared_stats_history(max_age_seconds=STATS_SHARED_FRESH_SECONDS)
             sample = shared.get("sample") if isinstance(shared.get("sample"), dict) else {}
@@ -2376,7 +2379,7 @@ class TmuxWebtermApp:
                     "role": "follower",
                 },
             }
-        sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer)
+        sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer, defer_token_scan=True)
         with self.stats_history_lock:
             self.stats_history_compact_locked(float(sample.get("time") or time.time()))
             history = self.stats_history_payload_locked(max(0, since), client_id=client_id, token_since=max(0, token_since), token_resolution_seconds=max(0, token_resolution_seconds))
@@ -9174,10 +9177,11 @@ class TmuxWebtermApp:
                 stopped_ts = observed_ts if previous_state == "working" else previous_stopped_ts or fallback_last_active_ts
             else:
                 stopped_ts = 0.0
-            self.agent_window_transition_state[key] = {
-                "state": state,
-                "working_stopped_ts": stopped_ts,
-            }
+            # Keep the prompt-transition fields alongside the working transition. A later
+            # approval uses them to distinguish A -> B -> A from one still-visible A prompt.
+            next_state = dict(previous)
+            next_state.update({"state": state, "working_stopped_ts": stopped_ts})
+            self.agent_window_transition_state[key] = next_state
         return stopped_ts
 
     @staticmethod
@@ -9211,11 +9215,42 @@ class TmuxWebtermApp:
         if state not in {"approval", "needs-approval", "needs-input", "interrupted"}:
             return ""
         screen_payload = screen if isinstance(screen, dict) else {}
-        for key in ("signature", "hash", "question_text", "text", "key"):
+        # The visible question is often the same for every Claude approval (for example, “Do you
+        # want to proceed?”). Prefer its prompt hash; the caller adds a per-window generation.
+        for key in ("prompt_hash", "signature", "hash", "question_text", "text", "key"):
             value = str(screen_payload.get(key) or "").strip()
             if value:
                 return value
         return state
+
+    def agent_window_attention_instance_signature(
+        self,
+        session: str,
+        window: str,
+        pane_target: str,
+        kind: str,
+        state: str,
+        prompt_hash: str,
+    ) -> str:
+        key = "\x1f".join((session, window, pane_target, kind))
+        attention_state = state in {"approval", "needs-approval", "needs-input", "interrupted"}
+        with self.agent_window_transition_lock:
+            previous = dict(self.agent_window_transition_state.get(key, {}))
+            previous_hash = str(previous.get("attention_prompt_hash") or "")
+            try:
+                generation = max(0, int(previous.get("attention_generation", 0)))
+            except (TypeError, ValueError):
+                generation = 0
+            if not attention_state or not prompt_hash:
+                previous["attention_prompt_hash"] = ""
+                self.agent_window_transition_state[key] = previous
+                return ""
+            if prompt_hash != previous_hash:
+                generation += 1
+                previous["attention_prompt_hash"] = prompt_hash
+                previous["attention_generation"] = generation
+            self.agent_window_transition_state[key] = previous
+        return f"{prompt_hash}:{generation}"
 
     def agent_window_attention_key(self, session: str, window: str, pane_target: str, kind: str, state: str, signature: str) -> str:
         if not signature:
@@ -9539,7 +9574,15 @@ class TmuxWebtermApp:
             path_entries = copy.deepcopy(path_record.get("path_entries") if isinstance(path_record, dict) else [])
             paths = [str(item.get("path") or "") for item in path_entries if isinstance(item, dict) and str(item.get("path") or "")]
             fallback_path = str(path_record.get("path") or "") if isinstance(path_record, dict) else ""
-            attention_signature = self.agent_window_attention_signature(state, screen)
+            prompt_hash = self.agent_window_attention_signature(state, screen)
+            attention_signature = self.agent_window_attention_instance_signature(
+                session,
+                window,
+                str(agent.pane_target or ""),
+                kind,
+                state,
+                prompt_hash,
+            )
             attention_key = self.agent_window_attention_key(session, window, str(agent.pane_target or ""), kind, state, attention_signature)
             cooldown_signature = self.agent_window_attention_signature("cooldown", screen, working_stopped_ts)
             cooldown_attention_key = self.agent_window_attention_key(session, window, str(agent.pane_target or ""), kind, "cooldown", cooldown_signature)

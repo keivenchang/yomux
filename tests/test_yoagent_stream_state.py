@@ -349,7 +349,7 @@ def test_yoagent_conversation_caps_oversized_auxiliary_fields(tmp_path):
     assert loaded == [written]
 
 
-def test_yoagent_stream_callback_truncates_oversized_auxiliary_history():
+def test_yoagent_stream_callback_truncates_oversized_auxiliary_history(no_control_socket):
     webapp = app_module.TmuxWebtermApp(["5"])
     last_payload = {}
 
@@ -358,7 +358,7 @@ def test_yoagent_stream_callback_truncates_oversized_auxiliary_history():
             last_payload.clear()
             last_payload.update(payload or {})
 
-    webapp.publish_client_event = publish
+    webapp.yoagent_streams.publish_client_event = publish
     try:
         callback = webapp.yoagent_stream_callback("stream-long", "codex")
         long_line = "x" * 1200

@@ -9,6 +9,7 @@ let jsDebugGraphScaleSeconds = jsDebugGraphDefaultScaleSeconds;
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugStatsPollTimer = null;
 let jsDebugStatsPollInFlight = false;
+let jsDebugStatsFirstSampleReceived = false;
 let jsDebugStatsHistoryFlushTimer = null;
 let jsDebugStatsHistoryFlushInFlight = false;
 let jsDebugStatsServerSequence = 0;
@@ -42,7 +43,9 @@ const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
 const jsDebugGraphRawBucketMs = 1000;
 const jsDebugGraphRollupBucketMs = 30 * 1000;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
+const jsDebugStatsPollFastMs = 2000;
 const jsDebugStatsPollMs = 30000;
+const jsDebugStatsPollTimeoutMs = 5000;
 const jsDebugStatsHistoryFlushMs = 30000;
 const jsDebugGraphRefreshMs = 30000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
@@ -779,6 +782,18 @@ function recordJsDebugStatsSample(payload = {}) {
   if (Number.isFinite(nextPid)) jsDebugStatsServerPid = nextPid;
   if (Number.isFinite(nextStartedAt)) jsDebugStatsServerStartedAt = nextStartedAt;
   if (Number.isFinite(Number(payload.rss_bytes))) jsDebugStatsServerRssBytes = Number(payload.rss_bytes);
+  const sampleApplied = Object.prototype.hasOwnProperty.call(payload, 'history') || [
+    payload.uptime_seconds,
+    payload.pid,
+    payload.started_at,
+    payload.rss_bytes,
+    payload.cpu_percent,
+    payload.system_cpu_percent,
+  ].some(value => Number.isFinite(Number(value)));
+  if (sampleApplied && !jsDebugStatsFirstSampleReceived) {
+    jsDebugStatsFirstSampleReceived = true;
+    armJsDebugStatsPolling();
+  }
   debugGraphApplyServerHistory(payload.history);
   if (payload.history && typeof payload.history === 'object') {
     scheduleJsDebugPanelRefresh();
@@ -989,6 +1004,11 @@ function debugGraphBucketRate(bucket, value) {
 function debugGraphAgentTokenBucketValue(bucket, item) {
   const tokens = Number(item?.tokens);
   if (Number.isFinite(tokens) && tokens > 0) {
+    // `seconds` is the real elapsed span over which the transcript counter advanced. It remains
+    // correct after the server folds raw samples into 2/5-minute history buckets; using the rendered
+    // bucket width here made the same activity look like a different tokens/min rate as the view changed.
+    const seconds = Number(item?.seconds);
+    if (Number.isFinite(seconds) && seconds > 0) return (tokens / seconds) * 60;
     const minutes = Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
     return tokens / minutes;
   }
@@ -1254,7 +1274,8 @@ function debugGraphMetaHtml() {
     const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
     items.push(`total ${uploadedMb}/${downloadedMb} MB up/down`);
   }
-  return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${esc(items.join(' | ') || 'waiting for server stats')}</div>`;
+  const metaHtml = items.length ? esc(items.join(' | ')) : textWithMovingEllipsisHtml(t('debug.waitingForServerStats'));
+  return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
 }
 
 function debugGraphAgentTokenSeriesDefs(buckets) {
@@ -1497,7 +1518,7 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesKeys) {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
-    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc('No client communication data collected')}</title></rect>`;
+    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(t('debug.noCommunicationData'))}</title></rect>`;
   }).join('');
 }
 
@@ -1855,6 +1876,33 @@ function stopJsDebugStatsPolling() {
   jsDebugStatsPollTimer = null;
 }
 
+function jsDebugStatsPollIntervalMs() {
+  return jsDebugStatsFirstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
+}
+
+function armJsDebugStatsPolling({pollNow = false} = {}) {
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) {
+    stopJsDebugStatsPolling();
+    return;
+  }
+  stopJsDebugStatsPolling();
+  if (pollNow) pollJsDebugStatsSample();
+  if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
+}
+
+async function fetchJsDebugStatsJson(url, options = {}) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timeoutId = null;
+  try {
+    if (controller && typeof setTimeout === 'function') {
+      timeoutId = setTimeout(() => controller.abort(), jsDebugStatsPollTimeoutMs);
+    }
+    return await apiFetchJsonQuiet(url, {...options, ...(controller ? {signal: controller.signal} : {})});
+  } finally {
+    if (timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(timeoutId);
+  }
+}
+
 async function pollJsDebugStatsSample() {
   if (!jsDebugCollectionEnabled) return;
   if (!jsDebugStatsPanelVisible()) {
@@ -1871,7 +1919,7 @@ async function pollJsDebugStatsSample() {
     const tokenHistory = tokenResolution
       ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
       : '';
-    const payload = await apiFetchJsonQuiet(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}${tokenHistory}`, {cache: 'no-store'});
+    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}${tokenHistory}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {
@@ -1932,6 +1980,7 @@ async function flushJsDebugStatsHistory() {
 }
 
 function clearJsDebugServerHistory() {
+  jsDebugStatsFirstSampleReceived = false;
   jsDebugStatsServerSequence = 0;
   jsDebugStatsServerUptimeSeconds = null;
   jsDebugStatsServerPid = null;
@@ -1941,6 +1990,7 @@ function clearJsDebugServerHistory() {
     clearTimeout(jsDebugStatsHistoryFlushTimer);
     jsDebugStatsHistoryFlushTimer = null;
   }
+  if (jsDebugStatsPollTimer) armJsDebugStatsPolling({pollNow: true});
   if (typeof apiFetchJsonQuiet !== 'function') return;
   apiFetchJsonQuiet('/api/stats-history', {
     method: 'POST',
@@ -1955,8 +2005,7 @@ function clearJsDebugServerHistory() {
 function startJsDebugStatsPolling() {
   if (!jsDebugCollectionEnabled || jsDebugStatsPollTimer) return;
   if (!jsDebugStatsPanelVisible()) return;
-  pollJsDebugStatsSample();
-  if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollMs);
+  armJsDebugStatsPolling({pollNow: true});
 }
 
 if (typeof document !== 'undefined' && document?.addEventListener) {

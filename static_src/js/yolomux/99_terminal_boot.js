@@ -22,8 +22,8 @@ function paneFrameControlsHtml(session, options = {}) {
   }
   if (includePopout) {
     controls.push(disabled
-      ? `<button class="tab pane-popout" ${disabledAttrs('Pop out tab')}></button>`
-      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="Pop out tab" aria-label="Pop out tab"></button>`);
+      ? `<button class="tab pane-popout" ${disabledAttrs(t('tab.popout'))}></button>`
+      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="${esc(t('tab.popout'))}" aria-label="${esc(t('tab.popout'))}"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -918,6 +918,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         aiPaneTarget: String(agent?.pane_target || ''),
         aiCurrent: agent?.current === true,
         aiWindowActive: agent?.window_active === true,
+        aiPid: tmuxWindowProcessPid(agent),
         aiWorkingStoppedTs: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
         aiIdleSince: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
         aiLastActiveTs: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
@@ -929,6 +930,8 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         pathKey: infoNormalizedPath(path) || '__no_path__',
         pathLabel: String(row?.pathLabel || compactHomePath(path) || 'No path'),
         pathTitle: String(row?.pathTitle || path || 'No path'),
+        pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
+        pathActivitySource: String(row?.pathActivitySource || ''),
         branchKey: branch || '__no_branch__',
         branchLabel: branch || 'No branch',
         branchTitle: branch || 'No branch',
@@ -953,6 +956,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         updated: String(row?.updatedText || row?.updated || ''),
         updatedTitle: String(row?.updatedTitle || row?.updated || ''),
         updatedTs: Number.isFinite(row?.updatedTs) ? row.updatedTs : 0,
+        updatedSource: String(row?.updatedSource || ''),
       });
     }
   }
@@ -1350,18 +1354,18 @@ function infoPullRequestCiClass(pr) {
   return pullRequestCiStatusClass(pr);
 }
 
-function infoStatusBadgeHtml(text, className, options = {}) {
+function infoStatusBadgeHtml(record, text, className, options = {}) {
   const label = String(text || '').trim();
   if (!label) return '';
   const labelHtml = options.highlight ? infoSearchHighlightHtml(label) : esc(label);
-  return `<span class="meta-pr-status info-tree-status-badge ${esc(className || 'pr-status-unknown')}">${labelHtml}</span>`;
+  return pullRequestStatusBadgeHtml(record?.tabSession, label, className, {labelHtml});
 }
 
 function infoRecordPrStatusHtml(record) {
   const parts = [];
   const highlight = infoRecordSearchKindMatches(record, 'pr');
-  if (record?.prLifecycleText) parts.push(infoStatusBadgeHtml(record.prLifecycleText, record.prLifecycleClass, {highlight}));
-  if (record?.prCiText) parts.push(infoStatusBadgeHtml(record.prCiText, record.prCiClass, {highlight}));
+  if (record?.prLifecycleText) parts.push(infoStatusBadgeHtml(record, record.prLifecycleText, record.prLifecycleClass, {highlight}));
+  if (record?.prCiText) parts.push(infoStatusBadgeHtml(record, record.prCiText, record.prCiClass, {highlight}));
   return parts.filter(Boolean).join(' ');
 }
 
@@ -1464,6 +1468,7 @@ function infoRecordAgentPayload(record) {
     working_stopped_ts: record.aiWorkingStoppedTs,
     idle_since: record.aiIdleSince,
     last_active_ts: record.aiLastActiveTs,
+    pid: record.aiPid,
   };
   return agent;
 }
@@ -1513,10 +1518,21 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const record = status.record;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
+  const info = transcriptMeta.sessions?.[session] || {};
+  const summary = typeof sessionStatusAgentWindowSummaryForTab === 'function'
+    ? sessionStatusAgentWindowSummaryForTab(session, info, autoApproveStates.get(session))
+    : null;
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
+  const agent = summary?.agent || infoRecordAgentPayload(record);
+  const activityHtml = summary?.item
+    ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
+      ...agentWindowActivityOptionsForStatus(agent, session),
+      item: summary.item,
+      statusOnly: true,
+    })
+    : agentWindowActivityIconHtmlForStatus(agent, record.aiKind, session, {statusOnly: true});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
@@ -1555,24 +1571,61 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
   });
 }
 
+function infoRecordAiRecencyHtml(record) {
+  const agent = infoRecordAgentPayload(record);
+  const lastActive = Number(agent.idle_since || agent.last_active_ts || 0);
+  if (!Number.isFinite(lastActive) || lastActive <= 0) return '';
+  const text = typeof sessionPopoverAgentRecencyText === 'function'
+    ? sessionPopoverAgentRecencyText(agent)
+    : sessionFileRelativeTimeText(lastActive);
+  return text ? `<span class="info-tree-ai-recency info-tree-trailing-meta">${esc(text)}</span>` : '';
+}
+
+function infoRecordAiPidHtml(record) {
+  const pidText = tmuxWindowPidText(record?.aiPid);
+  return pidText ? `<span class="info-tree-ai-pid">${esc(pidText)}</span>` : '';
+}
+
 function infoRecordAiValueHtml(record, options = {}) {
   if (!infoRecordHasAi(record)) return '';
   const buttonHtml = infoRecordAiWindowButtonHtml(record, options);
   if (!buttonHtml) return '';
   const status = infoAgentAttentionHtml(record);
-  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}</span>`;
+  const pid = infoRecordAiPidHtml(record);
+  const recency = infoRecordAiRecencyHtml(record);
+  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}${pid}${recency}</span>`;
+}
+
+function infoRecordUpdatedMetaHtml(record) {
+  if (infoRecordMissingValue(record?.updated)) return '';
+  const source = record?.updatedSource === 'git-commit' ? t('info.meta.gitCommit') : '';
+  const text = [source, record.updated].filter(Boolean).join(' ');
+  const title = [source, String(record?.updatedTitle || record.updated)].filter(Boolean).join(': ');
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  return `<span class="info-tree-meta-updated info-tree-trailing-meta"${titleAttr}>${infoRecordSearchValueHtml(record, 'updated', text)}</span>`;
+}
+
+function infoRecordPathActivityMetaHtml(record) {
+  const timestamp = Number(record?.pathActivityTs || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  const text = relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - timestamp));
+  const title = `Latest repository path activity: ${text}`;
+  return `<span class="info-tree-meta-updated info-tree-meta-path-activity" title="${esc(title)}">${esc(text)}</span>`;
 }
 
 function infoRecordMainChipsHtml(record, options = {}) {
   const hiddenDimensions = new Set(Array.isArray(options.hiddenDimensions) ? options.hiddenDimensions : []);
   const fields = [];
-  if (!hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__') {
+  const pathVisible = !hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__';
+  const branchVisible = !hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__';
+  const updatedMeta = infoRecordUpdatedMetaHtml(record);
+  if (pathVisible) {
     const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
-    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>`, record.pathTitle));
+    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}`, record.pathTitle));
   }
-  if (!hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__') {
+  if (branchVisible) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>`, record.branchTitle));
+    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
   }
   const linearDesc = infoRecordLinearDescHtml(record);
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
@@ -1583,9 +1636,6 @@ function infoRecordMainChipsHtml(record, options = {}) {
   }
   if (!hiddenDimensions.has('tmux-window') && infoRecordHasAi(record)) {
     fields.push(infoRecordFieldHtml('ai', infoRecordAiValueHtml(record), record.aiTitle));
-  }
-  if (!infoRecordMissingValue(record?.updated)) {
-    fields.push(infoRecordFieldHtml('updated', `<span class="info-tree-value-text info-tree-meta-updated">${infoRecordSearchValueHtml(record, 'updated', record.updated)}</span>`, record.updatedTitle));
   }
   return fields.join('');
 }
@@ -1616,7 +1666,8 @@ function infoGroupLabelHtml(group = {}) {
   const label = String(group.label || '');
   if (group.dimension === 'path' && !infoRecordMissingValue(label) && String(group.key || '') !== '__no_path__') {
     const path = String(group.key || group.title || label);
-    return `<button type="button" class="info-tree-group-label info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>`;
+    const activity = infoRecordPathActivityMetaHtml(infoGroupRepresentativeRecord(group));
+    return `<span class="info-tree-group-label info-tree-group-label-path"><button type="button" class="info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>${activity}</span>`;
   }
   const representative = infoGroupRepresentativeRecord(group);
   if (group.dimension === 'tmux-window') {
@@ -1966,6 +2017,7 @@ function infoTabAgentEntry(session, agent = null) {
     pane_target: String(agent?.pane_target || ''),
     current: agentWindowPayloadCurrent(agent) === true,
     window_active: agent?.window_active === true,
+    pid: tmuxWindowProcessPid(agent),
     working_stopped_ts: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
     idle_since: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
     last_active_ts: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
@@ -2056,6 +2108,17 @@ function rowWithInfoTabAgents(row, tabAgents) {
   };
 }
 
+function infoPathActivityForSource(source = {}) {
+  const root = infoGitRoot(source.git);
+  const repos = Array.isArray(source?.project?.repos) ? source.project.repos : [];
+  const repo = repos.find(item => infoNormalizedPath(item?.root) === infoNormalizedPath(root));
+  const timestamp = Number(repo?.activity_ts ?? source?.git?.activity_ts ?? 0);
+  return {
+    timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
+    source: String(repo?.activity_source || source?.git?.activity_source || ''),
+  };
+}
+
 function infoBranchRowForSource(source, branch, ownsSession) {
   const {session, info, project, git, primary} = source;
   const useCurrentProjectMetadata = ownsSession && primary;
@@ -2106,11 +2169,14 @@ function infoBranchRowForSource(source, branch, ownsSession) {
       || '',
     180,
   );
+  const pathActivity = infoPathActivityForSource(source);
   return {
     session: '',
     path: infoGitRoot(git),
     pathLabel: infoPathLabel(git),
     pathTitle: infoPathTitle(git),
+    pathActivityTs: pathActivity.timestamp,
+    pathActivitySource: pathActivity.source,
     branch: branch.name || '',
     branchHtml: branchLinkHtml(git, branch.name),
     desc,
@@ -2118,6 +2184,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     updatedText: branchUpdatedText(branch),
     updatedTitle: branch.updated || branchUpdatedText(branch),
     updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
+    updatedSource: 'git-commit',
     prHtml: prHtml || '',
     prTitle,
     prDescriptionTitle,
@@ -2209,12 +2276,15 @@ function shareInfoRowSnapshot(row = {}) {
     path: shareInfoString(row.path, 1000),
     pathLabel: shareInfoString(row.pathLabel, 1000),
     pathTitle: shareInfoString(row.pathTitle, 1000),
+    pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
+    pathActivitySource: shareInfoString(row.pathActivitySource, 100),
     branch: shareInfoString(row.branch, 500),
     desc: shareInfoString(row.desc, 1000),
     updated: shareInfoString(row.updated, 200),
     updatedText: shareInfoString(row.updatedText, 200),
     updatedTitle: shareInfoString(row.updatedTitle, 500),
     updatedTs: Number.isFinite(row.updatedTs) ? row.updatedTs : 0,
+    updatedSource: shareInfoString(row.updatedSource, 100),
     prTitle: shareInfoString(row.prTitle, 1000),
     prUrl: shareInfoString(row.prUrl, 1000),
     prLabel: shareInfoString(row.prLabel, 100),

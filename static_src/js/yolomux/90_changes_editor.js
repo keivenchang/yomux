@@ -577,7 +577,9 @@ function positionDiffRefPopover(input, compact) {
   const viewportHeight = Math.max(240, viewport.height || 720);
   const edgePadding = 24;
   const availableWidth = Math.max(280, viewportWidth - edgePadding * 2);
-  const width = availableWidth;
+  // Both Differ and editor ref pickers need enough room for real commit descriptions, but must leave
+  // substantial browser context visible. One responsive width owner keeps the two surfaces in sync.
+  const width = Math.min(availableWidth, Math.round(viewportWidth * (2 / 3)));
   const left = Math.max(edgePadding, Math.min(rect.left, viewportWidth - width - edgePadding));
   const top = Math.min(rect.bottom + 4, viewportHeight - 48);
   popover.style.width = `${Math.round(width)}px`;

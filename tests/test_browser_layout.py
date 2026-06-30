@@ -41,12 +41,12 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
         assert tab["symbol"] != "none", metrics
 
 
-def test_tab_without_status_ball_compacts_its_session_number_prefix(browser, tmp_path):
-    page = tmp_path / "tab-without-status-ball-compacts-prefix.html"
+def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(browser, tmp_path):
+    page = tmp_path / "tab-reserves-invisible-status-ball.html"
     page.write_text(page_html("""
       <section class="tab-prefix-fixture">
-        <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-status-dot"></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
-        <button id="without-ball" class="pane-tab active"><span class="pane-tab-core pane-tab-core--without-status-ball"><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="without-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 16px; background: #202633; }
@@ -62,13 +62,16 @@ def test_tab_without_status_ball_compacts_its_session_number_prefix(browser, tmp
           const text = tab.querySelector('.session-button-text');
           const numberRect = number.getBoundingClientRect();
           const textRect = text.getBoundingClientRect();
-          return {numberWidth: numberRect.width, textLeft: textRect.left};
+          const marker = tab.querySelector('.session-agent-activity-marker');
+          const markerRect = marker.getBoundingClientRect();
+          return {markerWidth: markerRect.width, numberWidth: numberRect.width, textLeft: textRect.left};
         };
         return {withBall: read('with-ball'), withoutBall: read('without-ball')};
         """
     )
-    assert metrics["withoutBall"]["numberWidth"] < metrics["withBall"]["numberWidth"], metrics
-    assert metrics["withoutBall"]["textLeft"] < metrics["withBall"]["textLeft"], metrics
+    assert abs(metrics["withoutBall"]["markerWidth"] - metrics["withBall"]["markerWidth"]) <= 0.5, metrics
+    assert abs(metrics["withoutBall"]["textLeft"] - metrics["withBall"]["textLeft"]) <= 0.5, metrics
+    assert metrics["withBall"]["numberWidth"] < 2 * metrics["withBall"]["markerWidth"], metrics
 
 
 _CLAUDE_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
@@ -382,6 +385,38 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     assert empty["client"]["height"] < empty["graph"]["height"] * 0.4, metrics
     assert empty["empty"]["height"] > empty["graph"]["height"] * 0.45, metrics
     assert empty["rowGap"] <= 6, metrics
+
+
+def test_debug_graph_waiting_meta_uses_shared_animated_ellipsis(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof clearJsDebugServerHistory === 'function'
+              && typeof debugGraphMetaHtml === 'function';
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        clearJsDebugServerHistory();
+        const holder = document.createElement('div');
+        holder.innerHTML = debugGraphMetaHtml();
+        document.body.appendChild(holder);
+        const meta = holder.querySelector('.js-debug-graph-meta');
+        const dots = Array.from(meta.querySelectorAll('.moving-ellipsis > span'));
+        return {
+          text: meta.textContent,
+          dotCount: dots.length,
+          animationNames: dots.map(dot => getComputedStyle(dot).animationName),
+          labelText: Array.from(meta.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join(''),
+        };
+        """
+    )
+    assert metrics["text"].startswith("Waiting for server stats"), metrics
+    assert metrics["dotCount"] == 3, metrics
+    assert all(name == "moving-ellipsis-dot" for name in metrics["animationNames"]), metrics
+    assert metrics["labelText"] == "Waiting for server stats", metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
@@ -824,6 +859,38 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
     assert float(metrics["opacity"]) == 1, metrics
 
 
+def test_mixed_parent_status_ball_uses_two_crisp_child_colors(browser, tmp_path):
+    page = tmp_path / "mixed-parent-status-ball.html"
+    page.write_text(page_html("""
+      <section class="mixed-status-fixture">
+        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-green" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-working">●</span></span></span>
+        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-yellow" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-cooldown">●</span></span></span>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 64px; background: #111820; }
+      .mixed-status-fixture { display: flex; gap: 24px; }
+      .session-agent-activity-marker { --agent-status-ball-size: 28px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const read = id => {
+          const node = document.getElementById(id);
+          const style = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return {backgroundImage: style.backgroundImage, border: style.borderTopColor, width: rect.width, height: rect.height};
+        };
+        return {redGreen: read('red-green'), redYellow: read('red-yellow')};
+        """
+    )
+    for name in ("redGreen", "redYellow"):
+        item = metrics[name]
+        assert "conic-gradient" in item["backgroundImage"], metrics
+        assert item["border"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+        assert abs(item["width"] - item["height"]) <= 0.5, metrics
+    assert metrics["redGreen"]["backgroundImage"] != metrics["redYellow"]["backgroundImage"], metrics
+
+
 def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, tmp_path):
     page = tmp_path / "pane-tab-cooldown-vibrant-yellow.html"
     page.write_text(page_html("""
@@ -1049,9 +1116,17 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
           tabber: read('tabber-cooldown'),
           session: read('session-aggregate'),
         };
+        const barActivity = document.getElementById('bar-working').closest('.agent-window-activity');
+        const barIcon = barActivity.querySelector('.agent-icon').getBoundingClientRect();
+        const barDot = barActivity.querySelector('.agent-window-status-dot').getBoundingClientRect();
+        const barLabel = barActivity.closest('.tmux-window-name-label').querySelector('.tmux-window-name-text').getBoundingClientRect();
+        const barInnerGap = Math.max(barIcon.left, barDot.left) - Math.min(barIcon.right, barDot.right);
+        const barLabelGap = barLabel.left - barActivity.getBoundingClientRect().right;
         document.body.classList.add('theme-light');
         return {
           ...dark,
+          barInnerGap,
+          barLabelGap,
           lightStaleCooldown: read('stale-cooldown'),
           lightActiveStaleCooldown: read('active-stale-cooldown'),
         };
@@ -1066,7 +1141,9 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["bar"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["bar"]["boxShadow"] in ("", "none"), metrics
     assert metrics["bar"]["filter"] == "none", metrics
-    assert 13 <= metrics["bar"]["width"] <= 15 and 13 <= metrics["bar"]["height"] <= 17, metrics
+    assert 2.9 <= metrics["barInnerGap"] <= 3.1, metrics
+    assert metrics["barLabelGap"] >= 1, metrics
+    assert 8 <= metrics["bar"]["width"] <= 10 and 8 <= metrics["bar"]["height"] <= 10, metrics
     assert metrics["bar"]["beforeContent"] == '""', metrics
     assert metrics["bar"]["beforeAnimationName"] == "none", metrics
     assert 0.14 <= float(metrics["bar"]["beforeOpacity"]) <= 1, metrics
@@ -1085,10 +1162,10 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["staleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
     assert metrics["activeStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
     assert metrics["activeStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["lightStaleCooldown"]["beforeBackground"] == "rgb(194, 138, 0)", metrics
+    assert metrics["lightStaleCooldown"]["afterBackground"] == "rgb(194, 138, 0)", metrics
+    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == "rgb(194, 138, 0)", metrics
+    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == "rgb(194, 138, 0)", metrics
     assert metrics["popover"]["beforeContent"] == '""', metrics
     assert metrics["popover"]["color"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["popover"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
@@ -1270,10 +1347,12 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     for name in subwindow_names:
         assert metrics[name]["agentStatusBallSize"] == "14px", (name, metrics)
         assert metrics[name]["dotFontSize"] == "14px", (name, metrics)
-    all_peak_widths = aggregate_peak_widths + subwindow_peak_widths
-    all_peak_heights = aggregate_peak_heights + subwindow_peak_heights
-    assert max(all_peak_widths) - min(all_peak_widths) <= 0.5, metrics
-    assert max(all_peak_heights) - min(all_peak_heights) <= 2, metrics
+    assert max(aggregate_peak_widths) - min(aggregate_peak_widths) <= 0.5, metrics
+    assert max(aggregate_peak_heights) - min(aggregate_peak_heights) <= 0.5, metrics
+    assert max(subwindow_peak_widths) - min(subwindow_peak_widths) <= 0.5, metrics
+    assert max(subwindow_peak_heights) - min(subwindow_peak_heights) <= 0.5, metrics
+    assert all(abs(width - (aggregate_peak_widths[0] * 0.66)) <= 0.5 for width in subwindow_peak_widths), metrics
+    assert all(abs(height - (aggregate_peak_heights[0] * 0.66)) <= 0.5 for height in subwindow_peak_heights), metrics
     assert len(transforms) == 1, metrics
 
 
@@ -1358,8 +1437,8 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
     assert metrics["parent"]["dotFontSize"] == "14px", metrics
     assert metrics["child"]["agentStatusBallSize"] == "14px", metrics
     assert metrics["child"]["dotFontSize"] == "14px", metrics
-    assert abs(metrics["child"]["width"] - metrics["parent"]["width"]) <= 0.5, metrics
-    assert abs(metrics["child"]["height"] - metrics["parent"]["height"]) <= 2, metrics
+    assert abs(metrics["child"]["width"] - (metrics["parent"]["width"] * 0.66)) <= 0.5, metrics
+    assert abs(metrics["child"]["height"] - (metrics["parent"]["height"] * 0.66)) <= 0.5, metrics
     for side in ("parent", "child"):
         assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
     assert metrics["parent"]["animationName"] == "agent-status-opacity-pulse", metrics
@@ -1531,7 +1610,7 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
     """, extra_css="""
-      :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 6; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
+      :root { --pulse-duration: 2.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 20; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
     """), encoding="utf-8")
     browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
@@ -1569,16 +1648,16 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
         assert metrics["reduced"] is True, metrics
         attention = metrics["attention"]
         assert attention["primaryAnimationName"] == "none", metrics
-        assert attention["primaryAnimationDuration"] == "1.55s", metrics
-        assert attention["primaryAnimationTimingFunction"].startswith("steps(6"), metrics
+        assert attention["primaryAnimationDuration"] == "2.55s", metrics
+        assert attention["primaryAnimationTimingFunction"].startswith("steps(20"), metrics
         assert attention["primaryAnimationDelay"] == "-0.42s", metrics
         assert attention["primaryEffectDuration"] == 0, metrics
         for key in ("working", "cooldown"):
             dot = metrics[key]
             assert dot["primaryAnimationName"] == "agent-status-opacity-pulse", metrics
-            assert dot["primaryAnimationDuration"] == "1.55s", metrics
+            assert dot["primaryAnimationDuration"] == "2.55s", metrics
             assert dot["primaryAnimationDelay"] == "-0.42s", metrics
-            assert dot["primaryAnimationTimingFunction"].startswith("steps(6"), metrics
+            assert dot["primaryAnimationTimingFunction"].startswith("steps(20"), metrics
             assert dot["primaryEffectDuration"] > 0, metrics
             assert dot["primaryPlayState"] in {"pending", "running"}, metrics
         assert metrics["working"]["animationName"] == "agent-status-opacity-pulse", metrics
@@ -1681,7 +1760,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
         assert item["dotWithinRoot"] is True, (name, item)
         assert item["dotDelayVar"] == item["rootDelayVar"], (name, item)
     assert metrics["info"]["rootWidth"] >= 24
-    assert metrics["tabber"]["rootWidth"] >= 28
+    assert 24 <= metrics["tabber"]["rootWidth"] <= 27
 
 
 def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser, tmp_path):
@@ -2017,6 +2096,22 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
     assert metrics["ownerRect"]["right"] <= metrics["activityRect"]["left"] + 1
     assert "STATS leader: devhost:8002" in metrics["title"]
     assert "SESS leader: devhost:8002" in metrics["title"]
+
+    surface_metrics = browser.execute_script(
+        """
+        document.body.classList.remove('theme-dark');
+        document.body.classList.add('theme-light');
+        const read = id => {
+          const node = document.getElementById(id);
+          const style = getComputedStyle(node);
+          return {classes: node.className, background: style.backgroundColor, border: style.border};
+        };
+        return {owner: read('topbarOwnerStatus'), activity: read('topbarActivity'), latency: read('latencyMeter')};
+        """
+    )
+    assert all("topbar-status-surface" in surface["classes"] for surface in surface_metrics.values()), surface_metrics
+    assert len({surface["background"] for surface in surface_metrics.values()}) == 1, surface_metrics
+    assert len({surface["border"] for surface in surface_metrics.values()}) == 1, surface_metrics
 
 
 @pytest.mark.e2e
@@ -2769,6 +2864,127 @@ def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_pa
         assert metrics["auxText"] == "thinking: preview\ntool output: done", (theme_class, metrics)
         assert metrics["auxColor"] != metrics["bodyColor"], (theme_class, metrics)
         assert metrics["previewColor"] != metrics["bodyColor"], (theme_class, metrics)
+        if theme_class == "theme-light":
+            assert _contrast_ratio(metrics["bodyColor"], "rgb(255, 255, 255)") >= 12.0, metrics
+            assert _contrast_ratio(metrics["auxColor"], "rgb(247, 248, 250)") >= 7.0, metrics
+            assert _contrast_ratio(metrics["previewColor"], "rgb(255, 255, 255)") >= 7.0, metrics
+
+
+def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp_path):
+    page = tmp_path / "light-agent-status-chart.html"
+    page.write_text(
+        page_html(
+            """
+            <script>document.body.className = 'theme-light';</script>
+            <section class="js-debug-graph-view">
+              <svg>
+                <path id="ask-line" class="js-debug-line--askAgents"></path>
+                <path id="working-line" class="js-debug-line--workingAgents"></path>
+                <path id="transition-line" class="js-debug-line--transitionAgents"></path>
+                <path id="idle-line" class="js-debug-line--idleAgents"></path>
+                <path id="ask-area" class="js-debug-area--askAgents"></path>
+              </svg>
+              <span id="ask-legend" class="js-debug-legend-swatch--askAgents"></span>
+              <span id="working-legend" class="js-debug-legend-swatch--workingAgents"></span>
+              <span id="transition-legend" class="js-debug-legend-swatch--transitionAgents"></span>
+            </section>
+            """,
+            extra_css="body { margin: 0; background: #fff; }",
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const style = id => getComputedStyle(document.getElementById(id));
+        return {
+          ask: style('ask-line').stroke,
+          working: style('working-line').stroke,
+          transition: style('transition-line').stroke,
+          idle: style('idle-line').stroke,
+          askLegend: style('ask-legend').color,
+          workingLegend: style('working-legend').color,
+          transitionLegend: style('transition-legend').color,
+          askAreaOpacity: style('ask-area').opacity,
+        };
+        """
+    )
+    assert metrics["ask"] == metrics["askLegend"], metrics
+    assert metrics["working"] == metrics["workingLegend"], metrics
+    assert metrics["transition"] == metrics["transitionLegend"], metrics
+    assert len({metrics["ask"], metrics["working"], metrics["transition"], metrics["idle"]}) == 4, metrics
+    assert metrics["askAreaOpacity"] == "0.78", metrics
+
+
+def test_subwindow_pid_and_recency_are_subtle_only_in_dark_mode(browser, tmp_path):
+    for theme_class in ("theme-dark", "theme-light"):
+        page = tmp_path / f"subwindow-metadata-{theme_class}.html"
+        page.write_text(
+            page_html(
+                f"""
+                <script>document.body.className = {json.dumps(theme_class)};</script>
+                <span id="info-pid" class="info-tree-ai-pid">(pid=2345)</span><span id="info-recency" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span>
+                <div class="file-tree-row tabber-row" data-tabber-type="window" data-recency="recent"><span class="tabber-window-pid" id="tabber-pid"> (pid=2345)</span><span class="file-tree-date" id="tabber-recency">3.1 hrs ago</span></div>
+                """,
+                extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
+            ),
+            encoding="utf-8",
+        )
+        browser.get(page.as_uri())
+        metrics = browser.execute_script(
+            """
+            const color = id => getComputedStyle(document.getElementById(id)).color;
+            return {infoPid: color('info-pid'), infoRecency: color('info-recency'), tabberPid: color('tabber-pid'), tabberRecency: color('tabber-recency')};
+            """
+        )
+        if theme_class == "theme-dark":
+            assert set(metrics.values()) == {"rgb(102, 112, 133)"}, metrics
+        else:
+            assert metrics == {"infoPid": "rgb(158, 168, 183)", "infoRecency": "rgb(91, 101, 115)", "tabberPid": "rgb(158, 168, 183)", "tabberRecency": "rgb(91, 101, 115)"}, metrics
+
+
+def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tmp_path):
+    page = tmp_path / "yoinfo-badges-and-trailing-metadata.html"
+    page.write_text(
+        page_html(
+            """
+            <script>document.body.className = 'theme-dark';</script>
+            <div class="info-tree-record" style="width: 760px"><div class="info-tree-record-main">
+              <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span id="branch-value" class="info-tree-field-value"><span class="info-tree-value-text">master</span><span id="branch-time" class="info-tree-meta-updated">Git commit 3 hours ago</span></span></div>
+              <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span id="window-value" class="info-tree-field-value"><span class="info-tree-ai-value tmux-window-bar"><button id="window-button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:claude</span></span></button><span id="window-pid" class="info-tree-ai-pid">(pid=1234)</span><span id="window-time" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span></span></span></div>
+              <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><span>#80 parser work</span> <span id="draft-badge" class="ci-indicator tab-symbol pr-status-draft">DRAFT</span></span></div>
+            </div></div>
+            """,
+            extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rightInset = (containerId, itemId) => {
+          const container = document.getElementById(containerId).getBoundingClientRect();
+          const item = document.getElementById(itemId).getBoundingClientRect();
+          return container.right - item.right;
+        };
+        const badge = document.getElementById('draft-badge');
+        const style = getComputedStyle(badge);
+        return {
+          branchRightInset: rightInset('branch-value', 'branch-time'),
+          windowRightInset: rightInset('window-value', 'window-time'),
+          windowPidOffset: document.getElementById('window-pid').getBoundingClientRect().left - document.getElementById('window-button').getBoundingClientRect().right,
+          badgeClasses: badge.className,
+          badgeBackground: style.backgroundColor,
+          badgeBorder: style.borderTopColor,
+        };
+        """
+    )
+    assert metrics["branchRightInset"] <= 1, metrics
+    assert metrics["windowRightInset"] <= 1, metrics
+    assert 0 <= metrics["windowPidOffset"] <= 8, metrics
+    assert "ci-indicator" in metrics["badgeClasses"] and "tab-symbol" in metrics["badgeClasses"], metrics
+    assert metrics["badgeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["badgeBorder"] != "rgba(0, 0, 0, 0)", metrics
 
 
 def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):
@@ -6994,7 +7210,7 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     for box in ("cp-dlg", "ks-dlg", "pref-adv", "pref-adv-code", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre", "info-pane", "info-content", "info-tree-summary"):
         assert _css_luminance_255(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
     assert style["bodyVars"]["infoTreeBorder"] == "#8793a3", style["bodyVars"]
-    assert style["bodyVars"]["infoTreeLine"] == "rgb(100 116 139 / 0.16)", style["bodyVars"]
+    assert style["bodyVars"]["infoTreeLine"] == "rgb(71 85 105 / 0.42)", style["bodyVars"]
     assert style["bodyVars"]["infoRecordBorder"] == style["bodyVars"]["infoTreeLine"], style["bodyVars"]
     assert style["bodyVars"]["infoTreeLine"] != style["bodyVars"]["infoTreeBorder"], style["bodyVars"]
 

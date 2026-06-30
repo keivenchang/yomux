@@ -404,6 +404,20 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
   }
 }
 
+function restartAgentWindowActivityPulseAnimations(root = document) {
+  const scope = root?.querySelectorAll ? root : document;
+  const nodes = Array.from(scope?.querySelectorAll?.(agentWindowActivityPulseSelector) || []);
+  for (const node of nodes) {
+    const animations = typeof node?.getAnimations === 'function' ? node.getAnimations({subtree: true}) : [];
+    for (const animation of animations) {
+      if (!agentWindowActivityPulseAnimationNames.has(String(animation?.animationName || '').trim())) continue;
+      animation.cancel?.();
+      animation.play?.();
+    }
+  }
+  syncAgentWindowActivityAnimationDelays(scope);
+}
+
 function scheduleAgentWindowActivityAnimationSync(root = document) {
   if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) disconnectAgentWindowActivityMutationObserver();
   ensureAgentWindowActivityMutationObserver();
@@ -481,7 +495,9 @@ function agentWindowActivityAcknowledgementKeyIsRecorded(key, options = {}) {
   if (!key) return false;
   if (options.attention_acknowledged === true || options.cooldown_acknowledged === true) return true;
   return typeof attentionAcknowledgementKeyIsRecorded === 'function'
-    ? attentionAcknowledgementKeyIsRecorded(key)
+    // A live per-window snapshot is more recent than the browser's optimistic acknowledgement
+    // cache. Passing it through prevents an identical later ASK from inheriting the old ACK.
+    ? attentionAcknowledgementKeyIsRecorded(key, options)
     : false;
 }
 
@@ -709,6 +725,19 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const aggregateTones = Array.isArray(item.aggregateTones)
+    ? item.aggregateTones.filter(value => ['attention', 'cooldown', STATE_KEY.working].includes(value)).slice(0, 3)
+    : [];
+  const allAggregateTones = Array.isArray(item.allAggregateTones)
+    ? item.allAggregateTones.filter(value => ['attention', 'cooldown', STATE_KEY.working].includes(value))
+    : aggregateTones;
+  const aggregateToneClasses = aggregateTones.length > 1
+    ? [
+      'agent-window-status-dot--segmented',
+      `agent-window-status-dot--${aggregateTones.join('-')}`,
+      ...allAggregateTones.map(value => `agent-window-status-dot--tone-${value}`),
+    ]
+    : [];
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -717,6 +746,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
+    aggregateToneClasses,
     {pulse},
   );
   return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
@@ -759,6 +789,9 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   ].filter(Boolean).join(' ');
   const markerHtml = acknowledged ? '' : agentWindowStatusDotHtml(item, {animate: options.animate !== false, subwindowGlyphPulse});
   if (statusOnly && !markerHtml) return '';
+  const placeholderHtml = options.reserveStatusSlot === true && !statusOnly && !markerHtml
+    ? '<span class="agent-window-status-placeholder" aria-hidden="true"></span>'
+    : '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = agentWindowActivityStyleAttribute(tone, item, {subwindowGlyphPulse});
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
@@ -769,7 +802,9 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     statusOnly ? 'agent-window-activity--status-only' : '',
   ].filter(Boolean).join(' ');
   const agentHtml = statusOnly ? '' : agentIcon(kind, {label, className: agentClasses});
-  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentHtml}${markerHtml}</span>`;
+  const statusHtml = `${markerHtml}${placeholderHtml}`;
+  const contentHtml = options.statusBeforeAgent === true ? `${statusHtml}${agentHtml}` : `${agentHtml}${statusHtml}`;
+  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${contentHtml}</span>`;
 }
 
 function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '', extraOptions = {}) {
