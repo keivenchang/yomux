@@ -83,6 +83,11 @@ def yolomux_client_revision() -> str:
     return file_revision(STATIC_DIR / "yolomux.js")
 
 
+def yolomux_dev_bundle_revision() -> str:
+    """Identify both browser assets so a restarted dev server can refresh stale clients."""
+    return ".".join(file_revision(STATIC_DIR / asset) for asset in ("yolomux.js", "yolomux.css"))
+
+
 class ErrorPayload(TypedDict, total=False):
     error: str
     path: str

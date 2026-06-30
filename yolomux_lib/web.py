@@ -18,6 +18,7 @@ from .common import yolomux_client_revision
 from .common import yolomux_commit_count
 from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
+from .common import yolomux_dev_bundle_revision
 from .settings import save_settings
 from .settings import settings_payload
 from .workdir import AGENT_LOGIN_COMMANDS
@@ -199,6 +200,7 @@ def html_page(
         "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,
         "version": YOLOMUX_VERSION,
         "clientRevision": yolomux_client_revision(),
+        "devBundleRevision": yolomux_dev_bundle_revision(),
         "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
         "versionCommitCount": yolomux_commit_count(),

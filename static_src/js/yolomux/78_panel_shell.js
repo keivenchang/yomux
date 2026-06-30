@@ -891,9 +891,12 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     : options.showLeading === false
     ? ''
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
+  // The fixed-width session number keeps activity-bearing tabs aligned. Without the status ball it
+  // only creates dead space before the branch/PR metadata, so mark that shared content variant compact.
+  const statusBallClass = leadingHtml.includes('agent-window-status-dot') ? '' : ' pane-tab-core--without-status-ball';
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
-  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+  return `<span class="pane-tab-core${statusBallClass}">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
 
@@ -1129,10 +1132,21 @@ function bindPanelShell(panel, session) {
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   panel.addEventListener('pointerdown', event => {
+    // Native range dragging must keep the same input node for the whole gesture;
+    // focusing YO!stats here would rerender the panel before the browser moves the thumb.
+    if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
     if (isTmuxSession(session)) {
       const windowTarget = event.target?.closest?.('[data-window-index]');
       const chromeTarget = event.target?.closest?.('[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session]');
-      if (windowTarget) return;
+      if (windowTarget) {
+        // Run the original target before polling or focus-side updates can replace it.
+        // The marker suppresses the later delegated click if the browser still emits one.
+        event.preventDefault();
+        event.stopPropagation();
+        windowTarget.dataset.pointerActionHandled = '1';
+        handleWindowStepButtonClick({target: windowTarget, currentTarget: windowTarget});
+        return;
+      }
       if (chromeTarget) {
         setFocusedTerminal(session, {userInitiated: true, acknowledgeAgentWindow: false});
         return;
@@ -1870,18 +1884,13 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
     const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
-    const agentStatusForIcon = agentStatus
-      ? {...agentStatus, current: active, window_active: active}
-      : (active && ['claude', 'codex'].includes(agentKey)
-        ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
-        : agentStatus);
     const title = t('terminal.window.title', {name: visibleName});
     return tmuxWindowButtonHtml({
       session,
       visibleName,
       numberLabel: record.numberLabel,
       active,
-      agentStatus: agentStatusForIcon,
+      agentStatus,
       agentKey,
       title,
       disabled,

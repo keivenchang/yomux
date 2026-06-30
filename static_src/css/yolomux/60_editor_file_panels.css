@@ -2209,8 +2209,10 @@ body.editor-theme-light .file-editor-content {
   gap: 1px;
   font-size: 0;
 }
-.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
-.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
+.file-editor-diff-ref-panel .diff-ref-controls.compact [data-diff-ref-from] {
+  width: clamp(16ch, 18vw, 24ch);
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact [data-diff-ref-to] {
   width: 9ch;
 }
 @container (min-width: 900px) {

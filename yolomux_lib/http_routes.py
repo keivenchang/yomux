@@ -287,11 +287,11 @@ def get_update_status(request: Any, parsed: Any, route: Route) -> None:
 
 
 def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
+    del route
     if not getattr(request.server, "dev", False):
         request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
         return
-    request.stream_dev_reload()
+    request.stream_dev_reload(str(query_one(parse_qs(parsed.query), "bundle_revision", "") or ""))
 
 
 def get_client_events(request: Any, parsed: Any, route: Route) -> None:

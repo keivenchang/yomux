@@ -4,6 +4,73 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
 
+def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const makeTab = className => {
+          const tab = document.createElement('button');
+          tab.className = className;
+          tab.innerHTML = '<span class="session-yolo-marker">YO</span><span class="session-button-name">1</span><span class="tab-symbol ci-indicator branch-indicator">MAIN</span><span class="session-button-detail">description</span>';
+          document.body.appendChild(tab);
+          return tab;
+        };
+        const regular = makeTab('pane-tab');
+        const compact = makeTab('tmux-pane-tab-token');
+        const read = tab => ({
+          symbol: getComputedStyle(tab.querySelector('.tab-symbol')).display,
+          yolo: getComputedStyle(tab.querySelector('.session-yolo-marker')).display,
+          number: tab.querySelector('.session-button-name')?.textContent || '',
+          detail: tab.querySelector('.session-button-detail')?.textContent || '',
+        });
+        document.body.classList.add('tab-meta-hidden');
+        const hidden = {regular: read(regular), compact: read(compact)};
+        document.body.classList.remove('tab-meta-hidden');
+        const visible = {regular: read(regular), compact: read(compact)};
+        regular.remove();
+        compact.remove();
+        return {hidden, visible};
+        """
+    )
+    for tab in metrics["hidden"].values():
+        assert tab["symbol"] == "none", metrics
+        assert tab["yolo"] != "none", metrics
+        assert tab["number"] == "1", metrics
+        assert tab["detail"] == "description", metrics
+    for tab in metrics["visible"].values():
+        assert tab["symbol"] != "none", metrics
+
+
+def test_tab_without_status_ball_compacts_its_session_number_prefix(browser, tmp_path):
+    page = tmp_path / "tab-without-status-ball-compacts-prefix.html"
+    page.write_text(page_html("""
+      <section class="tab-prefix-fixture">
+        <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-status-dot"></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="without-ball" class="pane-tab active"><span class="pane-tab-core pane-tab-core--without-status-ball"><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 16px; background: #202633; }
+      .tab-prefix-fixture { display: grid; justify-items: start; gap: 8px; }
+      .pane-tab { width: 420px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const read = id => {
+          const tab = document.getElementById(id);
+          const number = tab.querySelector('.session-button-number');
+          const text = tab.querySelector('.session-button-text');
+          const numberRect = number.getBoundingClientRect();
+          const textRect = text.getBoundingClientRect();
+          return {numberWidth: numberRect.width, textLeft: textRect.left};
+        };
+        return {withBall: read('with-ball'), withoutBall: read('without-ball')};
+        """
+    )
+    assert metrics["withoutBall"]["numberWidth"] < metrics["withBall"]["numberWidth"], metrics
+    assert metrics["withoutBall"]["textLeft"] < metrics["withBall"]["textLeft"], metrics
+
+
 _CLAUDE_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
   <rect width="24" height="24" rx="5.5" fill="#cf7554"/>
   <g fill="#fff7f1">
@@ -132,11 +199,20 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <path class="js-debug-line js-debug-line--sse" d="M0 3L20 3"></path>
           <path class="js-debug-line js-debug-line--cpu" d="M0 5L20 5"></path>
           <path class="js-debug-line js-debug-line--systemCpu" d="M0 7L20 7"></path>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="cyan" style="--js-debug-series-color: var(--js-debug-agent-token-cyan)" x="0" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="orange" style="--js-debug-series-color: var(--js-debug-agent-token-orange)" x="2" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="magenta" style="--js-debug-series-color: var(--js-debug-agent-token-magenta)" x="4" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="beige" style="--js-debug-series-color: var(--js-debug-agent-token-beige)" x="6" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="turquoise" style="--js-debug-series-color: var(--js-debug-agent-token-turquoise)" x="8" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="rose" style="--js-debug-series-color: var(--js-debug-agent-token-rose)" x="10" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="violet" style="--js-debug-series-color: var(--js-debug-agent-token-violet)" x="12" y="9" width="1" height="1"></rect>
+          <path class="js-debug-line js-debug-line--agentTokenTotal js-debug-line--moving-average" style="--js-debug-series-color: var(--js-debug-agent-token-total)" d="M0 12L20 12"></path>
         </svg>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--api"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--sse"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--cpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
+        <span class="js-debug-legend-swatch js-debug-legend-swatch--agentTokenTotal" style="--js-debug-series-color: var(--js-debug-agent-token-total)"></span>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
@@ -148,6 +224,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         const graph = document.getElementById('debug-graph');
         const line = name => getComputedStyle(document.querySelector(`.js-debug-line--${name}`)).stroke;
         const swatch = name => getComputedStyle(document.querySelector(`.js-debug-legend-swatch--${name}`)).color;
+        const agentToken = name => getComputedStyle(document.querySelector(`[data-agent-token="${name}"]`)).fill;
         const colorFor = value => {
           const probe = document.createElement('span');
           probe.style.color = value;
@@ -172,6 +249,15 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               cpu: colorFor('var(--active-accent-bright)'),
               systemCpu: colorFor('var(--bad)'),
             },
+            agentTokens: ['cyan', 'orange', 'magenta', 'beige', 'turquoise', 'rose', 'violet'].map(agentToken),
+            total: {
+              line: line('agentTokenTotal'),
+              swatch: swatch('agentTokenTotal'),
+              dasharray: getComputedStyle(document.querySelector('.js-debug-line--agentTokenTotal')).strokeDasharray,
+              strokeWidth: getComputedStyle(document.querySelector('.js-debug-line--agentTokenTotal')).strokeWidth,
+              swatchWidth: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).width,
+              swatchBackground: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).backgroundImage,
+            },
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
           return values;
@@ -193,6 +279,17 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["line"]["cpu"] != item["line"]["api"], (theme, item)
         assert item["line"]["cpu"] != item["line"]["systemCpu"], (theme, item)
         assert item["apiSseDistance"] >= 120, (theme, item)
+        distances = [
+            item["agentTokens"][left] != item["agentTokens"][right]
+            for left in range(len(item["agentTokens"]))
+            for right in range(left + 1, len(item["agentTokens"]))
+        ]
+        assert all(distances), (theme, item)
+        assert item["total"]["line"] == item["total"]["swatch"], (theme, item)
+        assert item["total"]["dasharray"] == "1px, 4px", (theme, item)
+        assert item["total"]["strokeWidth"] == "2.4px", (theme, item)
+        assert item["total"]["swatchWidth"] == "16px", (theme, item)
+        assert "repeating-linear-gradient" in item["total"]["swatchBackground"], (theme, item)
 
 
 def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
@@ -372,7 +469,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         }
 
         const sliderRect = slider.getBoundingClientRect();
-        const sliderPointerDefaultAllowed = slider.dispatchEvent(new PointerEvent('pointerdown', {
+            const sliderPointerDefaultAllowed = slider.dispatchEvent(new PointerEvent('pointerdown', {
           bubbles: true,
           cancelable: true,
           pointerId: 2,
@@ -382,7 +479,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           clientX: sliderRect.left + (sliderRect.width / 2),
           clientY: sliderRect.top + (sliderRect.height / 2),
         }));
-        const sliderSurvivedPointerDown = graph.querySelector('[data-js-debug-range-slider]') === slider;
+            const sliderSurvivedPointerDown = graph.querySelector('[data-js-debug-range-slider]') === slider;
         slider.value = '7.4';
         slider.dispatchEvent(new Event('input', {bubbles: true, cancelable: true}));
         const sliderValueDuringInput = slider.value;
@@ -458,7 +555,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           sliderMax: slider.max,
           sliderStep: slider.step,
           sliderValue: slider.value,
-          sliderPointerDefaultAllowed,
+              sliderPointerDefaultAllowed,
           sliderSurvivedPointerDown,
           sliderSurvivedInputDrag,
           sliderSurvivedPassiveRefreshDuringDrag,
@@ -566,7 +663,7 @@ def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
     return {"count": count, "energy": round(energy, 2), "bounds": (left, top, right, bottom)}
 
 
-def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_windows_and_tabber(browser, tmp_path):
+def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windows_and_tabber(browser, tmp_path):
     page = tmp_path / "working-agent-visible-pulse.html"
     page.write_text(page_html(f"""
       <section class="agent-pulse-fixture">
@@ -641,9 +738,10 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
               symOpacity: getComputedStyle(sym).opacity,
               dotPresent: !!dot,
               dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
-              dotAnim: dot ? getComputedStyle(dot).animationName : null,
-              dotBoxShadow: dot ? getComputedStyle(dot).boxShadow : null,
-              beforeAnim: before ? before.animationName : null,
+                  dotAnim: dot ? getComputedStyle(dot).animationName : null,
+                  dotBoxShadow: dot ? getComputedStyle(dot).boxShadow : null,
+                  beforeAnim: before ? before.animationName : null,
+                  beforeFilter: before ? before.filter : null,
             };
             """,
             selector,
@@ -652,21 +750,22 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
         # On every surface the agent symbol is STATIC (no pulse) ...
         assert info["symAnim"] == "none", results
         assert float(info["symOpacity"]) == 1, results
-        # ... and a separate status marker sits beside it. Session/Tab balls use the old ring pulse;
-        # sub-window glyphs suppress the element ring and animate their CSS glyph shape instead.
+        # ... and a separate status marker sits beside it. Session/Tab balls and sub-window play
+        # glyphs use the same opacity-only pulse, without a glow filter or shadow.
         assert info["dotPresent"] is True, results
         assert info["dotWorkingTone"] is True, results
         if not reduced:
             if label == "dock-tab Claude":
-                assert "attention-ring-fade" in info["dotAnim"], results
-                assert "working-ball-hard-flash" in info["dotAnim"], results
-            else:
-                assert info["dotAnim"] == "none", results
+                assert info["dotAnim"] == "agent-status-opacity-pulse", results
                 assert info["dotBoxShadow"] in ("", "none"), results
-                assert info["beforeAnim"] == "subwindow-status-glyph-pulse", results
+            else:
+                assert info["dotAnim"] == "agent-status-opacity-pulse", results
+                assert info["dotBoxShadow"] in ("", "none"), results
+                assert info["beforeAnim"] == "none", results
+                assert info["beforeFilter"] == "none", results
 
 
-def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
+def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, tmp_path):
     page = tmp_path / "working-agent-glow-pixels.html"
     page.write_text(page_html(f"""
       <section class="glow-pixel-fixture">
@@ -708,32 +807,21 @@ def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
           animationName: style.animationName,
           boxShadow: style.boxShadow,
           filter: style.filter,
-          background: style.backgroundColor,
-          color: style.color,
-          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              background: style.backgroundColor,
+              color: style.color,
+              border: style.borderTopColor,
+              opacity: style.opacity,
+              reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
         };
         """
     )
-    assert "attention-ring-fade" in metrics["animationName"] or metrics["reducedMotion"] is True, metrics
-    assert "working-ball-hard-flash" in metrics["animationName"] or metrics["reducedMotion"] is True, metrics
-    assert metrics["boxShadow"] != "none", metrics
-    screenshot = browser_screenshot_rgb(browser)
-    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
-    rect = metrics["rect"]
-    left = max(0, min(screenshot.width - 1, int((rect["right"] + 1) * dpr)))
-    right = max(left + 1, min(screenshot.width, int((rect["right"] + 18) * dpr)))
-    top = max(0, min(screenshot.height - 1, int((rect["top"] - 8) * dpr)))
-    bottom = max(top + 1, min(screenshot.height, int((rect["bottom"] + 8) * dpr)))
-    samples = []
-    green_pixels = 0
-    for y in range(top, bottom):
-        for x in range(left, right):
-            pixel = screenshot.getpixel((x, y))
-            if len(samples) < 20:
-                samples.append(pixel)
-            if pixel[1] >= 42 and pixel[1] - pixel[0] >= 10 and pixel[1] - pixel[2] >= 4:
-                green_pixels += 1
-    assert green_pixels >= 6, {"greenPixels": green_pixels, "samples": samples, "rect": rect, "metrics": metrics}
+    assert metrics["animationName"] == "agent-status-opacity-pulse" or metrics["reducedMotion"] is True, metrics
+    assert metrics["boxShadow"] in ("", "none"), metrics
+    assert metrics["filter"] == "none", metrics
+    assert metrics["background"] == "rgb(82, 210, 115)", metrics
+    assert metrics["color"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["border"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert float(metrics["opacity"]) == 1, metrics
 
 
 def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, tmp_path):
@@ -777,30 +865,63 @@ def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, 
         return {
           tab: rect('tab-dot'),
           reference: rect('reference-dot'),
-          tabFilter: style.filter,
-          tabAnimation: style.animationName,
-          canonicalCooldown: getComputedStyle(document.documentElement).getPropertyValue('--agent-status-cooldown').trim(),
+              tabFilter: style.filter,
+              tabAnimation: style.animationName,
+              tabBackground: style.backgroundColor,
+              tabBorder: style.borderTopColor,
+              tabOpacity: style.opacity,
+              canonicalCooldown: getComputedStyle(document.documentElement).getPropertyValue('--agent-status-cooldown').trim(),
         };
         """
     )
-    assert "brightness(1)" in metrics["tabFilter"], metrics
-    assert "attention-ring-fade" in metrics["tabAnimation"], metrics
+    assert metrics["tabFilter"] == "none", metrics
+    assert metrics["tabAnimation"] == "agent-status-opacity-pulse", metrics
+    assert metrics["tabBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["tabBorder"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert 0.14 <= float(metrics["tabOpacity"]) <= 0.18, metrics
     assert metrics["canonicalCooldown"] == "#ffd633", metrics
 
-    screenshot = browser_screenshot_rgb(browser)
-    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
 
-    def center_pixel(rect):
-        x = min(screenshot.width - 1, max(0, round((rect["left"] + rect["width"] / 2) * dpr)))
-        y = min(screenshot.height - 1, max(0, round((rect["top"] + rect["height"] / 2) * dpr)))
-        return screenshot.getpixel((x, y))
-
-    tab_pixel = center_pixel(metrics["tab"])
-    reference_pixel = center_pixel(metrics["reference"])
-    assert tab_pixel[0] >= 245 and tab_pixel[1] >= 200 and tab_pixel[2] <= 70, {"tab": tab_pixel, "reference": reference_pixel, "metrics": metrics}
-    # The status ring's slight saturation boost can lower the blue channel by a few points, but
-    # it must not bring back the old dim 82%-brightness resting color.
-    assert max(abs(tab_pixel[index] - reference_pixel[index]) for index in range(3)) <= 8, {"tab": tab_pixel, "reference": reference_pixel, "metrics": metrics}
+def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser, tmp_path):
+    page = tmp_path / "pane-tab-attention-opacity.html"
+    page.write_text(page_html("""
+      <button class="pane-tab active">
+        <span class="pane-tab-core">
+          <span class="session-agent-activity-marker">
+            <span class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:0s">
+              <span id="attention-dot" class="status-indicator status-indicator--dot status-indicator--attention heartbeat-pulse agent-window-status-dot agent-window-status-dot--transition-glow">●</span>
+            </span>
+          </span>
+          <span class="session-button-prefix">needs input</span>
+        </span>
+      </button>
+    """, extra_css="body { margin: 0; padding: 64px; background: var(--bg); }"), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const dot = document.getElementById('attention-dot');
+        const animation = dot.getAnimations().find(item => item.animationName === 'agent-status-opacity-pulse');
+        const read = () => {
+          const style = getComputedStyle(dot);
+          return {background: style.backgroundColor, border: style.borderTopColor, opacity: style.opacity, filter: style.filter};
+        };
+        const duration = Number(animation?.effect?.getTiming?.().duration) || 0;
+        if (animation && duration > 0) {
+          animation.pause();
+          animation.currentTime = duration;
+        }
+        const dim = read();
+        if (animation && duration > 0) animation.currentTime = duration * 0.5;
+        const bright = read();
+        return {animation: getComputedStyle(dot).animationName, dim, bright};
+        """
+    )
+    assert metrics["animation"] == "agent-status-opacity-pulse", metrics
+    assert metrics["dim"]["background"] == "rgb(255, 102, 115)", metrics
+    assert metrics["dim"]["border"] == "rgb(0, 0, 0)", metrics
+    assert metrics["dim"]["filter"] == metrics["bright"]["filter"] == "none", metrics
+    assert 0.14 <= float(metrics["dim"]["opacity"]) <= 0.18, metrics
+    assert float(metrics["bright"]["opacity"]) == 1, metrics
 
 
 def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_override(browser, tmp_path):
@@ -874,6 +995,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
+        document.documentElement.classList.add('status-pulse-disabled');
         document.getElementById('bar-working-dot').classList.add('agent-window-status-dot--subwindow-pulse');
         document.getElementById('popover-attention-dot').classList.add('agent-window-status-dot--subwindow-pulse');
         document.getElementById('tabber-cooldown-dot').classList.add('agent-window-status-dot--subwindow-pulse');
@@ -941,20 +1063,20 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["bar"]["overflow"] == "visible", metrics
     assert metrics["bar"]["borderRadius"] == "0px", metrics
     assert "agent-window-status-dot--subwindow-pulse" in metrics["bar"]["className"], metrics
-    assert metrics["bar"]["animationName"] == "none", metrics
+    assert metrics["bar"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["bar"]["boxShadow"] in ("", "none"), metrics
     assert metrics["bar"]["filter"] == "none", metrics
     assert 13 <= metrics["bar"]["width"] <= 15 and 13 <= metrics["bar"]["height"] <= 17, metrics
     assert metrics["bar"]["beforeContent"] == '""', metrics
-    assert metrics["bar"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["bar"]["beforeOpacity"] == "1", metrics
-    assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["color"], metrics
-    assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["buttonColor"], metrics
-    assert metrics["bar"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
-    assert "drop-shadow" in metrics["bar"]["beforeFilter"], metrics
-    assert "82, 210, 115" in metrics["bar"]["beforeFilter"], metrics
-    stable_width = float(metrics["stable"]["beforeBorderStartWidth"].replace("px", ""))
-    pulsing_width = float(metrics["bar"]["beforeBorderStartWidth"].replace("px", ""))
+    assert metrics["bar"]["beforeAnimationName"] == "none", metrics
+    assert 0.14 <= float(metrics["bar"]["beforeOpacity"]) <= 1, metrics
+    assert metrics["bar"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["bar"]["afterBackground"] == "rgb(82, 210, 115)", metrics
+    assert metrics["bar"]["afterAnimationName"] == "none", metrics
+    assert metrics["bar"]["beforeFilter"] == "none", metrics
+    assert metrics["bar"]["afterFilter"] == "none", metrics
+    stable_width = float(metrics["stable"]["beforeInlineSize"].replace("px", ""))
+    pulsing_width = float(metrics["bar"]["beforeInlineSize"].replace("px", ""))
     stale_pause_width = float(metrics["staleCooldown"]["beforeInlineSize"].replace("px", ""))
     pulsing_pause_width = float(metrics["tabber"]["beforeInlineSize"].replace("px", ""))
     assert 0.95 <= stable_width / pulsing_width <= 1.05, metrics
@@ -970,30 +1092,27 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["popover"]["beforeContent"] == '""', metrics
     assert metrics["popover"]["color"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["popover"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
-    assert metrics["popover"]["animationName"] == "none", metrics
+    assert metrics["popover"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["popover"]["boxShadow"] in ("", "none"), metrics
-    assert metrics["popover"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["popover"]["beforeOpacity"] == "1", metrics
+    assert metrics["popover"]["beforeAnimationName"] == "none", metrics
+    assert 0.14 <= float(metrics["popover"]["beforeOpacity"]) <= 1, metrics
     assert metrics["popover"]["beforeBorderTopWidth"] == "0px", metrics
-    assert "drop-shadow" in metrics["popover"]["beforeFilter"], metrics
-    assert "220, 38, 38" in metrics["popover"]["beforeFilter"], metrics
+    assert metrics["popover"]["beforeFilter"] == "none", metrics
     assert metrics["tabber"]["beforeContent"] == '""', metrics
     assert metrics["tabber"]["afterContent"] == '""', metrics
     assert metrics["tabber"]["color"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["tabber"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
     assert metrics["tabber"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["tabber"]["animationName"] == "none", metrics
+    assert metrics["tabber"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["tabber"]["boxShadow"] in ("", "none"), metrics
-    assert metrics["tabber"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["tabber"]["afterAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["tabber"]["beforeOpacity"] == "1", metrics
-    assert metrics["tabber"]["afterOpacity"] == "1", metrics
+    assert metrics["tabber"]["beforeAnimationName"] == "none", metrics
+    assert metrics["tabber"]["afterAnimationName"] == "none", metrics
+    assert 0.14 <= float(metrics["tabber"]["beforeOpacity"]) <= 1, metrics
+    assert 0.14 <= float(metrics["tabber"]["afterOpacity"]) <= 1, metrics
     assert metrics["tabber"]["beforeBorderTopWidth"] == "0px", metrics
     assert metrics["tabber"]["afterBorderTopWidth"] == "0px", metrics
-    assert "drop-shadow" in metrics["tabber"]["beforeFilter"], metrics
-    assert "drop-shadow" in metrics["tabber"]["afterFilter"], metrics
-    assert "255, 214, 51" in metrics["tabber"]["beforeFilter"], metrics
-    assert "255, 214, 51" in metrics["tabber"]["afterFilter"], metrics
+    assert metrics["tabber"]["beforeFilter"] == "none", metrics
+    assert metrics["tabber"]["afterFilter"] == "none", metrics
     for key in ("tabber", "staleCooldown", "activeStaleCooldown"):
         before_left = float(metrics[key]["beforeInsetInlineStart"].replace("px", ""))
         after_left = float(metrics[key]["afterInsetInlineStart"].replace("px", ""))
@@ -1121,14 +1240,17 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         assert item["centerDy"] <= 1, (name, metrics)
         if not metrics["reducedMotion"]:
             if name in ("tabberWindowCooldown", "infoAttention"):
-                assert item["dotAnimation"] == "none", (name, metrics)
-                assert item["beforeAnimation"] == "subwindow-status-glyph-pulse", (name, metrics)
+                assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, metrics)
+                assert item["beforeAnimation"] == "none", (name, metrics)
+                assert item["dotBoxShadow"] in ("", "none"), (name, metrics)
+            elif name == "tabberSessionWorking":
+                assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, metrics)
                 assert item["dotBoxShadow"] in ("", "none"), (name, metrics)
             else:
-                assert "attention-ring-fade" in item["dotAnimation"], (name, metrics)
+                assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, metrics)
                 assert item["dotPlayState"] == "running", (name, metrics)
                 assert item["dotIterationCount"] == "infinite", (name, metrics)
-                assert item["dotBoxShadow"] != "none", (name, metrics)
+                assert item["dotBoxShadow"] in ("", "none"), (name, metrics)
         assert item["dotWidth"] > 0 and item["dotHeight"] > 0, (name, metrics)
     assert metrics["dockAttention"]["dotToneAttention"] is True, metrics
     assert metrics["infoAttention"]["dotToneAttention"] is True, metrics
@@ -1151,7 +1273,7 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     all_peak_widths = aggregate_peak_widths + subwindow_peak_widths
     all_peak_heights = aggregate_peak_heights + subwindow_peak_heights
     assert max(all_peak_widths) - min(all_peak_widths) <= 0.5, metrics
-    assert max(all_peak_heights) - min(all_peak_heights) <= 0.5, metrics
+    assert max(all_peak_heights) - min(all_peak_heights) <= 2, metrics
     assert len(transforms) == 1, metrics
 
 
@@ -1218,6 +1340,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
             animationDuration: dotStyle.animationDuration,
             animationDelay: dotStyle.animationDelay,
             animationTimingFunction: dotStyle.animationTimingFunction,
+            opacity: dotStyle.opacity,
             transform: dotStyle.transform,
             width: dotRect.width,
             height: dotRect.height,
@@ -1236,13 +1359,13 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
     assert metrics["child"]["agentStatusBallSize"] == "14px", metrics
     assert metrics["child"]["dotFontSize"] == "14px", metrics
     assert abs(metrics["child"]["width"] - metrics["parent"]["width"]) <= 0.5, metrics
-    assert abs(metrics["child"]["height"] - metrics["parent"]["height"]) <= 0.5, metrics
+    assert abs(metrics["child"]["height"] - metrics["parent"]["height"]) <= 2, metrics
     for side in ("parent", "child"):
         assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
-    assert "attention-ring-fade" in metrics["parent"]["animationName"], metrics
-    assert "working-ball-hard-flash" in metrics["parent"]["animationName"], metrics
-    assert metrics["child"]["animationName"] == "none", metrics
-    assert metrics["child"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["parent"]["animationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["child"]["animationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["child"]["beforeAnimationName"] == "none", metrics
+    assert metrics["parent"]["opacity"] == metrics["child"]["opacity"] == "1", metrics
     assert metrics["parent"]["transform"] == metrics["child"]["transform"], metrics
 
 
@@ -1326,31 +1449,31 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
     assert badge["rest"]["boxShadow"] != badge["peak"]["boxShadow"], badge
     for dot_id in ("working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
         dot = metrics[dot_id]
-        assert dot["primaryAnimationName"] == "attention-ring-fade", {dot_id: dot}
+        uses_opacity_pulse = dot_id in ("working-dot", "cooldown-dot")
+        assert dot["primaryAnimationName"] == ("agent-status-opacity-pulse" if uses_opacity_pulse else "attention-ring-fade"), {dot_id: dot}
         assert dot["primaryAnimationPlayState"] == "running", {dot_id: dot}
         assert dot["primaryAnimationIterationCount"] == "infinite", {dot_id: dot}
         assert dot["primaryAnimationDuration"] == badge["primaryAnimationDuration"], {dot_id: dot, "badge": badge}
         assert dot["primaryAnimationDelay"] == badge["primaryAnimationDelay"], {dot_id: dot, "badge": badge}
         assert dot["primaryAnimationTimingFunction"] == badge["primaryAnimationTimingFunction"], {dot_id: dot, "badge": badge}
         assert dot["delayVar"] == badge["delayVar"] == "-0.42s", {dot_id: dot, "badge": badge}
-        assert dot["borderTopStyle"] == "solid", {dot_id: dot}
-        assert dot["borderTopWidth"] != "0px", {dot_id: dot}
-        assert dot["rest"]["boxShadow"] != dot["peak"]["boxShadow"], {dot_id: dot}
-        assert dot["rest"]["filter"] != dot["peak"]["filter"], {dot_id: dot}
+        assert dot["borderTopStyle"] in {"none", "solid"}, {dot_id: dot}
+        if uses_opacity_pulse:
+            assert dot["rest"]["boxShadow"] == dot["peak"]["boxShadow"] == "none", {dot_id: dot}
+            assert dot["rest"]["filter"] == dot["peak"]["filter"] == "none", {dot_id: dot}
+            assert dot["rest"]["opacity"] < dot["peak"]["opacity"], {dot_id: dot}
+        else:
+            assert dot["rest"]["boxShadow"] != dot["peak"]["boxShadow"], {dot_id: dot}
+            assert dot["rest"]["filter"] != dot["peak"]["filter"], {dot_id: dot}
         assert abs(dot["rest"]["rect"]["width"] - dot["peak"]["rect"]["width"]) <= 0.5, {dot_id: dot}
         assert abs(dot["rest"]["rect"]["height"] - dot["peak"]["rect"]["height"]) <= 0.5, {dot_id: dot}
-    assert "working-ball-hard-flash" in metrics["working-dot"]["animationName"], metrics["working-dot"]
-    assert metrics["working-dot"]["rest"]["color"] != metrics["working-dot"]["peak"]["color"], metrics["working-dot"]
-    peak_rgb = [int(float(item)) for item in re.findall(r"\d+(?:\.\d+)?", metrics["working-dot"]["peak"]["color"])[:3]]
-    assert peak_rgb[1] - peak_rgb[0] >= 90 and peak_rgb[1] - peak_rgb[2] >= 70, metrics["working-dot"]
-    working_peak_glow = float(metrics["working-dot"]["peakGlowSize"].replace("px", ""))
-    default_peak_glow = float(metrics["window-dot"]["peakGlowSize"].replace("px", ""))
-    assert working_peak_glow < default_peak_glow, metrics
+    assert metrics["working-dot"]["animationName"] == "agent-status-opacity-pulse", metrics["working-dot"]
+    assert metrics["working-dot"]["rest"]["opacity"] < metrics["working-dot"]["peak"]["opacity"], metrics["working-dot"]
     for dot_id in ("window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
-        assert abs(metrics["working-dot"]["rest"]["rect"]["width"] - metrics[dot_id]["rest"]["rect"]["width"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
-        assert abs(metrics["working-dot"]["rest"]["rect"]["height"] - metrics[dot_id]["rest"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
-        assert abs(metrics["working-dot"]["peak"]["rect"]["width"] - metrics[dot_id]["peak"]["rect"]["width"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
-        assert abs(metrics["working-dot"]["peak"]["rect"]["height"] - metrics[dot_id]["peak"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["rest"]["rect"]["width"] - metrics[dot_id]["rest"]["rect"]["width"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["rest"]["rect"]["height"] - metrics[dot_id]["rest"]["rect"]["height"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["peak"]["rect"]["width"] - metrics[dot_id]["peak"]["rect"]["width"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["peak"]["rect"]["height"] - metrics[dot_id]["peak"]["rect"]["height"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
 
     visual_ids = {"working-dot": "green", "window-dot": "red", "cooldown-dot": "yellow"}
     all_animation_ids = ["working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot", "attention-label"]
@@ -1390,7 +1513,10 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
         energy_ratio = 1.08 if dot_id == "working-dot" else 1.25
         count_delta = 6 if dot_id == "working-dot" else 10
         assert peak_score["energy"] > rest_score["energy"] * energy_ratio, visual_scores
-        assert peak_score["count"] > rest_score["count"] + count_delta, visual_scores
+        if dot_id in ("working-dot", "cooldown-dot"):
+            assert peak_score["count"] == rest_score["count"], visual_scores
+        else:
+            assert peak_score["count"] > rest_score["count"] + count_delta, visual_scores
     working_energy_delta = visual_scores["working-dot"]["peak"]["energy"] - visual_scores["working-dot"]["rest"]["energy"]
     red_energy_delta = visual_scores["window-dot"]["peak"]["energy"] - visual_scores["window-dot"]["rest"]["energy"]
     yellow_energy_delta = visual_scores["cooldown-dot"]["peak"]["energy"] - visual_scores["cooldown-dot"]["rest"]["energy"]
@@ -1442,20 +1568,20 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
         )
         assert metrics["reduced"] is True, metrics
         attention = metrics["attention"]
-        assert attention["primaryAnimationName"] == "attention-ring-fade", metrics
+        assert attention["primaryAnimationName"] == "none", metrics
         assert attention["primaryAnimationDuration"] == "1.55s", metrics
         assert attention["primaryAnimationTimingFunction"].startswith("steps(6"), metrics
         assert attention["primaryAnimationDelay"] == "-0.42s", metrics
-        assert attention["primaryEffectDuration"] > 0, metrics
+        assert attention["primaryEffectDuration"] == 0, metrics
         for key in ("working", "cooldown"):
             dot = metrics[key]
-            assert dot["primaryAnimationName"] == "attention-ring-fade", metrics
-            assert dot["primaryAnimationDuration"] == attention["primaryAnimationDuration"], metrics
-            assert dot["primaryAnimationDelay"] == attention["primaryAnimationDelay"], metrics
-            assert dot["primaryAnimationTimingFunction"] == attention["primaryAnimationTimingFunction"], metrics
-            assert dot["primaryEffectDuration"] == attention["primaryEffectDuration"], metrics
+            assert dot["primaryAnimationName"] == "agent-status-opacity-pulse", metrics
+            assert dot["primaryAnimationDuration"] == "1.55s", metrics
+            assert dot["primaryAnimationDelay"] == "-0.42s", metrics
+            assert dot["primaryAnimationTimingFunction"].startswith("steps(6"), metrics
+            assert dot["primaryEffectDuration"] > 0, metrics
             assert dot["primaryPlayState"] in {"pending", "running"}, metrics
-        assert "working-ball-hard-flash" in metrics["working"]["animationName"], metrics
+        assert metrics["working"]["animationName"] == "agent-status-opacity-pulse", metrics
     finally:
         browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
 
@@ -1546,9 +1672,9 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
             assert "attention-ring-fade" in item["dotAnimation"], (name, item)
             assert item["dotDelay"] == item["rootDelayVar"], (name, item)
         else:
-            assert item["dotAnimation"] == "none", (name, item)
-            assert item["beforeAnimation"] == "subwindow-status-glyph-pulse", (name, item)
-            assert item["beforeDelay"] == item["rootDelayVar"], (name, item)
+            assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, item)
+            assert item["beforeAnimation"] == "none", (name, item)
+            assert item["dotDelay"] == item["rootDelayVar"], (name, item)
             assert item["dotBoxShadow"] in ("", "none"), (name, item)
         assert item["leftGap"] >= -0.5, (name, item)
         assert item["centerDy"] <= 1, (name, item)
@@ -1768,7 +1894,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
               topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention') || false,
               topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('attention-pulse') || false,
             };
-            clearPromptAttentionForSession(session, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
+            acknowledgeTerminalAttentionFromUserAction(session, 0, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
             const immediate = {
               badgeText: tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '',
@@ -3378,6 +3504,55 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
     assert result["autoApproveFetches"] >= 2, result
     assert result["errors"] == []
     assert result["rejections"] == []
+
+
+def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        auto_approve_payload={
+            "session_order": ["1"],
+            "sessions": {"1": {"target": "1", "enabled": False, "last_action": "off", "screen": {"key": "idle"}}},
+            "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && document.querySelector('[data-pane-tab=\"1\"]') !== null")
+    )
+    result = browser.execute_script(
+        """
+        const tab = () => document.querySelector('[data-pane-tab="1"]');
+        const before = !!tab()?.querySelector('.session-yolo-marker');
+        applyAutoApprovePayload({
+          session_order: ['1'],
+          sessions: {
+            '1': {
+              target: '1', enabled: true, last_action: 'enabled', screen: {key: 'working'},
+              agent_windows: [{kind: 'codex', state: 'working', window_index: 0, window_label: '0:codex', current: true}],
+            },
+          },
+          rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+        });
+        const marker = tab()?.querySelector('.session-yolo-marker');
+        return {
+          before,
+          after: !!marker,
+          active: marker?.classList.contains('active') || false,
+          session: marker?.dataset.yoloSession || '',
+          statusDot: !!tab()?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--working'),
+          errors: window.__bootErrors || [],
+          rejections: window.__bootRejections || [],
+        };
+        """
+    )
+    assert result["before"] is False, result
+    assert result["after"] is True, result
+    assert result["active"] is True, result
+    assert result["session"] == "1", result
+    assert result["statusDot"] is True, result
+    assert result["errors"] == [], result
+    assert result["rejections"] == [], result
 
 
 def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):

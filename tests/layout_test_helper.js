@@ -1257,6 +1257,7 @@ globalThis.__layoutTestApi = {
   tmuxSignalAgentStateForSession,
   setTmuxSignalStateForTest(payload) { tmuxSignalState = payload; },
   setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
+  applyAutoApprovePayloadForTest: applyAutoApprovePayload,
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
   tabsToEvictForCap,

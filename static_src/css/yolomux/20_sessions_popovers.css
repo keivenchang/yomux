@@ -10,6 +10,11 @@
   border: 0;
   font-weight: 500;
 }
+/* A status ball establishes the tab's visual leading column. Without one, preserve no empty column
+   before the branch/PR content; the shared pane-tab renderer adds this state for every tab surface. */
+.pane-tab-core--without-status-ball .session-button-number {
+  min-width: 0;
+}
 .session-button-prefix {
   flex: 0 0 auto;
   min-width: max-content;
@@ -137,10 +142,12 @@
 .status-indicator--positive,
 .status-indicator--working {
   color: var(--pr-status-passing);
+  --agent-status-ball-fill: var(--pr-status-passing);
   --attention-ring-rgb: 82 210 115;
 }
 .status-indicator--cooldown {
   color: var(--agent-status-cooldown);
+  --agent-status-ball-fill: var(--agent-status-cooldown);
   --attention-ring-rgb: var(--agent-status-cooldown-rgb);
 }
 .status-indicator--active {
@@ -167,34 +174,24 @@
   animation-direction: normal;
 }
 .status-indicator--dot.status-indicator--working.heartbeat-pulse {
-  --attention-pulse-saturate-rest: 1;
-  --attention-pulse-saturate-peak: 1.08;
-  --attention-pulse-brightness-rest: 1;
-  --attention-pulse-brightness-peak: 1.06;
-  --attention-ring-border-rest-alpha: 0.18;
-  --attention-ring-border-peak-alpha: 0.42;
-  --attention-ring-rest-glow-alpha: 0.06;
-  --attention-ring-peak-outline-alpha: 0.14;
-  --attention-ring-peak-glow-alpha: 0.18;
-  --attention-ring-rest-glow-size: 2px;
-  --attention-ring-peak-glow-size: 8px;
-  border: 1px solid transparent;
-  animation-name: attention-ring-fade, working-ball-hard-flash;
+  animation-name: agent-status-opacity-pulse;
 }
-.status-indicator--dot.status-indicator--attention.heartbeat-pulse,
 .status-indicator--dot.status-indicator--cooldown.heartbeat-pulse {
-  border: 1px solid transparent;
-  animation-name: attention-ring-fade;
+  animation-name: agent-status-opacity-pulse;
 }
 .agent-window-status-dot--transition-glow.status-indicator--working,
 .agent-window-status-dot--transition-glow.status-indicator--attention,
 .agent-window-status-dot--transition-glow.status-indicator--cooldown {
-  border: 1px solid rgb(var(--attention-ring-rgb, 255 51 71) / 0.42);
-  box-shadow: 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.18), 0 0 5px rgb(var(--attention-ring-rgb, 255 51 71) / 0.18);
+  box-shadow: none;
+  filter: none;
+  animation-name: agent-status-opacity-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
 }
 .agent-window-status-dot--transition-pulse:not(.heartbeat-pulse) {
-  border: 1px solid transparent;
-  animation-name: agent-status-transition-pulse;
+  animation-name: agent-status-opacity-pulse;
   animation-duration: var(--agent-status-transition-pulse-duration, var(--pulse-duration, 1.55s));
   animation-delay: var(--attention-animation-delay, 0s);
   animation-timing-function: var(--status-pulse-timing);
@@ -205,6 +202,7 @@
 }
 .status-indicator--attention {
   color: var(--danger-text);
+  --agent-status-ball-fill: var(--bad);
   --attention-ring-rgb: 255 51 71;
 }
 .status-indicator--dot.status-indicator--attention {
@@ -220,6 +218,7 @@
      two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
   --agent-status-ball-size-base: 14px;
   --agent-status-ball-size: var(--agent-status-ball-size-base);
+  --agent-status-ball-border: #000;
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   display: inline-flex;
@@ -244,44 +243,28 @@
   font-family: var(--ui-font);
   font-stretch: normal;
 }
-.status-indicator--dot.agent-window-status-dot--segmented {
-  --agent-status-segment-attention: var(--bad);
-  --agent-status-segment-cooldown: var(--agent-status-cooldown);
-  --agent-status-segment-working: var(--pr-status-passing);
-  display: inline-block;
-  height: 1em;
+.session-agent-activity-marker .agent-window-status-dot {
+  box-sizing: border-box;
+  inline-size: var(--agent-status-ball-size);
+  min-inline-size: var(--agent-status-ball-size);
+  block-size: var(--agent-status-ball-size);
+  flex: 0 0 var(--agent-status-ball-size);
+  line-height: var(--agent-status-ball-size);
+  background: var(--agent-status-ball-fill, currentColor);
+  border: 1px solid var(--agent-status-ball-border);
+  border-radius: 50%;
   color: transparent;
-  background: var(--agent-status-segment-bg, currentColor);
-  overflow: hidden;
+  filter: none;
+  box-shadow: none;
 }
-.agent-window-status-dot--attention-cooldown {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-attention) 0 50%,
-    var(--agent-status-segment-cooldown) 0 100%
-  );
+.session-agent-activity-marker .agent-window-status-dot.status-indicator--working.heartbeat-pulse,
+.session-agent-activity-marker .agent-window-status-dot.status-indicator--cooldown.heartbeat-pulse,
+.session-agent-activity-marker .agent-window-status-dot.status-indicator--attention.heartbeat-pulse {
+  animation-name: agent-status-opacity-pulse;
 }
-.agent-window-status-dot--attention-working {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-attention) 0 50%,
-    var(--agent-status-segment-working) 0 100%
-  );
-}
-.agent-window-status-dot--cooldown-working {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-cooldown) 0 50%,
-    var(--agent-status-segment-working) 0 100%
-  );
-}
-.agent-window-status-dot--attention-cooldown-working {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-attention) 0 33.333%,
-    var(--agent-status-segment-cooldown) 0 66.666%,
-    var(--agent-status-segment-working) 0 100%
-  );
-}
-/* Agent status = a static AI symbol followed by a separate glowing status ball:
-   [symbol][ball]. Working uses a quieter green glow; attention and cooldown keep stronger red/yellow
-   glows. The active/current state is the only status that animates the symbol itself. */
+/* Agent status = a static AI symbol followed by a separate filled status ball:
+   [symbol][ball]. Activity is communicated by opacity, never glow. The active/current state is the
+   only status that animates the symbol itself. */
 .agent-window-activity--attention {
   --attention-ring-rgb: 255 51 71;
 }
@@ -296,13 +279,6 @@
 .agent-window-activity--cooldown .agent-window-status-dot {
   font-size: var(--agent-status-ball-size);
   line-height: 1;
-}
-.agent-window-activity .agent-window-status-dot--acknowledged {
-  font-size: var(--agent-status-ball-size-base);
-  border-color: transparent;
-  box-shadow: none;
-  filter: saturate(0.9) brightness(0.95);
-  opacity: 0.82;
 }
 .agent-window-agent-icon--active {
   --agent-working-glow-rgb: 226 238 248;
@@ -378,22 +354,12 @@
     filter: saturate(var(--attention-pulse-saturate-peak, 1)) brightness(var(--attention-pulse-brightness-peak, 1));
   }
 }
-@keyframes working-ball-hard-flash {
+@keyframes agent-status-opacity-pulse {
   0%, 100% {
-    color: var(--pr-status-passing);
+    opacity: 0.16;
   }
-  45%, 55% {
-    color: #4be878;
-  }
-}
-@keyframes agent-status-transition-pulse {
-  0%, 100% {
-    opacity: 0.52;
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.18);
-  }
-  45%, 55% {
+  50% {
     opacity: 1;
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.72);
   }
 }
 .attention-pulse {
@@ -529,7 +495,7 @@ body.theme-light .session-yolo-marker.inactive {
   background: var(--agent-inactive-marker-bg);
   border-color: var(--agent-inactive-marker-border);
 }
-/* The session YO marker no longer rotates to signal "working" — the glowing green ball beside the
+/* The session YO marker no longer rotates to signal "working" — the pulsing green ball beside the
    agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
    model work, not session-working. */
 .session-yolo-marker.working {
@@ -563,7 +529,8 @@ body.theme-light .session-yolo-marker.inactive {
   background: #161d29;
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
 }
-body.tab-meta-hidden .pane-tab .tab-symbol {
+body.tab-meta-hidden .pane-tab .tab-symbol,
+body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   display: none;
 }
 .ci-indicator.pr-number-chip {

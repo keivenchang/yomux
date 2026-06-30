@@ -589,6 +589,7 @@ const infoDimensionDefs = Object.freeze([
   {key: 'pr', label: 'PR'},
 ]);
 const infoPresetDefs = Object.freeze([
+  {key: 'tab-tmux-window', label: 'Tab > tmux sub-window', title: 'Tab, then tmux sub-window', grouping: ['tab', 'tmux-window']},
   {key: 'tab-path', label: 'Tab > Path', title: 'Tab, then path', grouping: ['tab', 'path']},
   {key: 'path-branch', label: 'Path > Branch', title: 'Path, then branch', grouping: ['path', 'branch']},
   {key: 'linear-pr', label: 'Linear > PR', title: 'Linear, then PR', grouping: ['linear', 'pr']},
@@ -1515,7 +1516,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true, animate: false});
+  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
@@ -1548,7 +1549,6 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
     active,
     agentStatus: agent,
     agentKey: record.aiKind,
-    activityAnimate: false,
     title,
     attrs,
     ariaPressed: options.action !== false,
@@ -2272,7 +2272,11 @@ function bindPanelControls(panel, session) {
     const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
     activateTab(button.dataset.tab, nextName, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-window-dir], [data-window-index]', event => {
+  delegate(panel, 'click', '[data-window-dir], [data-window-index]', (event, button) => {
+    if (button.dataset.pointerActionHandled === '1') {
+      delete button.dataset.pointerActionHandled;
+      return;
+    }
     handleWindowStepButtonClick(event);
   });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
@@ -3769,11 +3773,55 @@ function applyAutoApprovePayload(payload, options = {}) {
   for (const session of sessions) {
     const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
     autoApproveStates.set(session, state);
+    reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
   const result = {applied: true, sessionsChanged, previousActive};
   if (options.render === false) return result;
   renderAutoApproveStatusSurfaces(result);
   return result;
+}
+
+function reconcileTmuxWindowMetadataFromAgentWindows(session, payload = {}) {
+  const info = transcriptMeta.sessions?.[session];
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const agentWindows = typeof agentWindowPayloadRows === 'function'
+    ? agentWindowPayloadRows(payload.agent_windows)
+    : [];
+  if (!info || !agentWindows.length) return false;
+  const paneWindows = new Set(panes.map(pane => tmuxWindowIndexKey(pane?.window)).filter(index => index !== null));
+  const missing = agentWindows.filter(agent => {
+    const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+    return index !== null && !paneWindows.has(index);
+  });
+  if (!missing.length) return false;
+  const reconciledPanes = [...panes, ...missing.map(agent => {
+    const window = tmuxWindowIndexKey(agent.window_index ?? agent.window);
+    const name = String(agent.window_name || agent.kind || 'window').trim();
+    const active = agent.current === true || agent.window_active === true;
+    return {
+      window,
+      window_name: name,
+      process_label: name,
+      target: agent.pane_target || '',
+      pane_id: agent.pane_target || '',
+      active,
+      window_active: active,
+      pid: agent.pid || null,
+      process_label_pid: agent.pid || null,
+    };
+  })].sort((left, right) => Number(left.window) - Number(right.window));
+  transcriptMeta = {
+    ...transcriptMeta,
+    sessions: {
+      ...(transcriptMeta.sessions || {}),
+      [session]: {
+        ...info,
+        panes: reconciledPanes,
+        selected_pane: reconciledPanes.find(pane => pane.window_active === true) || info.selected_pane,
+      },
+    },
+  };
+  return true;
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -4073,6 +4121,12 @@ function maybeHandleServerVersionChange(serverVersion, serverClientRevision = ''
 async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
+  // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
+  // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
+  // until the next poll repairs the client model.
+  for (const session of Object.keys(transcriptMeta.sessions || {})) {
+    reconcileTmuxWindowMetadataFromAgentWindows(session, autoApproveStates.get(session));
+  }
   transcriptMetaLoaded = true;
   transcriptMetaLoadError = '';
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
@@ -5090,10 +5144,18 @@ function installDevAutoReload() {
   if (!devMode || typeof EventSource === 'undefined') return;
   let source;
   try {
-    source = new EventSource('/api/dev-reload');
+    const revision = encodeURIComponent(String(bootstrap.devBundleRevision || ''));
+    source = new EventSource(`/api/dev-reload?bundle_revision=${revision}`);
   } catch (_error) {
     return;
   }
+  source.addEventListener('ready', event => {
+    // A client reconnects after a server restart, which means it misses the old process's
+    // `reload` event. The fresh server's revision makes that stale bundle observable at once.
+    const serverRevision = String(safeJsonParse(event.data, {})?.signature || '');
+    const bootRevision = String(bootstrap.devBundleRevision || '');
+    if (serverRevision && bootRevision && serverRevision !== bootRevision) location.reload();
+  });
   source.addEventListener('reload', () => {
     statusOk('dev: bundle changed — reloading');
     location.reload();

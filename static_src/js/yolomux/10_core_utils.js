@@ -1568,16 +1568,32 @@ function attentionAcknowledgeDelayMsFromOptions(options = {}) {
     : (typeof agentWindowActivityAcknowledgeDelayMs === 'number' ? agentWindowActivityAcknowledgeDelayMs : 0);
 }
 
+function tmuxWindowUserInteractionIndex(session) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || typeof document === 'undefined') return null;
+  const activeButton = Array.from(document.querySelectorAll('.tmux-window-bar .tmux-window-button.active'))
+    .find(button => String(button.dataset.windowSession || '').trim() === sessionKey);
+  const activeIndex = tmuxWindowIndexKey(activeButton?.dataset.windowIndex);
+  if (activeIndex !== null) return activeIndex;
+  const info = transcriptMeta.sessions?.[sessionKey] || null;
+  return typeof tmuxWindowCurrentActiveIndex === 'function'
+    ? tmuxWindowCurrentActiveIndex(sessionKey, info)
+    : null;
+}
+
 function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null, options = {}) {
   const sessionKey = String(session || '').trim();
   if (!sessionKey || !isTmuxSession(sessionKey)) return false;
+  const resolvedWindowIndex = windowIndex === null || windowIndex === undefined
+    ? tmuxWindowUserInteractionIndex(sessionKey)
+    : windowIndex;
   const acknowledgeDelayMs = attentionAcknowledgeDelayMsFromOptions(options);
   let acknowledged = false;
   if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
     acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
   }
   if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
-    acknowledged = acknowledgeAgentWindowActivity(sessionKey, windowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
+    acknowledged = acknowledgeAgentWindowActivity(sessionKey, resolvedWindowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
   }
   return acknowledged;
 }

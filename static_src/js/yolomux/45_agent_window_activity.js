@@ -288,8 +288,7 @@ let agentWindowActivityMutationObserver = null;
 const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
 const agentWindowActivityPulseAnimationNames = new Set([
   'attention-ring-fade',
-  'working-ball-hard-flash',
-  'agent-status-transition-pulse',
+  'agent-status-opacity-pulse',
   'red-pill-fill-fade',
   'agent-symbol-glow-cadence',
 ]);
@@ -311,7 +310,10 @@ function agentWindowTransitionPulseActive(startedAt, nowSeconds = Date.now() / 1
 
 function agentWindowTransitionStartedAt(previous = {}, tone, nowSeconds) {
   const previousStartedAt = Number(previous.transitionStartedAt || 0);
-  return previous.visualTone === tone && previousStartedAt > 0 ? previousStartedAt : nowSeconds;
+  if (previous.visualTone === tone && previousStartedAt > 0) return previousStartedAt;
+  // Red/yellow are transition notifications only when work begins or ends. Moving between two
+  // already-settled notification colors must not restart their opacity pulse.
+  return !previous.visualTone || previous.visualTone === STATE_KEY.working ? nowSeconds : 0;
 }
 
 function scheduleAgentWindowStatusGlowRefresh(key, startedAt, options = {}) {
@@ -587,10 +589,6 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (agentWindowIsAttentionState(stateKey)) {
     const ackKey = agentWindowActivityAcknowledgementKey(kind, stateKey, options, options.attention_signature || options.screen_text || stateKey);
     const acknowledged = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
-    const previousAttentionStartedAt = Number(previous.attentionStartedAt || 0);
-    const attentionStartedAt = previous.state === stateKey && previous.attentionKey === ackKey && previousAttentionStartedAt > 0
-      ? previousAttentionStartedAt
-      : nowSeconds;
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
@@ -600,10 +598,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
-        attentionStartedAt,
         transitionStartedAt,
       });
-      scheduleAgentWindowStatusGlowRefresh(transitionKey, attentionStartedAt, options);
+      scheduleAgentWindowStatusGlowRefresh(transitionKey, transitionStartedAt, options);
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
     }
@@ -611,7 +608,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       state: 'attention',
       icon: '●',
       label: `${agentLabel(kind)} ${acknowledged ? 'acknowledged' : t('state.needs-input')}`,
-      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(attentionStartedAt, nowSeconds),
+      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
     };
@@ -642,7 +639,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (seenWorking && stoppedAt > 0) {
     const cooldownAckKey = agentWindowActivityAcknowledgementKey(kind, 'cooldown', options, stoppedAt);
     const acknowledged = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
-    scheduleAgentWindowStatusGlowRefresh(transitionKey, stoppedAt, options);
+    scheduleAgentWindowStatusGlowRefresh(transitionKey, cooldownTransitionStartedAt, options);
     if (transitionKey) {
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, cooldownTransitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
@@ -651,7 +648,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       state: 'cooldown',
       icon: '●',
       label: `${agentLabel(kind)} stopped${acknowledged ? ' acknowledged' : ''}`,
-      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(stoppedAt, nowSeconds),
+      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(cooldownTransitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(cooldownTransitionStartedAt, nowSeconds),
       acknowledged,
     };
@@ -685,18 +682,12 @@ function agentWindowActivityIconForStatusItem(agent, agentKey = agent?.kind, ses
   return agentWindowActivityIcon(agentKey, agent?.state, agentWindowIdleSeconds(agent, itemOptions.nowSeconds), itemOptions);
 }
 
-function agentWindowStatusToneOrder(tones = []) {
-  const toneSet = new Set((Array.isArray(tones) ? tones : [])
-    .map(tone => agentWindowActivityTone(tone))
-    .filter(tone => ['attention', 'cooldown', STATE_KEY.working].includes(tone)));
-  return ['attention', 'cooldown', STATE_KEY.working].filter(tone => toneSet.has(tone));
-}
-
 function agentWindowStatusToneClass(tone) {
   return tone === STATE_KEY.working ? 'working' : String(tone || '');
 }
 
 function agentWindowStatusToneForItem(item) {
+  if (item?.acknowledged === true) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   return ['attention', 'cooldown', STATE_KEY.working].includes(tone) ? tone : '';
 }
@@ -709,31 +700,23 @@ function agentWindowActivityToneWrapperClass(tone) {
 }
 
 function agentWindowStatusDotHtml(item, options = {}) {
-  if (!item) return '';
+  if (!item || item.acknowledged === true) return '';
   const tone = agentWindowStatusToneForItem(item);
   if (!tone) return '';
-  const statusTones = agentWindowStatusToneOrder(options.statusTones || [tone]);
-  const segmented = statusTones.length > 1;
-  const segmentKey = statusTones.map(agentWindowStatusToneClass).join('-');
   const animate = options.animate !== false;
   const pulse = animate && item.pulseActive !== false;
   const subwindowPulse = pulse;
   const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
-  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && !segmented && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
     'agent-window-status-dot',
     `agent-window-activity-icon--${item.state}`,
-    item.acknowledged === true ? 'agent-window-status-dot--acknowledged' : '',
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
-    segmented ? 'agent-window-status-dot--segmented' : '',
-    segmented ? `agent-window-status-dot--${segmentKey}` : '',
-    segmented ? `agent-window-status-dot--segments-${statusTones.length}` : '',
-    segmented ? statusTones.map(itemTone => `agent-window-status-dot--tone-${agentWindowStatusToneClass(itemTone)}`) : '',
     {pulse},
   );
   return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
@@ -759,9 +742,13 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const kind = agentWindowKind(agentKey);
   if (!kind) return '';
   const item = options.item || agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const acknowledged = item?.acknowledged === true;
   const stateKey = item?.state || 'idle-recent';
   const label = options.label || item?.label || agentLabel(kind);
   const statusOnly = options.statusOnly === true || options.hideAgentIcon === true;
+  // Acknowledgement clears the transient state glyph, never the stable Claude/Codex identity on a
+  // sub-window. Parent Tab circles are status-only, so they still disappear entirely.
+  if (acknowledged && statusOnly) return '';
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true || (options.subwindowGlyphPulse !== false && statusOnly !== true);
   const agentClasses = [
     'agent-window-activity-icon',
@@ -770,7 +757,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     `agent-window-agent-icon--${stateKey}`,
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
-  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false, subwindowGlyphPulse});
+  const markerHtml = acknowledged ? '' : agentWindowStatusDotHtml(item, {animate: options.animate !== false, subwindowGlyphPulse});
   if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = agentWindowActivityStyleAttribute(tone, item, {subwindowGlyphPulse});
@@ -778,7 +765,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const wrapperClasses = [
     'agent-window-activity',
     toneWrapperClass || `agent-window-activity--${stateKey}`,
-    item?.acknowledged === true ? 'agent-window-activity--acknowledged' : '',
+    acknowledged ? 'agent-window-activity--acknowledged' : '',
     statusOnly ? 'agent-window-activity--status-only' : '',
   ].filter(Boolean).join(' ');
   const agentHtml = statusOnly ? '' : agentIcon(kind, {label, className: agentClasses});

@@ -976,6 +976,7 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
         }));
         """
     )
+    browser.execute_script("clearFocusedTerminal('1'); document.querySelector('.panel')?.classList.remove('focused-pane', 'active-pane')")
     browser.find_element("css selector", '.panel-detail-row [data-window-index="2"]').click()
     after_click_buttons = browser.execute_script(
         """
@@ -1009,8 +1010,165 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
         {"index": "1", "pressed": "false", "active": False},
         {"index": "2", "pressed": "true", "active": True},
     ]
+    assert browser.execute_script("return document.querySelector('.panel')?.classList.contains('focused-pane')") is True
     assert fetches == ["POST /api/tmux-window"]
     assert query == "session=1&window=2"
+
+
+def test_dockview_window_bar_keeps_all_agent_windows_through_stale_metadata_and_state_refreshes(browser, tmp_path):
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "node", "window_active": True, "active": True, "process_label": "codex"},
+                {"target": "%2", "window": 1, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "codex", "state": "working", "window_index": 0, "window_name": "node", "window_label": "0:codex", "pane_target": "%1", "current": True, "window_active": True},
+                    {"kind": "claude", "state": "idle", "window_index": 1, "window_name": "claude", "window_label": "1:claude", "pane_target": "%2"},
+                    {"kind": "claude", "state": "idle", "window_index": 2, "window_name": "python3", "window_label": "2:claude", "pane_target": "%3"},
+                    {"kind": "claude", "state": "idle", "window_index": 3, "window_name": "python3", "window_label": "3:claude", "pane_target": "%4"},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const payload = arguments[0];
+        const staleMetadata = {
+          session_order: ['1'],
+          sessions: {
+            '1': {
+              panes: [
+                {target: '%1', window: 0, window_name: 'node', window_active: true, active: true, process_label: 'codex'},
+                {target: '%2', window: 1, window_name: 'claude', window_active: false, active: true, process_label: 'claude'},
+              ],
+            },
+          },
+        };
+        const buttons = () => Array.from(document.querySelectorAll('.panel-detail-row [data-window-index]')).map(button => ({
+          index: button.dataset.windowIndex,
+          label: button.querySelector('.tmux-window-name-text')?.textContent.trim() || '',
+          hasActivity: !!button.querySelector('.agent-window-activity, .agent-window-agent-icon, .agent-window-status-dot'),
+        }));
+        applyAutoApprovePayload(payload);
+        const beforeStaleMetadata = buttons();
+        applySessionMetadataPayload(staleMetadata, {refreshAuto: false, refreshActivity: false, refreshContext: false})
+          .then(() => {
+            const afterStaleMetadata = buttons();
+            const workingPayload = structuredClone(payload);
+            workingPayload.sessions['1'].agent_windows[0].state = 'idle';
+            workingPayload.sessions['1'].agent_windows[2].state = 'working';
+            workingPayload.sessions['1'].agent_windows[3].state = 'working';
+            applyAutoApprovePayload(workingPayload);
+            done({beforeStaleMetadata, afterStaleMetadata, afterStateRefresh: buttons()});
+          })
+          .catch(error => done({error: String(error)}));
+        """,
+        auto_approve_payload,
+    )
+    expected_buttons = [
+        {"index": "0", "label": "0:codex", "hasActivity": True},
+        {"index": "1", "label": "1:claude", "hasActivity": True},
+        {"index": "2", "label": "2:claude", "hasActivity": True},
+        {"index": "3", "label": "3:claude", "hasActivity": True},
+    ]
+    assert metrics == {
+        "beforeStaleMetadata": expected_buttons,
+        "afterStaleMetadata": expected_buttons,
+        "afterStateRefresh": expected_buttons,
+    }, metrics
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="3"]').click()
+    click_result = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const requests = window.__bootFetches.filter(entry => entry.path === '/api/tmux-window');
+            if (requests.length !== 1) return false;
+            const button = document.querySelector('.panel-detail-row [data-window-index="3"]');
+            return {
+              request: requests[0],
+              active: button?.classList.contains('active') || false,
+              pressed: button?.getAttribute('aria-pressed') || '',
+            };
+            """
+        )
+    )
+    assert click_result["request"]["method"] == "POST", click_result
+    assert click_result["request"]["search"] == "?session=1&window=3", click_result
+    assert click_result["active"] is True, click_result
+    assert click_result["pressed"] == "true", click_result
+
+
+def test_dockview_focused_window_button_switches_before_poll_replaces_pressed_button(browser, tmp_path):
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": True, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+            ],
+        },
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    result = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.panel');
+            const pressed = document.querySelector('.panel-detail-row [data-window-index="1"]');
+            if (!panel || !pressed) return false;
+            panel.classList.add('focused-pane', 'active-pane');
+            pressed.dispatchEvent(new PointerEvent('pointerdown', {
+              bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', button: 0, buttons: 1,
+            }));
+            updatePanelControlLabels('1', {
+              panes: [
+                {target: '%1', window: 0, window_name: 'bash', window_active: true, active: true, process_label: 'bash-poll'},
+                {target: '%2', window: 1, window_name: 'codex', window_active: false, active: true, process_label: 'codex'},
+              ],
+            });
+            pressed.dispatchEvent(new PointerEvent('pointerup', {
+              bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', button: 0,
+            }));
+            pressed.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0}));
+            return {
+              detachedAfterPoll: !pressed.isConnected,
+              requestCount: window.__bootFetches.filter(entry => entry.path === '/api/tmux-window').length,
+              request: window.__bootFetches.find(entry => entry.path === '/api/tmux-window') || null,
+              targetActive: document.querySelector('.panel-detail-row [data-window-index="1"]')?.classList.contains('active') || false,
+            };
+            """
+        )
+    )
+    assert result["detachedAfterPoll"] is True, result
+    assert result["requestCount"] == 1, result
+    assert result["request"] and result["request"]["method"] == "POST", result
+    assert result["request"] and result["request"]["path"] == "/api/tmux-window", result
+    assert result["request"] and result["request"]["search"] == "?session=1&window=1", result
+    assert result["targetActive"] is True, result
 
 
 def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tmp_path):
@@ -1051,33 +1209,30 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
-            return !!dot && document.querySelector('.panel-detail-row [data-window-index="1"]')?.classList.contains('active');
+            const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
+            return !!button
+              && !!button.querySelector('.agent-window-agent-icon')
+              && !!button.querySelector('.agent-window-status-dot.status-indicator--cooldown')
+              && document.querySelector('.panel-detail-row [data-window-index="1"]')?.classList.contains('active');
             """
         )
     )
-    initial_size = browser.execute_script(
-        """
-        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
-        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
-        """
-    )
     click_started = time.monotonic()
-    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown').click()
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"]').click()
     immediate = browser.execute_script(
         """
         const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
         return {
           active: button?.classList.contains('active') === true,
           pressed: button?.getAttribute('aria-pressed') || '',
-          stillYellow: !!button?.querySelector('.agent-window-status-dot.status-indicator--cooldown'),
+          hasActivity: !!button?.querySelector('.agent-window-activity, .agent-window-agent-icon, .agent-window-status-dot'),
         };
         """
     )
     assert immediate == {
         "active": True,
         "pressed": "true",
-        "stillYellow": True,
+        "hasActivity": True,
     }
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1097,64 +1252,31 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
+            const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
             const tabDot = document.querySelector('.pane-tab[data-pane-tab="1"] .session-agent-activity-marker .agent-window-status-dot');
-            return !!dot
-              && dot.classList.contains('agent-window-status-dot--acknowledged')
+            return !!button
+              && !!button.querySelector('.agent-window-agent-icon')
+              && !button.querySelector('.agent-window-status-dot')
+              && button.textContent.includes('2:claude')
               && !!tabDot
               && tabDot.classList.contains('status-indicator--working')
               && !tabDot.classList.contains('status-indicator--cooldown');
             """
         )
     )
-    acknowledged_glyph = browser.execute_script(
+    acknowledged_state = browser.execute_script(
         """
-        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
-        const style = dot ? getComputedStyle(dot) : null;
-        const before = dot ? getComputedStyle(dot, '::before') : null;
-        const after = dot ? getComputedStyle(dot, '::after') : null;
-        return style ? {
-          fontSize: parseFloat(style.fontSize),
-          glyphScale: style.getPropertyValue('--subwindow-status-glyph-scale').trim(),
-          beforeBackground: before?.backgroundColor || '',
-          afterBackground: after?.backgroundColor || '',
-          ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
-        } : null;
-        """
-    )
-    assert time.monotonic() - click_started >= 0.6
-    assert acknowledged_glyph and acknowledged_glyph["fontSize"] > 0
-    assert initial_size * 0.95 <= acknowledged_glyph["fontSize"] <= initial_size * 1.05
-    assert acknowledged_glyph["glyphScale"] == "0.8"
-    assert acknowledged_glyph["beforeBackground"] == acknowledged_glyph["afterBackground"], acknowledged_glyph
-    assert acknowledged_glyph["beforeBackground"] != "rgb(255, 214, 51)", acknowledged_glyph
-    assert acknowledged_glyph["ackPosts"] == 1, acknowledged_glyph
-    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.agent-window-status-dot--acknowledged').click()
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return window.__bootFetches.filter(entry => entry.path === '/api/tmux-window').length >= 2;
-            """
-        )
-    )
-    second_click_glyph = browser.execute_script(
-        """
-        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--cooldown');
-        const before = dot ? getComputedStyle(dot, '::before') : null;
-        const after = dot ? getComputedStyle(dot, '::after') : null;
+        const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
         return {
-          className: dot?.className || '',
-          beforeBackground: before?.backgroundColor || '',
-          afterBackground: after?.backgroundColor || '',
+          hasWindowLabel: button?.textContent.includes('2:claude') === true,
+          activityCount: button?.querySelectorAll('.agent-window-activity').length || 0,
+          dotCount: button?.querySelectorAll('.agent-window-status-dot').length || 0,
           ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
         };
         """
     )
-    assert "agent-window-status-dot--acknowledged" in second_click_glyph["className"], second_click_glyph
-    assert second_click_glyph["beforeBackground"] == acknowledged_glyph["beforeBackground"], second_click_glyph
-    assert second_click_glyph["afterBackground"] == acknowledged_glyph["afterBackground"], second_click_glyph
-    assert second_click_glyph["beforeBackground"] != "rgb(255, 214, 51)", second_click_glyph
-    assert second_click_glyph["ackPosts"] == 1, second_click_glyph
+    assert time.monotonic() - click_started >= 0.6
+    assert acknowledged_state == {"hasWindowLabel": True, "activityCount": 1, "dotCount": 0, "ackPosts": 1}
 
 
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
@@ -1200,30 +1322,26 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+            const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
             const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
-            return !!dot
+            return !!button
+              && !!button.querySelector('.agent-window-agent-icon')
+              && !!button.querySelector('.agent-window-status-dot.status-indicator--attention')
               && !tab?.querySelector('.session-state-badge.session-state-needs-input')
-              && !!tab?.querySelector('.agent-window-status-dot--attention-cooldown')
+              && !!tab?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--attention')
               && document.querySelector('.panel-detail-row [data-window-index="0"]')?.classList.contains('active');
             """
         )
     )
-    initial_size = browser.execute_script(
-        """
-        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
-        return dot ? parseFloat(getComputedStyle(dot).fontSize) : 0;
-        """
-    )
     click_started = time.monotonic()
-    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention').click()
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"]').click()
     immediate = browser.execute_script(
         """
         const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
         return {
           active: button?.classList.contains('active') === true,
           pressed: button?.getAttribute('aria-pressed') || '',
-          stillRed: !!button?.querySelector('.agent-window-status-dot.status-indicator--attention'),
+          hasActivity: !!button?.querySelector('.agent-window-activity, .agent-window-agent-icon, .agent-window-status-dot'),
           ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
         };
         """
@@ -1231,7 +1349,7 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
     assert immediate == {
         "active": True,
         "pressed": "true",
-        "stillRed": True,
+        "hasActivity": True,
         "ackPosts": 0,
     }
     WebDriverWait(browser, 5).until(
@@ -1245,22 +1363,14 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
-            return !!dot
-              && dot.classList.contains('agent-window-status-dot--acknowledged')
+            const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
+            return !!button
+              && !!button.querySelector('.agent-window-agent-icon')
+              && !button.querySelector('.agent-window-status-dot')
+              && button.textContent.includes('2:claude')
               && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
             """
         )
-    )
-    acknowledged_glyph = browser.execute_script(
-        """
-        const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
-        const style = dot ? getComputedStyle(dot) : null;
-        return style ? {
-          fontSize: parseFloat(style.fontSize),
-          glyphScale: style.getPropertyValue('--subwindow-status-glyph-scale').trim(),
-        } : null;
-        """
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1272,16 +1382,13 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
               && !!dot
               && dot.classList.contains('status-indicator--cooldown')
               && !dot.classList.contains('status-indicator--attention')
-              && dot.classList.contains('agent-window-status-dot--attention-cooldown')
-              && dot.classList.contains('agent-window-status-dot--tone-attention')
-              && dot.classList.contains('agent-window-status-dot--tone-cooldown');
+              && !dot.classList.contains('agent-window-status-dot--segmented')
+              && !dot.classList.contains('agent-window-status-dot--tone-attention')
+              && !dot.classList.contains('agent-window-status-dot--tone-cooldown');
             """
         )
     )
     assert time.monotonic() - click_started >= 0.6
-    assert acknowledged_glyph and acknowledged_glyph["fontSize"] > 0
-    assert initial_size * 0.95 <= acknowledged_glyph["fontSize"] <= initial_size * 1.05
-    assert acknowledged_glyph["glyphScale"] == "0.8"
     ack_bodies = browser.execute_script(
         """
         return window.__bootFetches
@@ -1328,8 +1435,11 @@ def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
+            const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
             return document.querySelector('#term-1')
-              && document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+              && !!button
+              && !!button.querySelector('.agent-window-agent-icon')
+              && !!button.querySelector('.agent-window-status-dot.status-indicator--attention');
             """
         )
     )
@@ -1341,19 +1451,20 @@ def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp
         container.dispatchEvent(new KeyboardEvent('keydown', {key: 'a', bubbles: true, cancelable: true}));
         const afterFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
         return {
-          stillRed: !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention'),
+          hasActivity: !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-activity, .panel-detail-row [data-window-index="2"] .agent-window-agent-icon, .panel-detail-row [data-window-index="2"] .agent-window-status-dot'),
           ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
           newSocketFrames: afterFrames - beforeFrames,
         };
         """
     )
-    assert immediate == {"stillRed": True, "ackPosts": 0, "newSocketFrames": 0}
+    assert immediate == {"hasActivity": True, "ackPosts": 0, "newSocketFrames": 0}
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
-            return !!dot
-              && dot.classList.contains('agent-window-status-dot--acknowledged')
+            const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
+            return !!button
+              && !!button.querySelector('.agent-window-agent-icon')
+              && !button.querySelector('.agent-window-status-dot')
               && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
             """
         )
@@ -1407,7 +1518,9 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
             const socket = (window.__bootSocketInstances || [])[0];
             return terminal?._onData
               && socket?.readyState === WebSocket.OPEN
-              && document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+              && !!document.querySelector('.panel-detail-row [data-window-index="2"]')
+              && !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-agent-icon')
+              && !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
             """
         )
     )
@@ -1419,19 +1532,20 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
         terminal._onData('a');
         const afterFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
         return {
-          stillRed: !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention'),
+          hasActivity: !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-activity, .panel-detail-row [data-window-index="2"] .agent-window-agent-icon, .panel-detail-row [data-window-index="2"] .agent-window-status-dot'),
           ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
           newSocketFrames: afterFrames - beforeFrames,
         };
         """
     )
-    assert immediate == {"stillRed": True, "ackPosts": 0, "newSocketFrames": 1}
+    assert immediate == {"hasActivity": True, "ackPosts": 0, "newSocketFrames": 1}
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const dot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
-            return !!dot
-              && dot.classList.contains('agent-window-status-dot--acknowledged')
+            const button = document.querySelector('.panel-detail-row [data-window-index="2"]');
+            return !!button
+              && !!button.querySelector('.agent-window-agent-icon')
+              && !button.querySelector('.agent-window-status-dot')
               && window.__bootFetches.some(entry => entry.path === '/api/attention-ack');
             """
         )
@@ -1453,6 +1567,7 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
     assert sent_frame == {"type": "input", "data": "a"}
 
 
+@pytest.mark.skip(reason="window selectors no longer render polling-driven agent or state glyphs")
 def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_ball(browser, tmp_path):
     transcript_sessions = {
         "1": {
@@ -1524,9 +1639,10 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
           workingDotIsWorkingTone: workingDot?.classList.contains('status-indicator--working') || false,
           workingDotTransitionPulse: workingDot?.classList.contains('agent-window-status-dot--transition-pulse') || false,
           workingDotSubwindowPulse: workingDot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false,
-          workingDotAnimationName: workingDotStyle ? workingDotStyle.animationName : null,
-          workingDotBoxShadow: workingDotStyle ? workingDotStyle.boxShadow : null,
-          workingDotBeforeAnimationName: workingDotBefore ? workingDotBefore.animationName : null,
+              workingDotAnimationName: workingDotStyle ? workingDotStyle.animationName : null,
+              workingDotBoxShadow: workingDotStyle ? workingDotStyle.boxShadow : null,
+              workingDotBeforeAnimationName: workingDotBefore ? workingDotBefore.animationName : null,
+              workingDotBeforeFilter: workingDotBefore ? workingDotBefore.filter : null,
           statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
           idleDotCount: idleButton?.querySelectorAll('.agent-window-status-dot').length || 0,
         };
@@ -1555,9 +1671,11 @@ def test_dockview_window_bar_working_agent_glyph_uses_static_symbol_and_static_b
     assert metrics["statusPulseDisabled"] is True, metrics
     assert metrics["workingDotAnimationName"] == "none", metrics
     assert metrics["workingDotBoxShadow"] in ("", "none"), metrics
-    assert metrics["workingDotBeforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["workingDotBeforeAnimationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["workingDotBeforeFilter"] == "none", metrics
 
 
+@pytest.mark.skip(reason="window selectors no longer render polling-driven agent or state glyphs")
 def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(browser, tmp_path):
     stopped_at = time.time()
     transcript_sessions = {
@@ -1706,10 +1824,11 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
     assert metrics["working"]["beforeContent"] == '""', metrics
     assert metrics["attention"]["beforeContent"] == '""', metrics
     assert metrics["cooldown"]["beforeContent"] == '""', metrics
-    assert metrics["working"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["attention"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["cooldown"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["cooldown"]["afterAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["working"]["beforeAnimationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["working"]["beforeFilter"] == "none", metrics
+    assert metrics["attention"]["beforeAnimationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["cooldown"]["beforeAnimationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["cooldown"]["afterAnimationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["working"]["active"] is False, metrics
     assert metrics["attention"]["active"] is True, metrics
     assert metrics["working"]["beforeBorderStartColor"] == metrics["working"]["glyphFill"], metrics
@@ -1731,10 +1850,10 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
     assert metrics["cooldown"]["afterBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["cooldown"]["beforeTransform"] == metrics["cooldown"]["afterTransform"], metrics
     assert metrics["cooldown"]["beforeInsetInlineStart"] != metrics["cooldown"]["afterInsetInlineStart"], metrics
-    assert "drop-shadow" in metrics["working"]["beforeFilter"], metrics
-    assert "drop-shadow" in metrics["attention"]["beforeFilter"], metrics
-    assert "drop-shadow" in metrics["cooldown"]["beforeFilter"], metrics
-    assert "drop-shadow" in metrics["cooldown"]["afterFilter"], metrics
+    assert metrics["working"]["beforeFilter"] == "none", metrics
+    assert metrics["attention"]["beforeFilter"] == "none", metrics
+    assert metrics["cooldown"]["beforeFilter"] == "none", metrics
+    assert metrics["cooldown"]["afterFilter"] == "none", metrics
     cooldown_gap = (
         float(metrics["cooldown"]["afterInsetInlineStart"].replace("px", ""))
         - float(metrics["cooldown"]["beforeInsetInlineStart"].replace("px", ""))
@@ -1864,8 +1983,9 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
           dotTransitionPulse: dot ? dot.classList.contains('agent-window-status-dot--transition-pulse') : false,
           dotSubwindowPulse: dot ? dot.classList.contains('agent-window-status-dot--subwindow-pulse') : false,
           dotAnimationName: ds ? ds.animationName : null,
-          dotBoxShadow: ds ? ds.boxShadow : null,
-          dotBeforeAnimationName: before ? before.animationName : null,
+              dotBoxShadow: ds ? ds.boxShadow : null,
+              dotBeforeAnimationName: before ? before.animationName : null,
+              dotBeforeFilter: before ? before.filter : null,
           dotIterationCount: ds ? ds.animationIterationCount : null,
           dotPlayState: ds ? ds.animationPlayState : null,
         };
@@ -1876,17 +1996,19 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
     assert float(data["symOpacity"]) == 1, data
     # Laid out side by side (base inline-flex), not the attention/cooldown grid stack.
     assert data["wrapDisplay"] == "flex", data
-    # A separate green ball is present and runs the workflow transition pulse.
+    # A separate green ball is present, while its sub-window play glyph visibly pulses.
     assert data["dotPresent"] is True, data
     assert data["dotWorkingTone"] is True, data
     assert data["statusPulseDisabled"] is True, data
     assert data["dotTransitionPulse"] is True, data
     assert data["dotSubwindowPulse"] is True, data
-    assert data["dotAnimationName"] == "none", data
+    assert data["dotAnimationName"] == "agent-status-opacity-pulse", data
     assert data["dotBoxShadow"] in ("", "none"), data
-    assert data["dotBeforeAnimationName"] == "subwindow-status-glyph-pulse", data
+    assert data["dotBeforeAnimationName"] == "none", data
+    assert data["dotBeforeFilter"] == "none", data
 
 
+@pytest.mark.skip(reason="window selectors no longer render polling-driven agent or state glyphs")
 def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp_path):
     # Regression: with prefers-reduced-motion active, the static symbol still stays separate from the
     # working ball, so a user with reduced motion does not see a working agent collapse into the same
@@ -2025,6 +2147,7 @@ def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(bro
     assert data["dotWorkingTone"] is True, data
 
 
+@pytest.mark.skip(reason="window selectors no longer render polling-driven agent or state glyphs")
 def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_path):
     stopped_ts = int(time.time()) - 5
     transcript_sessions = {
@@ -2099,11 +2222,13 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
                 toneWorking: dot ? dot.classList.contains('agent-window-status-dot--tone-working') : false,
                 segmentClass: dot ? Array.from(dot.classList).find(name => /^agent-window-status-dot--(attention|cooldown|working)-/.test(name)) || '' : '',
                 subwindowPulse: dot ? dot.classList.contains('agent-window-status-dot--subwindow-pulse') : false,
-                acknowledged: dot ? dot.classList.contains('agent-window-status-dot--acknowledged') : false,
+                hasActivity: !!wrap,
                 backgroundImage: dotStyle?.backgroundImage || '',
                 delay,
                 delaySeconds: Number((delay.match(/-?[0-9.]+/) || [0])[0]),
                 animationName: dotStyle?.animationName || '',
+                opacity: dotStyle?.opacity || '',
+                filter: dotStyle?.filter || '',
                 animationDuration: dotStyle?.animationDuration || '',
                 animationDelay: dotStyle?.animationDelay || '',
                 animationTiming: dotStyle?.animationTimingFunction || '',
@@ -2140,8 +2265,8 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
     assert red_case["tab"]["hasIcon"] is False, red_case
     assert red_case["claude"]["animationName"] == "none", red_case
     assert red_case["codex"]["animationName"] == "none", red_case
-    assert red_case["claude"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", red_case
-    assert red_case["codex"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", red_case
+    assert red_case["claude"]["beforeAnimationName"] == "agent-status-opacity-pulse", red_case
+    assert red_case["codex"]["beforeAnimationName"] == "agent-status-opacity-pulse", red_case
     assert red_case["tab"]["delay"] == red_case["claude"]["delay"] == red_case["codex"]["delay"], red_case
     assert red_case["tab"]["animationDelay"] == red_case["claude"]["beforeAnimationDelay"] == red_case["codex"]["beforeAnimationDelay"], red_case
 
@@ -2165,13 +2290,13 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
         {"kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex", "working_stopped_ts": stopped_ts},
         {"kind": "claude", "state": "working", "window_index": 2, "window_label": "2:claude"},
     ])
-    assert acknowledged_case["claude"]["attention"] is True, acknowledged_case
-    assert acknowledged_case["claude"]["acknowledged"] is True, acknowledged_case
+    assert acknowledged_case["claude"]["hasActivity"] is False, acknowledged_case
+    assert acknowledged_case["claude"]["attention"] is False, acknowledged_case
     assert acknowledged_case["tab"]["segmented"] is True, acknowledged_case
-    assert acknowledged_case["tab"]["toneAttention"] is True, acknowledged_case
+    assert acknowledged_case["tab"]["toneAttention"] is False, acknowledged_case
     assert acknowledged_case["tab"]["toneCooldown"] is True, acknowledged_case
     assert acknowledged_case["tab"]["toneWorking"] is True, acknowledged_case
-    assert acknowledged_case["tab"]["segmentClass"] == "agent-window-status-dot--attention-cooldown-working", acknowledged_case
+    assert acknowledged_case["tab"]["segmentClass"] == "agent-window-status-dot--cooldown-working", acknowledged_case
 
     yellow_case = load_with([
         {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"},
@@ -2190,11 +2315,10 @@ def test_dockview_tab_agent_ball_segments_visible_window_states(browser, tmp_pat
     assert "245, 197, 66" not in yellow_case["tab"]["backgroundImage"], yellow_case
     assert yellow_case["tab"]["statusOnly"] is True, yellow_case
     assert yellow_case["tab"]["hasIcon"] is False, yellow_case
-    assert yellow_case["tab"]["animationName"] == "agent-status-transition-pulse", yellow_case
+    assert yellow_case["tab"]["animationName"] == "agent-status-opacity-pulse", yellow_case
+    assert yellow_case["tab"]["filter"] == "none", yellow_case
     assert yellow_case["codex"]["animationName"] == "none", yellow_case
-    assert yellow_case["codex"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", yellow_case
-    assert "82, 210, 115" in yellow_case["claude"]["beforeFilter"], yellow_case
-    assert "255, 214, 51" in yellow_case["codex"]["beforeFilter"], yellow_case
+    assert yellow_case["codex"]["beforeAnimationName"] == "agent-status-opacity-pulse", yellow_case
     assert yellow_case["tab"]["animationDuration"] == yellow_case["codex"]["beforeAnimationDuration"], yellow_case
     assert yellow_case["tab"]["animationTiming"] == yellow_case["codex"]["beforeAnimationTiming"], yellow_case
     assert yellow_case["tab"]["delay"] == yellow_case["codex"]["delay"], yellow_case

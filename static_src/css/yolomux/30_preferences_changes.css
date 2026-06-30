@@ -109,11 +109,27 @@
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-bad-connection-rgb: 220 38 38;
+  --js-debug-agent-token-cyan: #00b7ff;
+  --js-debug-agent-token-orange: #ff7a00;
+  --js-debug-agent-token-magenta: #f000d5;
+  --js-debug-agent-token-beige: #f4d08a;
+  --js-debug-agent-token-turquoise: #31dca0;
+  --js-debug-agent-token-rose: #ff4f70;
+  --js-debug-agent-token-violet: #9b6cff;
+  --js-debug-agent-token-total: #ffe1a3;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
 }
 body.theme-light .js-debug-graph-view {
   --js-debug-idle-agent-status: var(--editor-line-number);
+  --js-debug-agent-token-cyan: #0074a4;
+  --js-debug-agent-token-orange: var(--icon-archive);
+  --js-debug-agent-token-magenta: #b0009f;
+  --js-debug-agent-token-beige: #805b1c;
+  --js-debug-agent-token-turquoise: #087c5b;
+  --js-debug-agent-token-rose: #c21f45;
+  --js-debug-agent-token-violet: #5b21d1;
+  --js-debug-agent-token-total: #8a5a20;
 }
 .js-debug-toolbar {
   display: flex;
@@ -497,6 +513,9 @@ body.theme-light .js-debug-graph-view {
 .js-debug-line--agentToken {
   stroke: var(--js-debug-series-color, var(--accent-sky-strong));
 }
+.js-debug-line--agentTokenTotal {
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-total));
+}
 .js-debug-area--askAgents {
   fill: var(--bad);
   opacity: 0.7;
@@ -526,6 +545,11 @@ body.theme-light .js-debug-graph-view {
   opacity: 0.82;
   stroke-width: 1.8;
   stroke-dasharray: 0.75 4.25;
+}
+.js-debug-line--agentTokenTotal.js-debug-line--moving-average {
+  opacity: 1;
+  stroke-width: 2.4;
+  stroke-dasharray: 1 4;
 }
 .js-debug-legend {
   display: flex;
@@ -576,6 +600,13 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-legend-swatch--agentToken {
   color: var(--js-debug-series-color, var(--accent-sky-strong));
+}
+.js-debug-legend-swatch--agentTokenTotal {
+  width: 16px;
+  height: 3px;
+  border-radius: 0;
+  color: var(--js-debug-series-color, var(--js-debug-agent-token-total));
+  background: repeating-linear-gradient(to right, currentColor 0 2px, transparent 2px 5px);
 }
 .js-debug-legend-swatch--cpu {
   color: var(--active-accent-bright);
@@ -699,7 +730,7 @@ body.theme-light .js-debug-graph-view {
 }
 .diff-ref-controls.compact .diff-ref-input,
 .diff-ref-controls.compact .diff-ref-control input {
-  width: 9ch;
+  width: clamp(16ch, 18vw, 24ch);
   height: 20px;
 }
 .diff-ref-reset {

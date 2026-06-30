@@ -1811,7 +1811,7 @@ def test_timer_client_event_polls_initialize_without_initial_push(monkeypatch):
         {"items": []},
         {"items": [{"repo": "owner/repo", "number": 1}]},
     ]
-    monkeypatch.setattr(webapp, "auto_approve_status", lambda: auto_payloads.pop(0))
+    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda: auto_payloads.pop(0))
     monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: tmux_payloads.pop(0))
     monkeypatch.setattr(webapp, "watched_prs_payload", lambda: watched_payloads.pop(0))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
@@ -1867,7 +1867,7 @@ def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
         {"ok": True, "window_count": 1, "windows": [{"key": "1:0", "activity_age_seconds": 2.0, "activity_ts": 11, "panes": [{"pane_id": "%1", "title": "b work", "history_bytes": 20, "history_size": 2}]}], "generated_at": 2.0},
         {"ok": True, "window_count": 1, "windows": [{"key": "1:0", "active": True, "activity_age_seconds": 3.0, "activity_ts": 12, "panes": [{"pane_id": "%1", "title": "c work", "history_bytes": 30, "history_size": 3}]}], "generated_at": 3.0},
     ]
-    monkeypatch.setattr(webapp, "auto_approve_status", lambda: auto_payloads.pop(0))
+    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda: auto_payloads.pop(0))
     monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: tmux_payloads.pop(0))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
@@ -2424,6 +2424,45 @@ def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
     assert "active" not in rows[0]
     assert rows[0]["current"] is True
     assert rows[0]["window_active"] is True
+
+
+def test_agent_window_working_completion_gets_a_fresh_pause_timestamp(monkeypatch, tmp_path):
+    pane = PaneInfo(
+        session="2",
+        window="0",
+        window_name="codex",
+        pane="0",
+        pane_id="%20",
+        target="%20",
+        current_path="/repo/working",
+        command="codex",
+        active=True,
+        window_active=True,
+        title="codex",
+        pid=20,
+        process_label="codex",
+        process_label_pid=20,
+    )
+    info = SessionInfo(
+        session="2",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[AgentInfo("2", "codex", 20, "%20", "codex", "/repo/working", "idle", "codex-id", str(tmp_path / "codex.jsonl"), None)],
+    )
+    states = iter(({"key": "working", "text": "working"}, {"key": "idle", "text": "done"}, {"key": "idle", "text": "done"}))
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, **_kwargs: "fixture")
+    monkeypatch.setattr(app_module, "agent_screen_state", lambda _text, **_kwargs: next(states))
+    webapp = app_module.TmuxWebtermApp(["2"])
+    try:
+        working = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})[0]
+        completed = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})[0]
+        still_completed = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})[0]
+    finally:
+        webapp.control_server.stop()
+    assert working["state"] == "working"
+    assert completed["state"] == "idle"
+    assert completed["working_stopped_ts"] >= working["observed_ts"]
+    assert still_completed["working_stopped_ts"] == completed["working_stopped_ts"]
 
 
 def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):

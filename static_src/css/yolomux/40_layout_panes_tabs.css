@@ -1821,24 +1821,10 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot {
   --subwindow-status-attention-fill: var(--danger-strong);
   --subwindow-status-cooldown-fill: var(--agent-status-cooldown);
-  --subwindow-status-acknowledged-fill: color-mix(in srgb, var(--muted) 82%, var(--text) 18%);
   --subwindow-status-glyph-scale: 0.8;
   --subwindow-status-glyph-fill: currentColor;
-  --subwindow-status-glyph-glow-rgb: 82 210 115;
   --subwindow-status-glyph-border-color: color-mix(in srgb, var(--text) 84%, var(--bg) 16%);
   --subwindow-status-glyph-border-color-active: var(--active-control-text);
-  --subwindow-status-cooldown-outline-color: color-mix(in srgb, var(--bg) 88%, #000 12%);
-  --subwindow-status-cooldown-outline-filter:
-    drop-shadow(1px 0 0 var(--subwindow-status-cooldown-outline-color))
-    drop-shadow(-1px 0 0 var(--subwindow-status-cooldown-outline-color))
-    drop-shadow(0 1px 0 var(--subwindow-status-cooldown-outline-color))
-    drop-shadow(0 -1px 0 var(--subwindow-status-cooldown-outline-color));
-  --subwindow-status-glyph-outline-filter:
-    drop-shadow(1px 0 0 var(--subwindow-status-glyph-border-color))
-    drop-shadow(-1px 0 0 var(--subwindow-status-glyph-border-color))
-    drop-shadow(0 1px 0 var(--subwindow-status-glyph-border-color))
-    drop-shadow(0 -1px 0 var(--subwindow-status-glyph-border-color));
-  --subwindow-status-glyph-base-filter: var(--subwindow-status-glyph-outline-filter);
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1864,6 +1850,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.agent-window-status-dot--transition-pulse,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.agent-window-status-dot--subwindow-pulse {
   border-color: transparent !important;
+  background: transparent !important;
   box-shadow: none !important;
   animation: none !important;
   filter: none !important;
@@ -1872,28 +1859,19 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .session-agent-row .agent-window-status-dot.status-indicator--working,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--working {
   --subwindow-status-glyph-fill: var(--pr-status-passing);
-  --subwindow-status-glyph-glow-rgb: 82 210 115;
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--attention,
 .session-agent-row .agent-window-status-dot.status-indicator--attention,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--attention {
   --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
-  --subwindow-status-glyph-glow-rgb: 220 38 38;
   color: transparent !important;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--cooldown,
 .session-agent-row .agent-window-status-dot.status-indicator--cooldown,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--cooldown {
   --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
-  --subwindow-status-glyph-glow-rgb: var(--agent-status-cooldown-rgb);
-  --subwindow-status-glyph-base-filter: var(--subwindow-status-cooldown-outline-filter);
   color: transparent !important;
-}
-.tmux-window-button .agent-window-status-dot.agent-window-status-dot--acknowledged,
-.session-agent-row .agent-window-status-dot.agent-window-status-dot--acknowledged,
-.file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.agent-window-status-dot--acknowledged {
-  --subwindow-status-glyph-fill: var(--subwindow-status-acknowledged-fill);
 }
 .tmux-window-button .agent-window-status-dot::before,
 .session-agent-row .agent-window-status-dot::before,
@@ -1908,15 +1886,28 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: block;
   text-indent: 0;
   transform: translate(-50%, -50%);
-  filter: var(--subwindow-status-glyph-base-filter);
+  filter: none;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--working::before,
 .session-agent-row .agent-window-status-dot.status-indicator--working::before,
 .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--working::before {
-  inline-size: 0;
-  block-size: 0;
-  border-block: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.42) solid transparent;
-  border-inline-start: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.7) solid var(--subwindow-status-glyph-fill, currentColor);
+  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.94);
+  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.88);
+  background: var(--subwindow-status-glyph-border-color);
+  clip-path: polygon(8% 0, 100% 50%, 8% 100%);
+}
+.tmux-window-button .agent-window-status-dot.status-indicator--working::after,
+.session-agent-row .agent-window-status-dot.status-indicator--working::after,
+.file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--working::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.94 - 2px);
+  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.88 - 2px);
+  background: var(--subwindow-status-glyph-fill);
+  clip-path: polygon(8% 0, 100% 50%, 8% 100%);
+  transform: translate(-50%, -50%);
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--attention::before,
 .session-agent-row .agent-window-status-dot.status-indicator--attention::before,
@@ -1939,43 +1930,15 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
   border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.06));
   background: var(--subwindow-status-glyph-fill, currentColor);
-  filter: var(--subwindow-status-glyph-base-filter);
+  filter: none;
 }
-.tmux-window-button .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
-.session-agent-row .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
-.file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
-.tmux-window-button .agent-window-status-dot.status-indicator--cooldown.agent-window-status-dot--subwindow-pulse::after,
-.session-agent-row .agent-window-status-dot.status-indicator--cooldown.agent-window-status-dot--subwindow-pulse::after,
-.file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--cooldown.agent-window-status-dot--subwindow-pulse::after {
-  animation-name: subwindow-status-glyph-pulse;
-  animation-duration: var(--pulse-duration);
-  animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--status-pulse-timing);
-  animation-iteration-count: infinite;
-}
-@keyframes subwindow-status-glyph-pulse {
-  0%, 100% {
-    opacity: 1;
-    transform: translate(-50%, -50%) scale(0.92);
-    filter: var(--subwindow-status-glyph-base-filter) drop-shadow(0 0 3px rgb(var(--subwindow-status-glyph-glow-rgb) / 0.36));
-  }
-  50% {
-    opacity: 1;
-    transform: translate(-50%, -50%) scale(1.08);
-    filter: var(--subwindow-status-glyph-base-filter) drop-shadow(0 0 8px rgb(var(--subwindow-status-glyph-glow-rgb) / 0.82));
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .tmux-window-button .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
-  .session-agent-row .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
-  .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.agent-window-status-dot--subwindow-pulse::before,
-  .tmux-window-button .agent-window-status-dot.status-indicator--cooldown.agent-window-status-dot--subwindow-pulse::after,
-  .session-agent-row .agent-window-status-dot.status-indicator--cooldown.agent-window-status-dot--subwindow-pulse::after,
-  .file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.status-indicator--cooldown.agent-window-status-dot--subwindow-pulse::after {
-    animation: none;
-    opacity: 1;
-    transform: translate(-50%, -50%);
-  }
+.tmux-window-button .agent-window-status-dot.agent-window-status-dot--subwindow-pulse,
+.session-agent-row .agent-window-status-dot.agent-window-status-dot--subwindow-pulse,
+.file-tree-row.tabber-row[data-tabber-type="window"] .tabber-window-label .agent-window-status-dot.agent-window-status-dot--subwindow-pulse {
+  /* The parent circle and child glyph deliberately animate this same element opacity. The child
+     container is transparent, so this does not draw a ball behind the triangle/square/pause bars. */
+  animation: agent-status-opacity-pulse var(--pulse-duration) var(--status-pulse-timing) var(--attention-animation-delay, 0s) infinite normal both !important;
+  will-change: opacity;
 }
 .tmux-window-button .agent-window-status-dot.status-indicator--cooldown::before,
 .session-agent-row .agent-window-status-dot.status-indicator--cooldown::before,
@@ -2011,12 +1974,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tmux-window-bar .tmux-window-button.active .agent-window-status-dot,
 .session-agent-window-block > .session-agent-row.current .agent-window-status-dot {
   --subwindow-status-glyph-border-color: var(--subwindow-status-glyph-border-color-active);
-  --subwindow-status-cooldown-outline-color: color-mix(in srgb, var(--active-control-bg) 22%, #000 78%);
-  --subwindow-status-glyph-outline-filter:
-    drop-shadow(1px 0 0 var(--subwindow-status-glyph-border-color))
-    drop-shadow(-1px 0 0 var(--subwindow-status-glyph-border-color))
-    drop-shadow(0 1px 0 var(--subwindow-status-glyph-border-color))
-    drop-shadow(0 -1px 0 var(--subwindow-status-glyph-border-color));
   color: transparent !important;
 }
 .tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--attention,
@@ -2030,10 +1987,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--cooldown,
 .session-agent-window-block > .session-agent-row.current .agent-window-status-dot.status-indicator--cooldown {
   --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
-}
-.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.agent-window-status-dot--acknowledged,
-.session-agent-window-block > .session-agent-row.current .agent-window-status-dot.agent-window-status-dot--acknowledged {
-  --subwindow-status-glyph-fill: var(--subwindow-status-acknowledged-fill);
 }
 .terminal-tab {
   flex: 0 1 auto;

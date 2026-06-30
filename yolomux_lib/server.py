@@ -48,6 +48,7 @@ from .common import codex_exec_argv
 from .common import codex_runtime_env
 from .common import error_payload
 from .common import terminate_process_group
+from .common import yolomux_dev_bundle_revision
 from .filesystem import FilesystemError
 from .http_routes import dispatch_http_route
 from .http_routes import parse_query_float
@@ -1620,19 +1621,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0)
 
     def dev_bundle_signature(self) -> str:
-        # mtime_ns of the served bundle + css; changes the instant static_build.py rewrites them.
-        from .web import static_asset_path
+        return yolomux_dev_bundle_revision()
 
-        parts = []
-        for asset in ("yolomux.js", "yolomux.css"):
-            path = static_asset_path(asset)
-            try:
-                parts.append(str(path.stat().st_mtime_ns) if path else "0")
-            except OSError:
-                parts.append("0")
-        return ".".join(parts)
-
-    def stream_dev_reload(self) -> None:
+    def stream_dev_reload(self, client_bundle_revision: str = "") -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1643,6 +1634,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         last = self.dev_bundle_signature()
         try:
             self.write_sse_json("ready", {"signature": last})
+            # Old clients did not identify their bundle. Treat that as stale once, so the reload
+            # listener already present in the old bundle repairs it after a server restart.
+            if str(client_bundle_revision or "") != last:
+                self.write_sse_json("reload", {"signature": last})
             while True:
                 time.sleep(0.5)
                 current = self.dev_bundle_signature()

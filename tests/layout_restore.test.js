@@ -1916,6 +1916,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/body\.theme-light \.ci-indicator\.pr-number-chip/.test(css) && /body\.theme-light \.ci-indicator\.pr-review-approved/.test(css), '#6: light-theme overrides cover number + review chips');
     // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); red attention states use balls/rings instead of text badges.
     assert.equal(api.sessionStateHtml({key: 'ready-review', short: 'PR', label: 'Ready for review', reason: 'checks pass'}), '', '#7: the redundant ready-review PR pill is suppressed');
+    assert.equal(api.sessionStateHtml({key: 'idle', short: '-', label: 'Idle', reason: 'no active work'}), '', '#7: idle state does not add a meaningless dash before branch metadata');
     const needsInputBadge = api.sessionStateHtml({key: 'needs-input', short: '?', label: 'Needs input', reason: 'waiting'});
     assert.equal(needsInputBadge, '', '#7: input-needed attention does not render a redundant text badge');
     // #3: tab badge chips carry no native title (the custom popover is the single source).

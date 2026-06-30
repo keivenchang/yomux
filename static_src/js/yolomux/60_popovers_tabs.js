@@ -85,10 +85,10 @@ if (fileExplorerHiddenToggle) {
 }
 
 function updateSessionButtonStates() {
-  // Top navigation is menu-based now; per-session state lives in pane tabs
-  // and menu rows, which are rebuilt by their normal render paths.
-  // Keep the top-bar cross-session activity line live as states change (poll-driven).
+  // YO ownership is rendered into pane-tab markup, so a restored/changed worker state must
+  // rebuild the shared tab strip as well as the popovers that describe it.
   updateTopbarActivityStatus();
+  renderPaneTabStrips();
   refreshPaneTabSessionPopovers();
 }
 
@@ -443,14 +443,14 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
 }
 
 function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI status indicator summarizes every visible agent-window ball as one segmented ball.
-  // Its symbol and glow follow the most urgent state: red attention, then yellow stopped cooldown, then
-  // green working. A screen-only working signal still falls back to the current/first agent window.
+  // A Tab has one circle. Its color follows the most urgent visible child (red, then yellow, then
+  // green), while its opacity pulse follows every child: if any child is pulsing, the parent pulses.
+  // A screen-only working signal still falls back to the current/first agent window.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
   if (!agents.length) return null;
   let selected = null;
-  const byTone = new Map();
+  const visibleItems = [];
   const screenWorking = sessionYoloIsWorking(session, payload);
   const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent?.state));
   for (const agent of agents) {
@@ -467,16 +467,8 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
     const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
-    const toneCurrent = byTone.get(tone);
-    const toneCurrentIsActive = toneCurrent ? agentWindowPayloadCurrent(toneCurrent.agent) === true : false;
-    if (!toneCurrent || current && !toneCurrentIsActive) byTone.set(tone, {agent, item});
+    visibleItems.push({agent, item, tone});
     if (item.acknowledged !== true && (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent))) selected = {agent, item};
-  }
-  if (!selected && byTone.size) {
-    const statusTones = typeof agentWindowStatusToneOrder === 'function'
-      ? agentWindowStatusToneOrder([...byTone.keys()])
-      : [...byTone.keys()];
-    selected = byTone.get(statusTones[0]) || null;
   }
   if (!selected && screenWorking) {
     const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
@@ -486,18 +478,18 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
         ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
         : {state: STATE_KEY.working, icon: '●', label: `${agentLabel(agent.kind)} ${t('state.working')}`};
       selected = {agent, item};
-      byTone.set(STATE_KEY.working, selected);
+      visibleItems.push({agent, item, tone: STATE_KEY.working});
     }
   }
   if (!selected) return null;
-  const statusTones = typeof agentWindowStatusToneOrder === 'function'
-    ? agentWindowStatusToneOrder([...byTone.keys()])
-    : [...byTone.keys()];
-  const label = statusTones
-    .map(tone => byTone.get(tone)?.item?.label || '')
-    .filter(Boolean)
-    .join('; ') || selected.item?.label || agentLabel(selected.agent?.kind);
-  return {...selected, statusTones, label};
+  const childIsPulsing = visibleItems.some(({item}) => item.pulseActive === true);
+  const childTransitionIsPulsing = visibleItems.some(({item}) => item.transitionPulseActive === true);
+  const item = {
+    ...selected.item,
+    pulseActive: childIsPulsing,
+    transitionPulseActive: childTransitionIsPulsing,
+  };
+  return {...selected, item, label: item.label || agentLabel(selected.agent?.kind)};
 }
 
 function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
@@ -518,7 +510,6 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       ...agentWindowActivityOptionsForStatus(statusAgent, session),
       item: statusSummary.item,
       label: statusSummary.label,
-      statusTones: statusSummary.statusTones,
       statusOnly: true,
     });
     if (iconHtml) {

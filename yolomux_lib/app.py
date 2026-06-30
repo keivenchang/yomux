@@ -1242,6 +1242,8 @@ class TmuxWebtermApp:
         self.stats_agent_token_lock = threading.Lock()
         self.stats_agent_token_state: dict[str, dict[str, Any]] = {}
         self.stats_agent_activity_state: dict[str, dict[str, Any]] = {}
+        self.agent_window_transition_lock = threading.RLock()
+        self.agent_window_transition_state: dict[str, dict[str, float | str]] = {}
         self.stats_agent_token_next_sample_at = 0.0
         self.stats_agent_token_consumer_until = 0.0
         self.performance_record_lock = threading.RLock()
@@ -4785,7 +4787,9 @@ class TmuxWebtermApp:
 
     def poll_auto_approve_client_event_once(self) -> list[str]:
         started = time.perf_counter()
-        payload, status = self.auto_approve_status()
+        # Attention must not wait behind the read-path cache: this poll drives the SSE update that
+        # turns a visible terminal confirmation into its red stop indicator.
+        payload, status = self.refresh_auto_approve_cache_sync()
         signature_payload = {"status": int(status), "data": payload}
         serialization_started = time.perf_counter()
         signature = self.stable_client_event_payload_signature(signature_payload)
@@ -9147,6 +9151,35 @@ class TmuxWebtermApp:
         record = activity_snapshot.get(key) if isinstance(activity_snapshot, dict) else None
         return self.activity_record_recency_ts(record if isinstance(record, dict) else None)
 
+    def agent_window_working_stopped_ts(
+        self,
+        session: str,
+        window: str,
+        pane_target: str,
+        kind: str,
+        state: str,
+        observed_ts: float,
+        fallback_last_active_ts: float,
+    ) -> float:
+        key = "\x1f".join((session, window, pane_target, kind))
+        with self.agent_window_transition_lock:
+            previous = self.agent_window_transition_state.get(key, {})
+            previous_state = str(previous.get("state") or "")
+            previous_stopped_ts = self.float_value(previous.get("working_stopped_ts"), 0.0)
+            if state == "working":
+                stopped_ts = 0.0
+            elif state == "idle":
+                # Each working->idle transition needs a fresh key. The activity ledger can hold
+                # terminal output from an older run whose pause was already acknowledged.
+                stopped_ts = observed_ts if previous_state == "working" else previous_stopped_ts or fallback_last_active_ts
+            else:
+                stopped_ts = 0.0
+            self.agent_window_transition_state[key] = {
+                "state": state,
+                "working_stopped_ts": stopped_ts,
+            }
+        return stopped_ts
+
     @staticmethod
     def attention_ack_key(*parts: Any) -> str:
         return json.dumps([str(part or "") for part in parts], separators=(",", ":"))
@@ -9479,7 +9512,15 @@ class TmuxWebtermApp:
             state = self.agent_window_state_from_screen(screen)
             elapsed = self.float_value(screen.get("display_elapsed_seconds"), self.float_value(screen.get("status_elapsed_seconds"), -1.0))
             last_active_ts = self.agent_window_last_active_ts(activity, session, window)
-            working_stopped_ts = last_active_ts if state == "idle" and last_active_ts > 0 else 0.0
+            working_stopped_ts = self.agent_window_working_stopped_ts(
+                session,
+                window,
+                str(agent.pane_target or ""),
+                kind,
+                state,
+                observed_ts,
+                last_active_ts,
+            )
             window_index: int | None
             try:
                 window_index = int(window)

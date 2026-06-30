@@ -3279,16 +3279,32 @@ function attentionAcknowledgeDelayMsFromOptions(options = {}) {
     : (typeof agentWindowActivityAcknowledgeDelayMs === 'number' ? agentWindowActivityAcknowledgeDelayMs : 0);
 }
 
+function tmuxWindowUserInteractionIndex(session) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || typeof document === 'undefined') return null;
+  const activeButton = Array.from(document.querySelectorAll('.tmux-window-bar .tmux-window-button.active'))
+    .find(button => String(button.dataset.windowSession || '').trim() === sessionKey);
+  const activeIndex = tmuxWindowIndexKey(activeButton?.dataset.windowIndex);
+  if (activeIndex !== null) return activeIndex;
+  const info = transcriptMeta.sessions?.[sessionKey] || null;
+  return typeof tmuxWindowCurrentActiveIndex === 'function'
+    ? tmuxWindowCurrentActiveIndex(sessionKey, info)
+    : null;
+}
+
 function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null, options = {}) {
   const sessionKey = String(session || '').trim();
   if (!sessionKey || !isTmuxSession(sessionKey)) return false;
+  const resolvedWindowIndex = windowIndex === null || windowIndex === undefined
+    ? tmuxWindowUserInteractionIndex(sessionKey)
+    : windowIndex;
   const acknowledgeDelayMs = attentionAcknowledgeDelayMsFromOptions(options);
   let acknowledged = false;
   if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
     acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
   }
   if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
-    acknowledged = acknowledgeAgentWindowActivity(sessionKey, windowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
+    acknowledged = acknowledgeAgentWindowActivity(sessionKey, resolvedWindowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
   }
   return acknowledged;
 }
@@ -7722,7 +7738,7 @@ function sessionStateHtml(state) {
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
   if ([STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state?.key)) return '';
-  if (!state || [STATE_KEY.working, 'done'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
+  if (!state || [STATE_KEY.idle, STATE_KEY.working, 'done'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
     clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
     session: state.session,
@@ -15902,8 +15918,7 @@ let agentWindowActivityMutationObserver = null;
 const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
 const agentWindowActivityPulseAnimationNames = new Set([
   'attention-ring-fade',
-  'working-ball-hard-flash',
-  'agent-status-transition-pulse',
+  'agent-status-opacity-pulse',
   'red-pill-fill-fade',
   'agent-symbol-glow-cadence',
 ]);
@@ -15925,7 +15940,10 @@ function agentWindowTransitionPulseActive(startedAt, nowSeconds = Date.now() / 1
 
 function agentWindowTransitionStartedAt(previous = {}, tone, nowSeconds) {
   const previousStartedAt = Number(previous.transitionStartedAt || 0);
-  return previous.visualTone === tone && previousStartedAt > 0 ? previousStartedAt : nowSeconds;
+  if (previous.visualTone === tone && previousStartedAt > 0) return previousStartedAt;
+  // Red/yellow are transition notifications only when work begins or ends. Moving between two
+  // already-settled notification colors must not restart their opacity pulse.
+  return !previous.visualTone || previous.visualTone === STATE_KEY.working ? nowSeconds : 0;
 }
 
 function scheduleAgentWindowStatusGlowRefresh(key, startedAt, options = {}) {
@@ -16201,10 +16219,6 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (agentWindowIsAttentionState(stateKey)) {
     const ackKey = agentWindowActivityAcknowledgementKey(kind, stateKey, options, options.attention_signature || options.screen_text || stateKey);
     const acknowledged = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
-    const previousAttentionStartedAt = Number(previous.attentionStartedAt || 0);
-    const attentionStartedAt = previous.state === stateKey && previous.attentionKey === ackKey && previousAttentionStartedAt > 0
-      ? previousAttentionStartedAt
-      : nowSeconds;
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
@@ -16214,10 +16228,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
-        attentionStartedAt,
         transitionStartedAt,
       });
-      scheduleAgentWindowStatusGlowRefresh(transitionKey, attentionStartedAt, options);
+      scheduleAgentWindowStatusGlowRefresh(transitionKey, transitionStartedAt, options);
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
     }
@@ -16225,7 +16238,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       state: 'attention',
       icon: '●',
       label: `${agentLabel(kind)} ${acknowledged ? 'acknowledged' : t('state.needs-input')}`,
-      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(attentionStartedAt, nowSeconds),
+      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
     };
@@ -16256,7 +16269,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (seenWorking && stoppedAt > 0) {
     const cooldownAckKey = agentWindowActivityAcknowledgementKey(kind, 'cooldown', options, stoppedAt);
     const acknowledged = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
-    scheduleAgentWindowStatusGlowRefresh(transitionKey, stoppedAt, options);
+    scheduleAgentWindowStatusGlowRefresh(transitionKey, cooldownTransitionStartedAt, options);
     if (transitionKey) {
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, cooldownTransitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
@@ -16265,7 +16278,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       state: 'cooldown',
       icon: '●',
       label: `${agentLabel(kind)} stopped${acknowledged ? ' acknowledged' : ''}`,
-      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(stoppedAt, nowSeconds),
+      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(cooldownTransitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(cooldownTransitionStartedAt, nowSeconds),
       acknowledged,
     };
@@ -16299,18 +16312,12 @@ function agentWindowActivityIconForStatusItem(agent, agentKey = agent?.kind, ses
   return agentWindowActivityIcon(agentKey, agent?.state, agentWindowIdleSeconds(agent, itemOptions.nowSeconds), itemOptions);
 }
 
-function agentWindowStatusToneOrder(tones = []) {
-  const toneSet = new Set((Array.isArray(tones) ? tones : [])
-    .map(tone => agentWindowActivityTone(tone))
-    .filter(tone => ['attention', 'cooldown', STATE_KEY.working].includes(tone)));
-  return ['attention', 'cooldown', STATE_KEY.working].filter(tone => toneSet.has(tone));
-}
-
 function agentWindowStatusToneClass(tone) {
   return tone === STATE_KEY.working ? 'working' : String(tone || '');
 }
 
 function agentWindowStatusToneForItem(item) {
+  if (item?.acknowledged === true) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   return ['attention', 'cooldown', STATE_KEY.working].includes(tone) ? tone : '';
 }
@@ -16323,31 +16330,23 @@ function agentWindowActivityToneWrapperClass(tone) {
 }
 
 function agentWindowStatusDotHtml(item, options = {}) {
-  if (!item) return '';
+  if (!item || item.acknowledged === true) return '';
   const tone = agentWindowStatusToneForItem(item);
   if (!tone) return '';
-  const statusTones = agentWindowStatusToneOrder(options.statusTones || [tone]);
-  const segmented = statusTones.length > 1;
-  const segmentKey = statusTones.map(agentWindowStatusToneClass).join('-');
   const animate = options.animate !== false;
   const pulse = animate && item.pulseActive !== false;
   const subwindowPulse = pulse;
   const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
-  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && !segmented && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
     'agent-window-status-dot',
     `agent-window-activity-icon--${item.state}`,
-    item.acknowledged === true ? 'agent-window-status-dot--acknowledged' : '',
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
-    segmented ? 'agent-window-status-dot--segmented' : '',
-    segmented ? `agent-window-status-dot--${segmentKey}` : '',
-    segmented ? `agent-window-status-dot--segments-${statusTones.length}` : '',
-    segmented ? statusTones.map(itemTone => `agent-window-status-dot--tone-${agentWindowStatusToneClass(itemTone)}`) : '',
     {pulse},
   );
   return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
@@ -16373,9 +16372,13 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const kind = agentWindowKind(agentKey);
   if (!kind) return '';
   const item = options.item || agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const acknowledged = item?.acknowledged === true;
   const stateKey = item?.state || 'idle-recent';
   const label = options.label || item?.label || agentLabel(kind);
   const statusOnly = options.statusOnly === true || options.hideAgentIcon === true;
+  // Acknowledgement clears the transient state glyph, never the stable Claude/Codex identity on a
+  // sub-window. Parent Tab circles are status-only, so they still disappear entirely.
+  if (acknowledged && statusOnly) return '';
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true || (options.subwindowGlyphPulse !== false && statusOnly !== true);
   const agentClasses = [
     'agent-window-activity-icon',
@@ -16384,7 +16387,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     `agent-window-agent-icon--${stateKey}`,
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
-  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false, subwindowGlyphPulse});
+  const markerHtml = acknowledged ? '' : agentWindowStatusDotHtml(item, {animate: options.animate !== false, subwindowGlyphPulse});
   if (statusOnly && !markerHtml) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = agentWindowActivityStyleAttribute(tone, item, {subwindowGlyphPulse});
@@ -16392,7 +16395,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const wrapperClasses = [
     'agent-window-activity',
     toneWrapperClass || `agent-window-activity--${stateKey}`,
-    item?.acknowledged === true ? 'agent-window-activity--acknowledged' : '',
+    acknowledged ? 'agent-window-activity--acknowledged' : '',
     statusOnly ? 'agent-window-activity--status-only' : '',
   ].filter(Boolean).join(' ');
   const agentHtml = statusOnly ? '' : agentIcon(kind, {label, className: agentClasses});
@@ -21530,10 +21533,10 @@ if (fileExplorerHiddenToggle) {
 }
 
 function updateSessionButtonStates() {
-  // Top navigation is menu-based now; per-session state lives in pane tabs
-  // and menu rows, which are rebuilt by their normal render paths.
-  // Keep the top-bar cross-session activity line live as states change (poll-driven).
+  // YO ownership is rendered into pane-tab markup, so a restored/changed worker state must
+  // rebuild the shared tab strip as well as the popovers that describe it.
   updateTopbarActivityStatus();
+  renderPaneTabStrips();
   refreshPaneTabSessionPopovers();
 }
 
@@ -21888,14 +21891,14 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
 }
 
 function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI status indicator summarizes every visible agent-window ball as one segmented ball.
-  // Its symbol and glow follow the most urgent state: red attention, then yellow stopped cooldown, then
-  // green working. A screen-only working signal still falls back to the current/first agent window.
+  // A Tab has one circle. Its color follows the most urgent visible child (red, then yellow, then
+  // green), while its opacity pulse follows every child: if any child is pulsing, the parent pulses.
+  // A screen-only working signal still falls back to the current/first agent window.
   if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
   const agents = sessionAgentWindowStatusPayloads(session, info, payload);
   if (!agents.length) return null;
   let selected = null;
-  const byTone = new Map();
+  const visibleItems = [];
   const screenWorking = sessionYoloIsWorking(session, payload);
   const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent?.state));
   for (const agent of agents) {
@@ -21912,16 +21915,8 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
     const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
-    const toneCurrent = byTone.get(tone);
-    const toneCurrentIsActive = toneCurrent ? agentWindowPayloadCurrent(toneCurrent.agent) === true : false;
-    if (!toneCurrent || current && !toneCurrentIsActive) byTone.set(tone, {agent, item});
+    visibleItems.push({agent, item, tone});
     if (item.acknowledged !== true && (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent))) selected = {agent, item};
-  }
-  if (!selected && byTone.size) {
-    const statusTones = typeof agentWindowStatusToneOrder === 'function'
-      ? agentWindowStatusToneOrder([...byTone.keys()])
-      : [...byTone.keys()];
-    selected = byTone.get(statusTones[0]) || null;
   }
   if (!selected && screenWorking) {
     const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
@@ -21931,18 +21926,18 @@ function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoAppr
         ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
         : {state: STATE_KEY.working, icon: '●', label: `${agentLabel(agent.kind)} ${t('state.working')}`};
       selected = {agent, item};
-      byTone.set(STATE_KEY.working, selected);
+      visibleItems.push({agent, item, tone: STATE_KEY.working});
     }
   }
   if (!selected) return null;
-  const statusTones = typeof agentWindowStatusToneOrder === 'function'
-    ? agentWindowStatusToneOrder([...byTone.keys()])
-    : [...byTone.keys()];
-  const label = statusTones
-    .map(tone => byTone.get(tone)?.item?.label || '')
-    .filter(Boolean)
-    .join('; ') || selected.item?.label || agentLabel(selected.agent?.kind);
-  return {...selected, statusTones, label};
+  const childIsPulsing = visibleItems.some(({item}) => item.pulseActive === true);
+  const childTransitionIsPulsing = visibleItems.some(({item}) => item.transitionPulseActive === true);
+  const item = {
+    ...selected.item,
+    pulseActive: childIsPulsing,
+    transitionPulseActive: childTransitionIsPulsing,
+  };
+  return {...selected, item, label: item.label || agentLabel(selected.agent?.kind)};
 }
 
 function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
@@ -21963,7 +21958,6 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       ...agentWindowActivityOptionsForStatus(statusAgent, session),
       item: statusSummary.item,
       label: statusSummary.label,
-      statusTones: statusSummary.statusTones,
       statusOnly: true,
     });
     if (iconHtml) {
@@ -29031,9 +29025,12 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     : options.showLeading === false
     ? ''
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
+  // The fixed-width session number keeps activity-bearing tabs aligned. Without the status ball it
+  // only creates dead space before the branch/PR metadata, so mark that shared content variant compact.
+  const statusBallClass = leadingHtml.includes('agent-window-status-dot') ? '' : ' pane-tab-core--without-status-ball';
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
-  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+  return `<span class="pane-tab-core${statusBallClass}">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
 
@@ -29269,10 +29266,21 @@ function bindPanelShell(panel, session) {
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   panel.addEventListener('pointerdown', event => {
+    // Native range dragging must keep the same input node for the whole gesture;
+    // focusing YO!stats here would rerender the panel before the browser moves the thumb.
+    if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
     if (isTmuxSession(session)) {
       const windowTarget = event.target?.closest?.('[data-window-index]');
       const chromeTarget = event.target?.closest?.('[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session]');
-      if (windowTarget) return;
+      if (windowTarget) {
+        // Run the original target before polling or focus-side updates can replace it.
+        // The marker suppresses the later delegated click if the browser still emits one.
+        event.preventDefault();
+        event.stopPropagation();
+        windowTarget.dataset.pointerActionHandled = '1';
+        handleWindowStepButtonClick({target: windowTarget, currentTarget: windowTarget});
+        return;
+      }
       if (chromeTarget) {
         setFocusedTerminal(session, {userInitiated: true, acknowledgeAgentWindow: false});
         return;
@@ -30010,18 +30018,13 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
     const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
-    const agentStatusForIcon = agentStatus
-      ? {...agentStatus, current: active, window_active: active}
-      : (active && ['claude', 'codex'].includes(agentKey)
-        ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
-        : agentStatus);
     const title = t('terminal.window.title', {name: visibleName});
     return tmuxWindowButtonHtml({
       session,
       visibleName,
       numberLabel: record.numberLabel,
       active,
-      agentStatus: agentStatusForIcon,
+      agentStatus,
       agentKey,
       title,
       disabled,
@@ -33391,6 +33394,7 @@ const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
 const jsDebugGraphMovingAverageSeries = new Set(['api', 'sse', 'latency', 'bandwidth']);
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
+const jsDebugGraphAgentTokenTotalSeriesKey = 'agentTokenTotal';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusSeriesLabels = Object.freeze({
@@ -33406,11 +33410,13 @@ const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   idleAgents: bucket => bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0,
 });
 const jsDebugGraphAgentTokenColors = Object.freeze([
-  'var(--accent-sky-strong)',
-  'var(--good)',
-  'var(--accent-gold)',
-  'var(--link-soft)',
-  'var(--bad)',
+  'var(--js-debug-agent-token-cyan)',
+  'var(--js-debug-agent-token-orange)',
+  'var(--js-debug-agent-token-magenta)',
+  'var(--js-debug-agent-token-beige)',
+  'var(--js-debug-agent-token-turquoise)',
+  'var(--js-debug-agent-token-rose)',
+  'var(--js-debug-agent-token-violet)',
 ]);
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
@@ -34330,6 +34336,21 @@ function debugGraphAgentTokenBucketValue(bucket, item) {
   return Number(item?.samples || 0) > 0 ? Number(item.total || 0) / Number(item.samples || 1) : 0;
 }
 
+function debugGraphAgentTokenTotalBucketValue(bucket) {
+  if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+  let total = 0;
+  for (const item of bucket.agentTokenRates.values()) total += debugGraphAgentTokenBucketValue(bucket, item);
+  return total;
+}
+
+function debugGraphAgentTokenTotalBucketHasData(bucket) {
+  if (!(bucket?.agentTokenRates instanceof Map)) return false;
+  for (const item of bucket.agentTokenRates.values()) {
+    if (Number(item?.samples || 0) > 0 || Number(item?.tokens || 0) > 0) return true;
+  }
+  return false;
+}
+
 function debugGraphBucketValue(bucket, key) {
   if (key === 'api') return debugGraphBucketRate(bucket, bucket.apiCount);
   if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
@@ -34337,6 +34358,7 @@ function debugGraphBucketValue(bucket, key) {
   if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
   if (jsDebugAgentStatusBucketValueGetters[key]) return jsDebugAgentStatusBucketValueGetters[key](bucket);
   if (key === 'tokensPerAgent') return bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0;
+  if (key === jsDebugGraphAgentTokenTotalSeriesKey) return debugGraphAgentTokenTotalBucketValue(bucket);
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
     const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
@@ -34352,6 +34374,7 @@ function debugGraphBucketHasSeriesData(bucket, key) {
   if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
   if (jsDebugAgentStatusSeriesKeys.includes(key)) return Number(bucket.agentActivitySamples || 0) > 0;
   if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
+  if (key === jsDebugGraphAgentTokenTotalSeriesKey) return debugGraphAgentTokenTotalBucketHasData(bucket);
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
     const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
@@ -34586,7 +34609,7 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
       tokenAgents.set(String(key), existing);
     }
   }
-  return [...tokenAgents.entries()]
+  const agentSeries = [...tokenAgents.entries()]
     .filter(([, item]) => item.samples > 0)
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
     .map(([key, item], index) => ({
@@ -34597,8 +34620,19 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
       agentTokenSeries: true,
       agentTokenKey: key,
       color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
-      movingAverageSamples: jsDebugGraphAgentTokenSmoothingSamples,
     }));
+  if (!agentSeries.length) return agentSeries;
+  return [...agentSeries, {
+    key: jsDebugGraphAgentTokenTotalSeriesKey,
+    label: 'All agents total',
+    unit: 'tokensPerMinute',
+    cssKey: 'agentTokenTotal',
+    agentTokenSeries: true,
+    agentTokenTotalSeries: true,
+    movingAverageOnly: true,
+    color: 'var(--js-debug-agent-token-total)',
+    movingAverageSamples: jsDebugGraphAgentTokenSmoothingSamples,
+  }];
 }
 
 function debugGraphSeriesData(buckets) {
@@ -34826,7 +34860,7 @@ function debugGraphSeriesStyleAttr(series) {
 }
 
 function debugGraphSeriesTokenAgentAttrs(series) {
-  if (series?.agentTokenSeries !== true) return '';
+  if (series?.agentTokenSeries !== true || series?.agentTokenTotalSeries === true) return '';
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}"`;
 }
 
@@ -35046,7 +35080,9 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
 function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
-  const plotSeries = group.stacked === true ? debugGraphStackedSeries(groupSeries) : groupSeries;
+  const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true);
+  const plotSeries = group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries;
+  const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0));
   const max = debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
@@ -35070,7 +35106,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, group.series) : ''}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${groupSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
@@ -35616,16 +35652,20 @@ function handleDebugGraphControlEvent(event, panel) {
   if (slider && panel.contains(slider)) {
     if (event.type === 'pointerdown') {
       jsDebugGraphRangeSliderDragging = true;
-      return false;
+      // Claim the event at the graph shell so chart-selection handling cannot
+      // inspect or replace the native range input during its drag gesture.
+      // Do not preventDefault: the browser owns the range-thumb movement.
+      return true;
     }
     if (event.type === 'input') {
       jsDebugGraphRangeSliderDragging = true;
       return setDebugGraphRangeFromSlider(slider, {render: false});
     }
-    if (event.type === 'change' || event.type === 'pointerup') {
+    if (event.type === 'change') {
       jsDebugGraphRangeSliderDragging = false;
       return setDebugGraphRangeFromSlider(slider, {snap: true});
     }
+    if (event.type === 'pointerup') return false;
     if (event.type === 'pointercancel') {
       jsDebugGraphRangeSliderDragging = false;
       return false;
@@ -50667,6 +50707,7 @@ const infoDimensionDefs = Object.freeze([
   {key: 'pr', label: 'PR'},
 ]);
 const infoPresetDefs = Object.freeze([
+  {key: 'tab-tmux-window', label: 'Tab > tmux sub-window', title: 'Tab, then tmux sub-window', grouping: ['tab', 'tmux-window']},
   {key: 'tab-path', label: 'Tab > Path', title: 'Tab, then path', grouping: ['tab', 'path']},
   {key: 'path-branch', label: 'Path > Branch', title: 'Path, then branch', grouping: ['path', 'branch']},
   {key: 'linear-pr', label: 'Linear > PR', title: 'Linear, then PR', grouping: ['linear', 'pr']},
@@ -51593,7 +51634,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true, animate: false});
+  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
@@ -51626,7 +51667,6 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
     active,
     agentStatus: agent,
     agentKey: record.aiKind,
-    activityAnimate: false,
     title,
     attrs,
     ariaPressed: options.action !== false,
@@ -52350,7 +52390,11 @@ function bindPanelControls(panel, session) {
     const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
     activateTab(button.dataset.tab, nextName, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-window-dir], [data-window-index]', event => {
+  delegate(panel, 'click', '[data-window-dir], [data-window-index]', (event, button) => {
+    if (button.dataset.pointerActionHandled === '1') {
+      delete button.dataset.pointerActionHandled;
+      return;
+    }
     handleWindowStepButtonClick(event);
   });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
@@ -53847,11 +53891,55 @@ function applyAutoApprovePayload(payload, options = {}) {
   for (const session of sessions) {
     const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
     autoApproveStates.set(session, state);
+    reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
   const result = {applied: true, sessionsChanged, previousActive};
   if (options.render === false) return result;
   renderAutoApproveStatusSurfaces(result);
   return result;
+}
+
+function reconcileTmuxWindowMetadataFromAgentWindows(session, payload = {}) {
+  const info = transcriptMeta.sessions?.[session];
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const agentWindows = typeof agentWindowPayloadRows === 'function'
+    ? agentWindowPayloadRows(payload.agent_windows)
+    : [];
+  if (!info || !agentWindows.length) return false;
+  const paneWindows = new Set(panes.map(pane => tmuxWindowIndexKey(pane?.window)).filter(index => index !== null));
+  const missing = agentWindows.filter(agent => {
+    const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+    return index !== null && !paneWindows.has(index);
+  });
+  if (!missing.length) return false;
+  const reconciledPanes = [...panes, ...missing.map(agent => {
+    const window = tmuxWindowIndexKey(agent.window_index ?? agent.window);
+    const name = String(agent.window_name || agent.kind || 'window').trim();
+    const active = agent.current === true || agent.window_active === true;
+    return {
+      window,
+      window_name: name,
+      process_label: name,
+      target: agent.pane_target || '',
+      pane_id: agent.pane_target || '',
+      active,
+      window_active: active,
+      pid: agent.pid || null,
+      process_label_pid: agent.pid || null,
+    };
+  })].sort((left, right) => Number(left.window) - Number(right.window));
+  transcriptMeta = {
+    ...transcriptMeta,
+    sessions: {
+      ...(transcriptMeta.sessions || {}),
+      [session]: {
+        ...info,
+        panes: reconciledPanes,
+        selected_pane: reconciledPanes.find(pane => pane.window_active === true) || info.selected_pane,
+      },
+    },
+  };
+  return true;
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -54151,6 +54239,12 @@ function maybeHandleServerVersionChange(serverVersion, serverClientRevision = ''
 async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
+  // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
+  // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
+  // until the next poll repairs the client model.
+  for (const session of Object.keys(transcriptMeta.sessions || {})) {
+    reconcileTmuxWindowMetadataFromAgentWindows(session, autoApproveStates.get(session));
+  }
   transcriptMetaLoaded = true;
   transcriptMetaLoadError = '';
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
@@ -55168,10 +55262,18 @@ function installDevAutoReload() {
   if (!devMode || typeof EventSource === 'undefined') return;
   let source;
   try {
-    source = new EventSource('/api/dev-reload');
+    const revision = encodeURIComponent(String(bootstrap.devBundleRevision || ''));
+    source = new EventSource(`/api/dev-reload?bundle_revision=${revision}`);
   } catch (_error) {
     return;
   }
+  source.addEventListener('ready', event => {
+    // A client reconnects after a server restart, which means it misses the old process's
+    // `reload` event. The fresh server's revision makes that stale bundle observable at once.
+    const serverRevision = String(safeJsonParse(event.data, {})?.signature || '');
+    const bootRevision = String(bootstrap.devBundleRevision || '');
+    if (serverRevision && bootRevision && serverRevision !== bootRevision) location.reload();
+  });
   source.addEventListener('reload', () => {
     statusOk('dev: bundle changed — reloading');
     location.reload();
