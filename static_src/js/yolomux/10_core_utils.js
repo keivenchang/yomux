@@ -439,15 +439,19 @@ function clearJsDebugEvents() {
     clearTimeout(jsDebugRenderTimer);
     jsDebugRenderTimer = null;
   }
+  jsDebugRenderForce = false;
   if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
 }
 
-function scheduleJsDebugPanelRefresh() {
+function scheduleJsDebugPanelRefresh(options = {}) {
   if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
+  if (options.force === true) jsDebugRenderForce = true;
   if (jsDebugRenderTimer) return;
   jsDebugRenderTimer = setTimeout(() => {
     jsDebugRenderTimer = null;
-    refreshDebugPanelsFromEvents();
+    const force = jsDebugRenderForce;
+    jsDebugRenderForce = false;
+    refreshDebugPanelsFromEvents({force});
   }, jsDebugRenderDebounceMs);
 }
 

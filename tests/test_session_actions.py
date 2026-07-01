@@ -10,6 +10,7 @@ import yolomux_lib.app as app_module
 import yolomux_lib.sessions as sessions_module
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.app import tmux_session_name_error
+from yolomux_lib.app import tmux_session_name_sanitize
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 
@@ -49,6 +50,14 @@ def test_tmux_session_name_validation_is_url_and_tmux_safe():
     assert "letters" in tmux_session_name_error("bad,name")
 
 
+def test_tmux_session_name_sanitize_mirrors_tmux_dot_and_colon_rewrite():
+    # tmux rewrites "." and ":" to "_"; everything else (dash, underscore, space) is preserved.
+    assert tmux_session_name_sanitize("dynamo-utils.dev") == "dynamo-utils_dev"
+    assert tmux_session_name_sanitize("a.b:c.d") == "a_b_c_d"
+    assert tmux_session_name_sanitize("  spaced name  ") == "spaced name"
+    assert tmux_session_name_sanitize("plain-name_2") == "plain-name_2"
+
+
 def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch):
     app = make_app(["1", "ant"])
     calls = []
@@ -82,6 +91,40 @@ def test_rename_session_rejects_duplicate_and_invalid_names(monkeypatch):
     assert "already exists" in duplicate_payload["error"]
     assert invalid_status == HTTPStatus.BAD_REQUEST
     assert "letters" in invalid_payload["error"]
+    assert calls == []
+
+
+def test_rename_session_sanitizes_dot_to_match_tmux_stored_name(monkeypatch):
+    app = make_app(["1", "ant"])
+    calls = []
+
+    def fake_tmux(args, timeout=5.0):
+        calls.append(args)
+        if args[0] == "rename-session":
+            # tmux stores the sanitized name; the app must report and switch to that, not the dotted input.
+            app.sessions = ["dynamo-utils_dev", "ant"]
+        return FakeTmuxResult()
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+
+    payload, status = app.rename_session("1", "dynamo-utils.dev")
+
+    assert status == HTTPStatus.OK
+    assert payload["renamed"] is True
+    assert payload["new_session"] == "dynamo-utils_dev"
+    assert calls == [["rename-session", "-t", "1:", "dynamo-utils_dev"]]
+
+
+def test_rename_session_detects_collision_after_sanitizing(monkeypatch):
+    app = make_app(["1", "dynamo-utils_dev"])
+    calls = []
+    monkeypatch.setattr(app_module, "tmux", lambda args, timeout=5.0: calls.append(args) or FakeTmuxResult())
+
+    payload, status = app.rename_session("1", "dynamo-utils.dev")
+
+    assert status == HTTPStatus.CONFLICT
+    assert "already exists" in payload["error"]
+    assert payload["new_name"] == "dynamo-utils_dev"
     assert calls == []
 
 

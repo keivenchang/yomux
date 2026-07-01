@@ -791,13 +791,14 @@ function recordJsDebugStatsSample(payload = {}) {
     payload.cpu_percent,
     payload.system_cpu_percent,
   ].some(value => Number.isFinite(Number(value)));
-  if (sampleApplied && !jsDebugStatsFirstSampleReceived) {
+  const firstSampleApplied = sampleApplied && !jsDebugStatsFirstSampleReceived;
+  if (firstSampleApplied) {
     jsDebugStatsFirstSampleReceived = true;
     armJsDebugStatsPolling();
   }
   debugGraphApplyServerHistory(payload.history);
   if (payload.history && typeof payload.history === 'object') {
-    scheduleJsDebugPanelRefresh();
+    scheduleJsDebugPanelRefresh({force: firstSampleApplied});
     return;
   }
   const cpuPercent = Number(payload.cpu_percent);
@@ -810,7 +811,7 @@ function recordJsDebugStatsSample(payload = {}) {
     systemCpuPercent: Number.isFinite(systemCpuPercent) ? systemCpuPercent : 0,
   });
   compactJsDebugGraphBuckets();
-  scheduleJsDebugPanelRefresh();
+  scheduleJsDebugPanelRefresh({force: firstSampleApplied});
 }
 
 function clearJsDebugGraphData() {
@@ -2133,9 +2134,9 @@ function renderDebugPanels(options = {}) {
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
-function refreshDebugPanelsFromEvents() {
+function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
-    refreshDebugPanelFromEvents(panel);
+    refreshDebugPanelFromEvents(panel, options);
   }
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }

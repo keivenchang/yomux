@@ -9732,6 +9732,20 @@ button.info-tree-tab-token.active:focus-visible {
   font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
   white-space: nowrap;
 }
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-group-label-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-group-child-count {
+  margin-inline-start: 0;
+}
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-meta-path-activity,
+.info-tree-field-path .info-tree-meta-path-activity {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  text-align: end;
+}
 .info-tree-group[data-info-dimension="path"] > summary .info-tree-group-label-line,
 .info-tree-group[data-info-dimension="branch"] > summary .info-tree-group-label-line,
 .info-tree-group[data-info-dimension="pr"] > summary .info-tree-group-label-line,
@@ -9799,6 +9813,20 @@ button.info-tree-tab-token.active:focus-visible {
   box-shadow: none;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
+.info-tree-group-children > .info-tree-record {
+  border-radius: 0;
+}
+.info-tree-group-children > .info-tree-record:not(.info-tree-item-first) {
+  border-block-start-width: 0;
+}
+.info-tree-group-children > .info-tree-record.info-tree-item-first {
+  border-start-start-radius: 8px;
+  border-start-end-radius: 8px;
+}
+.info-tree-group-children > .info-tree-record.info-tree-item-last {
+  border-end-start-radius: 8px;
+  border-end-end-radius: 8px;
+}
 .info-tree-record-main {
   min-width: 0;
   display: flex;
@@ -9837,6 +9865,7 @@ button.info-tree-tab-token.active:focus-visible {
   color: var(--text);
 }
 .info-tree-field-branch .info-tree-field-value,
+.info-tree-field-path .info-tree-field-value,
 .info-tree-field-ai .info-tree-field-value {
   min-width: 0;
   display: flex;

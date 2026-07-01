@@ -1079,6 +1079,14 @@ def cached_agent_auth_status_snapshot() -> dict[str, dict[str, object]]:
         return agent_auth_status()
 
 
+def tmux_session_name_sanitize(name: str) -> str:
+    # tmux's own session_check_name() silently rewrites "." and ":" to "_": a rename to
+    # "dynamo-utils.dev" is stored by tmux as "dynamo-utils_dev". Mirror that here so the name we
+    # validate, collision-check, return, and switch to matches what tmux actually stored -- otherwise
+    # the rename returns rc=0 but the follow-up switch targets a session name that never existed.
+    return re.sub(r"[.:]", "_", str(name or "").strip())
+
+
 def tmux_session_name_error(name: str) -> str | None:
     if not name:
         return "session name is required"
@@ -8428,7 +8436,7 @@ class TmuxWebtermApp:
 
     @requires_known_session(refresh=True)
     def rename_session(self, session: str, new_name: str) -> tuple[dict[str, Any], HTTPStatus]:
-        new_name = str(new_name or "").strip()
+        new_name = tmux_session_name_sanitize(new_name)
         name_error = tmux_session_name_error(new_name)
         if name_error:
             return {"session": session, "new_name": new_name, "error": name_error}, HTTPStatus.BAD_REQUEST

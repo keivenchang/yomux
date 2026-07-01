@@ -503,6 +503,94 @@ def test_debug_graph_waiting_meta_uses_shared_animated_ellipsis(browser, tmp_pat
     assert metrics["labelText"] == "Waiting for server stats", metrics
 
 
+def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof clearJsDebugEvents === 'function'
+              && typeof pollJsDebugStatsSample === 'function'
+              && typeof scheduleJsDebugPanelRefresh === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    initial = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugEvents();
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const originalFetch = window.fetch;
+        const now = Date.now();
+        window.__firstStatsSample = {
+          startedAt: performance.now(),
+          renderedAt: Number(graph.dataset.jsDebugGraphRenderedAt),
+          pollRequests: 0,
+        };
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+          window.__firstStatsSample.pollRequests += 1;
+          return jsonResponse({
+            time: now / 1000,
+            uptime_seconds: 60,
+            pid: 4242,
+            rss_bytes: 1048576,
+            cpu_percent: 7.5,
+            system_cpu_percent: 22.5,
+            history: {
+              sequence: 1,
+              records: [{
+                start: Math.floor(now / 1000),
+                duration: 1,
+                sequence: 1,
+                api_count: 2,
+                sse_count: 1,
+                latency_total_ms: 15.5,
+                latency_count: 2,
+                bandwidth_bytes: 4096,
+                cpu_total_percent: 7.5,
+                cpu_count: 1,
+                system_cpu_total_percent: 22.5,
+                system_cpu_count: 1,
+              }],
+            },
+          });
+        };
+        scheduleJsDebugPanelRefresh();
+        pollJsDebugStatsSample().then(() => {
+          window.__firstStatsSample.pollSettledAt = performance.now();
+        });
+        return {
+          waiting: graph.textContent.includes('Waiting for server stats'),
+          chartCount: graph.querySelectorAll('[data-js-debug-chart]').length,
+          renderedAt: window.__firstStatsSample.renderedAt,
+        };
+        """
+    )
+    assert initial["waiting"] is True, initial
+    assert initial["chartCount"] == 0, initial
+    WebDriverWait(browser, 3).until(
+        lambda driver: driver.execute_script(
+            """
+            const state = window.__firstStatsSample;
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const renderedAt = Number(graph?.dataset.jsDebugGraphRenderedAt);
+            if (!state?.pollSettledAt || !(renderedAt > state.renderedAt)) return false;
+            state.finishedAt = performance.now();
+            state.waiting = graph.textContent.includes('Waiting for server stats');
+            state.chartCount = graph.querySelectorAll('[data-js-debug-chart]').length;
+            state.renderedAtAfter = renderedAt;
+            return !state.waiting && state.chartCount === 6;
+            """
+        )
+    )
+    result = browser.execute_script("return window.__firstStatsSample")
+    assert result["pollRequests"] == 1, result
+    assert result["renderedAtAfter"] > result["renderedAt"], result
+    assert result["finishedAt"] - result["startedAt"] < 3000, result
+
+
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
     page = tmp_path / "debug-graph-bad-connection-overlay.html"
     page.write_text(page_html("""
@@ -3038,8 +3126,9 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
             """
             <script>document.body.className = 'theme-dark';</script>
             <div class="info-tree-record" style="width: 760px"><div class="info-tree-record-main">
-              <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span id="branch-value" class="info-tree-field-value"><span class="info-tree-value-text">master</span><span id="branch-time" class="info-tree-meta-updated">Git commit 3 hours ago</span></span></div>
+              <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span id="tab-value" class="info-tree-field-value">8001</span></div>
               <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span id="window-value" class="info-tree-field-value"><span class="info-tree-ai-value tmux-window-bar"><button id="window-button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:claude</span></span></button><span id="window-pid" class="info-tree-ai-pid">(pid=1234)</span><span id="window-time" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span></span></span></div>
+              <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span id="branch-value" class="info-tree-field-value"><span class="info-tree-value-text">master</span><span id="branch-time" class="info-tree-meta-updated">Git commit 3 hours ago</span></span></div>
               <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><span>#80 parser work</span> <span id="draft-badge" class="ci-indicator tab-symbol pr-status-draft">DRAFT</span></span></div>
             </div></div>
             """,
@@ -3058,6 +3147,9 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
         const badge = document.getElementById('draft-badge');
         const style = getComputedStyle(badge);
         return {
+          tabTop: document.getElementById('tab-value').getBoundingClientRect().top,
+          windowTop: document.getElementById('window-value').getBoundingClientRect().top,
+          branchTop: document.getElementById('branch-value').getBoundingClientRect().top,
           branchRightInset: rightInset('branch-value', 'branch-time'),
           windowRightInset: rightInset('window-value', 'window-time'),
           windowPidOffset: document.getElementById('window-pid').getBoundingClientRect().left - document.getElementById('window-button').getBoundingClientRect().right,
@@ -3067,12 +3159,78 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
         };
         """
     )
+    assert metrics["tabTop"] < metrics["windowTop"], metrics
+    assert metrics["windowTop"] < metrics["branchTop"], metrics
     assert metrics["branchRightInset"] <= 1, metrics
     assert metrics["windowRightInset"] <= 1, metrics
     assert 0 <= metrics["windowPidOffset"] <= 8, metrics
     assert "ci-indicator" in metrics["badgeClasses"] and "tab-symbol" in metrics["badgeClasses"], metrics
     assert metrics["badgeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["badgeBorder"] != "rgba(0, 0, 0, 0)", metrics
+
+
+def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tmp_path):
+    page = tmp_path / "yoinfo-path-trailing-metadata.html"
+    page.write_text(
+        page_html(
+            """
+            <script>document.body.className = 'theme-dark';</script>
+            <div class="info-tree" style="width: 900px">
+              <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="path" data-info-depth="0" open>
+                <summary>
+                  <span class="info-tree-group-dimension">PATH:</span>
+                  <span id="group-line" class="info-tree-group-label-line">
+                    <span class="info-tree-group-label info-tree-group-label-path"><button id="group-path" class="info-tree-group-label-action">/home/keivenc/dynamo/frontend-crates</button></span>
+                    <span id="group-count" class="info-tree-group-child-count">(6 branches)</span>
+                    <span id="group-time" class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta">2 hours ago</span>
+                  </span>
+                </summary>
+              </details>
+            </div>
+            <div class="info-tree-record" style="width: 900px"><div class="info-tree-record-main">
+              <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span class="info-tree-field-value"><span class="info-tree-ai-value tmux-window-bar"><button class="tab tmux-window-button">0:claude</button><span id="window-time" class="info-tree-ai-recency info-tree-trailing-meta">40 min ago</span></span></span></div>
+              <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span id="path-value" class="info-tree-field-value"><button id="leaf-path" class="info-tree-action-link info-tree-action-link-path">/home/keivenc/dynamo/dynamo-utils.dev</button><span id="path-time" class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta">5 hours ago</span></span></div>
+            </div></div>
+            """,
+            extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = id => document.getElementById(id).getBoundingClientRect();
+        const style = id => getComputedStyle(document.getElementById(id));
+        const groupLine = rect('group-line');
+        const groupPath = rect('group-path');
+        const groupCount = rect('group-count');
+        const groupTime = rect('group-time');
+        const pathValue = rect('path-value');
+        const pathTime = rect('path-time');
+        return {
+          groupTimeRightInset: groupLine.right - groupTime.right,
+          groupCountGap: groupCount.left - groupPath.right,
+          groupTrailingSpace: groupTime.left - groupCount.right,
+          pathTimeRightInset: pathValue.right - pathTime.right,
+          groupTimeColor: style('group-time').color,
+          pathTimeColor: style('path-time').color,
+          windowTimeColor: style('window-time').color,
+          pathTextColor: style('leaf-path').color,
+          groupTimeFontSize: style('group-time').fontSize,
+          pathTimeFontSize: style('path-time').fontSize,
+          windowTimeFontSize: style('window-time').fontSize,
+          pathTimeWhiteSpace: style('path-time').whiteSpace,
+        };
+        """
+    )
+    assert abs(metrics["groupTimeRightInset"]) <= 1, metrics
+    assert 4 <= metrics["groupCountGap"] <= 8, metrics
+    assert metrics["groupTrailingSpace"] > 50, metrics
+    assert abs(metrics["pathTimeRightInset"]) <= 1, metrics
+    assert metrics["groupTimeColor"] == metrics["pathTimeColor"] == metrics["windowTimeColor"], metrics
+    assert metrics["pathTimeColor"] != metrics["pathTextColor"], metrics
+    assert metrics["groupTimeFontSize"] == metrics["pathTimeFontSize"] == metrics["windowTimeFontSize"], metrics
+    assert metrics["pathTimeWhiteSpace"] == "nowrap", metrics
 
 
 def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):
@@ -4418,7 +4576,7 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     page = tmp_path / "info-tree-sticky-parent.html"
     records = "\n".join(
         f"""
-        <div class="info-tree-record info-tree-item{' info-tree-item-last' if index == 23 else ''}">
+        <div class="info-tree-record info-tree-item{' info-tree-item-first' if index == 0 else ''}{' info-tree-item-last' if index == 23 else ''}">
           <div class="info-tree-record-main">
             <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link info-tree-action-link-path">/repo/app/{index}</button></span></div>
             <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value"><span class="info-tree-value-text">feature/context</span></span></div>
@@ -4506,10 +4664,13 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
           const rootRect = rootSummary.getBoundingClientRect();
           const branchRect = branchSummary.getBoundingClientRect();
           const prRect = prSummary.getBoundingClientRect();
-          const summaryValueX = scrollerRect.left + Math.min(scrollerRect.width - 24, 210);
-          const topElement = document.elementFromPoint(summaryValueX, scrollerRect.top + Math.min(12, rootRect.height / 2));
-          const branchElement = document.elementFromPoint(summaryValueX, scrollerRect.top + rootRect.height + Math.min(12, branchRect.height / 2));
-          const prElement = document.elementFromPoint(summaryValueX, scrollerRect.top + rootRect.height + branchRect.height + Math.min(12, prRect.height / 2));
+          const labelProbeX = summary => {
+            const rect = summary.querySelector('.info-tree-group-label').getBoundingClientRect();
+            return rect.left + Math.min(4, rect.width / 2);
+          };
+          const topElement = document.elementFromPoint(labelProbeX(rootSummary), scrollerRect.top + Math.min(12, rootRect.height / 2));
+          const branchElement = document.elementFromPoint(labelProbeX(branchSummary), scrollerRect.top + rootRect.height + Math.min(12, branchRect.height / 2));
+          const prElement = document.elementFromPoint(labelProbeX(prSummary), scrollerRect.top + rootRect.height + branchRect.height + Math.min(12, prRect.height / 2));
           const rootStyle = getComputedStyle(rootSummary);
           const branchStyle = getComputedStyle(branchSummary);
           const prStyle = getComputedStyle(prSummary);
@@ -4649,6 +4810,67 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     assert metrics["darkColors"]["aiLeafValue"] == metrics["darkColors"]["themeAccent"], metrics
     assert metrics["lightColors"]["aiLeafLabel"] == metrics["lightColors"]["themeAccent"], metrics
     assert metrics["lightColors"]["aiLeafValue"] == metrics["lightColors"]["themeAccent"], metrics
+
+
+def test_info_tree_sibling_records_share_one_rounded_outline(browser, tmp_path):
+    page = tmp_path / "info-tree-shared-record-outline.html"
+    page.write_text(page_html("""
+      <div class="info-tree" style="width: 760px">
+        <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="path" data-info-depth="0" open>
+          <summary>
+            <span class="info-tree-group-dimension">PATH:</span>
+            <span class="info-tree-group-label-line"><span class="info-tree-group-label">/home/test/yolomux.dev8001</span></span>
+          </summary>
+          <div class="info-tree-group-children">
+            <div id="first-record" class="info-tree-record info-tree-item info-tree-item-first">
+              <div class="info-tree-record-main">
+                <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value">yolomux.dev8001</span></div>
+                <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span class="info-tree-field-value">1:claude</span></div>
+              </div>
+            </div>
+            <div id="last-record" class="info-tree-record info-tree-item info-tree-item-last">
+              <div class="info-tree-record-main">
+                <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value">yolomux.dev8001</span></div>
+                <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span class="info-tree-field-value">2:codex</span></div>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const first = document.getElementById('first-record');
+        const last = document.getElementById('last-record');
+        const firstRect = first.getBoundingClientRect();
+        const lastRect = last.getBoundingClientRect();
+        const firstStyle = getComputedStyle(first);
+        const lastStyle = getComputedStyle(last);
+        return {
+          firstTopLeft: firstStyle.borderTopLeftRadius,
+          firstTopRight: firstStyle.borderTopRightRadius,
+          firstBottomLeft: firstStyle.borderBottomLeftRadius,
+          firstBottomRight: firstStyle.borderBottomRightRadius,
+          lastTopLeft: lastStyle.borderTopLeftRadius,
+          lastTopRight: lastStyle.borderTopRightRadius,
+          lastBottomLeft: lastStyle.borderBottomLeftRadius,
+          lastBottomRight: lastStyle.borderBottomRightRadius,
+          firstBottomBorder: firstStyle.borderBottomWidth,
+          lastTopBorder: lastStyle.borderTopWidth,
+          seamGap: lastRect.top - firstRect.bottom,
+          leftDelta: Math.abs(lastRect.left - firstRect.left),
+          rightDelta: Math.abs(lastRect.right - firstRect.right),
+        };
+        """
+    )
+    assert metrics["firstTopLeft"] == "8px" and metrics["firstTopRight"] == "8px", metrics
+    assert metrics["firstBottomLeft"] == "0px" and metrics["firstBottomRight"] == "0px", metrics
+    assert metrics["lastTopLeft"] == "0px" and metrics["lastTopRight"] == "0px", metrics
+    assert metrics["lastBottomLeft"] == "8px" and metrics["lastBottomRight"] == "8px", metrics
+    assert metrics["firstBottomBorder"] == "1px" and metrics["lastTopBorder"] == "0px", metrics
+    assert abs(metrics["seamGap"]) <= 0.1, metrics
+    assert metrics["leftDelta"] <= 0.1 and metrics["rightDelta"] <= 0.1, metrics
 
 
 def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
@@ -5716,6 +5938,82 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
     )
     assert restored["active"] == setup["item"], restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
+
+
+def test_yoinfo_external_links_survive_panel_focus_pointerdown(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applyLayoutSlots === 'function' && typeof infoPanelRenderSignature === 'function';"
+        )
+    )
+    browser.execute_script(
+        """
+        autoFocusEnabled = false;
+        const next = emptyLayoutSlots();
+        next[layoutTreeKey] = leafNode('left');
+        next.left = paneStateWithTabs([infoItemId], infoItemId);
+        applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return dockviewLayoutActive()
+              && activeItemForSide('left') === infoItemId
+              && document.getElementById('info-content') !== null;
+            """
+        )
+    )
+    setup = browser.execute_script(
+        """
+        const node = document.getElementById('info-content');
+        const html = `
+          <div class="info-tree">
+            <div class="info-tree-record info-tree-item info-tree-item-first info-tree-item-last">
+              <div class="info-tree-record-main">
+                <div class="info-tree-field info-tree-field-linear"><span class="info-tree-field-label">Linear:</span><span class="info-tree-field-value"><a id="linear-link" href="https://example.test/linear/DIS-2228" target="_blank" rel="noreferrer noopener">DIS-2228</a></span></div>
+                <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><a id="pr-link" href="https://example.test/pull/87" target="_blank" rel="noreferrer noopener">#87</a></span></div>
+              </div>
+            </div>
+          </div>`;
+        node.innerHTML = html;
+        infoPanelLastRenderSignature = infoPanelRenderSignature();
+        infoPanelLastRenderHtml = html;
+        window.__infoTrustedClicks = [];
+        document.addEventListener('click', event => {
+          if (event.target?.matches?.('#linear-link, #pr-link')) {
+            window.__infoTrustedClicks.push({id: event.target.id, trusted: event.isTrusted});
+          }
+        }, {capture: true});
+        return {
+          dockview: dockviewLayoutActive(),
+          linearConnected: document.getElementById('linear-link')?.isConnected === true,
+          prConnected: document.getElementById('pr-link')?.isConnected === true,
+        };
+        """
+    )
+    assert setup == {"dockview": True, "linearConnected": True, "prConnected": True}, setup
+
+    original_handle = browser.current_window_handle
+
+    def click_external_link(selector, expected_path):
+        handles_before = set(browser.window_handles)
+        ActionChains(browser).move_to_element(browser.find_element("css selector", selector)).click().perform()
+        WebDriverWait(browser, 3).until(lambda driver: len(set(driver.window_handles) - handles_before) == 1)
+        new_handle = next(iter(set(browser.window_handles) - handles_before))
+        browser.switch_to.window(new_handle)
+        WebDriverWait(browser, 3).until(lambda driver: expected_path in driver.current_url)
+        browser.close()
+        browser.switch_to.window(original_handle)
+
+    click_external_link("#linear-link", "/linear/DIS-2228")
+    click_external_link("#pr-link", "/pull/87")
+    clicks = browser.execute_script("return window.__infoTrustedClicks")
+    assert clicks == [
+        {"id": "linear-link", "trusted": True},
+        {"id": "pr-link", "trusted": True},
+    ], clicks
 
 
 def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(browser, tmp_path):

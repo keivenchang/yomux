@@ -1610,7 +1610,7 @@ function infoRecordPathActivityMetaHtml(record) {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
   const text = relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - timestamp));
   const title = `Latest repository path activity: ${text}`;
-  return `<span class="info-tree-meta-updated info-tree-meta-path-activity" title="${esc(title)}">${esc(text)}</span>`;
+  return `<span class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta" title="${esc(title)}">${esc(text)}</span>`;
 }
 
 function infoRecordMainChipsHtml(record, options = {}) {
@@ -1619,6 +1619,12 @@ function infoRecordMainChipsHtml(record, options = {}) {
   const pathVisible = !hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__';
   const branchVisible = !hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__';
   const updatedMeta = infoRecordUpdatedMetaHtml(record);
+  if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
+    fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
+  }
+  if (!hiddenDimensions.has('tmux-window') && infoRecordHasAi(record)) {
+    fields.push(infoRecordFieldHtml('ai', infoRecordAiValueHtml(record), record.aiTitle));
+  }
   if (pathVisible) {
     const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
     fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}`, record.pathTitle));
@@ -1631,12 +1637,6 @@ function infoRecordMainChipsHtml(record, options = {}) {
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   const prDesc = infoRecordPrDescHtml(record);
   if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
-  if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
-    fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
-  }
-  if (!hiddenDimensions.has('tmux-window') && infoRecordHasAi(record)) {
-    fields.push(infoRecordFieldHtml('ai', infoRecordAiValueHtml(record), record.aiTitle));
-  }
   return fields.join('');
 }
 
@@ -1666,8 +1666,7 @@ function infoGroupLabelHtml(group = {}) {
   const label = String(group.label || '');
   if (group.dimension === 'path' && !infoRecordMissingValue(label) && String(group.key || '') !== '__no_path__') {
     const path = String(group.key || group.title || label);
-    const activity = infoRecordPathActivityMetaHtml(infoGroupRepresentativeRecord(group));
-    return `<span class="info-tree-group-label info-tree-group-label-path"><button type="button" class="info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>${activity}</span>`;
+    return `<span class="info-tree-group-label info-tree-group-label-path"><button type="button" class="info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button></span>`;
   }
   const representative = infoGroupRepresentativeRecord(group);
   if (group.dimension === 'tmux-window') {
@@ -1723,11 +1722,12 @@ function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ance
         hiddenDimensions,
       })).join('');
     const childCount = infoGroupChildCountHtml(child);
+    const trailingMeta = child.dimension === 'path' ? infoRecordPathActivityMetaHtml(infoGroupRepresentativeRecord(child)) : '';
     const openAttr = infoCollapsedGroupKeys.has(groupKey) ? '' : ' open';
     return `<details class="${esc(infoTreeItemClasses('info-tree-group', treeItemOptions))}" data-info-dimension="${esc(child.dimension)}" data-info-depth="${depth}" data-info-group-key="${esc(groupKey)}"${openAttr}>
       <summary title="${esc(child.title)}">
         <span class="info-tree-group-dimension">${esc(infoGroupDimensionLabel(child.dimension))}</span>
-        <span class="info-tree-group-label-line">${infoGroupLabelHtml(child)}${childCount}</span>
+        <span class="info-tree-group-label-line">${infoGroupLabelHtml(child)}${childCount}${trailingMeta}</span>
       </summary>
       <div class="info-tree-group-children">${nested}</div>
     </details>`;
@@ -1783,15 +1783,20 @@ function renderInfoPanel(options = {}) {
 }
 
 function renderInfoPanelMeasured(node, options = {}) {
-  const renderInfoContent = html => {
-    node.innerHTML = html;
+  const syncInfoContent = () => {
     if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
     if (typeof refreshPanePopouts === 'function') refreshPanePopouts(infoItemId);
+  };
+  const renderInfoContent = html => {
+    node.innerHTML = html;
+    syncInfoContent();
   };
   syncTranscriptMetaLoadingUi();
   const signature = infoPanelRenderSignature();
   if (options.force !== true && signature === infoPanelLastRenderSignature && infoPanelLastRenderHtml) {
-    renderInfoContent(infoPanelLastRenderHtml);
+    const hasContent = Boolean(node.children?.length || String(node.innerHTML || '').trim());
+    if (!hasContent) renderInfoContent(infoPanelLastRenderHtml);
+    else syncInfoContent();
     return;
   }
   const commitInfoContent = html => {
