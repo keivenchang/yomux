@@ -4021,6 +4021,22 @@ async function runEditorPreviewSuite() {
     assert.equal(appFeatureRecord?.prUrl, 'https://example.test/pull/11', 'YO!info relationship records carry the PR URL so the PR number is clickable');
     assert.equal(appFeatureRecord?.prLifecycleText, 'MERGED', 'YO!info relationship records carry PR lifecycle status for merged badges');
     const appMainRecord = records.find(record => record.pathKey === '/repo/app' && record.branchKey === 'main' && record.tabLabel === 'tab-a');
+    const tabAWorkDescriptions = new Set(records.filter(record => record.tabSession === 'tab-a').map(record => record.tabWorkDescription));
+    assert.equal(tabAWorkDescriptions.size, 1, 'YO!info computes one shared work description per session and reuses it across that session records');
+    const tabAWorkDescription = [...tabAWorkDescriptions][0];
+    assert.ok(tabAWorkDescription.includes('App main PR full description'), 'YO!info gets the displayed Tab work text from the shared session work-description helper');
+    assert.equal(appMainRecord?.tabLabel, 'tab-a', 'YO!info keeps the bare session identity separate from the displayed work description');
+    const duplicateWorkRecord = api.infoRelationshipRecords([{
+      path: '/repo/duplicate-work', branch: 'main', branchTitle: 'main',
+      tabAgents: [{session: 'tab-a', tabLabel: `tab-a ${tabAWorkDescription}`}],
+    }])[0];
+    assert.equal(duplicateWorkRecord?.tabWorkDescription, '', 'YO!info does not append work text already carried by an upstream session label');
+    const missingWorkRecord = api.infoRelationshipRecords([{
+      path: '/repo/missing-work', branch: 'main', branchTitle: 'main',
+      tabAgents: [{session: 'missing-session', tabLabel: 'missing-session'}],
+    }])[0];
+    assert.equal(missingWorkRecord?.tabWorkDescription, '', 'YO!info keeps the bare session token when transcript metadata cannot supply work text');
+    assert.equal(api.infoRecordSearchFieldsForTest({id: 'display-only-work', tabKey: '8003', tabSession: '8003', tabLabel: '8003', tabTitle: '8003', tabWorkDescription: 'display only work'}).some(field => field.text.includes('display only work')), false, 'YO!info work description remains display-only and does not change the Tab search identity');
     assert.equal(appMainRecord?.prLifecycleText, 'OPEN', 'YO!info relationship records carry explicit Open lifecycle status');
     assert.equal(appMainRecord?.prCiText, 'CI error', 'YO!info relationship records carry CI status separately from PR description');
     assert.equal(appMainRecord?.aiState, 'working', 'YO!info relationship records carry agent-window state for activity dots');
@@ -4234,6 +4250,7 @@ async function runEditorPreviewSuite() {
     assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && !/\bA(?:S)K\b/.test(pathOnlyHtml), 'YO!info AI rows show shared working/attention activity indicators without a text attention label');
     assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">tmux sub-window:</span>'), 'YO!info leaf rows label Tab session and window actions');
+    assert.ok(/info-tree-field-tab[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">#10: App main PR full description<\/span>/.test(pathOnlyHtml), 'YO!info Tab leaf values render the shared work description after the canonical bracketed session identifier');
     assert.ok(/info-tree-field-branch[\s\S]*?info-tree-meta-updated/.test(pathOnlyHtml) && !pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows attach branch recency to the Git branch instead of rendering a detached Updated row');
     const pathBranchHtml = api.infoTreeHtmlForTest(records, ['path', 'branch']);
     assert.equal((pathBranchHtml.match(/info-tree-field-path|info-tree-field-branch/g) || []).length, 0, 'YO!info hides every identity row already supplied by ancestor groups');
@@ -4244,6 +4261,7 @@ async function runEditorPreviewSuite() {
     const tabPathHtml = api.infoTreeHtmlForTest(records, ['tab', 'path']);
     assert.ok(/data-info-dimension="tab"[\s\S]*<span class="info-tree-group-dimension">Tab\(tmux session\):<\/span>[\s\S]*tab-a/.test(tabPathHtml), 'YO!info Tab group headers render as Tab(tmux session): <value>');
     assert.ok(tabPathHtml.includes('info-tree-tab-token') && tabPathHtml.includes('tmux-pane-tab-token') && tabPathHtml.includes('pane-tab-core') && tabPathHtml.includes('data-info-tab-state='), 'YO!info Tab group headers render through the shared compact tmux pane-tab token');
+    assert.ok(/data-info-dimension="tab"[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">#10: App main PR full description<\/span>/.test(tabPathHtml), 'YO!info Tab group headers render the same shared work description after the canonical bracketed session identifier');
     assert.equal((tabPathHtml.match(/info-tree-field-tab/g) || []).length, 0, 'YO!info hides Tab rows when Tab is already supplied by an ancestor group');
     const numericTabRecord = {...appMainRecord, id: 'numeric-tab-record', tabKey: '1', tabLabel: '1', tabTitle: '1', tabSession: '1'};
     api.setPinnedTabsForTest(['1']);
@@ -4357,7 +4375,7 @@ async function runEditorPreviewSuite() {
     assert.ok(describedMain.indexOf('info-tree-field-ai') < describedMain.indexOf('info-tree-field-branch'), 'YO!info leaf rows list the tmux sub-window before the Git branch');
     assert.ok(/info-tree-field-branch[\s\S]*?>main<[\s\S]*?info-tree-meta-updated[\s\S]*?Git commit 3 days ago/.test(describedMain) && describedMain.includes('title="Git commit: 3 days ago"') && !describedMain.includes('<span class="info-tree-field-label">Updated:</span>'), 'YO!info identifies the Git commit date beside its Git branch instead of rendering a detached Updated row');
     assert.ok(/info-tree-ai-window-token[\s\S]*?info-tree-ai-pid">\(pid=2345\)<\/span>[\s\S]*?info-tree-ai-recency info-tree-trailing-meta">10 min ago<\/span>/.test(describedMain), 'YO!info keeps the PID inline after its tmux sub-window button and the recency trailing');
-    assert.ok(describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>') < describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>'), 'YO!info leaf rows render Linear before PR');
+    assert.ok(describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>') < describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>'), 'YO!info leaf rows render PR before Linear');
     const fullCss = fs.readFileSync('static/yolomux.css', 'utf8');
     const infoTreeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
@@ -4446,7 +4464,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.tmux-pane-tab-token\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)[\s\S]*border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0[\s\S]*font-size:\s*var\(--tab-label-size\)/.test(paneTabCss) && /\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(paneTabCss), 'shared compact tmux pane-tab tokens own inactive and active tab styling');
     assert.ok(/function sessionShouldOfferYoloMarker\(session, info, payload, auto, state = null\)[\s\S]*autoApproveEnabledElsewhere\(payload\)[\s\S]*STATE_KEY\.needsApproval[\s\S]*STATE_KEY\.needsInput/.test(fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')), 'tmux session tabs offer the YO button only for enabled, externally locked, or prompted sessions');
     assert.ok(/function tmuxPaneTabHtml\(session, info, state, auto, options = \{\}\)[\s\S]*sessionTabLeadingActivityHtml\(session, info, auto,[\s\S]*state/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'real tabs, Tabber, and YO!info pass the shared tab state into the shared YO marker offer rule');
-    assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*showDetail:\s*false/.test(infoSource), 'YO!info Tab values route through the shared compact tmux pane-tab token helper instead of private active/inactive tab CSS');
+    assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*const detail = String\(options\.detail \?\? record\?\.tabWorkDescription \?\? ''\)\.trim\(\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*showDetail:\s*Boolean\(detail\)[\s\S]*detail,/.test(infoSource), 'YO!info Tab values route shared work text through the compact tmux pane-tab detail path');
+    assert.ok(/function infoRelationshipRecords\(rows = infoBranchRows\(\)\)[\s\S]*const tabWorkDescriptions = new Map\(\)[\s\S]*sessionWorkDescription\(session, info, 200\)[\s\S]*normalizedTabLabel\.includes\(normalizedSessionWork\)[\s\S]*tabWorkDescription,/.test(infoSource), 'YO!info computes shared work text once per session and suppresses a duplicate already carried by the session label');
+    assert.ok(/\.info-tree-tab-token\s*\{[\s\S]*inline-size:\s*100%[\s\S]*max-width:\s*100%/.test(infoTreeCss), 'YO!info Tab tokens fill their available group or leaf row so shared work text has the same responsive capacity as Tabber');
     assert.ok(/function infoGroupLabelHtml\(group = \{\}\)[\s\S]*leadingHtml:\s*infoTabGroupLeadingActivityHtml\(group\)/.test(infoSource), 'YO!info Tab group status is routed into the shared compact tmux pane-tab token instead of prepending a standalone dot');
     assert.equal(infoSource.includes('infoTabGroupStatusHtml(group)}${tabHtml'), false, 'YO!info Tab group summaries do not prepend a duplicate standalone status dot before the tab token');
     assert.equal(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showLeading:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showState:\s*false|function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*showBadges:\s*false/.test(infoSource), false, 'YO!info Tab values do not suppress the real tab YO marker, state badge path, or status indicators');
@@ -4459,7 +4479,7 @@ async function runEditorPreviewSuite() {
 	    assert.ok(/\.info-tree-trailing-meta\s*\{[\s\S]*color:\s*var\(--subwindow-recency-color\)[\s\S]*font:\s*var\(--ui-font-size-2xs\)\/1 var\(--mono-font\)/.test(infoTreeCss), 'YO!info Git commit and sub-window recency inherit one shared trailing-metadata style');
 	    assert.ok(/function infoRecordAiValueHtml\(record, options = \{\}\) \{[\s\S]*\$\{buttonHtml\}\$\{status\}\$\{pid\}\$\{recency\}/.test(infoSource), 'YO!info places PID inline after the button/status and keeps recency trailing');
 	    assert.ok(/\.info-tree-ai-pid\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*color:\s*var\(--subwindow-pid-color\)/.test(infoTreeCss), 'YO!info PID stays inline with its muted shared metadata color');
-	    assert.ok(/:root\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-soft\)[\s\S]*--subwindow-recency-color:\s*var\(--text-muted-soft\)[\s\S]*body\.theme-light\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-cool\)[\s\S]*--subwindow-recency-color:\s*var\(--muted\)/.test(tokenCss), 'sub-window metadata is subdued only in dark mode while preserving the existing light colors');
+	    assert.ok(/:root\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-soft\)[\s\S]*--subwindow-recency-color:\s*var\(--text-muted-soft\)[\s\S]*body\.theme-light\s*\{[\s\S]*--subwindow-pid-color:\s*var\(--text-muted-cool\)[\s\S]*--subwindow-recency-color:\s*var\(--text-muted-cool\)/.test(tokenCss), 'sub-window PID and recency use the brighter shared muted metadata color in light mode without changing dark mode');
 	    assert.ok(/function infoRecordAiRecencyHtml\(record\)[\s\S]*function infoRecordAiPidHtml\(record\)[\s\S]*tmuxWindowPidText\(record\?\.aiPid\)/.test(infoSource), 'YO!info reuses the shared PID formatter and existing recency formatter');
     assert.ok(/\.info-tree-group-child-count\s*\{[\s\S]*margin-inline-start:\s*6px[\s\S]*color:\s*var\(--muted\)/.test(infoTreeCss), 'YO!info child counts render inline beside group labels in a less prominent color');
     assert.equal(infoTreeCss.includes('.info-tree-group-count'), false, 'YO!info CSS no longer defines the detached count bubble');

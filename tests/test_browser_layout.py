@@ -3101,7 +3101,7 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
     assert metrics["askAreaOpacity"] == "0.78", metrics
 
 
-def test_subwindow_pid_and_recency_are_subtle_only_in_dark_mode(browser, tmp_path):
+def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser, tmp_path):
     for theme_class in ("theme-dark", "theme-light"):
         page = tmp_path / f"subwindow-metadata-{theme_class}.html"
         page.write_text(
@@ -3125,7 +3125,7 @@ def test_subwindow_pid_and_recency_are_subtle_only_in_dark_mode(browser, tmp_pat
         if theme_class == "theme-dark":
             assert set(metrics.values()) == {"rgb(102, 112, 133)"}, metrics
         else:
-            assert metrics == {"infoPid": "rgb(158, 168, 183)", "infoRecency": "rgb(91, 101, 115)", "tabberPid": "rgb(158, 168, 183)", "tabberRecency": "rgb(91, 101, 115)"}, metrics
+            assert set(metrics.values()) == {"rgb(158, 168, 183)"}, metrics
 
 
 def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tmp_path):
@@ -3240,6 +3240,95 @@ def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tm
     assert metrics["pathTimeColor"] != metrics["pathTextColor"], metrics
     assert metrics["groupTimeFontSize"] == metrics["pathTimeFontSize"] == metrics["windowTimeFontSize"], metrics
     assert metrics["pathTimeWhiteSpace"] == "nowrap", metrics
+
+
+def test_yoinfo_tab_values_show_shared_session_work_description(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof infoTreeHtml === 'function' && typeof infoRecordHtml === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const record = {
+          id: 'session-work-8003',
+          tabKey: '8003',
+          tabSession: '8003',
+          tabLabel: '8003',
+          tabTitle: '8003',
+          tabWorkDescription: 'Refactor agent status ownership',
+        };
+        const bareRecord = {...record, id: 'session-work-bare', tabSession: '8004', tabKey: '8004', tabLabel: '8004', tabTitle: '8004', tabWorkDescription: ''};
+        const fixture = document.createElement('div');
+        fixture.id = 'yoinfo-session-work-fixture';
+        fixture.style.width = '900px';
+        fixture.innerHTML = `
+          <section id="group-work">${infoTreeHtml([record], ['tab'])}</section>
+          <section id="leaf-work">${infoRecordHtml(record)}</section>
+          <section id="leaf-bare">${infoRecordHtml(bareRecord)}</section>`;
+        document.body.appendChild(fixture);
+        const groupLine = fixture.querySelector('#group-work .info-tree-group-label-line');
+        const groupToken = groupLine.querySelector('.info-tree-tab-token');
+        const groupDetail = groupToken.querySelector('.tab-inline-detail');
+        const leafValue = fixture.querySelector('#leaf-work .info-tree-field-tab .info-tree-field-value');
+        const leafToken = leafValue.querySelector('.info-tree-tab-token');
+        const leafDetail = leafToken.querySelector('.tab-inline-detail');
+        const bareToken = fixture.querySelector('#leaf-bare .info-tree-tab-token');
+        const rect = element => element?.getBoundingClientRect();
+        return {
+          groupText: groupDetail?.textContent || '',
+          leafText: leafDetail?.textContent || '',
+          groupSession: groupToken.querySelector('.session-button-number')?.textContent || '',
+          leafSession: leafToken.querySelector('.session-button-number')?.textContent || '',
+          groupWidthDelta: Math.abs(rect(groupLine).width - rect(groupToken).width),
+          leafWidthDelta: Math.abs(rect(leafValue).width - rect(leafToken).width),
+          groupDetailDisplay: groupDetail ? getComputedStyle(groupDetail).display : '',
+          leafDetailDisplay: leafDetail ? getComputedStyle(leafDetail).display : '',
+          bareDetailCount: bareToken.querySelectorAll('.tab-inline-detail').length,
+        };
+        """
+    )
+    assert metrics["groupText"] == "Refactor agent status ownership", metrics
+    assert metrics["leafText"] == "Refactor agent status ownership", metrics
+    assert metrics["groupSession"] == "[8003]" and metrics["leafSession"] == "[8003]", metrics
+    assert metrics["groupWidthDelta"] <= 1 and metrics["leafWidthDelta"] <= 1, metrics
+    assert metrics["groupDetailDisplay"] != "none" and metrics["leafDetailDisplay"] != "none", metrics
+    assert metrics["bareDetailCount"] == 0, metrics
+
+
+def test_yoinfo_leaf_fields_put_pr_before_linear(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof infoRecordHtml === 'function';")
+    )
+    order = browser.execute_script(
+        """
+        const fixture = document.createElement('div');
+        fixture.innerHTML = infoRecordHtml({
+          id: 'ordered-fields',
+          pathKey: '/home/test/repo',
+          pathLabel: '/home/test/repo',
+          pathTitle: '/home/test/repo',
+          branchKey: 'feature/order',
+          branchLabel: 'feature/order',
+          branchTitle: 'feature/order',
+          prKey: '#123',
+          prLabel: '#123',
+          prTitle: '#123 Reorder YO!info metadata',
+          prUrl: 'https://example.test/pull/123',
+          linearKey: 'DIS-123',
+          linearLabel: 'DIS-123',
+          linearTitle: 'DIS-123 Reorder YO!info metadata',
+          linearItems: [{identifier: 'DIS-123', title: 'Reorder YO!info metadata', url: 'https://linear.test/DIS-123'}],
+        });
+        document.body.appendChild(fixture);
+        return [...fixture.querySelectorAll('.info-tree-field')].map(field =>
+          [...field.classList].find(className => className.startsWith('info-tree-field-') && className !== 'info-tree-field-value')?.replace('info-tree-field-', '')
+        );
+        """
+    )
+    assert order == ["path", "branch", "pr", "linear"], order
 
 
 def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):

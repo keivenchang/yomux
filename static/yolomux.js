@@ -51739,6 +51739,7 @@ function infoRowPrNumber(row = {}) {
 
 function infoRelationshipRecords(rows = infoBranchRows()) {
   const records = [];
+  const tabWorkDescriptions = new Map();
   const noTab = {session: '', label: 'No tab / no AI', title: 'No tab or AI associated with this branch', kind: '', window: '', tabLabel: 'No tab', aiLabel: 'No AI'};
   for (const row of Array.isArray(rows) ? rows : []) {
     const directTabAgents = Array.isArray(row?.tabAgents) && row.tabAgents.length ? row.tabAgents : [];
@@ -51747,6 +51748,15 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
     for (const agent of tabAgents) {
       const session = String(agent?.session || '');
       const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || 'No tab');
+      if (session && !tabWorkDescriptions.has(session)) {
+        const info = transcriptMeta.sessions?.[session];
+        const work = info && typeof sessionWorkDescription === 'function' ? sessionWorkDescription(session, info, 200) : '';
+        tabWorkDescriptions.set(session, work);
+      }
+      const sessionWork = String(tabWorkDescriptions.get(session) || '').trim();
+      const normalizedTabLabel = infoSearchText(tabLabel).toLocaleLowerCase();
+      const normalizedSessionWork = infoSearchText(sessionWork).toLocaleLowerCase();
+      const tabWorkDescription = normalizedSessionWork && !normalizedTabLabel.includes(normalizedSessionWork) ? sessionWork : '';
       const aiLabel = String(agent?.aiLabel || infoTabAgentAiLabel(agent));
       const aiKind = String(agent?.kind || '');
       const tmuxWindowIndex = String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? '');
@@ -51769,6 +51779,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tabSession: session,
         tabLabel,
         tabTitle: String(agent?.title || tabLabel),
+        tabWorkDescription,
         aiKey: `${agent?.kind || 'no-ai'}:${agent?.window || ''}:${aiLabel}`,
         aiKind,
         aiAgentKey: aiKind || '__no_ai__',
@@ -52159,6 +52170,7 @@ function infoRecordTabValueHtml(record = {}, options = {}) {
   const attrs = [`data-info-tab-state="${active ? 'active' : 'inactive'}"`];
   if (options.action !== false) attrs.push(`data-info-open-tab="${esc(record.tabSession)}"`);
   const sessionText = sessionLabel(record.tabSession);
+  const detail = String(options.detail ?? record?.tabWorkDescription ?? '').trim();
   const sessionLabelHtml = infoRecordSearchKindMatches(record, 'tab')
     ? infoSearchHighlightHtml(sessionText)
     : undefined;
@@ -52168,7 +52180,8 @@ function infoRecordTabValueHtml(record = {}, options = {}) {
     active,
     title,
     attrs,
-    showDetail: false,
+    showDetail: Boolean(detail),
+    detail,
     sessionLabelHtml,
     leadingHtml: options.leadingHtml,
   });
@@ -52496,10 +52509,10 @@ function infoRecordMainChipsHtml(record, options = {}) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
     fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
   }
-  const linearDesc = infoRecordLinearDescHtml(record);
-  if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   const prDesc = infoRecordPrDescHtml(record);
   if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
+  const linearDesc = infoRecordLinearDescHtml(record);
+  if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   return fields.join('');
 }
 

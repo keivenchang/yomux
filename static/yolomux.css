@@ -606,7 +606,7 @@ body.theme-light {
   --text: #17202c;
   --muted: #5b6573;
   --subwindow-pid-color: var(--text-muted-cool);
-  --subwindow-recency-color: var(--muted);
+  --subwindow-recency-color: var(--text-muted-cool);
   --line: #c9d2df;
   --tree-indent-line: rgba(100, 116, 139, 0.12);
   --info-pane-bg: #ffffff;
@@ -9683,7 +9683,7 @@ body.theme-light .info-tree {
   vertical-align: -0.08em;
 }
 .info-tree-tab-token {
-  inline-size: min(var(--pane-tab-width), 100%);
+  inline-size: 100%;
   max-width: 100%;
   vertical-align: middle;
 }

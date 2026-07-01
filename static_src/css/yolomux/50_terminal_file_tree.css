@@ -2186,7 +2186,7 @@ body.theme-light .info-tree {
   vertical-align: -0.08em;
 }
 .info-tree-tab-token {
-  inline-size: min(var(--pane-tab-width), 100%);
+  inline-size: 100%;
   max-width: 100%;
   vertical-align: middle;
 }
