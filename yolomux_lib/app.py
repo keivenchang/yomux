@@ -9294,20 +9294,57 @@ class TmuxWebtermApp:
             previous = self.agent_window_transition_state.get(key, {})
             previous_state = str(previous.get("state") or "")
             previous_stopped_ts = self.float_value(previous.get("working_stopped_ts"), 0.0)
+            try:
+                previous_generation = max(0, int(previous.get("cooldown_generation", 0)))
+            except (TypeError, ValueError):
+                previous_generation = 0
+            generation = previous_generation
             if state == "working":
                 stopped_ts = 0.0
+                if previous_state != "working":
+                    generation, _ = self.shared_agent_window_cooldown_transition(
+                        session,
+                        window,
+                        pane_target,
+                        kind,
+                        "working",
+                        0,
+                        observed_ts,
+                    )
             elif state == "idle":
                 # A completion belongs only to a working->idle transition observed by this
                 # tracker. Activity recency is historical metadata: treating it as a stop
                 # fabricates a yellow completion when a renamed or newly discovered session is
                 # first seen idle.
-                stopped_ts = observed_ts if previous_state == "working" else previous_stopped_ts
+                if previous_state == "working":
+                    generation, stopped_ts = self.shared_agent_window_cooldown_transition(
+                        session,
+                        window,
+                        pane_target,
+                        kind,
+                        "idle",
+                        previous_generation,
+                        observed_ts,
+                    )
+                else:
+                    stopped_ts = previous_stopped_ts
             else:
                 stopped_ts = 0.0
+                if previous_state == "working":
+                    self.shared_agent_window_cooldown_transition(
+                        session,
+                        window,
+                        pane_target,
+                        kind,
+                        "cancel",
+                        previous_generation,
+                        observed_ts,
+                    )
+                generation = 0
             # Keep the prompt-transition fields alongside the working transition. A later
             # approval uses them to distinguish A -> B -> A from one still-visible A prompt.
             next_state = dict(previous)
-            next_state.update({"state": state, "working_stopped_ts": stopped_ts})
+            next_state.update({"state": state, "working_stopped_ts": stopped_ts, "cooldown_generation": generation})
             self.agent_window_transition_state[key] = next_state
         return stopped_ts
 
@@ -9367,6 +9404,82 @@ class TmuxWebtermApp:
             oldest = min(instances, key=lambda item: float(instances[item].get("updated_at") or 0.0))
             instances.pop(oldest, None)
 
+    def update_shared_agent_window_attention_instance(
+        self,
+        session: str,
+        window: str,
+        pane_target: str,
+        kind: str,
+        update: Callable[[dict[str, Any], float], tuple[Any, bool]],
+    ) -> Any:
+        key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
+        now = time.time()
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            container = status.get("attention_instances") if isinstance(status.get("attention_instances"), dict) else {}
+            instances = container.get("instances") if isinstance(container.get("instances"), dict) else {}
+            instances = {str(instance_key): dict(record) for instance_key, record in instances.items() if isinstance(record, dict)}
+            self.prune_attention_instances(instances, now)
+            record = dict(instances.get(key, {}))
+            result, changed = update(record, now)
+            if changed:
+                record["updated_at"] = now
+                instances[key] = record
+                status["attention_instances"] = {"updated_at": now, "instances": instances}
+                self._write_shared_tmux_ai_status_locked(status)
+        return result
+
+    def shared_agent_window_cooldown_transition(
+        self,
+        session: str,
+        window: str,
+        pane_target: str,
+        kind: str,
+        transition: str,
+        local_generation: int,
+        observed_ts: float,
+    ) -> tuple[int, float]:
+        def update(record: dict[str, Any], now: float) -> tuple[tuple[int, float], bool]:
+            try:
+                generation = max(0, int(record.get("cooldown_generation", 0)))
+            except (TypeError, ValueError):
+                generation = 0
+            try:
+                stopped_ts = max(0.0, float(record.get("cooldown_stopped_at", 0.0)))
+            except (TypeError, ValueError):
+                stopped_ts = 0.0
+            try:
+                cancelled_generation = max(0, int(record.get("cooldown_cancelled_generation", 0)))
+            except (TypeError, ValueError):
+                cancelled_generation = 0
+            working = record.get("cooldown_working") is True
+            if transition == "working":
+                if not working:
+                    generation += 1
+                    record.update({"cooldown_generation": generation, "cooldown_working": True, "cooldown_stopped_at": 0.0})
+                    return (generation, 0.0), True
+                return (generation, 0.0), False
+            if local_generation <= 0 or local_generation != generation:
+                return (0, 0.0), False
+            if transition == "idle":
+                if cancelled_generation >= generation:
+                    return (0, 0.0), False
+                changed = False
+                if stopped_ts <= 0:
+                    stopped_ts = observed_ts if observed_ts > 0 else now
+                    record["cooldown_stopped_at"] = stopped_ts
+                    changed = True
+                if working:
+                    record["cooldown_working"] = False
+                    changed = True
+                return (generation, stopped_ts), changed
+            if transition == "cancel" and stopped_ts <= 0 and (working or cancelled_generation < generation):
+                record.update({"cooldown_working": False, "cooldown_cancelled_generation": generation})
+                return (generation, 0.0), True
+            return (generation, 0.0), False
+
+        return self.update_shared_agent_window_attention_instance(session, window, pane_target, kind, update)
+
     def shared_agent_window_attention_instance_signature(
         self,
         session: str,
@@ -9377,37 +9490,26 @@ class TmuxWebtermApp:
         prompt_hash: str,
     ) -> str:
         attention_state = state in {"approval", "needs-approval", "needs-input", "interrupted"}
-        key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
-        now = time.time()
-        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
-            status = self._read_shared_tmux_ai_status_locked()
-            container = status.get("attention_instances") if isinstance(status.get("attention_instances"), dict) else {}
-            instances = container.get("instances") if isinstance(container.get("instances"), dict) else {}
-            instances = {str(instance_key): dict(record) for instance_key, record in instances.items() if isinstance(record, dict)}
-            self.prune_attention_instances(instances, now)
-            previous = dict(instances.get(key, {}))
-            previous_hash = str(previous.get("active_prompt_hash") or "")
+
+        def update(record: dict[str, Any], _now: float) -> tuple[str, bool]:
+            previous_hash = str(record.get("active_prompt_hash") or "")
             try:
-                generation = max(0, int(previous.get("attention_generation", 0)))
+                generation = max(0, int(record.get("attention_generation", 0)))
             except (TypeError, ValueError):
                 generation = 0
             if not attention_state or not prompt_hash:
                 if previous_hash:
-                    previous["active_prompt_hash"] = ""
-                    previous["updated_at"] = now
-                    instances[key] = previous
-                    status["attention_instances"] = {"updated_at": now, "instances": instances}
-                    self._write_shared_tmux_ai_status_locked(status)
-                return ""
+                    record["active_prompt_hash"] = ""
+                    return "", True
+                return "", False
             if prompt_hash != previous_hash:
                 generation += 1
-                previous["active_prompt_hash"] = prompt_hash
-                previous["attention_generation"] = generation
-                previous["updated_at"] = now
-                instances[key] = previous
-                status["attention_instances"] = {"updated_at": now, "instances": instances}
-                self._write_shared_tmux_ai_status_locked(status)
-        return f"{prompt_hash}:{generation}"
+                record["active_prompt_hash"] = prompt_hash
+                record["attention_generation"] = generation
+                return f"{prompt_hash}:{generation}", True
+            return f"{prompt_hash}:{generation}", False
+
+        return self.update_shared_agent_window_attention_instance(session, window, pane_target, kind, update)
 
     def agent_window_attention_key(self, session: str, window: str, pane_target: str, kind: str, state: str, signature: str) -> str:
         if not signature:

@@ -160,6 +160,43 @@ def test_attention_instance_generation_is_shared_across_servers_and_refresh(monk
     assert restarted.attention_acknowledged(first.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", next_event)) is False
 
 
+def test_cooldown_ack_uses_one_shared_transition_identity_across_servers(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    first = make_app()
+    second = make_app()
+    scope = ("8002", "1", "%27", "codex")
+
+    first.agent_window_working_stopped_ts(*scope, "working", 100.0)
+    second.agent_window_working_stopped_ts(*scope, "working", 110.0)
+    first_stopped = first.agent_window_working_stopped_ts(*scope, "idle", 200.0)
+    first_key = first.agent_window_attention_key(
+        *scope, "cooldown", first.agent_window_attention_signature("cooldown", {}, first_stopped)
+    )
+
+    first.acknowledge_attention({"keys": [first_key]})
+    second.merge_shared_attention_acks()
+    # The peer can observe idle after the click. It must still recover the first server's
+    # canonical transition instead of minting a new timestamp/key after the acknowledgement.
+    second_stopped = second.agent_window_working_stopped_ts(*scope, "idle", 220.0)
+    second_key = second.agent_window_attention_key(
+        *scope, "cooldown", second.agent_window_attention_signature("cooldown", {}, second_stopped)
+    )
+
+    assert first_stopped == second_stopped
+    assert first_key == second_key
+    assert second.attention_acknowledged(second_key) is True
+
+    first.agent_window_working_stopped_ts(*scope, "working", 300.0)
+    next_stopped = first.agent_window_working_stopped_ts(*scope, "idle", 400.0)
+    next_key = first.agent_window_attention_key(
+        *scope, "cooldown", first.agent_window_attention_signature("cooldown", {}, next_stopped)
+    )
+
+    assert next_stopped != first_stopped
+    assert next_key != first_key
+    assert first.attention_acknowledged(next_key) is False
+
+
 def test_attention_ack_poll_publishes_once_per_revision(monkeypatch, tmp_path, make_app):
     patch_shared_path(monkeypatch, tmp_path)
     first = make_app()
