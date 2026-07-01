@@ -1182,7 +1182,7 @@
   "upload.keepStatus": "⟦Ķééƥ úƥłóáđ šťáťúš ṽíšíƀłé··········⟧",
   "upload.resultInserted": "⟦úƥłóáđéđ {name} ťó {destination}; ƥáťĥ íñšéřťéđ···········⟧",
   "upload.resultTerminalDisconnected": "⟦úƥłóáđéđ {name} ťó {destination}; ťéřɱíñáł ñóť çóññéçťéđ···············⟧",
-  "upload.resultTitle": "⟦ÝÓŁÓɱúẋ - {host}: {session} úƥłóáđ········⟧",
+  "upload.resultTitle": "⟦{session} úƥłóáđ···⟧",
   "upload.sizeText": "⟦Šéłéçťéđ úƥłóáđ šížé íš {size}.··········⟧",
   "upload.toastBody": "⟦{sizeText} Ɓřóŵšéř úƥłóáđš ářé ƀúƒƒéřéđ íñ ɱéɱóřý; çúřřéñť çáƥ íš {cap}.·······················⟧",
   "upload.toastTitle": "⟦Úšé řšýñç ƒóř łářǧé ƒíłéš··········⟧",

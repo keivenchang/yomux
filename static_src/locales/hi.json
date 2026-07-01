@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "Upload status visible रखें",
   "upload.resultInserted": "{name} को {destination} पर अपलोड किया; पथ डाला गया",
   "upload.resultTerminalDisconnected": "{name} को {destination} पर अपलोड किया; टर्मिनल कनेक्ट नहीं है",
-  "upload.resultTitle": "YOLOmux - {host}: {session} upload",
+  "upload.resultTitle": "{session} upload",
   "upload.sizeText": "चुना हुआ upload साइज़ {size} है।",
   "upload.toastBody": "{sizeText} ब्राउज़र uploads मेमोरी में buffer होते हैं; वर्तमान सीमा {cap} है।",
   "upload.toastTitle": "बड़ी फ़ाइलों के लिए rsync उपयोग करें",

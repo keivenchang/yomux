@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "アップロード状態を表示したままにする",
   "upload.resultInserted": "{name} を {destination} にアップロードしました; パスを挿入しました",
   "upload.resultTerminalDisconnected": "{name} を {destination} にアップロードしました; 端末は未接続です",
-  "upload.resultTitle": "YOLOmux - {host}: {session} アップロード",
+  "upload.resultTitle": "{session} アップロード",
   "upload.sizeText": "選択したアップロードサイズは {size} です。",
   "upload.toastBody": "{sizeText} ブラウザーのアップロードはメモリにバッファリングされます。現在の上限は {cap} です。",
   "upload.toastTitle": "大きいファイルには rsync を使ってください",

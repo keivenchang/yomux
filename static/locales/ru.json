@@ -1182,7 +1182,7 @@
   "upload.keepStatus": "Оставить статус загрузки видимым",
   "upload.resultInserted": "{name} загружен в {destination}; путь вставлен",
   "upload.resultTerminalDisconnected": "{name} загружен в {destination}; терминал не подключён",
-  "upload.resultTitle": "YOLOmux - {host}: загрузка {session}",
+  "upload.resultTitle": "загрузка {session}",
   "upload.sizeText": "Выбранный размер загрузки: {size}.",
   "upload.toastBody": "{sizeText} Загрузки браузера буферизуются в памяти; текущий лимит — {cap}.",
   "upload.toastTitle": "Используйте rsync для больших файлов",

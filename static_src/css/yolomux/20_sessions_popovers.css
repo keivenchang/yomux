@@ -848,12 +848,11 @@ body.theme-light .branch-link {
 }
 .session-agent-row {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 5px;
+  display: block;
   color: var(--text);
   font: var(--ui-font-size-xs)/1.25 var(--ui-font);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .session-agent-window-block > .session-agent-row {
   padding: 3px 5px;
@@ -867,10 +866,11 @@ body.theme-light .branch-link {
   color: var(--danger-text);
 }
 .session-agent-kind {
-  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  margin-inline-end: 3px;
+  vertical-align: text-bottom;
   font-weight: 600;
 }
 .session-agent-kind .agent-window-activity {
@@ -880,6 +880,9 @@ body.theme-light .branch-link {
 .session-agent-status,
 .session-agent-empty {
   color: var(--muted);
+}
+.session-agent-sep {
+  margin-inline: 3px;
 }
 .session-agent-row.attention .session-agent-status {
   color: var(--danger-text);

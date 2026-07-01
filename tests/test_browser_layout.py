@@ -46,6 +46,51 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
         assert tab["symbolColor"] != tab["symbolBackground"], metrics
 
 
+def test_session_popover_agent_row_wraps_text_after_compact_state_and_ai_controls(browser, tmp_path):
+    page = tmp_path / "session-popover-agent-row-wrap.html"
+    page.write_text(page_html("""
+      <div id="row" class="session-agent-row attention">
+        <span id="controls" class="session-agent-kind"><span class="agent-window-activity"><span class="agent-window-status-dot">■</span><span class="agent-icon">✳</span></span></span>12:claude a deliberately long tmux window name that should wrap in the popover <span id="separator" class="session-agent-sep">—</span> needs input
+      </div>
+    """, extra_css="""
+      body { margin: 0; padding: 16px; background: var(--bg); }
+      #row { box-sizing: border-box; width: 210px; padding: 3px 5px; border-radius: 5px; background: var(--pane-inactive-tab-bg); }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const row = document.getElementById('row');
+        const controls = document.getElementById('controls');
+        const separator = document.getElementById('separator');
+        const labelRange = document.createRange();
+        labelRange.setStartAfter(controls);
+        labelRange.setEndBefore(separator);
+        const labelRects = [...labelRange.getClientRects()].map(rect => ({
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          width: rect.width,
+        }));
+        const rowRect = row.getBoundingClientRect();
+        const controlsRect = controls.getBoundingClientRect();
+        return {
+          controlsLeft: controlsRect.left,
+          controlsRight: controlsRect.right,
+          rowLeft: rowRect.left,
+          rowRight: rowRect.right,
+          scrollWidth: row.scrollWidth,
+          clientWidth: row.clientWidth,
+          labelRects,
+        };
+        """
+    )
+    assert metrics["controlsLeft"] - metrics["rowLeft"] <= 6, metrics
+    assert metrics["labelRects"][0]["left"] >= metrics["controlsRight"] - 1, metrics
+    assert len(metrics["labelRects"]) >= 2, metrics
+    assert metrics["labelRects"][1]["left"] <= metrics["labelRects"][0]["left"] + 1, metrics
+    assert metrics["scrollWidth"] <= metrics["clientWidth"], metrics
+
+
 @pytest.mark.parametrize(
     "tone,pulsing,expected_fill",
     [
@@ -3153,14 +3198,29 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         const externalTitle = sessionNotificationTitle('1', state);
         const internalTitle = sessionNotificationTitle('1', state, {inApp: true});
         showAttentionAlert('1', state);
+        const genericAttentionTitle = document.querySelector('.toast[data-toast-kind="attention"] .toast-title')?.textContent?.trim() || '';
+        document.querySelectorAll('.toast[data-toast-kind="attention"]').forEach(node => node.remove());
+        autoApproveStates.set('1', {agent_windows: [{kind: 'claude', state: 'approval', window_index: 0, window_label: '0:claude', screen_text: 'Do you want to proceed?'}]});
+        const agentState = sessionState('1');
+        showAttentionAlert('1', agentState);
         showTerminalConnectionToast('1', 'Disconnected', 5000);
         sendTestNotification();
         const title = selector => document.querySelector(selector)?.textContent?.trim() || '';
+        const attentionPill = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-agent-button');
+        const attentionReason = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-reason');
+        const pillRect = attentionPill?.getBoundingClientRect();
+        const reasonRect = attentionReason?.getBoundingClientRect();
         const untyped = [...document.querySelectorAll('.toast:not([data-toast-kind]) .toast-title')];
         return {
           externalTitle,
           internalTitle,
+          genericAttentionTitle,
           attentionTitle: title('.toast[data-toast-kind="attention"] .toast-title'),
+          attentionAgentLabel: title('.toast[data-toast-kind="attention"] .attention-toast-agent-button .tmux-window-name-text'),
+          attentionReason: title('.toast[data-toast-kind="attention"] .attention-toast-reason'),
+          attentionHasStop: Boolean(document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-agent-button .status-indicator--attention')),
+          attentionPillVisible: Boolean(pillRect && pillRect.width > 0 && pillRect.height > 0),
+          attentionReasonFollowsPill: Boolean(pillRect && reasonRect && (reasonRect.left >= pillRect.right - 1 || reasonRect.top > pillRect.top)),
           terminalTitle: title('.toast[data-toast-kind="terminal-connection"] .toast-title'),
           testTitle: untyped.at(-1)?.textContent?.trim() || '',
         };
@@ -3169,10 +3229,61 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
     assert metrics == {
         "externalTitle": "YOLOmux[1 main] Needs input",
         "internalTitle": "Needs input",
-        "attentionTitle": "Needs input",
+        "genericAttentionTitle": "Needs input",
+        "attentionTitle": "[1] 0:claude: Needs approval",
+        "attentionAgentLabel": "0:claude",
+        "attentionReason": "Do you want to proceed?",
+        "attentionHasStop": True,
+        "attentionPillVisible": True,
+        "attentionReasonFollowsPill": True,
         "terminalTitle": "terminal",
         "testTitle": "notifications enabled",
     }, metrics
+    navigation = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const calls = [];
+        const originalSelectSession = selectSession;
+        const originalTmuxWindow = tmuxWindow;
+        selectSession = async (...args) => { calls.push(['select', args[0], args[1]?.userInitiated === true]); };
+        tmuxWindow = (...args) => { calls.push(['window', args[0], args[1]?.windowIndex, args[2]]); };
+        document.querySelector('.toast[data-toast-kind="attention"]').click();
+        setTimeout(() => {
+          selectSession = originalSelectSession;
+          tmuxWindow = originalTmuxWindow;
+          done(calls);
+        }, 0);
+        """
+    )
+    assert navigation == [["select", "1", True], ["window", "1", "0", "tmux sub-window 0"]], navigation
+
+
+def test_hovered_toast_pauses_countdown(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof showToast === 'function';")
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const toast = showToast('Needs input', 'Do you want to proceed?', {countdownMs: 120});
+        const countdown = toast.querySelector('.toast-line');
+        toast.dispatchEvent(new Event('pointerenter'));
+        toast.dispatchEvent(new FocusEvent('focusin'));
+        setTimeout(() => {
+          const held = toast.isConnected;
+          const paused = toast.classList.contains('toast-countdown-paused')
+            && getComputedStyle(countdown, '::after').animationPlayState === 'paused';
+          toast.dispatchEvent(new Event('pointerleave'));
+          setTimeout(() => {
+            const heldAfterPointerLeave = toast.isConnected;
+            toast.dispatchEvent(new FocusEvent('focusout', {relatedTarget: document.body}));
+            setTimeout(() => done({held, paused, heldAfterPointerLeave, removed: !toast.isConnected}), 180);
+          }, 180);
+        }, 180);
+        """
+    )
+    assert result == {"held": True, "paused": True, "heldAfterPointerLeave": True, "removed": True}, result
 
 
 def test_browser_notifications_use_shared_badge_free_yolomux_icon(browser, tmp_path):

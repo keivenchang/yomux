@@ -182,7 +182,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'text status badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'attention status labels inherit shared status-indicator tone behavior without badge text-transform');
     assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*const tone = agentWindowStatusToneForItem\(item\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(activitySource), 'tmux sub-window status dots inherit shared dot behavior through the shared activity-tone helper');
-    assert.ok(/sessionPopoverAgentWindowRowHtml\(agent[\s\S]*agentWindowActivityIconHtmlForStatus\(agent, agent\.kind/.test(popoverSource), 'session popover agent rows reuse the shared activity glyph/status renderer');
+    assert.ok(/sessionPopoverAgentWindowRowHtml\(agent[\s\S]*agentWindowActivityIconHtmlForStatus\(agent, agent\.kind[\s\S]*statusBeforeAgent: true/.test(popoverSource), 'session popover agent rows reuse the shared state-then-agent renderer ordering');
+    assert.ok(/session-agent-kind">\$\{activityHtml\}<\/span>\$\{esc\(label\)\}/.test(popoverSource), 'session popover keeps state/AI controls inline with the window text instead of wrapping the full label in a fixed control group');
     assert.ok(/function refreshAgentWindowActivityDisplays\(\)[\s\S]*renderPanels\(activePaneItems\(\), \{reason: 'agent-window-activity'\}\);[\s\S]*renderPaneTabStrips\(\)/.test(activitySource), 'sub-window activity refreshes redraw parent pane tab strips immediately');
     assert.ok(/mutationTouchesAgentWindowActivity\(mutation\)[\s\S]*status-indicator[\s\S]*heartbeat-pulse[\s\S]*querySelector\?\.\('\.status-indicator\.heartbeat-pulse, \.status-indicator\.attention-pulse'/.test(activitySource), 'the shared animation sync observer watches attention status indicators as well as agent activity wrappers');
     assert.ok(/function syncAgentWindowPulseAnimationCurrentTime\(node, nowMs = Date\.now\(\)\)[\s\S]*animation\.currentTime = Number\(nowMs\) \|\| 0/.test(activitySource), 'red/yellow/green attention balls are phase-synced from one sampled timeline value');
@@ -1805,7 +1806,16 @@ async function runEditorPreviewSuite() {
     assert.ok(body.includes('container: displayToastContainer(session)'), 'attention notifications use the target pane-local toast stack');
     assert.equal(body.includes('container: attentionAlerts'), false, 'attention notifications do not use the global fixed stack');
     assert.ok(source.includes('function compactNotificationTitle('), 'notification/toast titles use one compact title helper');
-    assert.ok(body.includes('sessionNotificationTitle(session, state, {inApp: true})'), 'attention toasts use the shared title helper without redundant external app context');
+    assert.ok(body.includes('attentionToastTitle(session, state)'), 'attention toasts name the exact session and tmux window through one title helper');
+    assert.ok(body.includes('attentionToastLine(session, state)'), 'attention toasts route their body through the shared agent-status message renderer');
+    assert.ok(body.includes('focusAttentionToastTarget(session, state)'), 'clicking an attention toast follows the shared direct tmux-window route');
+    assert.ok(source.includes('function attentionToastLine(session, state)'), 'attention toast status content has one shared renderer');
+    assert.ok(source.includes('tmuxWindowButtonHtml({'), 'attention toast status content reuses the tmux sub-window button renderer');
+    assert.ok(source.includes("classes: ['attention-toast-agent-button']"), 'attention toast status content uses the shared stop/pause-plus-agent button styling');
+    assert.ok(source.includes('function pauseToastRemoval(id, node, reason)'), 'hover/focus pauses the shared toast removal timer');
+    assert.ok(source.includes("node.addEventListener('pointerenter', () => pauseToastRemoval(id, node, 'Pointer'))"), 'hovering a toast pauses its countdown');
+    assert.ok(source.includes("node.addEventListener('pointerleave', () => resumeToastRemoval(id, node, 'Pointer'))"), 'leaving a toast resumes its countdown');
+    assert.ok(source.includes('node.dataset.toastPausePointer || node.dataset.toastPauseFocus'), 'overlapping pointer and keyboard focus do not prematurely resume a toast');
     assert.ok(source.includes('function sessionNotificationScope(session)'), 'session attention notifications enrich the compact scope through one helper');
     assert.ok(source.includes('sessionTabDescription(session, transcriptMeta.sessions?.[session])'), 'session attention notifications include the same concise description used by tabs');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}'), false, 'attention notifications drop verbose host-prefixed titles');
@@ -1827,6 +1837,12 @@ async function runEditorPreviewSuite() {
     });
     assert.equal(notificationApi.sessionNotificationTitleForTest('1', {label: 'Needs input'}), 'YOLOmux[1 fix: show attention notification description] Needs input', 'attention notification title includes session number plus tab description');
     assert.equal(notificationApi.sessionNotificationTitleForTest('1', {label: 'Needs input'}, {inApp: true}), 'Needs input', 'in-page attention title omits redundant YOLOmux and session context');
+    notificationApi.setAutoApproveStateForTest('1', {agent_windows: [{kind: 'claude', state: 'approval', window_index: 0, window_label: '0:claude', screen_text: 'Do you want to proceed?'}]});
+    const attentionState = notificationApi.sessionState('1');
+    const attentionLine = notificationApi.attentionToastLineForTest('1', attentionState);
+    assert.equal(attentionLine.text, 'Do you want to proceed?', 'the attention toast does not repeat the agent label beside its status button');
+    assert.equal(typeof attentionLine.render, 'function', 'the attention toast renders the shared stop/pause-plus-agent status button');
+    assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['upload.resultTitle'], '{session} upload', 'upload toast titles omit the redundant YOLOmux host prefix');
     assert.ok(source.includes("localizedHtml('terminal.connection.reconnectingStatus'"), 'terminal reconnect status is i18n-keyed');
     assert.ok(source.includes("t('terminal.connection.reconnectingToast'"), 'terminal reconnect toast is i18n-keyed');
     assert.ok(source.includes("terminalNotConnectedHtml(session)"), 'terminal-not-connected statuses share the localized helper');
@@ -2158,8 +2174,8 @@ async function runEditorPreviewSuite() {
       {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
     ]});
     const agentPopover = api.sessionPopoverHtml('4', {panes: []}, 'claude', false);
-    assert.ok(/session-agent-kind[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*agent-window-status-dot[^"]*status-indicator--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows a static Claude symbol plus glyph-ready green status before the tmux sub-window label');
-    assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)[^"]*[\s\S]*1:codex/.test(agentPopover), 'attention popover row shows a static Codex symbol plus a red attention status before the label');
+    assert.ok(/session-agent-kind[\s\S]*agent-window-status-dot[^"]*status-indicator--working[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows the play glyph before the Claude identity and tmux sub-window label');
+    assert.ok(/session-agent-kind[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--attention)[^"]*[\s\S]*agent-icon codex[\s\S]*1:codex/.test(agentPopover), 'attention popover row shows the stop glyph before the Codex identity and tmux sub-window label');
     assert.equal(/agent-window-activity agent-window-activity--attention[^"]*"[^>]*style="[^"]*--attention-animation-delay:[^"]*"[\s\S]*agent-window-status-dot/.test(agentPopover), false, 'a settled red attention marker does not retain a pulse phase after its transition ends');
     assert.equal(/agent-window-status-dot[^>]*style="--attention-animation-delay:/.test(agentPopover), false, 'attention status dot does not carry its own independent animation phase');
     assert.equal(/class="[^"]*session-agent-status[^"]*attention-pulse/.test(agentPopover), false, 'attention popover status text stays static when continuous status pulsing is disabled');
@@ -3543,6 +3559,7 @@ async function runEditorPreviewSuite() {
     const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
     assert.ok(/\.session-agent-window-block > \.session-agent-row\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)/.test(sessionsCss), 'per-window popover headers use the pane-tab shaded background token');
     assert.ok(/\.session-agent-window-block > \.session-agent-row\.current\s*\{[\s\S]*background:\s*var\(--active-tab-muted-bg\)/.test(sessionsCss), 'current per-window popover header uses the active muted tab background token');
+    assert.ok(/\.session-agent-row\s*\{[\s\S]*display:\s*block[\s\S]*overflow-wrap:\s*anywhere[\s\S]*white-space:\s*normal/.test(sessionsCss), 'popover window rows use inline text flow and wrap long labels instead of keeping a fixed left flex column');
   });
 
   test('t@6754', () => {

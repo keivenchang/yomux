@@ -3271,7 +3271,7 @@ function showUploadResult(session, payload, inserted) {
 
 function ensureUploadResultShell(session, node) {
   return ensureToastShell(node, {
-    title: t('upload.resultTitle', {host: serverHostname, session: sessionLabel(session)}),
+    title: t('upload.resultTitle', {session: sessionLabel(session)}),
     closeLabel: t('upload.hideStatus'),
     keepLabel: t('upload.keepStatus'),
     onKeep: () => keepUploadResult(session),

@@ -879,9 +879,11 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
-  const activityHtml = agentWindowActivityIconHtmlForStatus(agent, agent.kind, agent._session || '');
+  // Match the tmux-window button and attention toast: the state glyph (play/stop/pause)
+  // comes before the stable Claude/Codex identity everywhere a sub-window is shown.
+  const activityHtml = agentWindowActivityIconHtmlForStatus(agent, agent.kind, agent._session || '', {statusBeforeAgent: true});
   return `<div class="${esc(classes.join(' '))}">
-    <span class="session-agent-kind">${activityHtml}${esc(label)}</span>
+    <span class="session-agent-kind">${activityHtml}</span>${esc(label)}
     <span class="session-agent-sep">—</span>
     ${sessionPopoverAgentStatusHtml(agent, nowSeconds)}
   </div>`;

@@ -1279,7 +1279,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/if \(await saveFileEditor\(path, panel, \{autosave: true, closing: true\}\)\) return true;[\s\S]*?showFileEditorDecisionDialog/.test(source), '#81: autosave-on-close failure falls back to the close dialog');
     // #85/#86/#87/#88: toast removal honors countdownMs; reconnect confirmation is single-in-flight; the
     // repo popover is viewport-clamped; an equal-mtime unknown-size entry is treated as changed (re-stat).
-    assert.ok(/removeAttentionAlert\(id\), options\.countdownMs \|\| toastDurationMs/.test(source), '#85: toast removal uses options.countdownMs');
+    assert.ok(/scheduleToastRemoval\(id, node, options\.countdownMs \|\| toastDurationMs\)/.test(source), '#85: toast removal uses options.countdownMs through the shared scheduler');
     assert.ok(/function confirmSessionGoneOrReconnect[\s\S]*?if \(item\.confirmingGone\) return;[\s\S]*?item\.confirmingGone = true/.test(source), '#86: reconnect confirmation has an in-flight guard');
     assert.ok(/function showFileTreeRepoPopover[\s\S]*?clampToViewport\(/.test(source), '#87: the repo popover is clamped to the viewport');
     assert.ok(/function scheduleRepoRowHoverPopover[\s\S]*?setTimeout\([\s\S]*?showRepoRowHoverPopover\(row, path\)/.test(source), '#87: repo directory hover popovers are delayed through the shared popover delay timer');

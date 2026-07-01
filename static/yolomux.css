@@ -2888,12 +2888,11 @@ body.theme-light .branch-link {
 }
 .session-agent-row {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 5px;
+  display: block;
   color: var(--text);
   font: var(--ui-font-size-xs)/1.25 var(--ui-font);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .session-agent-window-block > .session-agent-row {
   padding: 3px 5px;
@@ -2907,10 +2906,11 @@ body.theme-light .branch-link {
   color: var(--danger-text);
 }
 .session-agent-kind {
-  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  margin-inline-end: 3px;
+  vertical-align: text-bottom;
   font-weight: 600;
 }
 .session-agent-kind .agent-window-activity {
@@ -2920,6 +2920,9 @@ body.theme-light .branch-link {
 .session-agent-status,
 .session-agent-empty {
   color: var(--muted);
+}
+.session-agent-sep {
+  margin-inline: 3px;
 }
 .session-agent-row.attention .session-agent-status {
   color: var(--danger-text);
@@ -7877,6 +7880,32 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   overflow-wrap: anywhere;
   white-space: normal;
 }
+.toast-line--attention {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.attention-toast-agent {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.attention-toast-agent-button {
+  pointer-events: none;
+  max-width: none;
+  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
+  border: 1px solid var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+  font-weight: 700;
+}
+.attention-toast-agent-button .tmux-window-name-text {
+  overflow: visible;
+  text-overflow: clip;
+}
+.attention-toast-reason {
+  min-width: 0;
+  flex: 1 1 160px;
+}
 .toast-line::after,
 .toast-countdown::after {
   content: "";
@@ -7888,6 +7917,10 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   background: #d28b00;
   transform-origin: left center;
   animation: toast-countdown var(--toast-countdown-duration, 10s) linear forwards;
+}
+.toast.toast-countdown-paused .toast-line::after,
+.toast.toast-countdown-paused .toast-countdown::after {
+  animation-play-state: paused;
 }
 @keyframes toast-countdown {
   from { transform: scaleX(1); }

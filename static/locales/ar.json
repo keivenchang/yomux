@@ -1182,7 +1182,7 @@
   "upload.keepStatus": "إبقاء حالة الرفع مرئية",
   "upload.resultInserted": "تم رفع {name} إلى {destination}؛ تم إدراج المسار",
   "upload.resultTerminalDisconnected": "تم رفع {name} إلى {destination}؛ الطرفية غير متصلة",
-  "upload.resultTitle": "YOLOmux - {host}: رفع {session}",
+  "upload.resultTitle": "رفع {session}",
   "upload.sizeText": "حجم الرفع المحدد هو {size}.",
   "upload.toastBody": "{sizeText} رفوعات المتصفح مخزّنة في الذاكرة؛ الحد الحالي هو {cap}.",
   "upload.toastTitle": "استخدم rsync للملفات الكبيرة",

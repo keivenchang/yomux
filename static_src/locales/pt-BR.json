@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "Manter status do upload visível",
   "upload.resultInserted": "{name} enviado para {destination}; caminho inserido",
   "upload.resultTerminalDisconnected": "{name} enviado para {destination}; terminal não conectado",
-  "upload.resultTitle": "YOLOmux - {host}: upload de {session}",
+  "upload.resultTitle": "upload de {session}",
   "upload.sizeText": "O tamanho do upload selecionado é {size}.",
   "upload.toastBody": "{sizeText} Uploads no navegador são armazenados em buffer na memória; o limite atual é {cap}.",
   "upload.toastTitle": "Use rsync para arquivos grandes",

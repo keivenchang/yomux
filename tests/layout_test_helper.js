@@ -1463,6 +1463,7 @@ globalThis.__layoutTestApi = {
   fileImagePreviewMinShowDelayMs,
   splitPercentForNewItem,
   sessionNotificationTitleForTest: sessionNotificationTitle,
+  attentionToastLineForTest: attentionToastLine,
   handleDropDragOver,
   installFilePathDropTarget,
   showPaneTabDropPreview,

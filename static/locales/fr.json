@@ -1182,7 +1182,7 @@
   "upload.keepStatus": "Garder le statut du téléversement visible",
   "upload.resultInserted": "{name} téléversé vers {destination}; chemin inséré",
   "upload.resultTerminalDisconnected": "{name} téléversé vers {destination}; terminal non connecté",
-  "upload.resultTitle": "YOLOmux - {host}: téléversement {session}",
+  "upload.resultTitle": "téléversement {session}",
   "upload.sizeText": "La taille de téléversement sélectionnée est {size}.",
   "upload.toastBody": "{sizeText} Les téléversements de navigateur sont mis en mémoire tampon ; la limite actuelle est {cap}.",
   "upload.toastTitle": "Utilisez rsync pour les gros fichiers",

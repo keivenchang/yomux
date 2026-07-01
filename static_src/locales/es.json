@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "Mantener estado de subida visible",
   "upload.resultInserted": "se subió {name} a {destination}; ruta insertada",
   "upload.resultTerminalDisconnected": "se subió {name} a {destination}; terminal no conectado",
-  "upload.resultTitle": "YOLOmux - {host}: subida de {session}",
+  "upload.resultTitle": "subida de {session}",
   "upload.sizeText": "El tamaño de subida seleccionado es {size}.",
   "upload.toastBody": "{sizeText} Las subidas del navegador se almacenan en memoria; el límite actual es {cap}.",
   "upload.toastTitle": "Usa rsync para archivos grandes",

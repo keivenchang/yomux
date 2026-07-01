@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "保持上传状态可见",
   "upload.resultInserted": "已上传 {name} 到 {destination}；路径已插入",
   "upload.resultTerminalDisconnected": "已上传 {name} 到 {destination}；终端未连接",
-  "upload.resultTitle": "优乐mux - {host}: {session} 上传",
+  "upload.resultTitle": "{session} 上传",
   "upload.sizeText": "所选上传大小为 {size}。",
   "upload.toastBody": "{sizeText} 浏览器上传会缓冲在内存中；当前上限为 {cap}。",
   "upload.toastTitle": "大文件请使用 rsync",

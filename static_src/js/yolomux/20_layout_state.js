@@ -1615,7 +1615,11 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent?.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
     const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
     const reasonText = String(agent?.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
-    return stateValue(stateKey, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {agentWindowState: 'attention'});
+    return stateValue(stateKey, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
+      agentWindowState: 'attention',
+      attentionAgent: agent,
+      attentionAgentItem: agentWindowSummary.item,
+    });
   }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
@@ -4044,7 +4048,8 @@ function renderToastLines(bodyNode, lines, options = {}) {
     const line = document.createElement('div');
     line.className = 'toast-line';
     setToastCountdown(line, countdownMs || toastDurationMs);
-    line.textContent = lineText;
+    if (typeof item?.render === 'function') item.render(line);
+    else line.textContent = lineText;
     bodyNode.appendChild(line);
   }
 }
@@ -4055,6 +4060,7 @@ function normalizeToastLine(item, options = {}) {
   return {
     text: compactToastText(text),
     countdownMs: objectItem ? item.countdownMs : options.countdownMs,
+    render: objectItem && typeof item.render === 'function' ? item.render : null,
   };
 }
 
@@ -4082,6 +4088,40 @@ function toastTextLines(text) {
   return lines.length ? lines : [''];
 }
 
+function clearToastRemovalTimer(id) {
+  if (!attentionAlertTimers.has(id)) return;
+  clearTimeout(attentionAlertTimers.get(id));
+  attentionAlertTimers.delete(id);
+}
+
+function scheduleToastRemoval(id, node, remainingMs) {
+  const delay = Math.max(1, Number(remainingMs) || 1);
+  clearToastRemovalTimer(id);
+  node.dataset.toastRemainingMs = String(delay);
+  node.dataset.toastRemovalStartedAt = String(Date.now());
+  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), delay));
+}
+
+function pauseToastRemoval(id, node, reason) {
+  if (!node || node.classList.contains('kept')) return;
+  node.dataset[`toastPause${reason}`] = 'true';
+  if (node.classList.contains('toast-countdown-paused')) return;
+  const remainingMs = Number(node.dataset.toastRemainingMs);
+  const startedAt = Number(node.dataset.toastRemovalStartedAt);
+  const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : 0;
+  node.dataset.toastRemainingMs = String(Math.max(1, (Number.isFinite(remainingMs) ? remainingMs : toastDurationMs) - elapsedMs));
+  clearToastRemovalTimer(id);
+  node.classList.add('toast-countdown-paused');
+}
+
+function resumeToastRemoval(id, node, reason) {
+  if (!node || node.classList.contains('kept')) return;
+  delete node.dataset[`toastPause${reason}`];
+  if (node.dataset.toastPausePointer || node.dataset.toastPauseFocus || !node.classList.contains('toast-countdown-paused')) return;
+  node.classList.remove('toast-countdown-paused');
+  scheduleToastRemoval(id, node, Number(node.dataset.toastRemainingMs));
+}
+
 function showToast(title, lines, options = {}) {
   const container = options.container || attentionAlerts;
   if (!container) return null;
@@ -4095,10 +4135,7 @@ function showToast(title, lines, options = {}) {
     keepLabel: options.keepLabel,
     actions: options.actions,
     onKeep: () => {
-      if (attentionAlertTimers.has(id)) {
-        clearTimeout(attentionAlertTimers.get(id));
-        attentionAlertTimers.delete(id);
-      }
+      clearToastRemovalTimer(id);
       options.onKeep?.();
     },
     onClose: () => {
@@ -4106,12 +4143,19 @@ function showToast(title, lines, options = {}) {
       removeAttentionAlert(id);
     },
   });
-  renderToastLines(bodyNode, Array.isArray(lines) ? lines : toastTextLines(lines), {
+  const toastLines = Array.isArray(lines) ? lines : (lines && typeof lines === 'object' ? [lines] : toastTextLines(lines));
+  renderToastLines(bodyNode, toastLines, {
     countdownMs: options.countdownMs || toastDurationMs,
   });
   node.addEventListener('click', event => {
     if (event.target.closest('[data-toast-close], .toast-actions')) return;
     options.onClick?.();
+  });
+  node.addEventListener('pointerenter', () => pauseToastRemoval(id, node, 'Pointer'));
+  node.addEventListener('pointerleave', () => resumeToastRemoval(id, node, 'Pointer'));
+  node.addEventListener('focusin', () => pauseToastRemoval(id, node, 'Focus'));
+  node.addEventListener('focusout', event => {
+    if (!node.contains(event.relatedTarget)) resumeToastRemoval(id, node, 'Focus');
   });
   container.appendChild(node);
   while (container.children.length > 5) {
@@ -4121,7 +4165,7 @@ function showToast(title, lines, options = {}) {
   }
   // remove the toast when its countdown bar finishes — honor options.countdownMs (the
   // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
-  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), options.countdownMs || toastDurationMs));
+  scheduleToastRemoval(id, node, options.countdownMs || toastDurationMs);
   return node;
 }
 
@@ -4283,13 +4327,86 @@ function hostNotificationTitle(message, options = {}) {
   return compactNotificationTitle(serverHostname, message, options);
 }
 
+function attentionToastAgent(session, state) {
+  const agent = state?.attentionAgent;
+  if (agentWindowIsAttentionState(agent?.state)) {
+    return {agent, item: state?.attentionAgentItem || null};
+  }
+  const info = transcriptMeta.sessions?.[session];
+  const summary = typeof sessionAgentWindowStatusSummary === 'function'
+    ? sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session))
+    : null;
+  return agentWindowIsAttentionState(summary?.agent?.state) ? summary : null;
+}
+
+function attentionToastReason(state, agent) {
+  const reason = String(state?.reason || '').trim();
+  const label = String(agent?.window_label || agent?.window || '').trim();
+  const prefix = label ? `${label}:` : '';
+  return prefix && reason.startsWith(prefix) ? reason.slice(prefix.length).trim() : reason;
+}
+
+function attentionToastTitle(session, state) {
+  const attention = attentionToastAgent(session, state);
+  const agent = attention?.agent;
+  const windowLabel = String(agent?.window_label || agent?.window || '').trim();
+  return windowLabel ? `[${sessionLabel(session)}] ${windowLabel}: ${state?.label || ''}` : sessionNotificationTitle(session, state, {inApp: true});
+}
+
+async function focusAttentionToastTarget(session, state) {
+  await selectSession(session, {userInitiated: true});
+  const windowIndex = agentWindowIndex(attentionToastAgent(session, state)?.agent);
+  if (windowIndex === null) return;
+  tmuxWindow(session, {windowIndex}, `tmux sub-window ${windowIndex}`);
+}
+
+function attentionToastLine(session, state) {
+  const attention = attentionToastAgent(session, state);
+  const agent = attention?.agent;
+  const reason = attentionToastReason(state, agent);
+  if (!agent || typeof tmuxWindowButtonHtml !== 'function') return reason;
+  const visibleName = String(agent.window_label || agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.kind)).trim();
+  if (!visibleName) return reason;
+  return {
+    text: reason,
+    render: line => {
+      line.classList.add('toast-line--attention');
+      const marker = document.createElement('span');
+      marker.className = 'attention-toast-agent';
+      marker.innerHTML = tmuxWindowButtonHtml({
+        tag: 'span',
+        visibleName,
+        showNumberLabel: false,
+        active: true,
+        ariaPressed: false,
+        attrs: ['role="img"'],
+        classes: ['attention-toast-agent-button'],
+        agentStatus: agent,
+        agentKey: agent.kind,
+        session,
+        activityAnimate: false,
+        activityIconHtml: agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
+          ...agentWindowActivityOptionsForStatus(agent, session),
+          item: attention.item || undefined,
+          animate: false,
+          statusBeforeAgent: true,
+        }),
+      });
+      const text = document.createElement('span');
+      text.className = 'attention-toast-reason';
+      text.textContent = reason;
+      line.append(marker, text);
+    },
+  };
+}
+
 function showAttentionAlert(session, state) {
   const node = showToast(
-    sessionNotificationTitle(session, state, {inApp: true}),
-    state.reason,
+    attentionToastTitle(session, state),
+    attentionToastLine(session, state),
     {
       container: displayToastContainer(session),
-      onClick: () => selectSession(session, {userInitiated: true}),
+      onClick: () => { void focusAttentionToastTarget(session, state); },
     },
   );
   if (node) {
@@ -4314,10 +4431,7 @@ function attentionAlreadyVisible(session) {
 }
 
 function removeAttentionAlert(id) {
-  if (attentionAlertTimers.has(id)) {
-    clearTimeout(attentionAlertTimers.get(id));
-    attentionAlertTimers.delete(id);
-  }
+  clearToastRemovalTimer(id);
   document.querySelector(`[data-alert-id="${id}"]`)?.remove();
 }
 

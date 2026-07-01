@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "保持上傳狀態可見",
   "upload.resultInserted": "已上傳 {name} 到 {destination}；路徑已插入",
   "upload.resultTerminalDisconnected": "已上傳 {name} 到 {destination}；終端機未連線",
-  "upload.resultTitle": "優樂mux - {host}: {session} 上傳",
+  "upload.resultTitle": "{session} 上傳",
   "upload.sizeText": "選取的上傳大小為 {size}。",
   "upload.toastBody": "{sizeText} 瀏覽器上傳會緩衝在記憶體中；目前上限為 {cap}。",
   "upload.toastTitle": "大型檔案請使用 rsync",

@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "השאר מצב העלאה גלוי",
   "upload.resultInserted": "{name} הועלה אל {destination}; הנתיב הוכנס",
   "upload.resultTerminalDisconnected": "{name} הועלה אל {destination}; המסוף אינו מחובר",
-  "upload.resultTitle": "YOLOmux - {host}: העלאת {session}",
+  "upload.resultTitle": "העלאת {session}",
   "upload.sizeText": "גודל ההעלאה שנבחר הוא {size}.",
   "upload.toastBody": "{sizeText} העלאות דפדפן מאוחסנות בזיכרון; המגבלה הנוכחית היא {cap}.",
   "upload.toastTitle": "השתמש ב-rsync לקבצים גדולים",

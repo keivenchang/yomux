@@ -1114,7 +1114,7 @@
   "upload.keepStatus": "업로드 상태 계속 표시",
   "upload.resultInserted": "{name}을(를) {destination}에 업로드함; 경로 삽입됨",
   "upload.resultTerminalDisconnected": "{name}을(를) {destination}에 업로드함; 터미널 연결 안 됨",
-  "upload.resultTitle": "YOLOmux - {host}: {session} 업로드",
+  "upload.resultTitle": "{session} 업로드",
   "upload.sizeText": "선택한 업로드 크기는 {size}입니다.",
   "upload.toastBody": "{sizeText} 브라우저 업로드는 메모리에 버퍼링됩니다. 현재 제한은 {cap}입니다.",
   "upload.toastTitle": "대용량 파일에는 rsync를 사용하세요",

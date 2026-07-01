@@ -1182,7 +1182,7 @@
   "upload.keepStatus": "Uploadstatus sichtbar lassen",
   "upload.resultInserted": "{name} nach {destination} hochgeladen; Pfad eingefügt",
   "upload.resultTerminalDisconnected": "{name} nach {destination} hochgeladen; Terminal nicht verbunden",
-  "upload.resultTitle": "YOLOmux - {host}: {session} Upload",
+  "upload.resultTitle": "{session} Upload",
   "upload.sizeText": "Die gewählte Uploadgröße ist {size}.",
   "upload.toastBody": "{sizeText} Browser-Uploads werden im Speicher gepuffert; die aktuelle Obergrenze ist {cap}.",
   "upload.toastTitle": "Verwende rsync für große Dateien",
