@@ -8445,6 +8445,37 @@ class TmuxWebtermApp:
         return {"session": session, "ok": True}, HTTPStatus.OK
 
     @requires_known_session()
+    def tmux_status_mode(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        target = tmux_session_target(session)
+        status_result = tmux(["show-option", "-t", target, "-v", "status"], timeout=3.0)
+        if status_result.returncode != 0:
+            return {"session": session, "error": cmd_error(status_result, "tmux status read failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
+        if status_result.stdout.strip().lower() != "on":
+            return {"session": session, "status": "none"}, HTTPStatus.OK
+        position_result = tmux(["show-option", "-t", target, "-v", "status-position"], timeout=3.0)
+        if position_result.returncode != 0:
+            return {"session": session, "error": cmd_error(position_result, "tmux status position read failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
+        position = position_result.stdout.strip().lower()
+        return {"session": session, "status": position if position in {"top", "bottom"} else "bottom"}, HTTPStatus.OK
+
+    @requires_known_session()
+    def cycle_tmux_status_mode(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        current, status = self.tmux_status_mode(session)
+        if status != HTTPStatus.OK:
+            return current, status
+        next_mode = {"top": "bottom", "bottom": "none", "none": "top"}[current["status"]]
+        target = tmux_session_target(session)
+        commands = [["set-option", "-t", target, "status", "off"]] if next_mode == "none" else [
+            ["set-option", "-t", target, "status", "on"],
+            ["set-option", "-t", target, "status-position", next_mode],
+        ]
+        for command in commands:
+            result = tmux(command, timeout=3.0)
+            if result.returncode != 0:
+                return {"session": session, "error": cmd_error(result, "tmux status update failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
+        return {"session": session, "status": next_mode}, HTTPStatus.OK
+
+    @requires_known_session()
     def tmux_select_window(self, session: str, window: str) -> tuple[dict[str, Any], HTTPStatus]:
         window_text = str(window or "").strip()
         if not window_text.isdigit():

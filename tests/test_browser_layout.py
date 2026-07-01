@@ -2008,6 +2008,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
             <button type="button" class="tab tmux-window-button active"><span class="tmux-window-name-label"><span class="tmux-window-name-text">1:claude</span></span><span class="tmux-window-number-label">1</span></button>
             <button type="button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">2:bash</span></span><span class="tmux-window-number-label">2</span></button>
           </div>
+          <button id="status-toggle" type="button" class="tab tmux-status-toggle tmux-status-toggle--none">·</button>
           <button type="button" class="panel-detail-close"></button>
         </div>
       </article>
@@ -2064,6 +2065,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           labelMode: document.getElementById('window-bar').dataset.tmuxWindowLabelMode,
           visibleNameDisplays: Array.from(document.querySelectorAll('.tmux-window-name-label')).map(node => getComputedStyle(node).display),
           visibleNumberDisplays: Array.from(document.querySelectorAll('.tmux-window-number-label')).map(node => getComputedStyle(node).display),
+          statusToggle: rect('status-toggle'),
         };
         """
     )
@@ -2087,6 +2089,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert metrics["buttonBorderStyle"] == "solid"
     assert metrics["buttonBorderWidth"] == "1px"
     assert metrics["buttonBorderBackgroundDistance"] > 32
+    assert metrics["statusToggle"]["left"] >= metrics["viewport"]["right"] - 1
     assert metrics["labelMode"] == "names"
     assert set(metrics["visibleNameDisplays"]).issubset({"flex", "inline-flex"})
     assert "none" not in set(metrics["visibleNameDisplays"])

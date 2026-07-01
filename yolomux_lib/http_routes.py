@@ -422,6 +422,11 @@ def get_tmux_signals(request: Any, parsed: Any, route: Route) -> None:
     qs = parse_qs(parsed.query)
     request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(qs, "force"), session=str(query_one(qs, "session", "") or "")))
 
+def get_tmux_status(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    request.write_app_result(request.server.app.tmux_status_mode(str(query_one(qs, "session", "") or "")))
+
 
 def get_transcript(request: Any, parsed: Any, route: Route) -> None:
     del route
@@ -970,6 +975,11 @@ def post_tmux_next(request: Any, parsed: Any, route: Route) -> None:
     session = qs.get("session", [""])[0]
     request.write_app_result(request.server.app.tmux_next_window(session))
 
+def post_tmux_status(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    request.write_app_result(request.server.app.cycle_tmux_status_mode(str(query_one(qs, "session", "") or "")))
+
 
 def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
     del route
@@ -1130,6 +1140,7 @@ FILESYSTEM_ROUTES = (
 TMUX_ROUTES = (
     Route("GET", "/api/tmux", "readonly", get_tmux, group="tmux"),
     Route("GET", "/api/tmux-signals", "readonly", get_tmux_signals, group="tmux"),
+    Route("GET", "/api/tmux-status", "readonly", get_tmux_status, group="tmux"),
     Route("GET", "/api/transcript", "readonly", get_transcript, group="tmux"),
     Route("GET", "/api/context", "readonly", get_context, group="tmux"),
     Route("GET", "/api/context-items", "readonly", get_context_items, group="tmux"),
@@ -1137,6 +1148,7 @@ TMUX_ROUTES = (
     Route("GET", "/api/summary-stream", "admin", get_summary_stream, group="tmux"),
     Route("GET", "/ws", "readonly", get_websocket, group="tmux"),
     Route("POST", "/api/tmux-next", "admin", post_tmux_next, group="tmux"),
+    Route("POST", "/api/tmux-status", "admin", post_tmux_status, group="tmux"),
     Route("POST", "/api/tmux-window", "admin", post_tmux_window, group="tmux"),
     Route("POST", "/api/tmux-copy-selection", "admin", post_tmux_copy_selection, group="tmux"),
 )

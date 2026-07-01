@@ -51179,6 +51179,37 @@ function panelActiveTabName(session) {
   return 'terminal';
 }
 
+const tmuxStatusModes = new Map();
+
+function tmuxStatusModeForSession(session) {
+  return tmuxStatusModes.get(String(session || '')) || 'none';
+}
+
+function tmuxStatusToggleHtml(session) {
+  const mode = tmuxStatusModeForSession(session);
+  const label = t(`pref.appearance.tmux_status_bar.${mode === 'none' ? 'off' : mode}`);
+  const disabled = readOnlyMode ? ' disabled' : '';
+  return `<button type="button" class="tab tmux-status-toggle tmux-status-toggle--${mode}" data-tmux-status-toggle="${esc(session)}" title="${esc(t('pref.appearance.tmux_status_bar.label'))}: ${esc(label)}" aria-label="${esc(t('pref.appearance.tmux_status_bar.label'))}: ${esc(label)}"${disabled}>${mode === 'top' ? '↑' : mode === 'bottom' ? '↓' : '·'}</button>`;
+}
+
+async function refreshTmuxStatusMode(session) {
+  if (!isTmuxSession(session)) return;
+  const payload = await apiFetchJson(`/api/tmux-status?session=${encodeURIComponent(session)}`, {cache: 'no-store'});
+  const mode = ['top', 'bottom', 'none'].includes(payload?.status) ? payload.status : 'none';
+  tmuxStatusModes.set(String(session), mode);
+  const button = document.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
+  if (button) button.outerHTML = tmuxStatusToggleHtml(session);
+}
+
+async function cycleTmuxStatusMode(session) {
+  if (readOnlyMode) return;
+  const payload = await apiFetchJson(`/api/tmux-status?session=${encodeURIComponent(session)}`, {method: 'POST'});
+  const mode = ['top', 'bottom', 'none'].includes(payload?.status) ? payload.status : 'none';
+  tmuxStatusModes.set(String(session), mode);
+  const button = document.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
+  if (button) button.outerHTML = tmuxStatusToggleHtml(session);
+}
+
 function createPanel(session) {
   const panel = document.createElement('article');
   panel.className = 'panel';
@@ -51195,6 +51226,7 @@ function createPanel(session) {
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
         ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
+        ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
         <div id="term-${session}" class="terminal"></div>
@@ -53414,6 +53446,11 @@ function applyShareInfoState(info = {}) {
 }
 
 function bindPanelControls(panel, session) {
+  delegate(panel, 'click', '[data-tmux-status-toggle]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void cycleTmuxStatusMode(button.dataset.tmuxStatusToggle).catch(error => statusErr(String(error?.message || error)));
+  });
   delegate(panel, 'click', '[data-tab]', (_event, button) => {
     const currentName = button.dataset.tabName;
     const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
@@ -54563,6 +54600,7 @@ function connectTerminalSocket(session, item) {
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
       if (!shareViewMode) scheduleRemoteResize(session, shareRemoteResizeAfterSocketOpenMs);
     }
+    void refreshTmuxStatusMode(session).catch(error => console.warn('tmux status read failed', error));
     updateTypingIndicator(session);
     updateStatus();
     refreshTrackedSessionChrome(session);

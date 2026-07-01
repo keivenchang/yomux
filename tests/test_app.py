@@ -2280,6 +2280,53 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     assert commands[-1] == ["refresh-client", "-S"]
     assert webapp.tmux_theme_color == "purple"
 
+def test_cycle_tmux_status_mode_reads_and_updates_one_session(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    tmux_calls = []
+
+    def fake_tmux(args, timeout=5.0):
+        tmux_calls.append((args, timeout))
+        if args[-1] == "status":
+            return app_module.subprocess.CompletedProcess(args, 0, "on\n", "")
+        if args[-1] == "status-position":
+            return app_module.subprocess.CompletedProcess(args, 0, "top\n", "")
+        return app_module.subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+    try:
+        payload, status = webapp.cycle_tmux_status_mode("1")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload == {"session": "1", "status": "bottom"}
+    commands = [args for args, _timeout in tmux_calls]
+    assert commands == [
+        ["show-option", "-t", "1:", "-v", "status"],
+        ["show-option", "-t", "1:", "-v", "status-position"],
+        ["set-option", "-t", "1:", "status", "on"],
+        ["set-option", "-t", "1:", "status-position", "bottom"],
+    ]
+
+def test_cycle_tmux_status_mode_turns_bottom_off(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    tmux_calls = []
+
+    def fake_tmux(args, timeout=5.0):
+        tmux_calls.append((args, timeout))
+        stdout = "on\n" if args[-1] == "status" else "bottom\n" if args[-1] == "status-position" else ""
+        return app_module.subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+    try:
+        payload, status = webapp.cycle_tmux_status_mode("1")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload == {"session": "1", "status": "none"}
+    assert [args for args, _timeout in tmux_calls][-1] == ["set-option", "-t", "1:", "status", "off"]
+
 
 def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])

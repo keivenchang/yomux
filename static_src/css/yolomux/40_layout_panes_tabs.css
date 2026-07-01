@@ -1739,6 +1739,21 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   justify-content: flex-start;
   overflow: visible;
 }
+.tmux-status-toggle {
+  flex: 0 0 auto;
+  min-width: 20px;
+  margin-inline-start: 4px;
+  border-radius: 0;
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+}
+.tmux-status-toggle:hover,
+.tmux-status-toggle:focus-visible {
+  color: var(--pc-control-hover-fg);
+  background: var(--pane-tab-control-hover-bg);
+  border-color: var(--pane-tab-control-hover-border);
+}
 .tmux-window-button {
   flex: 0 1 auto;
   min-width: 18px;
