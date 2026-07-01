@@ -6779,6 +6779,138 @@ def test_editor_pane_does_not_shift_grid_when_legacy_body_class_is_present(brows
     assert metrics["panelLeft"] <= 16
 
 
+def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const host = document.createElement('section');
+        host.className = 'file-editor-panel';
+        host.style.cssText = 'width: 600px; height: 140px';
+        host.innerHTML = `
+          <div class="file-editor-content">
+            <div class="file-editor-preview-pane-panel"><p>alpha first</p>${'<p>filler</p>'.repeat(40)}<p>beta alpha second</p></div>
+            <div class="file-editor-find-overview" hidden></div>
+            <form class="file-editor-preview-find-panel" hidden>
+              <input type="search"><span class="file-editor-preview-find-count"></span>
+              <button type="button" data-preview-find-move="-1"></button>
+              <button type="button" data-preview-find-move="1"></button>
+              <button type="button" data-preview-find-close></button>
+            </form>
+          </div>`;
+        document.body.append(host);
+        openPreviewFind(host);
+        const input = host.querySelector('input');
+        input.value = 'alpha';
+        previewFindApplyQuery(host, input.value);
+        const opened = {
+          visible: !previewFindPanelForHost(host).hidden,
+          matches: host.querySelectorAll('.file-editor-preview-find-match').length,
+          overviewTicks: host.querySelectorAll('.file-editor-find-overview-tick').length,
+          overviewVisible: !host.querySelector('.file-editor-find-overview').hidden,
+          overviewTops: [...host.querySelectorAll('.file-editor-find-overview-tick')].map(node => Number.parseFloat(node.style.top)),
+          active: host.querySelectorAll('.file-editor-preview-find-match.active').length,
+          count: host.querySelector('.file-editor-preview-find-count').textContent,
+          inputFocused: document.activeElement === input,
+        };
+        previewFindSelectMatch(host, 1);
+        const moved = {
+          activeIndex: [...host.querySelectorAll('.file-editor-preview-find-match')].findIndex(node => node.classList.contains('active')),
+          overviewActiveIndex: [...host.querySelectorAll('.file-editor-find-overview-tick')].findIndex(node => node.classList.contains('active')),
+          count: host.querySelector('.file-editor-preview-find-count').textContent,
+        };
+        closePreviewFind(host);
+        const closed = {
+          hidden: previewFindPanelForHost(host).hidden,
+          matches: host.querySelectorAll('.file-editor-preview-find-match').length,
+          overviewHidden: host.querySelector('.file-editor-find-overview').hidden,
+          startsWith: host.querySelector('.file-editor-preview-pane-panel').textContent.trim().startsWith('alpha first'),
+          endsWith: host.querySelector('.file-editor-preview-pane-panel').textContent.trim().endsWith('beta alpha second'),
+        };
+        host.remove();
+        return {opened, moved, closed};
+        """
+    )
+    opened = {**metrics["opened"], "overviewTops": None}
+    assert opened == {"visible": True, "matches": 2, "overviewTicks": 2, "overviewVisible": True, "overviewTops": None, "active": 1, "count": "1/2", "inputFocused": True}
+    assert metrics["opened"]["overviewTops"][0] < metrics["opened"]["overviewTops"][1], metrics
+    assert metrics["moved"] == {"activeIndex": 1, "overviewActiveIndex": 1, "count": "2/2"}
+    assert metrics["closed"] == {"hidden": True, "matches": 0, "overviewHidden": True, "startsWith": True, "endsWith": True}
+
+
+def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const path = '/tmp/preview-find.md';
+        const item = 'file:/tmp/preview-find.md';
+        const host = document.createElement('section');
+        host.className = 'file-editor-panel';
+        host.dataset.filePath = path;
+        host.dataset.layoutItem = item;
+        host.innerHTML = `
+          <div class="file-editor-content"><div class="file-editor-preview-pane-panel"><p>alpha</p></div><div class="file-editor-find-overview" hidden></div><form class="file-editor-preview-find-panel" hidden><input type="search"><span class="file-editor-preview-find-count"></span></form></div>
+          <button class="file-editor-find-panel"></button>`;
+        document.body.append(host);
+        openFiles.set(path, {kind: 'text'});
+        fileEditorViewModesForPath(path, true).set(item, 'preview');
+        focusedPanelItem = item;
+        const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        host.dispatchEvent(event);
+        return new Promise(resolve => setTimeout(() => {
+          const find = host.querySelector('.file-editor-preview-find-panel');
+          const result = {prevented: event.defaultPrevented, visible: !find.hidden, focused: document.activeElement === find.querySelector('input')};
+          host.remove();
+          openFiles.delete(path);
+          fileEditorViewModesForPath(path, true).delete(item);
+          resolve(result);
+        }, 0));
+        """
+    )
+    assert metrics == {"prevented": True, "visible": True, "focused": True}
+
+
+def test_codemirror_find_uses_the_shared_scrollbar_overview(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const path = '/tmp/editor-find.py';
+        const item = 'file:/tmp/editor-find.py';
+        const newline = String.fromCharCode(10);
+        const text = `alpha first${newline}${`filler${newline}`.repeat(40)}alpha last`;
+        const lineAt = position => ({number: text.slice(0, position).split(newline).length});
+        const host = document.createElement('section');
+        host.className = 'file-editor-panel';
+        host.dataset.filePath = path;
+        host.dataset.layoutItem = item;
+        host.innerHTML = `<div class="file-editor-content"><div class="file-editor-find-overview" hidden></div><div class="cm-search"><input name="search" value="alpha"></div></div>`;
+        host._cmView = {state: {doc: {toString: () => text, lines: text.split(newline).length, lineAt}, selection: {main: {from: 0, to: 5, head: 0}}}};
+        document.body.append(host);
+        openFiles.set(path, {kind: 'text'});
+        fileEditorViewModesForPath(path, true).set(item, 'edit');
+        refreshCodeMirrorFindOverview(host);
+        const rail = host.querySelector('.file-editor-find-overview');
+        const opened = {
+          visible: !rail.hidden,
+          ticks: rail.querySelectorAll('.file-editor-find-overview-tick').length,
+          active: rail.querySelectorAll('.file-editor-find-overview-tick.active').length,
+          tops: [...rail.querySelectorAll('.file-editor-find-overview-tick')].map(node => Number.parseFloat(node.style.top)),
+        };
+        host.querySelector('input[name="search"]').value = '';
+        refreshCodeMirrorFindOverview(host);
+        const closed = {hidden: rail.hidden, ticks: rail.children.length};
+        host.remove();
+        openFiles.delete(path);
+        fileEditorViewModesForPath(path, true).delete(item);
+        return {opened, closed};
+        """
+    )
+    assert metrics["opened"]["visible"] is True
+    assert metrics["opened"]["ticks"] == 2
+    assert metrics["opened"]["active"] == 1
+    assert metrics["opened"]["tops"][0] < metrics["opened"]["tops"][1]
+    assert metrics["closed"] == {"hidden": True, "ticks": 0}
+
+
 def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     load_codemirror_editor_controls_fixture(browser, tmp_path)
     metrics = browser.execute_script(

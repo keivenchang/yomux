@@ -5415,6 +5415,20 @@ function handleGlobalShortcutKeydown(event) {
   if (handleFileExplorerArrowNav(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
+  const focusedEditorPanel = (() => {
+    const direct = event.target?.closest?.('.file-editor-panel');
+    if (direct && direct.offsetParent !== null) return direct;
+    if (!isFileEditorItem(focusedPanelItem)) return null;
+    return [...document.querySelectorAll('.file-editor-panel')].find(panel => panel.dataset.layoutItem === focusedPanelItem && panel.offsetParent !== null) || null;
+  })();
+  if (mod && !event.shiftKey && key === 'f' && focusedEditorPanel) {
+    event.preventDefault();
+    event.stopPropagation();
+    openEditorFindShortcut(focusedEditorPanel).then(() => {
+      updateEditorFindButton(focusedEditorPanel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(focusedEditorPanel)), focusedEditorPanel);
+    });
+    return;
+  }
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
   if (handlePendingGlobalShortcutChord(event, key)) return;
   const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection(event);

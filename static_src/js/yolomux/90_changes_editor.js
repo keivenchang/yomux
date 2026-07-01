@@ -3102,6 +3102,14 @@ function createFileEditorPanel(item) {
           <div class="file-editor-codemirror-panel" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
+          <div class="file-editor-find-overview" hidden aria-hidden="true"></div>
+          <form class="file-editor-preview-find-panel" hidden role="search" aria-label="Find in preview">
+            <input type="search" placeholder="Find in preview" aria-label="Find in preview" autocomplete="off">
+            <span class="file-editor-preview-find-count" aria-live="polite"></span>
+            <button type="button" data-preview-find-move="-1" aria-label="Previous match">↑</button>
+            <button type="button" data-preview-find-move="1" aria-label="Next match">↓</button>
+            <button type="button" data-preview-find-close aria-label="Close find">×</button>
+          </form>
           <div class="file-editor-image-panel" hidden></div>
         </div>
         <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>
@@ -3131,8 +3139,9 @@ function createFileEditorPanel(item) {
       setEditorPreviewFontSize(editorPreviewFontSize + Number(target?.dataset?.editorPreviewFontStep || 0));
     },
     'editor-toggle-wrap': () => toggleEditorWrap(),
-    'editor-find': () => {
-      toggleEditorFind(panel);
+    'editor-find': async () => {
+      await toggleEditorFind(panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(path), panel);
     },
     'editor-blame': (_event, target) => {
       if (target?.disabled) return;
@@ -3211,6 +3220,34 @@ function createFileEditorPanel(item) {
     setRepoDiffRefs(repo, 'HEAD', 'current', {path});
   });
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+  const previewFindPanel = panel.querySelector('.file-editor-preview-find-panel');
+  previewFindPanel?.addEventListener('submit', event => event.preventDefault());
+  previewFindPanel?.addEventListener('input', event => {
+    if (event.target.matches('input')) previewFindApplyQuery(panel, event.target.value);
+  });
+  previewFindPanel?.addEventListener('click', event => {
+    const move = event.target.closest('[data-preview-find-move]');
+    if (move) {
+      const state = previewFindStateForHost(panel, true);
+      previewFindSelectMatch(panel, state.index + Number(move.dataset.previewFindMove || 0));
+      return;
+    }
+    if (event.target.closest('[data-preview-find-close]')) {
+      closePreviewFind(panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(path), panel);
+    }
+  });
+  previewFindPanel?.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closePreviewFind(panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(path), panel);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      const state = previewFindStateForHost(panel, true);
+      previewFindSelectMatch(panel, state.index + (event.shiftKey ? -1 : 1));
+    }
+  });
   previewPane?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, fileEditorPreviewScrollSyncSource(panel)));
   previewPane?.addEventListener('toggle', event => {
     if (event.target?.matches?.('details')) scheduleFileEditorPreviewLayoutSync(panel);

@@ -2150,6 +2150,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/className: 'file-editor-wrap-panel'[\s\S]*file-editor-icon-wrap/.test(editorToolbarTemplate), 'editor Wrap toolbar button renders the original icon in the left zone');
     assert.ok(/function updateEditorWrapButton\(button\)[\s\S]*setFileEditorIcon\(button, 'file-editor-icon-wrap'\)/.test(source), 'wrap button renderer preserves the original icon');
     assert.ok(source.includes('toggleEditorFind(panel);'), 'Search toolbar button toggles the CodeMirror search panel');
+    assert.ok(/mod && !event\.shiftKey && key === 'f' && focusedEditorPanel[\s\S]*openEditorFindShortcut\(focusedEditorPanel\)/.test(source), 'Cmd/Ctrl-F claims Find for the focused file editor before the browser can open native Find');
     assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
     assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
     assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
@@ -2177,7 +2178,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(css.includes('.cm-content .md-heading'), 'Markdown fallback color classes apply inside CodeMirror edit content');
     assert.ok(/gutterButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the line-number button because no CodeMirror gutter is shown');
     assert.ok(/wrapButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the wrap button because no CodeMirror editor is shown');
-    assert.ok(/findButton && mode === 'preview'/.test(source), 'preview mode hides Search because the CodeMirror search panel is not available there');
+    assert.ok(source.includes("if (fileEditorPanelMode(host) === 'preview') return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);"), 'Preview routes the shared Search control to rendered-preview search');
+    assert.ok(source.includes("if (mode !== 'preview') closePreviewFind(panel);"), 'leaving Preview clears rendered-preview search highlights');
     assert.equal(source.includes('file-editor-pure-preview'), false, 'old side-preview-only editor mode class is removed');
     assert.equal(source.includes('isFilePreviewItem'), false, 'old file-preview tab type is removed from runtime');
     assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session, \{updateActiveFile: !dockviewLayoutActive\(\), captureViewState: false\}\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome without making Dockview background renders active or overwriting saved scroll');

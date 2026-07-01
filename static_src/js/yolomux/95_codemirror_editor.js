@@ -1201,7 +1201,7 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
     updateEditorWrapButton(parts.wrapButton);
   }
   updateEditorFindButton(parts.findButton, state, panel);
-  if (parts.findButton && mode === 'preview') parts.findButton.hidden = true;
+  if (mode !== 'preview') closePreviewFind(panel);
   // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
   // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
@@ -1263,6 +1263,7 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
     parts.previewPane.hidden = false;
     renderEditorPreviewPane(parts.previewPane, path, state.content, {context: 'preview'});
   }
+  refreshPreviewFind(panel);
   scheduleShareFileEditorScrollRestore(item, path);
 }
 

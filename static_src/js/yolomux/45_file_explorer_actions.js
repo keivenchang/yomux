@@ -3168,6 +3168,7 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       const panel = this.view.dom?.querySelector?.('.cm-search');
       this.bindPanel(panel);
       syncCodeMirrorFindButtonForView(this.view);
+      refreshCodeMirrorFindOverview(this.view.dom?.closest?.('.file-editor-panel'));
       if (!panel) return;
       const next = panel.querySelector?.('.cm-button[name="next"]');
       const previous = panel.querySelector?.('.cm-button[name="prev"]');

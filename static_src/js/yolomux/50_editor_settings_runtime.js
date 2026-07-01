@@ -278,6 +278,187 @@ function updateEditorWrapButton(button) {
   setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
+function previewFindPanelForHost(host = null) {
+  return host?.querySelector?.('.file-editor-preview-find-panel') || null;
+}
+
+function fileEditorFindOverviewForHost(host = null) {
+  return host?.querySelector?.('.file-editor-find-overview') || null;
+}
+
+function clearFileEditorFindOverview(host = null) {
+  const overview = fileEditorFindOverviewForHost(host);
+  if (!overview) return;
+  overview.replaceChildren();
+  overview.hidden = true;
+}
+
+function updateFileEditorFindOverview(host = null, positions = [], activeIndex = -1) {
+  const overview = fileEditorFindOverviewForHost(host);
+  if (!overview || !positions.length) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  positions.forEach((position, index) => {
+    const tick = document.createElement('span');
+    tick.className = 'file-editor-find-overview-tick';
+    tick.classList.toggle(CLS.active, index === activeIndex);
+    tick.style.top = `${Math.max(0, Math.min(100, Number(position) || 0))}%`;
+    fragment.append(tick);
+  });
+  overview.replaceChildren(fragment);
+  overview.hidden = false;
+}
+
+function previewFindStateForHost(host = null, create = false) {
+  if (!host) return null;
+  if (!host._previewFindState && create) host._previewFindState = {query: '', matches: [], index: -1};
+  return host._previewFindState || null;
+}
+
+function previewFindClearMatches(host = null) {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  if (!preview) return;
+  for (const match of preview.querySelectorAll('.file-editor-preview-find-match')) {
+    const parent = match.parentNode;
+    match.replaceWith(document.createTextNode(match.textContent || ''));
+    parent?.normalize?.();
+  }
+  clearFileEditorFindOverview(host);
+}
+
+function previewFindUpdateOverview(host = null) {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  const state = previewFindStateForHost(host);
+  if (!preview || !state?.matches.length) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const previewRect = preview.getBoundingClientRect();
+  const scrollHeight = Math.max(1, Number(preview.scrollHeight || 0));
+  const positions = state.matches.map(match => {
+    const offset = preview.scrollTop + match.getBoundingClientRect().top - previewRect.top;
+    return (offset / scrollHeight) * 100;
+  });
+  updateFileEditorFindOverview(host, positions, state.index);
+}
+
+function refreshCodeMirrorFindOverview(host = null) {
+  if (!host || fileEditorPanelMode(host) === 'preview') return;
+  const view = host._cmView;
+  const panel = codeMirrorSearchPanelForHost(host);
+  const query = panel?.querySelector?.('input[name="search"]')?.value || '';
+  const text = view?.state?.doc?.toString?.() || '';
+  const matches = codeMirrorSearchMatches(text, query, codeMirrorSearchCheckboxState(panel));
+  if (!matches.length || !view?.state?.doc) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const totalLines = Math.max(1, Number(view.state.doc.lines || 1));
+  const positions = matches.map(match => ((view.state.doc.lineAt(match.from).number - 1) / totalLines) * 100);
+  const summary = codeMirrorSearchMatchSummary(text, query, view.state.selection.main || {}, codeMirrorSearchCheckboxState(panel));
+  updateFileEditorFindOverview(host, positions, summary.current - 1);
+}
+
+function previewFindUpdatePanel(host = null) {
+  const panel = previewFindPanelForHost(host);
+  const state = previewFindStateForHost(host);
+  if (!panel || !state) return;
+  const count = state.matches.length;
+  const current = count && state.index >= 0 ? state.index + 1 : 0;
+  const countNode = panel.querySelector('.file-editor-preview-find-count');
+  if (countNode) countNode.textContent = state.query ? `${current}/${count}` : '';
+  panel.querySelectorAll('[data-preview-find-move]').forEach(button => { button.disabled = count === 0; });
+}
+
+function previewFindSelectMatch(host = null, index = 0) {
+  const state = previewFindStateForHost(host);
+  if (!state?.matches.length) return false;
+  state.index = (index + state.matches.length) % state.matches.length;
+  state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
+  state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  previewFindUpdateOverview(host);
+  previewFindUpdatePanel(host);
+  return true;
+}
+
+function previewFindApplyQuery(host = null, query = '') {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  const state = previewFindStateForHost(host, true);
+  if (!preview || !state) return false;
+  previewFindClearMatches(host);
+  state.query = String(query || '');
+  state.matches = [];
+  state.index = -1;
+  const needle = state.query.toLocaleLowerCase();
+  if (needle) {
+    const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const folded = text.toLocaleLowerCase();
+      let from = 0;
+      let index = folded.indexOf(needle, from);
+      if (index < 0) continue;
+      const fragment = document.createDocumentFragment();
+      while (index >= 0) {
+        fragment.append(document.createTextNode(text.slice(from, index)));
+        const match = document.createElement('mark');
+        match.className = 'file-editor-preview-find-match';
+        match.textContent = text.slice(index, index + needle.length);
+        fragment.append(match);
+        state.matches.push(match);
+        from = index + needle.length;
+        index = folded.indexOf(needle, from);
+      }
+      fragment.append(document.createTextNode(text.slice(from)));
+      node.replaceWith(fragment);
+    }
+  }
+  if (state.matches.length) previewFindSelectMatch(host, 0);
+  else previewFindUpdatePanel(host);
+  return true;
+}
+
+function previewFindOpenForHost(host = null) {
+  return previewFindPanelForHost(host)?.hidden === false;
+}
+
+function openPreviewFind(host = null) {
+  const panel = previewFindPanelForHost(host);
+  if (!panel) return false;
+  panel.hidden = false;
+  const input = panel.querySelector('input');
+  previewFindApplyQuery(host, input?.value || '');
+  input?.focus();
+  input?.select();
+  return true;
+}
+
+function closePreviewFind(host = null) {
+  const panel = previewFindPanelForHost(host);
+  if (!panel) return false;
+  previewFindClearMatches(host);
+  const state = previewFindStateForHost(host, true);
+  state.matches = [];
+  state.index = -1;
+  panel.hidden = true;
+  previewFindUpdatePanel(host);
+  return true;
+}
+
+function refreshPreviewFind(host = null) {
+  if (!previewFindOpenForHost(host)) return;
+  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '');
+}
+
 function updateEditorFindButton(button, state, host = null) {
   if (!button) return;
   const visible = state?.kind === 'text';
@@ -286,7 +467,9 @@ function updateEditorFindButton(button, state, host = null) {
   const label = `Find in file (${appShortcutText('F')})`;
   button.title = label;
   button.setAttribute('aria-label', label);
-  button.setAttribute('aria-pressed', codeMirrorSearchPanelOpenForHost(host) ? 'true' : 'false');
+  const previewMode = fileEditorPanelMode(host) === 'preview';
+  button.setAttribute('aria-pressed', previewMode ? String(previewFindOpenForHost(host)) : String(codeMirrorSearchPanelOpenForHost(host)));
+  if (!previewMode) refreshCodeMirrorFindOverview(host);
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
@@ -379,7 +562,13 @@ async function closeEditorFind(host = null) {
 }
 
 async function toggleEditorFind(host = null) {
+  if (fileEditorPanelMode(host) === 'preview') return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);
   return codeMirrorSearchPanelOpenForHost(host) ? closeEditorFind(host) : openEditorFind(host);
+}
+
+async function openEditorFindShortcut(host = null) {
+  if (fileEditorPanelMode(host) === 'preview') return openPreviewFind(host);
+  return openEditorFind(host);
 }
 
 function applyEditorWrapPreference() {

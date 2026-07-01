@@ -14182,6 +14182,89 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   background: var(--bg);
   overflow: hidden;
 }
+.file-editor-preview-find-panel {
+  position: absolute;
+  z-index: calc(var(--z-file-editor-layer) + 1);
+  top: 8px;
+  inset-inline-end: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 20px);
+  padding: 4px;
+  border: 1px solid var(--editor-toolbar-control-border);
+  border-radius: 4px;
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
+  box-shadow: 0 3px 12px rgb(0 0 0 / 0.24);
+}
+.file-editor-preview-find-panel[hidden] {
+  display: none;
+}
+.file-editor-find-overview {
+  position: absolute;
+  z-index: calc(var(--z-file-editor-layer) + 1);
+  inset-block: 3px;
+  inset-inline-end: 3px;
+  width: 4px;
+  pointer-events: none;
+}
+.file-editor-find-overview[hidden] {
+  display: none;
+}
+.file-editor-find-overview-tick {
+  position: absolute;
+  inset-inline: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--active-accent) 66%, var(--editor-scheme-bg));
+  transform: translateY(-1px);
+}
+.file-editor-find-overview-tick.active {
+  height: 3px;
+  background: var(--active-accent);
+}
+.file-editor-preview-find-panel input {
+  width: clamp(12ch, 22vw, 28ch);
+  min-width: 0;
+  border: 1px solid var(--editor-toolbar-control-border);
+  border-radius: 3px;
+  padding: 2px 5px;
+  color: var(--text);
+  background: var(--panel);
+  font: var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.file-editor-preview-find-count {
+  min-width: 4ch;
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
+  text-align: end;
+}
+.file-editor-preview-find-panel button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--editor-toolbar-control-border);
+  border-radius: 3px;
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.file-editor-preview-find-panel button:not(:disabled):hover {
+  color: var(--editor-toolbar-control-hover-fg);
+  border-color: var(--editor-toolbar-control-hover-border);
+  background: var(--editor-toolbar-control-hover-bg);
+}
+.file-editor-preview-find-panel button:disabled {
+  opacity: 0.42;
+}
+.file-editor-preview-find-match {
+  color: inherit;
+  background: color-mix(in srgb, var(--active-accent) 50%, transparent);
+}
+.file-editor-preview-find-match.active {
+  background: var(--active-accent);
+}
 .file-editor-content.split-preview .file-editor-codemirror,
 .file-editor-content.split-preview .file-editor-codemirror-panel {
   inset: 0 50% 0 0;
