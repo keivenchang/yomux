@@ -1836,7 +1836,7 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
     """, extra_css="""
-      :root { --pulse-duration: 2.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 20; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
+      :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 12; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
     """), encoding="utf-8")
     browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
@@ -1874,16 +1874,16 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
         assert metrics["reduced"] is True, metrics
         attention = metrics["attention"]
         assert attention["primaryAnimationName"] == "none", metrics
-        assert attention["primaryAnimationDuration"] == "2.55s", metrics
-        assert attention["primaryAnimationTimingFunction"].startswith("steps(20"), metrics
+        assert attention["primaryAnimationDuration"] == "1.55s", metrics
+        assert attention["primaryAnimationTimingFunction"].startswith("steps(12"), metrics
         assert attention["primaryAnimationDelay"] == "-0.42s", metrics
         assert attention["primaryEffectDuration"] == 0, metrics
         for key in ("working", "cooldown"):
             dot = metrics[key]
             assert dot["primaryAnimationName"] == "agent-status-opacity-pulse", metrics
-            assert dot["primaryAnimationDuration"] == "2.55s", metrics
+            assert dot["primaryAnimationDuration"] == "1.55s", metrics
             assert dot["primaryAnimationDelay"] == "-0.42s", metrics
-            assert dot["primaryAnimationTimingFunction"].startswith("steps(20"), metrics
+            assert dot["primaryAnimationTimingFunction"].startswith("steps(12"), metrics
             assert dot["primaryEffectDuration"] > 0, metrics
             assert dot["primaryPlayState"] in {"pending", "running"}, metrics
         assert metrics["working"]["animationName"] == "agent-status-opacity-pulse", metrics

@@ -937,7 +937,7 @@ function applyCssSettings() {
   root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
   root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
   // Quantize the opacity pulse into ~125ms steps (steps(N) timing): step size = period / N with
-  // N = round(period / 125). 125ms (~8 opacity updates/sec at the 2.55s default) was chosen over:
+  // N = round(period / 125). 125ms (~8 opacity updates/sec at the 1.55s default) was chosen over:
   //   - 250ms (the old value): ~4/sec read as a perceptible staircase on the 0.16->1 ramp;
   //   - 50ms: ~20/sec is near-continuous but pays close to full 60fps repaint cost on EVERY status
   //     ball (per-window, tabs, YO!info, topbar) -- the stepping exists to avoid exactly that;

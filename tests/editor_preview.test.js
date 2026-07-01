@@ -298,7 +298,7 @@ async function runEditorPreviewSuite() {
     let syncDotCurrentTime = -1;
     const syncDotAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 2550})},
+      effect: {getTiming: () => ({duration: 1550})},
       cancel() { this.cancelled = (this.cancelled || 0) + 1; },
       play() { this.played = (this.played || 0) + 1; },
       set currentTime(value) { syncDotCurrentTime = value; },
@@ -312,7 +312,7 @@ async function runEditorPreviewSuite() {
     let syncAttentionLabelCurrentTime = -2;
     const syncAttentionLabelAnimation = {
       animationName: 'attention-ring-fade',
-      effect: {getTiming: () => ({duration: 2550})},
+      effect: {getTiming: () => ({duration: 1550})},
       cancel() { this.cancelled = (this.cancelled || 0) + 1; },
       play() { this.played = (this.played || 0) + 1; },
       set currentTime(value) { syncAttentionLabelCurrentTime = value; },
@@ -342,8 +342,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/const statusPulsePeriodMs = Math\.max\(1, agentStatusPulsePeriodMs\)/.test(settingsRuntimeSource) && /root\.setProperty\('--pulse-duration', `\$\{statusPulsePeriodMs \/ 1000\}s`\)/.test(settingsRuntimeSource), 'status balls use the shared setting-backed transition pulse cadence');
     assert.ok(/root\.setProperty\('--status-pulse-step-count', String\(Math\.max\(1, Math\.round\(statusPulsePeriodMs \/ 125\)\)\)\)/.test(settingsRuntimeSource), 'status ball transition pulse uses one discrete step per roughly 125ms');
     assert.ok(/const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;[\s\S]*agentStatusPulsePeriodMs = numberSetting\('performance\.agent_status_pulse_period_ms'\)[\s\S]*previousAgentStatusPulsePeriodMs !== agentStatusPulsePeriodMs[\s\S]*restartAgentWindowActivityPulseAnimations\(\)/.test(settingsRuntimeSource), 'a runtime pulse-period update restarts existing status animations through the shared synchronization owner');
-    assert.ok(/--pulse-duration:\s*2\.55s/.test(tokensCss), 'status pulse duration fallback matches the 2550ms default');
-    assert.ok(/--status-pulse-step-count:\s*20/.test(tokensCss) && /--status-pulse-timing:\s*steps\(var\(--status-pulse-step-count\),\s*end\)/.test(tokensCss), 'status pulse timing defaults to twenty roughly-125ms visual steps per 2550ms period');
+    assert.ok(/--pulse-duration:\s*1\.55s/.test(tokensCss), 'status pulse duration fallback matches the 1550ms default');
+    assert.ok(/--status-pulse-step-count:\s*12/.test(tokensCss) && /--status-pulse-timing:\s*steps\(var\(--status-pulse-step-count\),\s*end\)/.test(tokensCss), 'status pulse timing defaults to twelve roughly-125ms visual steps per 1550ms period');
     assert.ok(/\.agent-window-status-dot--transition-pulse:not\(\.heartbeat-pulse\)\s*\{[\s\S]*animation-timing-function:\s*var\(--status-pulse-timing\)/.test(sessionsCss), 'transition status balls use the stepped timing token');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
     assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation-name:\s*metadata-badge-pulse;[^}]*animation-duration:\s*var\(--pulse-duration\);[^}]*animation-timing-function:\s*var\(--pulse-easing\);[^}]*animation-iteration-count:\s*infinite;/.test(sessionsCss), 'metadata pulse repeats until the server-window class is removed');
