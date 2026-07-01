@@ -1556,6 +1556,13 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   const approvalPromptText = String(approvalPrompt.text || stateReason('approvalPromptVisible'));
   const screenKey = String(screen.key || '');
   const screenText = String(screen.text || '');
+  const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
+    ? sessionAgentWindowStatusSummary(session, info, auto)
+    : null;
+  const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
+  const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
+    ? agentWindowStatusToneForItem(agentWindowSummary?.item)
+    : '';
   const agents = Array.isArray(info?.agents) ? info.agents : [];
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const agentText = agents
@@ -1582,35 +1589,43 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (/blocked|denied|rejected/.test(lastAction)) {
     return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
   }
-  if (approvalPromptVisible && approvalYesSelected) {
+  if (!hasAttributedAgentWindows && approvalPromptVisible && approvalYesSelected) {
     return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
-  if (approvalPromptVisible) {
+  if (!hasAttributedAgentWindows && approvalPromptVisible) {
     return stateValue(STATE_KEY.needsInput, stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
   }
-  if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
+  if (!hasAttributedAgentWindows && !autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
     return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'));
   }
-  if (screenKey === STATE_KEY.approval) {
+  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.approval) {
     return stateValue(STATE_KEY.needsApproval, screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
-  const agentWindowAttention = agentWindowAttentionState(session, info, auto);
-  if (agentWindowAttention) return agentWindowAttention;
+  if (agentWindowTone === 'attention') {
+    const agent = agentWindowSummary.agent;
+    const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent?.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
+    const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    const reasonText = String(agent?.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
+    return stateValue(stateKey, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {agentWindowState: 'attention'});
+  }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
     return tmuxSignalStateForSession;
   }
-  if (screenKey === STATE_KEY.working) {
+  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.working) {
     return stateValue(STATE_KEY.working, screenText || stateReason('agentWorking'));
   }
-  if (screenKey === STATE_KEY.needsInput) {
+  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.needsInput) {
     return stateValue(STATE_KEY.needsInput, screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
   }
   if (screenKey === 'error') {
     return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
   }
-  const agentWindowCooldown = agentWindowCooldownState(session, info, auto);
-  if (agentWindowCooldown) return agentWindowCooldown;
+  if (agentWindowTone === 'cooldown') {
+    const agent = agentWindowSummary.agent;
+    const label = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    return stateValue('cooldown', label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown'), {agentWindowState: 'cooldown'});
+  }
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
     return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
@@ -1630,42 +1645,6 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
   }
   return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
-}
-
-function agentWindowCooldownState(session, info = null, auto = autoApproveStates.get(session) || {}) {
-  if (
-    typeof sessionAgentWindowStatusPayloads !== 'function'
-    || typeof agentWindowActivityIconForStatusItem !== 'function'
-    || typeof agentWindowActivityOptionsForStatus !== 'function'
-    || typeof agentWindowActivityTone !== 'function'
-  ) return null;
-  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
-  if (!windows.length) return null;
-  let cooldownWindow = null;
-  for (const agent of windows) {
-    const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
-    const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
-    if (!item || item.acknowledged === true) continue;
-    const tone = agentWindowActivityTone(item.state);
-    if (tone === 'attention' || tone === STATE_KEY.working) return null;
-    if (tone === 'cooldown') cooldownWindow = cooldownWindow || {agent, item};
-  }
-  if (!cooldownWindow) return null;
-  const label = String(cooldownWindow.agent?.window_label || cooldownWindow.agent?.window || cooldownWindow.agent?.kind || '').trim();
-  const reason = label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown');
-  return stateValue('cooldown', reason, {agentWindowState: 'cooldown'});
-}
-
-function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
-  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
-  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
-  const agent = windows.find(item => AGENT_WINDOW_ATTENTION_STATES.has(String(item?.state || '')));
-  if (!agent) return null;
-  const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
-  const windowLabel = String(agent.window_label || agent.window || agent.kind || '').trim();
-  const reasonText = String(agent.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
-  const reason = windowLabel ? `${windowLabel}: ${reasonText}` : reasonText;
-  return stateValue(stateKey, reason, promptAttentionExtra(session, auto));
 }
 
 function agentErrorIsBlocking(error) {
@@ -1692,18 +1671,21 @@ function autoApproveEnabledForSession(payload) {
 }
 
 function autoApproveScreenIsWorking(payload) {
-  return String(payload?.screen?.key || '') === STATE_KEY.working;
+  return typeof sessionAgentWindowScreenIsWorking === 'function'
+    ? sessionAgentWindowScreenIsWorking(payload)
+    : String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
 function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
-  if (typeof sessionAgentWindowStatusPayloads !== 'function') return false;
-  return sessionAgentWindowStatusPayloads(session, info, payload)
-    .some(agent => String(agent?.state || '').toLowerCase() === STATE_KEY.working);
+  return typeof sessionAgentWindowHasWorkingSignal === 'function'
+    ? sessionAgentWindowHasWorkingSignal(session, info, payload)
+    : false;
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  // Spin the YO ball whenever any Claude/Codex tmux sub-window is working, even when that sub-window is hidden.
-  return sessionHasWorkingAgentWindow(session, payload) || autoApproveScreenIsWorking(payload);
+  // The shared model resolves both live window rows and the screen-capture proxy before any UI
+  // surface asks whether this session is working.
+  return sessionHasWorkingAgentWindow(session, payload);
 }
 
 function yoloWorkingSessions() {

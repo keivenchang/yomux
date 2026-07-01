@@ -443,59 +443,10 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
 }
 
 function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  // A Tab has one circle. It shows the two most urgent distinct child colors (red, yellow, green)
-  // as equal segments, while its opacity pulse follows every child: if any child is pulsing, the
-  // parent pulses. A screen-only working signal still falls back to the current/first agent window.
-  // A screen-only working signal still falls back to the current/first agent window.
-  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
-  const agents = sessionAgentWindowStatusPayloads(session, info, payload);
-  if (!agents.length) return null;
-  let selected = null;
-  const visibleItems = [];
-  const screenWorking = sessionYoloIsWorking(session, payload);
-  const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent?.state));
-  for (const agent of agents) {
-    const item = typeof agentWindowActivityIconForStatusItem === 'function'
-      ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
-      : null;
-    const tone = typeof agentWindowStatusToneForItem === 'function'
-      ? agentWindowStatusToneForItem(item)
-      : (item?.state ? agentWindowActivityTone(item.state) : '');
-    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(tone)) continue;
-    const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
-    if (screenWorking && !hasWorkingWindow && tone === 'cooldown' && !explicitStopped) continue;
-    const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
-    const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
-    const current = agentWindowPayloadCurrent(agent) === true;
-    const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
-    visibleItems.push({agent, item, tone});
-    if (item.acknowledged !== true && (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent))) selected = {agent, item};
-  }
-  if (!selected && screenWorking) {
-    const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
-    if (candidate && !agentWindowIsAttentionState(candidate.state)) {
-      const agent = {...candidate, state: STATE_KEY.working};
-      const item = typeof agentWindowActivityIconForStatusItem === 'function'
-        ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
-        : {state: STATE_KEY.working, icon: '●', label: `${agentLabel(agent.kind)} ${t('state.working')}`};
-      selected = {agent, item};
-      visibleItems.push({agent, item, tone: STATE_KEY.working});
-    }
-  }
-  if (!selected) return null;
-  const childIsPulsing = visibleItems.some(({item}) => item.pulseActive === true);
-  const childTransitionIsPulsing = visibleItems.some(({item}) => item.transitionPulseActive === true);
-  const allAggregateTones = ['attention', 'cooldown', STATE_KEY.working]
-    .filter(tone => visibleItems.some(item => item.tone === tone));
-  const aggregateTones = allAggregateTones;
-  const item = {
-    ...selected.item,
-    pulseActive: childIsPulsing,
-    transitionPulseActive: childTransitionIsPulsing,
-    aggregateTones,
-    allAggregateTones,
-  };
-  return {...selected, item, label: item.label || agentLabel(selected.agent?.kind)};
+  const summary = typeof sessionAgentWindowStatusSummary === 'function'
+    ? sessionAgentWindowStatusSummary(session, info, payload)
+    : null;
+  return summary?.agent ? summary : null;
 }
 
 function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
@@ -884,7 +835,7 @@ function sessionPopoverWindowPidByIndex(info) {
 function sessionPopoverAgentWindowPid(agent, pidByIndex) {
   const directPid = Number(agent?.pid || agent?.process_label_pid || 0);
   if (Number.isFinite(directPid) && directPid > 0) return Math.floor(directPid);
-  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const index = agentWindowIndex(agent);
   const sharedPid = index !== null ? Number(pidByIndex.get(index)) : null;
   if (Number.isFinite(sharedPid) && sharedPid > 0) return Math.floor(sharedPid);
   return null;
@@ -910,7 +861,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       state: String(agent?.state || STATE_KEY.idle),
       current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
         ? agentWindowPayloadCurrent(agent) === true
-        : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
+        : activeWindowIndex !== null && agentWindowIndex(agent) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
@@ -946,7 +897,7 @@ function sessionPopoverWindowMetadataItems(session, info, agentRows) {
     const path = paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || ''));
     const meta = {
       window: String(agent?.window ?? ''),
-      window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
+      window_index: agentWindowIndex(agent),
       window_name: String(agent?.window_name || ''),
       path,
       paths,
@@ -965,11 +916,11 @@ function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = n
   }
   const nowSeconds = Date.now() / 1000;
   const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(session, info, agents);
-  const metadataByWindow = new Map(items.map(item => [tmuxWindowIndexKey(item.agent.window_index ?? item.agent.window), item]));
+  const metadataByWindow = new Map(items.map(item => [agentWindowIndex(item.agent), item]));
   const sharedMetadata = items.length > 1 && items.length === agents.length && new Set(items.map(item => sessionWindowMetadataSignature(item.meta))).size === 1;
   const rows = agents.map(agent => {
     const row = sessionPopoverAgentWindowRowHtml(agent, nowSeconds);
-    const item = metadataByWindow.get(tmuxWindowIndexKey(agent.window_index ?? agent.window));
+    const item = metadataByWindow.get(agentWindowIndex(agent));
     const transcriptHtml = agentTranscriptRowsHtml(agent);
     if ((!item || sharedMetadata) && !transcriptHtml) return row;
     const metadataHtml = item && !sharedMetadata ? item.html : '';

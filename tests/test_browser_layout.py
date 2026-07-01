@@ -15,10 +15,13 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
           document.body.appendChild(tab);
           return tab;
         };
-        const regular = makeTab('pane-tab');
-        const compact = makeTab('tmux-pane-tab-token');
+        const regular = makeTab('pane-tab active');
+        const compact = makeTab('tmux-pane-tab-token active');
         const read = tab => ({
           symbol: getComputedStyle(tab.querySelector('.tab-symbol')).display,
+          symbolText: tab.querySelector('.branch-indicator')?.textContent || '',
+          symbolColor: getComputedStyle(tab.querySelector('.branch-indicator')).color,
+          symbolBackground: getComputedStyle(tab.querySelector('.branch-indicator')).backgroundColor,
           yolo: getComputedStyle(tab.querySelector('.session-yolo-marker')).display,
           number: tab.querySelector('.session-button-name')?.textContent || '',
           detail: tab.querySelector('.session-button-detail')?.textContent || '',
@@ -39,6 +42,87 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
         assert tab["detail"] == "description", metrics
     for tab in metrics["visible"].values():
         assert tab["symbol"] != "none", metrics
+        assert tab["symbolText"] == "MAIN", metrics
+        assert tab["symbolColor"] != tab["symbolBackground"], metrics
+
+
+@pytest.mark.parametrize(
+    "tone,pulsing,expected_fill",
+    [
+        ("attention", True, "#dc2626"),
+        ("attention", False, "#dc2626"),
+        ("cooldown", True, "#ffd633"),
+        ("cooldown", False, "#ffd633"),
+    ],
+)
+def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(browser, tmp_path, tone, pulsing, expected_fill):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    browser.execute_script(
+        """
+        const tone = arguments[0];
+        const pulsing = arguments[1];
+        const now = Date.now() / 1000;
+        agentStatusPulsePeriodMs = 1200;
+        document.documentElement.style.setProperty('--pulse-duration', '1.2s');
+        document.documentElement.style.setProperty('--status-pulse-step-count', '10');
+        setAttentionAnimationClockDelay();
+        workflowTransitionGlowSeconds = pulsing ? 60 : 0;
+        const agent = tone === 'attention'
+          ? {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', attention_key: 'click-gray-red', attention_acknowledged: false, screen_text: 'Approval required', observed_ts: now}
+          : {kind: 'codex', state: 'idle', window_index: 2, window_label: '2:codex', working_stopped_ts: now - 1, idle_since: now - 1, cooldown_acknowledged: false, observed_ts: now};
+        applyAutoApprovePayload({sessions: {'1': {
+          target: '1', enabled: false, screen: {key: 'idle'},
+          agent_windows: [agent],
+        }}});
+        refreshAgentWindowActivityDisplays();
+        const findButton = () => [...document.querySelectorAll('[data-window-session="1"][data-window-index="2"]')].find(node => node.offsetParent !== null);
+        const read = label => {
+          const dot = findButton()?.querySelector('.agent-window-status-dot');
+          const style = dot ? getComputedStyle(dot) : null;
+          const pseudo = name => {
+            const pseudoStyle = dot ? getComputedStyle(dot, name) : null;
+            return {content: pseudoStyle?.content || '', width: pseudoStyle?.width || '', height: pseudoStyle?.height || '', background: pseudoStyle?.backgroundColor || ''};
+          };
+          return {label, gray: dot?.classList.contains('agent-window-status-dot--acknowledging') || false, pulsing: dot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false, fill: style?.getPropertyValue('--subwindow-status-glyph-fill').trim() || '', opacity: Number(style?.opacity || 0), animationName: style?.animationName || '', animationDuration: style?.animationDuration || '', animationDelay: style?.animationDelay || '', animationIterationCount: style?.animationIterationCount || '', animationTimingFunction: style?.animationTimingFunction || '', before: pseudo('::before'), after: pseudo('::after')};
+        };
+        window.__subwindowGrayClickSamples = [read('before')];
+        document.addEventListener('pointerdown', event => {
+          const button = event.target?.closest?.('[data-window-session="1"][data-window-index="2"]');
+          if (!button) return;
+          setTimeout(() => window.__subwindowGrayClickSamples.push(read('immediate')), 0);
+          setTimeout(() => window.__subwindowGrayClickSamples.push(read('400ms')), 400);
+          setTimeout(() => window.__subwindowGrayClickSamples.push(read('900ms')), 900);
+          setTimeout(() => window.__subwindowGrayClickSamples.push(read('1400ms')), 1400);
+        }, {capture: true, once: true});
+        return window.__subwindowGrayClickSamples[0];
+        """,
+        tone,
+        pulsing,
+    )
+    button = next(node for node in browser.find_elements("css selector", '[data-window-session="1"][data-window-index="2"]') if node.is_displayed())
+    ActionChains(browser).move_to_element(button).click().perform()
+    WebDriverWait(browser, 4).until(
+        lambda driver: driver.execute_script("return window.__subwindowGrayClickSamples?.length === 5")
+    )
+    samples = browser.execute_script("return window.__subwindowGrayClickSamples")
+    assert samples[0]["gray"] is False and samples[0]["pulsing"] is pulsing and samples[0]["fill"] == expected_fill, samples
+    for sample in samples[1:4]:
+        assert sample["gray"] is True and sample["pulsing"] is False and sample["fill"] == "#9aa5b1", samples
+        assert sample["animationName"] == "agent-status-acknowledgement-fade", samples
+        assert sample["animationDuration"] == "1.2s", samples
+        assert -1.2 <= float(sample["animationDelay"].removesuffix("s")) <= 0, samples
+        assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith("steps(10"), samples
+        assert float(sample["before"]["width"].removesuffix("px")) > 0, samples
+        assert float(sample["before"]["height"].removesuffix("px")) > 0, samples
+        assert sample["before"]["background"] == "rgb(154, 165, 177)", samples
+        if tone == "cooldown":
+            assert float(sample["after"]["width"].removesuffix("px")) > 0, samples
+            assert float(sample["after"]["height"].removesuffix("px")) > 0, samples
+            assert sample["after"]["background"] == "rgb(154, 165, 177)", samples
+    assert samples[1]["opacity"] > samples[2]["opacity"] > samples[3]["opacity"] > 0, samples
+    assert samples[1]["opacity"] >= 0.8 and samples[3]["opacity"] <= 0.6, samples
+    assert samples[1]["opacity"] - samples[3]["opacity"] >= 0.4, samples
+    assert samples[4]["gray"] is False and samples[4]["fill"] == "", samples
 
 
 def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(browser, tmp_path):
@@ -1981,6 +2065,8 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
               panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
               topbarText: topbar?.textContent || '',
               topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
+              acknowledgedStatusPresent: !!document.querySelector('.agent-window-status-dot.agent-window-status-dot--acknowledging.status-indicator--acknowledged'),
+              acknowledgedStatusPulse: document.querySelector('.agent-window-status-dot.agent-window-status-dot--acknowledging')?.classList.contains('attention-pulse') || false,
               newInputFrames: afterSocketFrames.slice(beforeSocketFrames.length).filter(frame => String(frame).includes('"type":"input"')).length,
             };
             return {before, immediate};
@@ -1997,9 +2083,11 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
         assert metrics["before"]["topbarAskHasAttentionModifier"] is True
         assert metrics["before"]["topbarAskHasPulse"] is False
         assert metrics["immediate"]["badgeText"] == ""
-        assert metrics["immediate"]["tabAttention"] is True
-        assert metrics["immediate"]["panelNeedsApproval"] is True
+        assert metrics["immediate"]["tabAttention"] is False
+        assert metrics["immediate"]["panelNeedsApproval"] is False
         assert metrics["immediate"]["topbarAskCount"] == "1"
+        assert metrics["immediate"]["acknowledgedStatusPresent"] is True
+        assert metrics["immediate"]["acknowledgedStatusPulse"] is False
         assert metrics["immediate"]["newInputFrames"] == 0
         WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
@@ -3809,6 +3897,109 @@ def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):
     assert metrics["passiveKeptScroller"], metrics
     assert metrics["forcedReplacedScroller"], metrics
     assert "preferences-sections" in metrics["bodyHtml"]
+
+
+def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof selectSession === 'function' && window.__terminalOpened >= 1")
+    )
+    opened = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        agentStatusPulsePeriodMs = 2000;
+        document.documentElement.style.setProperty('--pulse-duration', '2s');
+        document.documentElement.style.setProperty('--status-pulse-step-count', '16');
+        setAttentionAnimationClockDelay();
+        selectSession('__prefs__').then(
+          () => requestAnimationFrame(() => done({ok: true})),
+          error => done({ok: false, error: String(error)})
+        );
+        """
+    )
+    assert opened["ok"], opened
+    browser.execute_script(
+        """
+        const host = document.createElement('div');
+        host.className = 'preferences-status-pulse-browser-fixture';
+        host.style.cssText = 'position:fixed;inset:24px auto auto 24px;padding:12px;background:var(--panel);z-index:9999';
+        host.innerHTML = preferencesStatusPulseExampleHtml();
+        document.body.appendChild(host);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('.preferences-status-pulse-browser-fixture .agent-window-status-dot').length === 9"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const example = document.querySelector('.preferences-status-pulse-browser-fixture .preferences-status-pulse-example');
+        scheduleAgentWindowActivityAnimationSync(example);
+        const first = value => String(value || '').split(',')[0].trim();
+        const pseudo = (node, name) => {
+          const style = getComputedStyle(node, name);
+          return {width: parseFloat(style.width) || 0, height: parseFloat(style.height) || 0, background: style.backgroundColor};
+        };
+        const read = node => {
+          const dot = node.querySelector('.agent-window-status-dot');
+          const style = getComputedStyle(dot);
+          const animationName = first(style.animationName);
+          const animation = dot.getAnimations().find(item => item.animationName === animationName);
+          const timing = animation?.effect?.getComputedTiming?.() || {};
+          return {
+            group: node.dataset.statusPulseExampleGroup,
+            state: node.dataset.statusPulseExampleState,
+            animationName,
+            duration: first(style.animationDuration),
+            delay: first(style.animationDelay),
+            timingFunction: first(style.animationTimingFunction),
+            iterations: first(style.animationIterationCount),
+            playState: animation?.playState || '',
+            progress: Number(timing.progress),
+            opacity: Number(style.opacity),
+            background: style.backgroundColor,
+            borderRadius: style.borderRadius,
+            before: pseudo(dot, '::before'),
+            after: pseudo(dot, '::after'),
+          };
+        };
+        const groups = Object.fromEntries(['tab', 'subwindow', 'acknowledgement'].map(group => {
+          const groupNode = example.querySelector(`[data-status-pulse-example="${group}"]`);
+          return [group, {
+            left: groupNode.getBoundingClientRect().left,
+            right: groupNode.getBoundingClientRect().right,
+            markers: [...groupNode.querySelectorAll('[data-status-pulse-example-group]')].map(read),
+          }];
+        }));
+        return {groups, rootDelay: getComputedStyle(document.documentElement).getPropertyValue('--attention-animation-delay').trim()};
+        """
+    )
+    groups = metrics["groups"]
+    assert groups["tab"]["right"] < groups["subwindow"]["left"], metrics
+    assert groups["subwindow"]["right"] < groups["acknowledgement"]["left"], metrics
+    expected_names = {"tab": "agent-status-opacity-pulse", "subwindow": "agent-status-opacity-pulse", "acknowledgement": "agent-status-acknowledgement-fade"}
+    for group, expected_name in expected_names.items():
+        markers = groups[group]["markers"]
+        assert [marker["state"] for marker in markers] == ["working", "cooldown", "attention"], metrics
+        assert all(marker["animationName"] == expected_name for marker in markers), metrics
+        assert all(marker["duration"] == "2s" and marker["delay"] == metrics["rootDelay"] for marker in markers), metrics
+        assert all(marker["timingFunction"].startswith("steps(16") and marker["iterations"] == "infinite" for marker in markers), metrics
+        assert all(marker["playState"] in {"pending", "running"} for marker in markers), metrics
+        assert max(marker["progress"] for marker in markers) - min(marker["progress"] for marker in markers) < 0.04, metrics
+        assert max(marker["opacity"] for marker in markers) - min(marker["opacity"] for marker in markers) < 0.04, metrics
+    all_progress = [marker["progress"] for group in groups.values() for marker in group["markers"]]
+    assert max(all_progress) - min(all_progress) < 0.04, metrics
+    expected_tab_fills = {"working": "rgb(82, 210, 115)", "cooldown": "rgb(255, 214, 51)", "attention": "rgb(255, 102, 115)"}
+    expected_glyph_fills = {"working": "rgb(82, 210, 115)", "cooldown": "rgb(255, 214, 51)", "attention": "rgb(220, 38, 38)"}
+    for marker in groups["tab"]["markers"]:
+        assert marker["background"] == expected_tab_fills[marker["state"]] and marker["borderRadius"] == "50%", metrics
+    for marker in groups["subwindow"]["markers"]:
+        shape = marker["after"] if marker["state"] == "working" else marker["before"]
+        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == expected_glyph_fills[marker["state"]], metrics
+    for marker in groups["acknowledgement"]["markers"]:
+        shape = marker["after"] if marker["state"] == "working" else marker["before"]
+        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == "rgb(154, 165, 177)", metrics
 
 
 def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):

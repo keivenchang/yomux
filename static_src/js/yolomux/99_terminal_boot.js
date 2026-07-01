@@ -4802,6 +4802,9 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
+  if (!shareViewMode && typeof primeJsDebugStatsBeforeLongLivedStreams === 'function') {
+    await primeJsDebugStatsBeforeLongLivedStreams();
+  }
   if (!shareViewMode) installClientEventStream();
   if (!shareViewMode) {
     initialAutoStatusesPromise.then(() => {
@@ -5108,6 +5111,12 @@ function handleClientPushEventNow(type, payload = {}) {
   }
   if (type === 'tmux_signals_changed') {
     applyTmuxSignalsPayload(payload);
+    if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
+      for (const session of activePaneItems()) {
+        if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
+        updatePanelWindowStepButtons(session, transcriptMeta.sessions?.[session]);
+      }
+    }
     return;
   }
   if (type === 'watched_prs_changed') {

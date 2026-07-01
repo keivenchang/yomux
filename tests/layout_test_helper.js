@@ -1517,7 +1517,9 @@ globalThis.__layoutTestApi = {
   setWorkflowTransitionGlowSecondsForTest(value) { workflowTransitionGlowSeconds = Math.max(0, Number(value) || 0); },
   acknowledgeAgentWindowActivityForTest(session, windowIndex = null, options = {}) { return acknowledgeAgentWindowActivity(session, windowIndex, {...options, localOnly: options.localOnly !== false}); },
   acknowledgeAgentWindowStoppedTransitionForTest: acknowledgeAgentWindowStoppedTransition,
+  agentWindowAcknowledgementVisualActiveForTest: agentWindowAcknowledgementVisualActive,
   agentWindowActivityIconHtmlForStatusForTest: agentWindowActivityIconHtmlForStatus,
+  sessionAgentWindowStatusModelForTest: sessionAgentWindowStatusModel,
   sessionAgentWindowStatusPayloadsForTest: sessionAgentWindowStatusPayloads,
   tmuxWindowCanonicalLabelForTest: tmuxWindowCanonicalLabel,
   buildTabberTreeForTest: buildTabberTree,
@@ -1812,6 +1814,7 @@ globalThis.__layoutTestApi = {
     fileExplorerTabberExpanded.clear();
     for (const path of paths || []) fileExplorerTabberCollapsed.add(path);
   },
+  setTabberPathExpandedForTest: setTabberPathExpanded,
   tabberRenderedRowsForTest(options = {}) {
     if (options.preserveCollapsed !== true) {
       fileExplorerTabberCollapsed.clear();

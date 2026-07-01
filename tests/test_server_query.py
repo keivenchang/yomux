@@ -102,13 +102,13 @@ def test_record_http_response_bytes_includes_route_compute_details():
 def test_get_stats_sample_uses_app_payload():
     writes = []
     calls = []
-    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0: calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
+    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, history_start=0: calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds, history_start)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
     request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
 
     http_routes.get_stats_sample(request, SimpleNamespace(query="since=9&client_id=client-a"), None)
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120"), None)
+    http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120&history_start=900"), None)
 
-    assert calls == [(9, "client-a", False, 0, 0), (10, "client-a", True, 7, 120)]
+    assert calls == [(9, "client-a", False, 0, 0, 0), (10, "client-a", True, 7, 120, 900)]
     assert writes == [
         (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
         (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
@@ -591,14 +591,14 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         session_metadata_payload=lambda force=False: {"sessions": {}, "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
         activity_payload=lambda hours=24.0, visible=True: ({"hours": hours, "visible": visible}, HTTPStatus.OK),
-        stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds},
+        stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, history_start=0: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds, "history_start": history_start},
         tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
 
     handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1&token_since=3&token_resolution=120", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a", "token_consumer": True, "token_since": 3, "token_resolution_seconds": 120})]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a", "token_consumer": True, "token_since": 3, "token_resolution_seconds": 120, "history_start": 0})]
 
     handler, calls, writes = route_handler("/api/session-metadata?force=1", app)
     Handler.do_GET(handler)

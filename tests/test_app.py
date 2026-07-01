@@ -120,6 +120,23 @@ def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
     assert third["history"]["sequence"] > duplicate["history"]["sequence"]
 
 
+def test_stats_history_payload_limits_records_to_requested_visible_range():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        with webapp.stats_history_lock:
+            for sample_time in (900.0, 960.0, 1000.0):
+                webapp.stats_history_merge_record_locked({
+                    "time": sample_time,
+                    "cpu_total_percent": 1.0,
+                    "cpu_count": 1.0,
+                }, now=1000.0, fields=app_module.STATS_HISTORY_SERVER_FIELDS, client_id=None)
+            history = webapp.stats_history_payload_locked(history_start=950)
+    finally:
+        webapp.control_server.stop()
+
+    assert [record["start"] for record in history["records"]] == [960, 1000]
+
+
 def test_system_cpu_percent_from_times_clamps_to_single_100_percent_scale():
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 22.0)) == 50.0
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 200.0)) == 100.0
@@ -318,6 +335,7 @@ def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monk
     data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
     assert data["stats_history"]["writer"]["port"] == 8003
     assert data["stats_history"]["raw_buckets"]
+    assert isinstance(data["stats_history"]["raw_buckets"][0], list)
 
 
 def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch, tmp_path):
@@ -702,9 +720,9 @@ def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch):
     assert len(calls) == 1
 
 
-def test_stats_token_sampling_uses_slower_consumer_cadence(monkeypatch):
+def test_stats_token_sampling_bootstraps_rate_before_steady_consumer_cadence(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
-    sample_times = iter([1000.0, 1005.0, 1011.0])
+    sample_times = iter([1000.0, 1001.0])
     token_totals = iter([100.0, 500.0])
 
     def current_sample():
@@ -725,13 +743,12 @@ def test_stats_token_sampling_uses_slower_consumer_cadence(monkeypatch):
     try:
         first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
         second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        third = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
     finally:
         webapp.control_server.stop()
 
     assert first["time"] == 1000.0
-    assert second["time"] == 1005.0
-    assert third["time"] == 1011.0
+    assert second["time"] == 1001.0
+    assert webapp.stats_agent_token_next_sample_at == 1011.0
     with webapp.stats_history_lock:
         history = webapp.stats_history_payload_locked(0, client_id="client-a")
     token_records = [item for record in history["records"] for item in record["agent_token_rates"]]

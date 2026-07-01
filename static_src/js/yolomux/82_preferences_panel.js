@@ -163,6 +163,40 @@ function yoagentEffortPreferenceChoicesForBackend(backend) {
   return backend === 'claude' ? yoagentClaudeEffortPreferenceChoices() : backend === 'codex' ? yoagentCodexEffortPreferenceChoices() : [];
 }
 
+function preferencesStatusPulseExampleItem(state, acknowledging = false) {
+  return {
+    state,
+    icon: '●',
+    label: acknowledging ? 'Acknowledged status' : 'Status pulse',
+    pulseActive: !acknowledging,
+    transitionPulseActive: !acknowledging,
+    acknowledged: false,
+    acknowledging,
+  };
+}
+
+function preferencesStatusPulseExampleMarkerHtml(state, group) {
+  const tabBall = group === 'tab';
+  const acknowledging = group === 'acknowledgement';
+  const activityHtml = agentWindowActivityIconHtml('codex', state, 0, {
+    item: preferencesStatusPulseExampleItem(state, acknowledging),
+    label: acknowledging ? 'Acknowledged status' : 'Status pulse',
+    statusOnly: true,
+    subwindowGlyphPulse: !tabBall,
+    acknowledgementPreview: acknowledging,
+  });
+  const surfaceClass = tabBall
+    ? 'session-agent-activity-marker'
+    : 'tmux-window-button keyboard-legend-status-glyph';
+  return `<span class="${surfaceClass} preferences-status-pulse-marker" data-status-pulse-example-group="${esc(group)}" data-status-pulse-example-state="${esc(state)}" aria-hidden="true">${activityHtml}</span>`;
+}
+
+function preferencesStatusPulseExampleHtml() {
+  const states = [STATE_KEY.working, 'cooldown', 'attention'];
+  const groupHtml = group => `<span class="preferences-status-pulse-example-group" data-status-pulse-example="${esc(group)}">${states.map(state => preferencesStatusPulseExampleMarkerHtml(state, group)).join('')}</span>`;
+  return `<span class="preferences-status-pulse-example">${groupHtml('tab')}${groupHtml('subwindow')}${groupHtml('acknowledgement')}</span>`;
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -221,7 +255,7 @@ function preferenceSections() {
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
-      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help'), exampleHtml: () => `<span class="preferences-status-pulse-example">${keyboardLegendStatusSample('working', '●', {glyph: true, pulse: true})}${keyboardLegendStatusSample('cooldown', '●', {glyph: true, pulse: true})}${keyboardLegendStatusSample('attention', '●', {glyph: true, pulse: true})}</span>`},
+      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help'), exampleHtml: preferencesStatusPulseExampleHtml},
       {path: 'performance.workflow_transition_glow_seconds', label: t('pref.performance.workflow_transition_glow_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.workflow_transition_glow_seconds.help')},
       {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
     ]},

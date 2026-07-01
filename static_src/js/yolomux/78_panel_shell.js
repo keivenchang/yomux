@@ -1870,8 +1870,33 @@ function tmuxWindowAgentKey(name) {
   return 'other';
 }
 
-function tmuxWindowBarHtml(session, info, options = {}) {
+function tmuxWindowBarPanes(session, info) {
   const panes = Array.isArray(info) ? info : info?.panes;
+  const result = Array.isArray(panes) ? [...panes] : [];
+  const knownWindows = new Set(result.map(pane => tmuxWindowIndexKey(pane?.window ?? pane?.window_index)).filter(index => index !== null));
+  if (typeof tmuxSignalWindowsForSession !== 'function') return result;
+  for (const windowRecord of tmuxSignalWindowsForSession(session)) {
+    const windowIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+    if (windowIndex === null || knownWindows.has(windowIndex)) continue;
+    const activePane = (windowRecord.panes || []).find(pane => pane?.active === true) || windowRecord.panes?.[0] || {};
+    result.push({
+      window: windowIndex,
+      window_name: windowRecord.window_name || activePane.current_command || `window ${windowIndex}`,
+      pane: activePane.pane_index ?? '',
+      pane_id: activePane.pane_id || activePane.target || '',
+      target: activePane.target || activePane.pane_id || '',
+      current_path: activePane.current_path || '',
+      command: activePane.current_command || '',
+      active: activePane.active === true,
+      window_active: windowRecord.active === true,
+    });
+    knownWindows.add(windowIndex);
+  }
+  return result;
+}
+
+function tmuxWindowBarHtml(session, info, options = {}) {
+  const panes = tmuxWindowBarPanes(session, info);
   const records = tmuxWindowRecords(panes);
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;

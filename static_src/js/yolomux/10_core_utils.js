@@ -1589,11 +1589,13 @@ function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null,
     : windowIndex;
   const acknowledgeDelayMs = attentionAcknowledgeDelayMsFromOptions(options);
   let acknowledged = false;
-  if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
-    acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
-  }
+  // The clicked window needs to capture its visual state before the shared prompt acknowledgement
+  // makes the model look acknowledged and therefore removes the pause/stop glyph on re-render.
   if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
     acknowledged = acknowledgeAgentWindowActivity(sessionKey, resolvedWindowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
+  }
+  if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
+    acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
   }
   return acknowledged;
 }

@@ -205,6 +205,23 @@
   color: var(--agent-status-cooldown);
   border: 1px solid transparent;
 }
+.status-indicator--dot.status-indicator--acknowledged,
+.agent-window-status-dot--acknowledging {
+  color: var(--muted);
+  --agent-status-ball-fill: var(--muted);
+  animation-name: agent-status-acknowledgement-fade;
+  animation-duration: var(--agent-status-acknowledgement-duration, var(--pulse-duration));
+  animation-delay: var(--agent-status-acknowledgement-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: var(--agent-status-acknowledgement-iteration-count, 1);
+  animation-direction: normal;
+  animation-fill-mode: both;
+  will-change: opacity;
+}
+.agent-window-status-dot--acknowledgement-preview {
+  --agent-status-acknowledgement-delay: var(--attention-animation-delay, 0s);
+  --agent-status-acknowledgement-iteration-count: infinite;
+}
 .agent-window-activity {
   --agent-window-icon-size: 18px;
   /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
@@ -367,6 +384,14 @@
   }
   50% {
     opacity: 1;
+  }
+}
+@keyframes agent-status-acknowledgement-fade {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
   }
 }
 .attention-pulse {
@@ -614,9 +639,12 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   opacity: 1;
 }
 .ci-indicator.branch-indicator {
-  color: #071321;
-  background: var(--accent-sky-strong);
-  border-color: #c9ebff;
+  --branch-indicator-text: #071321;
+  --branch-indicator-bg: var(--accent-sky-strong);
+  --branch-indicator-border: #c9ebff;
+  color: var(--branch-indicator-text);
+  background: var(--branch-indicator-bg);
+  border-color: var(--branch-indicator-border);
 }
 /* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
    are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
@@ -660,9 +688,12 @@ body.theme-light .ci-indicator.pr-review-required {
   border-color: #aab4c4;
 }
 body.theme-light .ci-indicator.branch-indicator {
-  color: #07314f;
-  background: #bfe3ff;
-  border-color: #7fb8e0;
+  --branch-indicator-text: #07314f;
+  --branch-indicator-bg: #bfe3ff;
+  --branch-indicator-border: #7fb8e0;
+  color: var(--branch-indicator-text);
+  background: var(--branch-indicator-bg);
+  border-color: var(--branch-indicator-border);
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;

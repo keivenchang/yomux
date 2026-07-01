@@ -1921,8 +1921,17 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-status-pulse-example {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   margin-top: 4px;
+}
+.preferences-status-pulse-example-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.preferences-status-pulse-marker,
+.preferences-status-pulse-marker .agent-window-activity {
+  margin-inline-start: 0;
 }
 .preferences-status-pulse-example .tmux-window-button {
   min-width: 0;

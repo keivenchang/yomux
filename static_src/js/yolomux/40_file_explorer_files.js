@@ -4094,27 +4094,34 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   return fullPath;
 }
 
-function toggleTabberCollapsed(fullPath) {
+function tabberPathIsExpanded(fullPath) {
   const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
-  const expanded = !fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath));
-  if (expanded) {
-    fileExplorerTabberExpanded.delete(fullPath);
-    fileExplorerTabberCollapsed.add(fullPath);
-  } else {
+  return !fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath));
+}
+
+function setTabberPathExpanded(fullPath, expanded) {
+  if (!fullPath) return false;
+  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
+  const nextExpanded = expanded === true;
+  if (tabberPathIsExpanded(fullPath) === nextExpanded) return false;
+  if (nextExpanded) {
     fileExplorerTabberCollapsed.delete(fullPath);
     if (defaultsCollapsed) fileExplorerTabberExpanded.add(fullPath);
+  } else {
+    fileExplorerTabberExpanded.delete(fullPath);
+    fileExplorerTabberCollapsed.add(fullPath);
   }
   persistTabberCollapsed();
   scheduleShareUiStatePublish();
+  return true;
+}
+
+function toggleTabberCollapsed(fullPath) {
+  return setTabberPathExpanded(fullPath, !tabberPathIsExpanded(fullPath));
 }
 
 function expandTabberPath(fullPath) {
-  const defaultsCollapsed = tabberPathDefaultsCollapsed(fullPath);
-  if (!fileExplorerTabberCollapsed.has(fullPath) && (!defaultsCollapsed || fileExplorerTabberExpanded.has(fullPath))) return;
-  fileExplorerTabberCollapsed.delete(fullPath);
-  if (defaultsCollapsed) fileExplorerTabberExpanded.add(fullPath);
-  persistTabberCollapsed();
-  scheduleShareUiStatePublish();
+  return setTabberPathExpanded(fullPath, true);
 }
 
 // Expand/collapse ALL Tabber nodes (the toolbar Expand all / Collapse all). Collapse-all records every
@@ -4190,11 +4197,8 @@ function openTabberSession(session, options = {}) {
   const target = String(session || '').trim();
   if (!target) return false;
   const sessionPath = tabberSessionPath(target);
-  if (sessionPath && fileExplorerTabberCollapsed.has(sessionPath)) {
-    fileExplorerTabberCollapsed.delete(sessionPath);
-    persistTabberCollapsed();
+  if (sessionPath && expandTabberPath(sessionPath)) {
     if (options.refresh !== false) refreshTabberPanels();
-    scheduleShareUiStatePublish();
   }
   selectSession(target, {userInitiated: true});
   return true;
@@ -4256,11 +4260,7 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
   setExpanded(row, expanded) {
     const fullPath = row?.dataset?.path || '';
     if (!fullPath || row?.dataset?.kind !== 'dir') return;
-    if (expanded) fileExplorerTabberCollapsed.delete(fullPath);
-    else fileExplorerTabberCollapsed.add(fullPath);
-    persistTabberCollapsed();
-    refreshTabberPanels();
-    scheduleShareUiStatePublish();
+    if (setTabberPathExpanded(fullPath, expanded)) refreshTabberPanels();
   },
   activateRow(row, event) {
     handleTabberRowActivate(row, event);

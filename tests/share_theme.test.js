@@ -2116,6 +2116,14 @@ async function runShareThemeSuite() {
     assert.equal(globalPathRowsHtml.includes('YOLO rules'), false, 'global Preferences path rows no longer show the YOLO rules path');
     assert.equal(/class="preferences-status"/.test(preferencesHtml), false, 'Preferences does not render a separate loaded/status line');
     assert.ok(preferencesHtml.includes('preferences-status-pulse-example'), 'Status-pulse preference renders the reusable live glyph example');
+    const pulseExampleStart = preferencesHtml.indexOf('<span class="preferences-status-pulse-example">');
+    const pulseExampleEnd = preferencesHtml.indexOf('</label>', pulseExampleStart);
+    const pulseExampleHtml = preferencesHtml.slice(pulseExampleStart, pulseExampleEnd);
+    assert.ok(pulseExampleHtml.indexOf('data-status-pulse-example="tab"') < pulseExampleHtml.indexOf('data-status-pulse-example="subwindow"'), 'Preferences shows colored aggregate Tab balls to the left of colored play/pause/stop glyphs');
+    assert.ok(pulseExampleHtml.indexOf('data-status-pulse-example="subwindow"') < pulseExampleHtml.indexOf('data-status-pulse-example="acknowledgement"'), 'Preferences shows fading gray play/pause/stop glyphs after the colored glyphs');
+    for (const group of ['tab', 'subwindow', 'acknowledgement']) {
+      assert.equal((pulseExampleHtml.match(new RegExp(`data-status-pulse-example-group="${group}"`, 'g')) || []).length, 3, `Preferences ${group} example has working/play, cooldown/pause, and attention/stop states`);
+    }
     const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="YOLO"');
     const yoloSectionEnd = preferencesHtml.indexOf('data-preference-section="', yoloSectionStart + 1);
     const yoloSectionHtml = preferencesHtml.slice(yoloSectionStart, yoloSectionEnd >= 0 ? yoloSectionEnd : undefined);

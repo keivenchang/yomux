@@ -1355,6 +1355,7 @@ async function runTabberSuite() {
     assert.ok(/type === 'repo' && row\.dataset\.tabberRepoRoot\) \{[\s\S]*switchWindow\(\);[\s\S]*setFileExplorerMode\('files'\)/.test(source), 'Tabber repo clicks also install the tmux-window override before leaving Tabber mode');
     assert.equal(source.includes("if (entry.tabber?.type !== 'session') fileExplorerTabberCollapsed.add(path)"), false, 'Tabber collapse-all and disclosure toggles include session rows');
     assert.ok(/function tabberSessionForNumericKey\(key\)[\s\S]*\^\[1-9\]\$/.test(source), 'Tabber maps bare numeric keys to matching tmux sessions');
+    assert.ok(/function setTabberPathExpanded\(fullPath, expanded\)[\s\S]*tabberPathDefaultsCollapsed\(fullPath\)[\s\S]*fileExplorerTabberExpanded\.add\(fullPath\)[\s\S]*setExpanded\(row, expanded\) \{[\s\S]*setTabberPathExpanded\(fullPath, expanded\)/.test(source), 'Tabber disclosure clicks and keyboard expansion reuse the default-collapse-aware expansion owner');
     assert.ok(/row\.dataset\.kind === 'dir' && fullPath && onDisclosure[\s\S]*toggleTabberCollapsed\(fullPath\)[\s\S]*type === 'session' && session\)[\s\S]*openTabberSession\(session\)/.test(source), 'Tabber session row text opens the session while the shared disclosure branch toggles collapse');
 
     const api = loadYolomux();
@@ -1434,6 +1435,10 @@ async function runTabberSuite() {
     assert.equal(defaultSessionRow?.ariaExpanded, 'true', 'Tabber defaults to expanding each session Tab');
     assert.equal(defaultWindowRow?.ariaExpanded, 'false', 'Tabber defaults to collapsing the directories inside sub-window buttons');
     assert.equal(defaultCollapsedRows.some(row => row.type === 'repo' && row.path.startsWith(`/${s1.name}/${claudeWin.name}/`)), false, 'Tabber hides sub-window directories until the user expands that window');
+    assert.equal(api.setTabberPathExpandedForTest(defaultWindowRow.path, true), true, 'an explicit sub-window expansion changes the shared Tabber expansion model');
+    const expandedWindowRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
+    assert.equal(expandedWindowRows.find(row => row.path === defaultWindowRow.path)?.ariaExpanded, 'true', 'an explicitly expanded sub-window remains expanded after Tabber rerenders');
+    assert.ok(expandedWindowRows.some(row => row.type === 'repo' && row.path.startsWith(`${defaultWindowRow.path}/`)), 'an explicitly expanded sub-window shows its attributed directory list');
 
     api.setTranscriptInfoForTest('3', {
       project: {git: {branch: 'scoped', root: '/home/u/codex-a'}},

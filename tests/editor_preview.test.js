@@ -171,6 +171,7 @@ async function runEditorPreviewSuite() {
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const settingsRuntimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
+    const preferencesSource = fs.readFileSync('static_src/js/yolomux/82_preferences_panel.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
     const dotBlock = sessionsCss.match(/\.status-indicator--dot\s*\{[^}]*\}/)?.[0] || '';
     assert.ok(/function statusPulseAnimationEnabled\(\)\s*\{\s*return typeof globalThis !== 'undefined' && globalThis\.yolomuxEnableBroadStatusPulse === true;\s*\}/.test(layoutSource), 'continuous broad status pulse is disabled by default through one shared helper');
@@ -220,11 +221,15 @@ async function runEditorPreviewSuite() {
     assert.equal(/\.tmux-window-button \.agent-window-status-dot,[\s\S]*?\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\s*\{[\s\S]*?(?:overflow:\s*hidden|text-indent:\s*-999px|border-radius:\s*max\(1px, calc\(var\(--agent-status-ball-size-base\) \* 0\.08\)\))/.test(paneTabsCss), false, 'sub-window status dot containers do not clip glyph glow into a rounded box');
     assert.equal(/--subwindow-status-glyph-scale:\s*0\.4/.test(paneTabsCss), false, 'sub-window glyphs never shrink to a stale 40% size');
     assert.ok(/\.tmux-window-button \.agent-window-status-dot\.status-indicator--working,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.status-indicator--working\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--pr-status-passing\)/.test(paneTabsCss), 'working/play sub-window glyphs stay vibrant green through the shared 66% scale');
-    assert.equal(/agent-window-status-dot--acknowledged|subwindow-status-acknowledged/.test(paneTabsCss + sessionsCss), false, 'acknowledged attention has no gray status-marker styling because it is removed');
-    assert.ok(/const agentWindowActivityAcknowledgeDelayMs\s*=\s*700;/.test(activitySource), 'sub-window acknowledgement removes its marker after the 700ms interaction hold');
+    assert.ok(/agent-window-status-dot--acknowledging[\s\S]*--agent-status-ball-fill:\s*var\(--muted\)/.test(sessionsCss) && /agent-window-status-dot--acknowledging[\s\S]*--subwindow-status-glyph-fill:\s*var\(--muted\) !important/.test(paneTabsCss), 'acknowledging play/pause/stop glyphs and parent balls share the muted gray owner');
+    assert.ok(/const acknowledgementShapeClass = acknowledging && \[STATE_KEY\.working, 'attention', 'cooldown'\]\.includes\(item\.state\)[\s\S]*`status-indicator--\$\{item\.state\}`[\s\S]*acknowledgementShapeClass/.test(activitySource), 'gray acknowledgement keeps the original play-triangle, stop-square, or pause-bar shape modifier');
+    assert.ok(/function agentWindowAcknowledgementVisualDurationMs\(\)[\s\S]*attentionAnimationDurationMs\(agentStatusPulsePeriodMs\)/.test(activitySource) && /const durationMs = agentWindowAcknowledgementVisualDurationMs\(\)[\s\S]*setTimeout\([\s\S]*}, durationMs\)/.test(activitySource), 'gray acknowledgement lifetime comes from the configured status-ball pulse period');
+    assert.ok(/@keyframes agent-status-acknowledgement-fade\s*\{[\s\S]*0%\s*\{\s*opacity:\s*1[\s\S]*100%\s*\{\s*opacity:\s*0/.test(sessionsCss) && /agent-window-status-dot--acknowledging[\s\S]*animation-name:\s*agent-status-acknowledgement-fade[\s\S]*animation-duration:\s*var\(--agent-status-acknowledgement-duration, var\(--pulse-duration\)\)/.test(sessionsCss), 'one shared one-way fade retires gray live and preview markers over the pulse period');
+    assert.ok(/agentWindowAcknowledgementVisuals\.set\(key, \{startedAtMs, untilMs, durationMs, timer, agent: visualAgent\}\)/.test(activitySource) && /acknowledgementElapsedMs:\s*Math\.max\(0, Date\.now\(\) - acknowledgementVisual\.startedAtMs\)/.test(activitySource) && /--agent-status-acknowledgement-delay: \$\{-elapsedMs \/ 1000\}s/.test(activitySource), 'gray fade progress survives live window-bar rerenders instead of restarting from opaque');
+    assert.ok(/function preferencesStatusPulseExampleHtml\(\)[\s\S]*groupHtml\('tab'\)[\s\S]*groupHtml\('subwindow'\)[\s\S]*groupHtml\('acknowledgement'\)/.test(preferencesSource) && /function preferencesStatusPulseExampleMarkerHtml\(state, group\)[\s\S]*agentWindowActivityIconHtml\('codex', state[\s\S]*statusOnly:\s*true[\s\S]*acknowledgementPreview:\s*acknowledging/.test(preferencesSource), 'Preferences routes colored Tab balls, colored glyphs, and fading gray glyphs through the live status renderer');
     assert.equal(/subwindowPulseActive:\s*true/.test(activitySource), false, 'working/play sub-window glyphs use the shared pulseActive path instead of a parallel forever-pulse override');
-    assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*const pulse = animate && item\.pulseActive !== false;[\s\S]*const subwindowPulse = pulse;[\s\S]*options\.subwindowGlyphPulse === true && subwindowPulse[\s\S]*agent-window-status-dot--subwindow-pulse/.test(activitySource), 'the shared status dot renderer emits the sub-window pulse class from the shared pulseActive lifecycle');
-    assert.ok(/function agentWindowActivityIconHtml\(agentKey, state, idleSeconds, options = \{\}\)[\s\S]*const subwindowGlyphPulse = options\.subwindowGlyphPulse === true \|\| \(options\.subwindowGlyphPulse !== false && statusOnly !== true\)[\s\S]*agentWindowStatusDotHtml\(item, \{animate: options\.animate !== false, subwindowGlyphPulse\}\)/.test(activitySource), 'sub-window rows and status-only parent balls use the shared status glyph lifecycle');
+    assert.ok(/function agentWindowStatusDotHtml\(item, options = \{\}\)[\s\S]*const pulse = !acknowledging && animate && item\.pulseActive !== false;[\s\S]*const subwindowPulse = pulse;[\s\S]*options\.subwindowGlyphPulse === true && subwindowPulse[\s\S]*agent-window-status-dot--subwindow-pulse/.test(activitySource), 'the shared status dot renderer emits the sub-window pulse class from the shared pulseActive lifecycle and keeps acknowledgement gray static');
+    assert.ok(/function agentWindowActivityIconHtml\(agentKey, state, idleSeconds, options = \{\}\)[\s\S]*const subwindowGlyphPulse = options\.subwindowGlyphPulse === true \|\| \(options\.subwindowGlyphPulse !== false && statusOnly !== true\)[\s\S]*agentWindowStatusDotHtml\(item, \{[\s\S]*subwindowGlyphPulse,[\s\S]*acknowledgementPreview: options\.acknowledgementPreview === true/.test(activitySource), 'sub-window rows, status-only parent balls, and Preferences samples use the shared status glyph lifecycle');
     assert.ok(/\.tmux-window-button \.agent-window-status-dot\.agent-window-status-dot--subwindow-pulse,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.agent-window-status-dot--subwindow-pulse\s*\{[\s\S]*box-shadow:\s*none !important[\s\S]*animation:\s*none !important/.test(paneTabsCss), 'sub-window pulse suppresses element-level box-shadow/animation so the square container never draws a ring');
     assert.ok(/\.tmux-window-button \.agent-window-status-dot\.agent-window-status-dot--subwindow-pulse,[\s\S]*\.file-tree-row\.tabber-row\[data-tabber-type="window"\] \.tabber-window-label \.agent-window-status-dot\.agent-window-status-dot--subwindow-pulse\s*\{[\s\S]*animation:\s*agent-status-opacity-pulse[\s\S]*!important/.test(paneTabsCss), 'sub-window glyphs animate the same status-dot opacity property and keyframe as their parent circles');
     assert.equal(/subwindow-status-glyph-pulse|subwindow-status-glyph-outline-filter|subwindow-status-cooldown-outline-filter|drop-shadow/.test(paneTabsCss.slice(paneTabsCss.indexOf('.tmux-window-button .agent-window-status-dot,'), paneTabsCss.indexOf('.tmux-window-bar[data-tmux-window-label-mode="names"]'))), false, 'sub-window play/stop/pause glyphs use fill and borders instead of glow filters');
@@ -246,8 +251,11 @@ async function runEditorPreviewSuite() {
     assert.ok(/agent-window-status-dot--attention-cooldown[\s\S]*conic-gradient\(var\(--bad\)[\s\S]*var\(--agent-status-cooldown\)/.test(sessionsCss), 'mixed red/yellow parent Tab balls use crisp conic segments instead of an averaged brown');
     assert.ok(/agent-window-status-dot--attention-working[\s\S]*conic-gradient\(var\(--bad\)[\s\S]*var\(--pr-status-passing\)/.test(sessionsCss), 'mixed red/green parent Tab balls use the shared two-tone fill');
     assert.ok(/agent-window-status-dot--attention-cooldown-working[\s\S]*conic-gradient\(var\(--bad\) 0 33\.333%[\s\S]*var\(--agent-status-cooldown\) 33\.333% 66\.666%[\s\S]*var\(--pr-status-passing\) 66\.666% 100%/.test(sessionsCss), 'mixed red/yellow/green parent Tab balls use three equal, crisp segments');
-    assert.ok(/function agentWindowStatusToneForItem\(item\)[\s\S]*item\?\.acknowledged === true\) return ''[\s\S]*agentWindowActivityTone\(item\.state\)[\s\S]*\['attention', 'cooldown', STATE_KEY\.working\]\.includes\(tone\)/.test(activitySource), 'one shared status-tone classifier removes acknowledged windows from sub-window glyphs and parent circles');
-    assert.ok(/function sessionStatusAgentWindowSummaryForTab\(session, info, payload = autoApproveStates\.get\(session\)\)[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*const allAggregateTones = \['attention', 'cooldown', STATE_KEY\.working\][\s\S]*const aggregateTones = allAggregateTones;[\s\S]*pulseActive: childIsPulsing[\s\S]*aggregateTones/.test(popoverSource), 'the parent circle retains every visible child tone while inheriting opacity pulse from any visible child');
+    assert.ok(/function agentWindowStatusToneForItem\(item\)[\s\S]*item\?\.acknowledging === true\) return 'acknowledged';[\s\S]*item\?\.acknowledged === true\) return ''[\s\S]*agentWindowActivityTone\(item\.state\)[\s\S]*\['attention', 'cooldown', STATE_KEY\.working\]\.includes\(tone\)/.test(activitySource), 'one shared status-tone classifier renders the temporary gray acknowledgement before removing an acknowledged window from every surface');
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\) \{[\s\S]*acknowledgeAgentWindowActivity\(sessionKey, resolvedWindowIndex[\s\S]*clearPromptAttentionForSession\(sessionKey/.test(coreSource), 'sub-window acknowledgement captures its gray visual before the shared prompt acknowledgement can hide the glyph');
+    assert.ok(/function sessionAgentWindowStatusSummary\(session, info = null, autoPayload = null\)[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*const allAggregateTones = \['attention', 'cooldown', STATE_KEY\.working\][\s\S]*pulseActive: visibleItems\.some[\s\S]*aggregateTones/.test(activitySource), 'the shared model retains every visible child tone while inheriting opacity pulse from any visible child');
+    assert.ok(/function sessionStatusAgentWindowSummaryForTab\(session, info, payload = autoApproveStates\.get\(session\)\)[\s\S]*sessionAgentWindowStatusSummary\(session, info, payload\)/.test(popoverSource), 'the parent Tab delegates status classification to the shared model instead of maintaining a second classifier');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared sub-window 100% reference owner');
     assert.ok(/function agentWindowActivityIconHtml\(agentKey, state, idleSeconds, options = \{\}\)[\s\S]*const acknowledged = item\?\.acknowledged === true;[\s\S]*if \(acknowledged && statusOnly\) return ''[\s\S]*const markerHtml = acknowledged \? '' : agentWindowStatusDotHtml/.test(activitySource), 'acknowledgement removes the transient ball/play/pause/stop glyph while preserving the stable sub-window agent identity');
@@ -972,7 +980,14 @@ async function runEditorPreviewSuite() {
     assert.equal(api.acknowledgeAgentWindowActivityForTest('1', 7, {refresh: false}), true, 'clicking the matching tmux sub-window acknowledges its sticky yellow marker');
     const acknowledgedWindowStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {session: '1', window_index: 7, working_stopped_ts: 4000, nowSeconds: 4500, scheduleRefresh: false});
     assert.equal(acknowledgedWindowStopped.state, 'cooldown', 'the acknowledged tmux sub-window retains its stopped transition identity');
-    assert.equal(acknowledgedWindowStopped.acknowledged, true, 'the acknowledged tmux sub-window remains suppressed until new work re-arms it');
+    assert.equal(acknowledgedWindowStopped.acknowledging, true, 'the acknowledged tmux sub-window immediately enters the shared gray acknowledgement interval');
+    const acknowledgingWindowHtml = api.agentWindowActivityIconHtmlForStatusForTest({kind: 'codex', state: 'idle', window_index: 7, working_stopped_ts: 4000}, 'codex', '1');
+    assert.ok(acknowledgingWindowHtml.includes('agent-window-status-dot--acknowledging') && acknowledgingWindowHtml.includes('status-indicator--acknowledged'), 'the shared renderer turns a newly acknowledged pause glyph gray instead of removing it immediately');
+    const acknowledgementSurvivesWindowSwitch = api.agentWindowActivityIconForTest('codex', 'working', 0, {session: '1', window_index: 7, pane_target: '1:7.0', nowSeconds: 4500, scheduleRefresh: false});
+    assert.equal(acknowledgementSurvivesWindowSwitch.acknowledging, true, 'switching the acknowledged window to its active working capture keeps the gray marker visible for the full interval');
+    assert.equal(acknowledgementSurvivesWindowSwitch.state, 'cooldown', 'the gray marker retains the acknowledged pause shape instead of changing to a green play');
+    assert.equal(api.agentWindowAcknowledgementVisualActiveForTest('1:7::codex', Date.now() + 1000), true, 'the gray acknowledgement interval remains active before the configured 1550ms pulse period ends');
+    assert.equal(api.agentWindowAcknowledgementVisualActiveForTest('1:7::codex', Date.now() + 1600), false, 'the gray acknowledgement interval expires after the configured status-ball pulse period');
     api.setWorkflowTransitionGlowSecondsForTest(60);
     const freshAttention = api.agentWindowActivityIconForTest('codex', 'needs-input', 0, {transitionKey, nowSeconds: 1061, scheduleRefresh: false});
     assert.equal(freshAttention.state, 'attention', 'needs-input outranks cooldown and stays on the persistent red attention state');
@@ -1018,6 +1033,20 @@ async function runEditorPreviewSuite() {
     const backgroundAskWindow = backgroundAskWindowBarHtml.match(/<button[^>]*data-window-index="2"[\s\S]*?<\/button>/)?.[0] || '';
     assert.ok(backgroundAskWindow.includes('agent-icon codex'), 'inactive Codex sub-windows retain their identity icon');
     assert.ok(/agent-window-status-dot[^>]*status-indicator--attention/.test(backgroundAskWindow), 'an unacknowledged approval in inactive 2:codex renders the red stop square');
+    api.setAutoApproveStateForTest('1', {screen: {key: 'approval'}, agent_windows: [
+      {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', attention_key: 'merge-priority-attention', attention_acknowledged: false, observed_ts: 100},
+    ]});
+    api.setTabberActivityForTest({agent_windows: {'1': [
+      {kind: 'codex', state: 'idle', window_index: 2, window_label: '2:codex', observed_ts: 200},
+    ]}});
+    const mergedAttentionWindowBar = api.tmuxWindowBarHtml('1', {panes: [
+      {window: '2', window_name: 'python3', process_label: 'codex', window_active: true, active: true},
+    ]});
+    const mergedAttentionParentTab = api.tmuxPaneTabHtml('1', {panes: [
+      {window: '2', window_name: 'python3', process_label: 'codex', window_active: true, active: true},
+    ]}, null, false);
+    assert.ok(/agent-window-status-dot[^>]*status-indicator--attention/.test(mergedAttentionWindowBar), 'an unacknowledged captured ASK beats a newer idle activity snapshot in its matching sub-window');
+    assert.ok(/session-agent-activity-marker[\s\S]*status-indicator--attention/.test(mergedAttentionParentTab), 'the same unacknowledged ASK reaches the parent Tab through the shared merged row');
     const repeatedAskKey = '8001:2:repeat-ask';
     const repeatedAskPayload = {agent_windows: [
       {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', screen_text: 'Would you like to run the following command?', attention_key: repeatedAskKey, attention_acknowledged: false},
@@ -1429,6 +1458,26 @@ async function runEditorPreviewSuite() {
 
     assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'stale transcript payloads are normalized through tmux-signals before repainting the window bar');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'stale transcript payloads do not revert the terminal title to the old active window');
+  });
+
+  await testAsync('tmux signal windows render before transcript discovery', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const info = {panes: [{window: '0', window_name: 'codex', window_active: true, active: true, process_label: 'codex'}]};
+    api.setTmuxSignalStateForTest({windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      window_name: 'codex',
+      active: true,
+      panes: [{pane_index: '0', target: 'meta-preview:0.0', active: true, current_command: 'codex'}],
+    }, {
+      session: 'meta-preview',
+      window_index: '1',
+      window_name: 'bash',
+      active: false,
+      panes: [{pane_index: '0', target: 'meta-preview:1.0', active: true, current_command: 'bash'}],
+    }]});
+    const html = api.tmuxWindowBarHtml('meta-preview', info);
+    assert.ok(html.includes('data-window-index="0"') && html.includes('data-window-index="1"'), 'the next tmux-signals push adds a bare new window to the existing bar without waiting for transcript metadata');
   });
 
   await testAsync('direct tmux sub-window clicks do not bounce through stale transcript or partial signal pushes', async () => {
@@ -1946,6 +1995,19 @@ async function runEditorPreviewSuite() {
     assert.equal(workingMarkerHtml.includes('agent-icon claude'), false, 'working Claude session tabs omit the Claude icon');
     assert.ok(workingHtml.indexOf('session-yolo-marker') < workingHtml.indexOf('session-agent-activity-marker'), 'YO button stays before the working status ball');
 
+    api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}, agent_windows: [
+      {kind: 'claude', state: 'idle', window_index: 1, window_label: '1:claude', current: true, window_active: true},
+    ]});
+    const screenProxyInfo = {panes: [{window: '1', window_name: 'claude', process_label: 'claude', window_active: true, active: true}]};
+    const screenProxyModel = api.sessionAgentWindowStatusModelForTest('4', screenProxyInfo);
+    const screenProxyWindowBar = api.tmuxWindowBarHtml('4', screenProxyInfo);
+    const screenProxyTab = api.tmuxPaneTabHtml('4', screenProxyInfo, api.sessionState('4', screenProxyInfo), true);
+    assert.equal(screenProxyModel.screenWorking, true, 'the shared model records the screen working signal once');
+    assert.equal(screenProxyModel.agents[0].state, 'working', 'the shared model promotes the current idle row when the screen capture is working');
+    assert.equal(api.sessionYoloIsWorking('4'), true, 'session working state consumes the shared model');
+    assert.ok(/data-window-index="1"[\s\S]*status-indicator--working/.test(screenProxyWindowBar), 'the window bar consumes the shared screen-proxy row');
+    assert.ok(/session-agent-activity-marker[\s\S]*status-indicator--working/.test(screenProxyTab), 'the parent Tab consumes the same shared screen-proxy row');
+
     api.setAutoApproveStateForTest('4', {enabled: false, screen: {key: 'working'}, agent_windows: [
       {kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude', current: true, window_active: true},
     ]});
@@ -2067,7 +2129,7 @@ async function runEditorPreviewSuite() {
     ]});
     const yellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
     const yellowMarkerHtml = tabActivityMarkerHtml(yellowTabHtml);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--cooldown)[^"]*agent-window-status-dot--cooldown-working/.test(yellowMarkerHtml), 'yellow+green tab status renders one dual yellow/green parent ball');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--working)[^"]*agent-window-status-dot--cooldown-working/.test(yellowMarkerHtml), 'yellow+green tab status renders one dual yellow/green parent ball while the live green child remains the session state');
     assert.equal(yellowMarkerHtml.includes('agent-icon'), false, 'yellow+green tab status does not render any agent symbol');
     api.agentWindowActivityIconForTest('claude', 'working', 0, {transitionKey: '4:2::claude', nowSeconds: 5000, scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
@@ -2075,7 +2137,7 @@ async function runEditorPreviewSuite() {
       {kind: 'claude', state: 'idle', window_index: 2, window_label: '2:claude'},
     ]});
     const transitionYellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--cooldown)/.test(transitionYellowTabHtml), 'tab status keeps the yellow child state when it comes from frontend transition state');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--working)/.test(transitionYellowTabHtml), 'the active working child remains the session state when another child is in a frontend yellow transition');
     assert.ok(transitionYellowTabHtml.includes('agent-window-status-dot--cooldown-working'), 'a frontend yellow transition plus another working child uses the same dual yellow/green parent ball');
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude'},
@@ -2253,6 +2315,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/if \(event\.type === 'pointerdown'\)[\s\S]*jsDebugGraphRangeSliderDragging = true;[\s\S]*return true;[\s\S]*if \(event\.type === 'change'\)[\s\S]*jsDebugGraphRangeSliderDragging = false;[\s\S]*setDebugGraphRangeFromSlider/.test(debugPaneSource), 'YO!stats range dragging preserves the native input and commits only on change');
     assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
+    assert.ok(/await Promise\.all\(activeSessions\.filter\(isTmuxSession\)[\s\S]*await primeJsDebugStatsBeforeLongLivedStreams\(\)[\s\S]*installClientEventStream\(\)/.test(debugPaneSource), 'YO!stats primes its first sample before the global long-lived SSE streams can consume the remaining HTTP\/1.1 connection slots');
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
     assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-area--workingAgents') && debugPaneCss.includes('.js-debug-bar--agentToken') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, area/line/bar graph styling, and legends');
@@ -2977,6 +3040,7 @@ async function runEditorPreviewSuite() {
     assert.equal(sampleRequest.method, 'GET', 'YO!stats sample uses GET');
     assert.equal(historyRequest.method, 'POST', 'YO!stats history uses POST');
     assert.equal(sampleUrl.searchParams.get('since'), '0', 'YO!stats sample keeps incremental since state');
+    assert.ok(sampleUrl.searchParams.has('history_start'), `YO!stats initial sample requests a bounded visible-history range: ${sampleRequest.url}`);
     assert.ok(sampleUrl.searchParams.get('client_id'), 'YO!stats sample includes the per-tab client id');
 	    assert.equal(sampleUrl.searchParams.get('token_consumer'), '1', 'visible YO!stats polling opts into slower server token scans');
 	    assert.equal(body.client_id, sampleUrl.searchParams.get('client_id'), 'YO!stats history posts the same per-tab client id');
@@ -3080,6 +3144,10 @@ async function runEditorPreviewSuite() {
     const waitingApi = loadYolomux('?debug=1&sessions=debug', ['1']);
     const waitingHtmlBeforeSample = waitingApi.debugGraphMetaHtmlForTest();
     assert.ok(waitingHtmlBeforeSample.includes('Waiting for server stats') && waitingHtmlBeforeSample.includes('moving-ellipsis'), 'the localized empty state uses the shared animated dots before the first sample');
+    const coldGraphHtml = waitingApi.debugPanelHtmlForTest();
+    assert.equal(coldGraphHtml.includes('Waiting for server stats') && coldGraphHtml.includes('No events yet'), false, 'cold YO!stats renders only the waiting metadata, never a stacked second empty state');
+    const emptyAfterSampleHtml = api.debugPanelHtmlForTest();
+    assert.ok(emptyAfterSampleHtml.includes('No events yet'), 'after the first server sample, an empty selected range keeps its independent graph-body empty state');
   });
 
   await testAsync('YO!stats records disconnected client gaps with full-height bad-connection overlays', async () => {
@@ -3843,7 +3911,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/class="tab tmux-window-button info-tree-ai-window-button active"[\s\S]*data-info-open-ai-window="1"/.test(html), 'YO!info renders the switched tmux sub-window as the active Info Bar-style button');
     assert.equal(/class="tab tmux-window-button info-tree-ai-window-button active"[\s\S]*data-info-open-ai-window="0"/.test(html), false, 'YO!info does not keep the previous sub-window button active after a tmux switch');
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
-    assert.ok(/function sessionAgentWindowStatusPayloads[\s\S]*activeTmuxWindowIndexFromInfo\(info\)[\s\S]*agentWindowWithInfoActiveWindow\(agent, activeIndex\)/.test(activitySource), 'shared agent-window payloads normalize current/window_active from live tmux pane state before YO!info reads them');
+    assert.ok(/function sessionAgentWindowStatusModel[\s\S]*activeTmuxWindowIndexFromInfo\(info\)[\s\S]*agentWindowWithInfoActiveWindow\(agent, activeIndex\)[\s\S]*function sessionAgentWindowStatusPayloads[\s\S]*sessionAgentWindowStatusModel\(session, info, autoPayload\)\.agents/.test(activitySource), 'the shared status model normalizes current/window_active from live tmux pane state before every consumer, including YO!info, reads it');
   });
 
   test('t@info-tree-relationship-grouping', () => {

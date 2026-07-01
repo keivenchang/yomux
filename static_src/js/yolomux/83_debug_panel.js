@@ -19,6 +19,7 @@ let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
 let jsDebugStatsServerRssBytes = null;
+let jsDebugStatsHistoryStartSeconds = 0;
 let jsDebugStatsClientId = '';
 let jsDebugStatsClientConnected = null;
 let jsDebugStatsDisconnectStartedAtMs = null;
@@ -1259,7 +1260,7 @@ function debugClientPerfHtml() {
   </div>`;
 }
 
-function debugGraphMetaHtml() {
+function debugGraphMetaItems() {
   const items = [];
   if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`yolomux.py uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
   if (Number.isFinite(jsDebugStatsServerPid)) items.push(`PID=${Math.floor(jsDebugStatsServerPid)}`);
@@ -1274,6 +1275,15 @@ function debugGraphMetaHtml() {
     const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
     items.push(`total ${uploadedMb}/${downloadedMb} MB up/down`);
   }
+  return items;
+}
+
+function debugGraphWaitingForServerStats() {
+  return debugGraphMetaItems().length === 0;
+}
+
+function debugGraphMetaHtml() {
+  const items = debugGraphMetaItems();
   const metaHtml = items.length ? esc(items.join(' | ')) : textWithMovingEllipsisHtml(t('debug.waitingForServerStats'));
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
 }
@@ -1819,7 +1829,8 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
   const clientPerf = debugClientPerfHtml();
   const buckets = debugGraphDisplayBuckets(nowMs);
   if (!buckets.length) {
-    return `${controls}${meta}${clientPerf}<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
+    const empty = debugGraphWaitingForServerStats() ? '' : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
+    return `${controls}${meta}${clientPerf}${empty}`;
   }
   const seriesItems = debugGraphSeriesData(buckets);
   const chartGroups = debugGraphVisibleChartGroups(seriesItems);
@@ -1915,11 +1926,17 @@ async function pollJsDebugStatsSample() {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
     const tokenResolution = debugGraphAgentTokenResolution();
+    const historyStart = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
+    if (!jsDebugStatsHistoryStartSeconds || historyStart < jsDebugStatsHistoryStartSeconds) {
+      jsDebugStatsServerSequence = 0;
+      jsDebugStatsHistoryStartSeconds = historyStart;
+      resetDebugGraphAgentTokenHistory();
+    }
     if (tokenResolution !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
     const tokenHistory = tokenResolution
       ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
       : '';
-    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}${tokenHistory}`, {cache: 'no-store'});
+    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}${tokenHistory}`, {cache: 'no-store'});
     recordJsDebugStatsSample(payload);
   } catch (_error) {
   } finally {
@@ -1986,6 +2003,7 @@ function clearJsDebugServerHistory() {
   jsDebugStatsServerPid = null;
   jsDebugStatsServerStartedAt = null;
   jsDebugStatsServerRssBytes = null;
+  jsDebugStatsHistoryStartSeconds = 0;
   if (jsDebugStatsHistoryFlushTimer) {
     clearTimeout(jsDebugStatsHistoryFlushTimer);
     jsDebugStatsHistoryFlushTimer = null;
@@ -2006,6 +2024,12 @@ function startJsDebugStatsPolling() {
   if (!jsDebugCollectionEnabled || jsDebugStatsPollTimer) return;
   if (!jsDebugStatsPanelVisible()) return;
   armJsDebugStatsPolling({pollNow: true});
+}
+
+async function primeJsDebugStatsBeforeLongLivedStreams() {
+  if (!jsDebugStatsPanelVisible() || jsDebugStatsFirstSampleReceived) return false;
+  await pollJsDebugStatsSample();
+  return jsDebugStatsFirstSampleReceived;
 }
 
 if (typeof document !== 'undefined' && document?.addEventListener) {
@@ -2184,6 +2208,9 @@ function setDebugGraphRange(value, {render = true} = {}) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
   if (debugGraphAgentTokenResolution() !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
+  if (render && jsDebugStatsPanelVisible() && (!jsDebugStatsHistoryStartSeconds || Math.floor(debugGraphDomain().startMs / 1000) < jsDebugStatsHistoryStartSeconds)) {
+    armJsDebugStatsPolling({pollNow: true});
+  }
   if (!render) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force: true});
