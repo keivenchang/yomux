@@ -405,8 +405,13 @@ function bindTabActivation(node, activate, options = {}) {
 }
 
 // Tabs, headers, and popovers all use these helpers so badge precedence stays consistent.
+function metaSeparatorHtml(classes = '') {
+  const extraClasses = String(classes || '').trim();
+  return `<span class="meta-sep${extraClasses ? ` ${extraClasses}` : ''}" aria-hidden="true">|</span>`;
+}
+
 function metaJoin(parts) {
-  return parts.filter(Boolean).join('<span class="meta-sep"> · </span>');
+  return parts.filter(Boolean).join(metaSeparatorHtml());
 }
 
 function sessionNumberNameHtml(session, options = {}) {

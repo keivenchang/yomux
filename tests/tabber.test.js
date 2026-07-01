@@ -91,6 +91,7 @@ async function runTabberSuite() {
     slots.right = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(slots);
     api.setFocusedPanelItem('1');
+    api.setFileExplorerModeForTest('tabber');
     api.setTranscriptInfoForTest('1', {
       panes: [{window: '1', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: '/repo'}],
     });
@@ -128,8 +129,12 @@ async function runTabberSuite() {
     assert.equal(windowOne.classList.contains('selected'), true, 'active window row gets shared selected class');
     assert.equal(windowOne.classList.contains('current-file'), true, 'active window row gets shared current-file class');
 
-    const arrowDown = treeKeyEvent('ArrowDown', panel);
-    assert.equal(api.handleFileExplorerArrowNavForTest(arrowDown), true, 'global key wrapper routes Tabber ArrowDown to the shared controller');
+    const terminal = new TestElement('tabber-keyboard-terminal');
+    terminal.classList.add('xterm');
+    api.setDocumentActiveElementForTest(terminal);
+    api.setDocumentQuerySelectorForTest(selector => selector === '.file-explorer-panel' ? panel : null);
+    const arrowDown = treeKeyEvent('ArrowDown', terminal);
+    assert.equal(api.handleFileExplorerArrowNavForTest(arrowDown), true, 'an automatic Tabber selection claims ArrowDown without a preliminary Tabber click');
     assert.equal(arrowDown.defaultPrevented, true, 'Tabber ArrowDown is consumed');
     assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2'], 'ArrowDown moves the Tabber selected row');
     assert.equal(sessionTwo.classList.contains('selected'), true, 'moved Tabber row gets shared selected class');
@@ -137,6 +142,45 @@ async function runTabberSuite() {
     const enter = treeKeyEvent('Enter', panel);
     assert.equal(api.handleFileExplorerArrowNavForTest(enter), true, 'Tabber Enter activates the selected row');
     assert.equal(api.currentSessionActionTarget(), '2', 'Tabber Enter opens the selected tmux session');
+  });
+
+  test('Tabber highlights every visible tab, not only the focused one', () => {
+    const api = loadYolomux('', ['1', '2', '3']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.right = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    api.setFocusedPanelItem('1');
+    api.setFileExplorerModeForTest('tabber');
+    for (const session of ['1', '2', '3']) {
+      api.setTranscriptInfoForTest(session, {
+        panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: `/repo/${session}`}],
+      });
+    }
+
+    const rows = api.tabberRenderedRowsForTest();
+    for (const session of ['1', '2']) {
+      const sessionRow = rows.find(row => row.type === 'session' && row.path === `/s_${session}`);
+      const windowRow = rows.find(row => row.type === 'window' && row.path === `/s_${session}/w_0`);
+      assert.equal(sessionRow?.classes.includes('tabber-active-session'), true, `visible session ${session} keeps the shared active-tab highlight`);
+      assert.ok(/\btabber-session-tab\b[^>]*\bactive\b/.test(sessionRow?.nameHtml || ''), `visible session ${session} uses the shared active tab chrome`);
+      assert.equal(windowRow?.classes.includes('tabber-active-window'), true, `visible session ${session} highlights its active tmux sub-window`);
+    }
+    assert.equal(rows.find(row => row.path === '/s_1/w_0')?.ariaCurrent, 'true', 'the focused visible tab owns the single current row');
+    assert.equal(rows.find(row => row.path === '/s_2/w_0')?.ariaCurrent, '', 'another visible tab stays active without becoming current');
+    const hiddenSession = rows.find(row => row.type === 'session' && row.path === '/s_3');
+    const hiddenWindow = rows.find(row => row.type === 'window' && row.path === '/s_3/w_0');
+    assert.equal(hiddenSession?.classes.includes('tabber-active-session'), false, 'a tab not shown in any pane is not highlighted');
+    assert.equal(hiddenSession?.ariaCurrent, '', 'a tab not shown in any pane has no active aria state');
+    assert.equal(hiddenWindow?.classes.includes('tabber-active-window'), true, 'tmux-window activity remains distinct from whether its parent tab is visible');
+
+    api.setFocusedPanelItem('2');
+    assert.equal(api.activeTabberRowPathForTest(), '/s_2/w_0', 'moving focus selects the second visible tab in Tabber');
+    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2/w_0'], 'the shared focus path updates Tabber selection without changing active highlights');
+    const refocusedRows = api.tabberRenderedRowsForTest();
+    assert.equal(refocusedRows.find(row => row.path === '/s_1/w_0')?.ariaCurrent, '', 'the old focused row no longer reads as current');
+    assert.equal(refocusedRows.find(row => row.path === '/s_2/w_0')?.ariaCurrent, 'true', 'the new focused row reads as current');
   });
 
   test('Tabber active window follows the optimistic tmux sub-window override', () => {
@@ -1413,7 +1457,7 @@ async function runTabberSuite() {
     const s1 = entries.find(e => e.tabber && e.tabber.session === '1');
     assert.ok(s1 && s1.tabber.type === 'session', 'B2: tmux session 1 appears at level 0');
     assert.equal(s1.tabber.active, true, 'A5: the focused tmux session is marked active at the top level');
-    assert.equal(entries.find(e => e.tabber && e.tabber.session === '2')?.tabber.active, false, 'A5: inactive tmux sessions stay inactive');
+    assert.equal(entries.find(e => e.tabber && e.tabber.session === '2')?.tabber.active, true, 'A5: a second session shown in another pane is active too');
     assert.ok(String(s1.tabber.branchText || '').length > 0, 'B2: the repo branch is retained as Tabber metadata');
     const windows = entriesByDir.get('/' + s1.name);
     assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 has its two tmux sub-windows');
@@ -1519,9 +1563,9 @@ async function runTabberSuite() {
     assert.equal(rows.some(r => r.type === 'session' && r.title.split('\n')[0] === '1' && r.nameHtml.includes('data-action="pane-tab-auto-approve"')), false, 'TR2: Tabber auto-off working session rows hide the inactive YO action when there is no prompt');
     assert.equal(rows.some(r => r.type !== 'session' && r.nameHtml.includes('tabber-session-tab')), false, 'A1: window/repo/loading/non-tmux Tabber rows do not get the session tab treatment');
     const activeSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '1');
-    const inactiveSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '2');
+    const secondVisibleSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '2');
     assert.ok(activeSessionRow, 'A5: rendered rows include the focused session');
-    assert.ok(inactiveSessionRow, 'A5: rendered rows include an inactive session');
+    assert.ok(secondVisibleSessionRow, 'A5: rendered rows include the second visible session');
     assert.equal(rows.every(r => r.nativeTitle === ''), true, 'Tabber rows do not show native browser titles in addition to the custom Tabber hover');
     assert.equal(/\stitle=/.test((activeSessionRow.nameHtml || '').split('<div class="session-popover"')[0]), false, 'visible Tabber tab chrome strips nested native title hovers');
     assert.ok(activeSessionRow.classes.includes('tabber-active-session'), 'A5: the current tmux session row gets the active-session class');
@@ -1611,9 +1655,9 @@ async function runTabberSuite() {
     api.setFileExplorerTreeDateModeForTest('relative');
     assert.ok(/class="[^"]*\btabber-session-tab\b[^"]*\bactive\b/.test(activeSessionRow.nameHtml), 'A5: the current tmux session label reads as an active tab');
     assert.ok(activeSessionRow.nameHtml.includes('data-tabber-session-chrome="shared"'), 'TR5: the session row marks the shared chrome path');
-    assert.equal(inactiveSessionRow.classes.includes('tabber-active-session'), false, 'A5: inactive tmux sessions do not get the active-session class');
-    assert.equal(inactiveSessionRow.ariaCurrent, '', 'A5: inactive tmux sessions do not expose aria-current');
-    assert.equal(inactiveSessionRow.nameHtml.includes('tabber-session-tab active'), false, 'A5: inactive tmux session labels keep the inactive tab shape');
+    assert.equal(secondVisibleSessionRow.classes.includes('tabber-active-session'), true, 'A5: every tmux session shown in a pane gets the active-session class');
+    assert.equal(secondVisibleSessionRow.ariaCurrent, 'true', 'A5: every tmux session shown in a pane exposes active aria state');
+    assert.ok(/\btabber-session-tab\b[^>]*\bactive\b/.test(secondVisibleSessionRow.nameHtml), 'A5: every tmux session shown in a pane uses the active tab shape');
     assert.equal(activeSessionRow.ariaExpanded, 'true', 'A3: session rows remain expandable treeitems');
     assert.equal(activeSessionRow.ariaSelected, 'false', 'A3: session rows keep tree selection state on the row, not the inner label');
     assert.equal(rows.some(r => r.type === 'session' && r.nameHtml.includes('data-tabber-expand')), false, 'session description text is part of the row activation target');

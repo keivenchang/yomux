@@ -3077,7 +3077,10 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     const rows = controller.rows(panel);
     if (!rows.length) return false;
     const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
-    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
+    const globalTargetAllowed = typeof globalShortcutTargetAllowsAppAction !== 'function' || globalShortcutTargetAllowsAppAction(event?.target);
+    const explicitlyOwned = typeof options.allowKeyboardFromGlobalTarget === 'function'
+      && options.allowKeyboardFromGlobalTarget(event, panel) === true;
+    if (!globalTargetAllowed && !eventTargetsOwnedPanel && !explicitlyOwned) return false;
     const lead = controller.leadRow(panel);
     let leadIndex = lead ? rows.indexOf(lead) : -1;
     if (intent === 'select-all' && options.allowSelectAll === true) {
@@ -3740,7 +3743,10 @@ function tmuxWindowCanonicalLabel(session, record, fallback = '', info = null) {
 function buildTabberTree() {
   const entriesByDir = new Map();
   const topEntries = [];
-  const activeSession = currentSessionActionTarget();
+  // A split layout can show any number of active tabs. Keep that shared layout truth
+  // separate from the one focused session used only for keyboard/tree selection.
+  const visibleItems = new Set(activePaneItems());
+  const focusedItem = visualActivePaneItem();
   tabberOrderedSessions().forEach(session => {
     const info = transcriptMeta.sessions?.[session] || {};
     const sessionName = `s_${tabberPathToken(session)}`;
@@ -3754,7 +3760,7 @@ function buildTabberTree() {
     const nowSeconds = Date.now() / 1000;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
-      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: session === activeSession},
+      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: visibleItems.has(session)},
     };
     topEntries.push(sessionEntry);
     const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
@@ -3781,21 +3787,21 @@ function buildTabberTree() {
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: label,
-        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText: dateDisplay.text, dateHtml: dateDisplay.html},
+        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: focusedItem === session && active, agentKey, agentStatus: agentStatusForIcon, activityIconHtml, dateText: dateDisplay.text, dateHtml: dateDisplay.html},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
     const maxChild = windowEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
     sessionEntry.mtime = Math.max(maxChild, windowEntries.length ? 0 : fallbackSessionRecency);
-    sessionEntry.tabber.current = session === activeSession && !windowEntries.some(entry => entry.tabber?.current === true);
+    sessionEntry.tabber.current = focusedItem === session && !windowEntries.some(entry => entry.tabber?.current === true);
   });
   // The other open (non-tmux) tabs — Preferences, YO!info/YO!agent, file editors — as leaf rows after the
   // sessions. They are kind:'file', so the shared dirs-before-files sort always keeps them below sessions.
   for (const item of allTabItems()) {
     if (isTmuxSession(item) || isFileExplorerItem(item)) continue; // tmux sessions are shown above; skip the Finder/Tabber pane itself
     topEntries.push({
-      name: `t_${tabberPathToken(item)}`, kind: 'file', mtime: 0, sortName: itemLabel(item),
-      tabber: {type: 'tab', item, label: itemLabel(item), icon: '◷'},
+      name: tabberTabPath(item).slice(1), kind: 'file', mtime: 0, sortName: itemLabel(item),
+      tabber: {type: 'tab', item, label: itemLabel(item), icon: '◷', active: visibleItems.has(item), current: focusedItem === item},
     });
   }
   return {entries: topEntries, entriesByDir};
@@ -3878,6 +3884,12 @@ function refreshTabberPanels() {
     const groups = panel.querySelector('[data-file-explorer-changes] .changes-groups');
     if (groups) renderTabberTree(groups);
   }
+}
+
+function refreshTabberPanelsForFocusChange() {
+  if (fileExplorerMode !== 'tabber') return;
+  refreshTabberPanels();
+  syncTabberTreeActiveSelection();
 }
 
 function tabberWindowLabelHtml(label, iconHtml, options = {}) {
@@ -4201,9 +4213,16 @@ function tabberWindowPath(session, windowIndex) {
   return sessionPath && index !== null ? `${sessionPath}/w_${tabberPathToken(index)}` : '';
 }
 
+function tabberTabPath(item) {
+  const value = String(item || '').trim();
+  return value ? `/t_${tabberPathToken(value)}` : '';
+}
+
 function activeTabberRowPath() {
-  const session = currentSessionActionTarget();
-  if (!session) return '';
+  const item = visualActivePaneItem();
+  if (!item || isFileExplorerItem(item)) return '';
+  if (!isTmuxSession(item)) return tabberTabPath(item);
+  const session = item;
   const info = transcriptMeta.sessions?.[session] || {};
   const override = tmuxWindowDisplayActiveIndex(session);
   if (override !== undefined) {
@@ -4269,6 +4288,10 @@ function handleTabberRowActivate(row, event) {
   }
 }
 
+function tabberTreeKeyboardNavigationReady() {
+  return fileExplorerMode === 'tabber' && tabberTreeSelectedPaths.size > 0;
+}
+
 const tabberTreeInteractionController = createSharedTreeInteractionController({
   name: 'tabber',
   rowSelector: '.file-tree-row[data-tabber-type]',
@@ -4278,6 +4301,7 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
   getLeadId: () => tabberTreeSelectionLead,
   setLeadId: id => { tabberTreeSelectionLead = id; },
   currentRowId: activeTabberRowPath,
+  allowKeyboardFromGlobalTarget: () => tabberTreeKeyboardNavigationReady(),
   syncCurrentSelection(currentId) {
     tabberTreeSelectedPaths.clear();
     if (currentId) tabberTreeSelectedPaths.add(currentId);

@@ -1130,6 +1130,9 @@ body.theme-light .drop-slot.drag-over {
 }
 .meta-sep {
   color: var(--sep-muted);
+  display: inline-block;
+  margin-inline: 2px;
+  opacity: 0.65;
 }
 /* Multi-repo detail controls and popover rows. Tokens only (light/dark). */
 .meta-repo-switch {

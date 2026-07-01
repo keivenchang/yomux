@@ -1999,7 +1999,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
             <div class="panel-session-label"><span class="session-button-dir">8001</span></div>
             <div id="meta" class="pane-info-bar-meta meta pane-info-bar-meta-overflow" style="--pane-info-bar-scroll-distance: 240px; --pane-info-bar-scroll-offset: -240px; --pane-info-bar-scroll-duration: 23s; --pane-info-bar-scroll-timing: linear(0 0%, 0 13.04%, 1 91.30%, 1 100%);">
               <span id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="btn-base meta-repo-cycle">&lt;</button><button type="button" class="btn-base meta-repo-chip">2/3</button><button type="button" class="btn-base meta-repo-cycle">&gt;</button></span></span>
-              <span class="meta-sep pane-info-bar-fixed-sep"> · </span>
+              <span id="meta-separator" class="meta-sep pane-info-bar-fixed-sep" aria-hidden="true">|</span>
               <span id="viewport" class="pane-info-bar-scroll-viewport"><span id="scroll-text" class="pane-info-bar-scroll-text"><span class="meta-branch">__LONG_TEXT__</span></span></span>
             </div>
           </div>
@@ -2026,6 +2026,8 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
         };
         const textStyle = getComputedStyle(document.getElementById('scroll-text'));
         const metaStyle = getComputedStyle(document.getElementById('meta'));
+        const separator = document.getElementById('meta-separator');
+        const separatorStyle = getComputedStyle(separator);
         const movedText = document.getElementById('scroll-text').cloneNode(true);
         movedText.id = 'scroll-text-moved';
         movedText.style.animationDelay = '-4s';
@@ -2053,6 +2055,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           scrollDuration: textStyle.animationDuration,
           scrollOffset: metaStyle.getPropertyValue('--pane-info-bar-scroll-offset').trim(),
           scrollTiming: metaStyle.getPropertyValue('--pane-info-bar-scroll-timing').trim(),
+          separator: {text: separator.textContent, opacity: separatorStyle.opacity, marginStart: separatorStyle.marginInlineStart, marginEnd: separatorStyle.marginInlineEnd},
           movedX,
           reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
           buttonFlexShrink: buttonStyle.flexShrink,
@@ -2074,6 +2077,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert "fix(performance): repair v1 PARITY commit + case-doc links after" in metrics["metaText"]
     assert metrics["controlsInsideViewport"] is False
     assert metrics["controls"]["right"] <= metrics["viewport"]["left"] + 2
+    assert metrics["separator"] == {"text": "|", "opacity": "0.65", "marginStart": "2px", "marginEnd": "2px"}, metrics
     if not metrics["reduced"]:
         assert metrics["scrollAnimation"] == "pane-info-bar-scroll"
         assert metrics["scrollDelay"] == "0s"
@@ -3619,9 +3623,9 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                       <span class="file-tree-git-status" hidden></span>
                       <span class="file-tree-date">2m ago</span>
                     </div>
-                    <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
+                    <div class="file-tree-row tabber-row kind-dir expanded tabber-active-session" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
                       <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
-                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
+                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -3756,20 +3760,19 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["active"]["ariaCurrent"] == "true", (label, metrics)
         assert metrics["active"]["ariaExpanded"] == "true", (label, metrics)
         assert metrics["active"]["iconText"] == "›", (label, metrics)
-        assert "tabber-active-session" not in metrics["inactive"]["rowClass"], (label, metrics)
-        assert "active" not in metrics["inactive"]["tabClass"], (label, metrics)
+        assert "tabber-active-session" in metrics["inactive"]["rowClass"], (label, metrics)
+        assert "active" in metrics["inactive"]["tabClass"], (label, metrics)
         assert "tmux-pane-tab-token" in metrics["inactive"]["tabClass"], (label, metrics)
         assert "tmux-pane-tab-token-action" in metrics["inactive"]["tabClass"], (label, metrics)
         assert metrics["inactive"]["ariaCurrent"] == "", (label, metrics)
         assert metrics["active"]["tabBg"] == metrics["active"]["expectedActiveBg"], (label, metrics)
-        assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedInactiveBg"], (label, metrics)
-        assert metrics["inactive"]["tabBorderTop"] == metrics["expectedInactiveBorder"], (label, metrics)
+        assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedActiveBg"], (label, metrics)
         assert metrics["active"]["tabBg"] != metrics["active"]["tabColor"], (label, metrics)
         assert metrics["inactive"]["tabBg"] != metrics["inactive"]["tabColor"], (label, metrics)
         if theme_class == "theme-light":
             assert metrics["active"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
             assert metrics["active"]["descriptionColor"] == metrics["active"]["tabColor"], (label, metrics)
-            assert metrics["inactive"]["tabColor"] == metrics["expectedInactiveText"], (label, metrics)
+            assert metrics["inactive"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
             assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
         assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
         assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)

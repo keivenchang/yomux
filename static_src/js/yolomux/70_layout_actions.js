@@ -1242,7 +1242,7 @@ function paneInfoBarMetaHtml(session, info) {
   const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, {fullText: true});
   const scrollHtml = metaJoin(metadataParts);
   const controlsHtml = repoSwitchHtml ? `<span class="pane-info-bar-controls">${repoSwitchHtml}</span>` : '';
-  const separatorHtml = controlsHtml && scrollHtml ? '<span class="meta-sep pane-info-bar-fixed-sep"> · </span>' : '';
+  const separatorHtml = controlsHtml && scrollHtml ? metaSeparatorHtml('pane-info-bar-fixed-sep') : '';
   const scrollTrackHtml = scrollHtml
     ? `<span class="pane-info-bar-scroll-viewport"><span class="pane-info-bar-scroll-text">${scrollHtml}</span></span>`
     : '';

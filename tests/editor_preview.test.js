@@ -1170,6 +1170,8 @@ async function runEditorPreviewSuite() {
     assert.equal(paneInfoBarMetaHtml.includes('...'), false, 'Info Bar metadata does not use shortText/shortBranch ellipses');
     assert.ok(/class="pane-info-bar-controls"[\s\S]*meta-repo-switch/.test(paneInfoBarMetaHtml), 'Info Bar repo selector is rendered in a fixed controls slot');
     assert.ok(/pane-info-bar-controls[\s\S]*pane-info-bar-scroll-viewport/.test(paneInfoBarMetaHtml), 'Info Bar scroll viewport starts after the fixed repo selector');
+    assert.ok(/meta-sep pane-info-bar-fixed-sep" aria-hidden="true">\|<\/span>/.test(paneInfoBarMetaHtml), 'Info Bar reuses the shared compact muted metadata pipe beside repo controls');
+    assert.equal(paneInfoBarMetaHtml.includes(' · '), false, 'Info Bar no longer uses wide middot separators');
     assert.ok(/pane-info-bar-scroll-viewport[\s\S]*#76 DRAFT[\s\S]*DIS-2239 In Review[\s\S]*keivenchang\/DIS-2239__parity-commit-link-frontend-crates[\s\S]*fix\(performance\): repair v1 PARITY commit \+ case-doc links after/.test(paneInfoBarMetaHtml), 'Info Bar keeps Linear immediately after the PR, before branch and path metadata');
     const idempotentInfoBarApi = loadYolomux('', ['info-scroll']);
     const idempotentMeta = idempotentInfoBarApi.testElementForId('meta-info-scroll');

@@ -1758,6 +1758,7 @@ function updatePanelInactiveOverlays() {
   }
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
+  if (typeof refreshTabberPanelsForFocusChange === 'function') refreshTabberPanelsForFocusChange();
 }
 
 function esc(value) {
