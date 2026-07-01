@@ -452,6 +452,7 @@
   "notify.pr.review": "Review {decision} on {ref}",
   "notify.testBody": "Cảnh báo trong trang YOLOmux đã bật.",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
+  "notify.testToastTitle": "đã bật thông báo",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "Command palette",
   "palette.group.files": "Tệp",

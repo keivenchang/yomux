@@ -3128,6 +3128,129 @@ def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser
             assert set(metrics.values()) == {"rgb(158, 168, 183)"}, metrics
 
 
+def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof showAttentionAlert === 'function' && typeof showTerminalConnectionToast === 'function' && typeof sendTestNotification === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        document.querySelectorAll('.toast').forEach(node => node.remove());
+        const state = {label: 'Needs input', reason: 'Please answer the question'};
+        const externalTitle = sessionNotificationTitle('1', state);
+        const internalTitle = sessionNotificationTitle('1', state, {inApp: true});
+        showAttentionAlert('1', state);
+        showTerminalConnectionToast('1', 'Disconnected', 5000);
+        sendTestNotification();
+        const title = selector => document.querySelector(selector)?.textContent?.trim() || '';
+        const untyped = [...document.querySelectorAll('.toast:not([data-toast-kind]) .toast-title')];
+        return {
+          externalTitle,
+          internalTitle,
+          attentionTitle: title('.toast[data-toast-kind="attention"] .toast-title'),
+          terminalTitle: title('.toast[data-toast-kind="terminal-connection"] .toast-title'),
+          testTitle: untyped.at(-1)?.textContent?.trim() || '',
+        };
+        """
+    )
+    assert metrics == {
+        "externalTitle": "YOLOmux[1 main] Needs input",
+        "internalTitle": "Needs input",
+        "attentionTitle": "Needs input",
+        "terminalTitle": "terminal",
+        "testTitle": "notifications enabled",
+    }, metrics
+
+
+def test_browser_notifications_use_shared_badge_free_yolomux_icon(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof sendBrowserNotification === 'function' && typeof renderBrowserAppIconDataUrl === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const sent = [];
+        Object.defineProperty(window, 'Notification', {
+          configurable: true,
+          value: function(title, options) {
+            sent.push({title, options});
+            return {};
+          },
+        });
+        sendBrowserNotification('YOLOmux[test] Needs input', {body: 'Please answer'});
+        sendBrowserNotification('custom', {icon: 'data:image/png;base64,custom'});
+        const image = new Image();
+        image.onload = () => done({
+          first: sent[0],
+          second: sent[1],
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        });
+        image.onerror = () => done({error: 'icon did not decode', first: sent[0]});
+        image.src = sent[0]?.options?.icon || '';
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["first"]["title"] == "YOLOmux[test] Needs input", metrics
+    assert metrics["first"]["options"]["body"] == "Please answer", metrics
+    assert metrics["first"]["options"]["icon"].startswith("data:image/png;base64,"), metrics
+    assert metrics["second"]["options"]["icon"] == "data:image/png;base64,custom", metrics
+    assert (metrics["width"], metrics["height"]) == (192, 192), metrics
+
+
+def test_rename_marks_index_building_and_refresh_done_requeries_open_search(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof renameFileTreePath === 'function' && typeof markFileIndexRootsRefreshing === 'function' && typeof handleClientPushEventNow === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const requests = [];
+        const retries = [];
+        apiFetchJson = async url => {
+          requests.push(url);
+          if (url === '/api/fs/rename') return {path: '/repo/home-manifest', reindex_roots: ['/repo']};
+          if (url.startsWith('/api/fs/index-status')) return {state: 'building', ready: false};
+          return {};
+        };
+        refreshFileExplorerTrees = async () => {};
+        refreshBackgroundOwnerStatus = async () => {};
+        fileExplorerIndexedDirs = new Set(['/repo']);
+        fileExplorerIndexStatus.set('/repo', 'ready');
+        renameFileTreePath('/repo/migration-tools', {name: 'migration-tools', kind: 'dir'}, 'home-manifest').then(async renamed => {
+          await new Promise(resolve => setTimeout(resolve, 0));
+          commandPaletteNode = document.createElement('div');
+          commandPaletteNode.hidden = false;
+          commandPaletteMode = 'files';
+          commandPaletteQuery = 'home-manifest';
+          refreshFileQuickOpenCandidates = async query => { retries.push(query); };
+          handleClientPushEventNow('background_refresh_done', {role: 'search-index', root: '/repo'});
+          await Promise.resolve();
+          done({
+            renamed,
+            indexStatus: fileExplorerIndexStatus.get('/repo'),
+            indexStatusRequested: requests.some(url => url.startsWith('/api/fs/index-status')),
+            retries,
+          });
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert metrics == {
+        "renamed": True,
+        "indexStatus": "building",
+        "indexStatusRequested": True,
+        "retries": ["home-manifest"],
+    }, metrics
+
+
 def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tmp_path):
     page = tmp_path / "yoinfo-badges-and-trailing-metadata.html"
     page.write_text(

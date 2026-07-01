@@ -452,6 +452,7 @@
   "notify.pr.review": "Review {decision} on {ref}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
+  "notify.testToastTitle": "เปิดใช้การแจ้งเตือนแล้ว",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "Command palette",
   "palette.group.files": "ไฟล์",

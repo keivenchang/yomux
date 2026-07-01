@@ -402,6 +402,7 @@
   "notify.pr.merged": "PR {ref} merged",
   "notify.pr.review": "Review {decision} on {ref}",
   "notify.testBody": "Cảnh báo trong trang YOLOmux đã bật.",
+  "notify.testToastTitle": "đã bật thông báo",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "Command palette",

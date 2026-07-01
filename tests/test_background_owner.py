@@ -974,6 +974,80 @@ def test_search_index_build_publishes_background_refresh_done(monkeypatch, tmp_p
     assert payload["entries"] >= 1
 
 
+def test_directory_rename_invalidates_and_rebuilds_search_index(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    old_dir = root / "migration-tools"
+    old_dir.mkdir(parents=True)
+    (old_dir / "manifest.yaml").write_text("name: old\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+
+    def synchronous_start(index, skip_dirs, exclude_path=None, exclude_signature=""):
+        file_index._run_build(index, set(skip_dirs), exclude_path=exclude_path, exclude_signature=exclude_signature)
+
+    monkeypatch.setattr(file_index, "_start_build", synchronous_start)
+    file_index.set_background_owner_checker(lambda _role: True)
+    try:
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+        file_index.build_now(
+            root,
+            filesystem.SEARCH_SKIP_DIRS,
+            exclude_path=filesystem._path_is_secret,
+            exclude_signature=filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
+        before = filesystem.search_files(str(root), query="migration-tools", recursive=True)
+        renamed = filesystem.rename_path(str(old_dir), "home-manifest")
+        after_new = filesystem.search_files(str(root), query="home-manifest", recursive=True)
+        after_old = filesystem.search_files(str(root), query="migration-tools", recursive=True)
+    finally:
+        file_index.set_background_owner_checker(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+
+    assert [entry["relative_path"] for entry in before["files"]] == ["migration-tools/manifest.yaml"]
+    assert renamed["reindex_roots"] == [str(root)]
+    assert [entry["relative_path"] for entry in after_new["files"]] == ["home-manifest/manifest.yaml"]
+    assert after_old["files"] == []
+
+
+def test_directory_rename_follower_requests_owner_index_rebuild(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    old_dir = root / "migration-tools"
+    old_dir.mkdir(parents=True)
+    (old_dir / "manifest.yaml").write_text("name: old\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    requests = []
+    try:
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+        file_index.build_now(root, filesystem.SEARCH_SKIP_DIRS)
+        file_index.set_background_owner_checker(lambda _role: False)
+        file_index.set_background_owner_refresh_requester(lambda role, payload: requests.append((role, payload)) or {"ok": True, "accepted": True})
+        renamed = filesystem.rename_path(str(old_dir), "home-manifest")
+    finally:
+        file_index.set_background_owner_checker(None)
+        file_index.set_background_owner_refresh_requester(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+
+    assert renamed["reindex_roots"] == [str(root)]
+    assert requests == [(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(root), "path": str(old_dir), "reason": "fs-rename"})]
+
+
+def test_local_owner_search_index_refresh_request_starts_root_build(no_control_socket, monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    refreshed = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(filesystem, "index_status", lambda root: refreshed.append(root) or {"root": root, "state": "building"})
+    try:
+        result = webapp.request_background_refresh(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "reason": "fs-rename"})
+    finally:
+        webapp.control_server.stop()
+
+    assert refreshed == [str(tmp_path)]
+    assert result["refresh"] == {"root": str(tmp_path), "state": "building"}
+
+
 def test_search_index_warm_takeover_loads_disk_without_rebuild_timing_regression(monkeypatch, tmp_path):
     (tmp_path / "target.py").write_text("print('x')\n", encoding="utf-8")
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

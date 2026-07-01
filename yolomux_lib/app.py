@@ -2540,6 +2540,13 @@ class TmuxWebtermApp:
         else:
             self.background_owner.record_refresh_request(role)
             result = {"ok": False, "accepted": False, "role": role, "fallback": False}
+        if result.get("local_owner") and not result.get("coalesced") and role == BACKGROUND_ROLE_SEARCH_INDEX:
+            root = str(request_payload.get("root") or "").strip()
+            if root:
+                try:
+                    result["refresh"] = filesystem.index_status(root)
+                except filesystem.FilesystemError as exc:
+                    result.update({"ok": False, "accepted": False, "error": str(exc)})
         cache_status = "coalesced" if result.get("coalesced") else ("fallback" if self.background_refresh_should_fallback(result) else ("accepted" if result.get("accepted") else "rejected"))
         self.record_performance_sample(
             role,

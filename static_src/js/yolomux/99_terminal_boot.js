@@ -5122,6 +5122,9 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
+      if (commandPaletteNode && !commandPaletteNode.hidden && commandPaletteEffectiveMode() === 'files') {
+        refreshFileQuickOpenCandidates(commandPaletteQuery).catch(error => console.warn('search-index quick-open refresh failed', error));
+      }
     }
     if (payload.role === 'session-files') {
       const session = String(payload.session || '');

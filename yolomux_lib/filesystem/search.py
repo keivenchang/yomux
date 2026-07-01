@@ -435,3 +435,26 @@ def unindex_root(raw_root: str) -> dict[str, Any]:
     root = paths._canonical_root(paths._validated_path(raw_root))
     file_index.unindex(root)
     return {"root": str(root), "ok": True}
+
+
+def reindex_roots_for_path(raw_path: str, reason: str = "filesystem-change") -> list[str]:
+    """Invalidate indexed ancestors and immediately hand their rebuild to the index owner."""
+    path = paths._normalized_scope_path(paths._validated_path(raw_path))
+    roots = file_index.invalidate_path(path)
+    for root in roots:
+        if not root.is_dir():
+            continue
+        if file_index.background_owner_can_build():
+            file_index.ensure_index(
+                root,
+                SEARCH_SKIP_DIRS,
+                exclude_path=paths._path_is_secret,
+                exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
+            )
+        else:
+            file_index.request_background_owner_refresh({
+                "root": str(root),
+                "path": str(path),
+                "reason": reason,
+            })
+    return [str(root) for root in roots]

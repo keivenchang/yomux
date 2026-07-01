@@ -714,3 +714,39 @@ def unindex(root: Path) -> None:
         _tombstone_path(root).write_text(str(time.time()), encoding="utf-8")
     except OSError:
         pass
+
+
+def indexed_ancestor_roots(path: Path) -> list[Path]:
+    """Return every active or persisted index root that contains ``path``."""
+    target = path.expanduser().resolve(strict=False)
+    with _REGISTRY_LOCK:
+        candidates = {Path(root).expanduser().resolve(strict=False) for root in _REGISTRY}
+    try:
+        manifests = tuple(INDEX_DIR.glob("*.manifest.json"))
+    except OSError:
+        manifests = ()
+    for manifest_path in manifests:
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        root_text = payload.get("root") if isinstance(payload, dict) else None
+        if not isinstance(root_text, str) or not root_text.startswith("/"):
+            continue
+        candidates.add(Path(root_text).resolve(strict=False))
+    roots = []
+    for root in candidates:
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        roots.append(root)
+    return sorted(roots, key=lambda root: (len(root.parts), str(root)))
+
+
+def invalidate_path(path: Path) -> list[Path]:
+    """Drop indexed ancestors through the existing cross-process unindex path."""
+    roots = indexed_ancestor_roots(path)
+    for root in roots:
+        unindex(root)
+    return roots

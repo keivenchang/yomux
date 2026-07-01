@@ -452,6 +452,7 @@
   "notify.pr.review": "{ref} 的审查为 {decision}",
   "notify.testBody": "优乐mux 页内通知已启用。",
   "notify.testTitle": "优乐mux[{host}] 通知已启用",
+  "notify.testToastTitle": "通知已启用",
   "notify.toggleTitle": "会话需要注意时通知；浏览器通知：{state}",
   "palette.aria": "命令面板",
   "palette.group.files": "文件",

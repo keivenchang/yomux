@@ -452,6 +452,7 @@
   "notify.pr.review": "{ref}의 리뷰가 {decision}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
+  "notify.testToastTitle": "알림이 활성화됨",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "명령 팔레트",
   "palette.group.files": "파일",

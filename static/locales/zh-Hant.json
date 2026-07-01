@@ -452,6 +452,7 @@
   "notify.pr.review": "{ref} 的審查為 {decision}",
   "notify.testBody": "優樂mux 頁內通知已啟用。",
   "notify.testTitle": "優樂mux[{host}] 通知已啟用",
+  "notify.testToastTitle": "通知已啟用",
   "notify.toggleTitle": "工作階段需要注意時通知；瀏覽器通知：{state}",
   "palette.aria": "命令面板",
   "palette.group.files": "檔案",

@@ -835,6 +835,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       body: JSON.stringify({path: fullPath, new_name: trimmed}),
     });
     const newPath = payload.path;
+    markFileIndexRootsRefreshing(payload.reindex_roots);
     if (fileExplorerSelectedPaths.delete(fullPath)) fileExplorerSelectedPaths.add(newPath);
     if (fileExplorerSelectionAnchor === fullPath) fileExplorerSelectionAnchor = newPath;
     if (fileTreeRenamePath === fullPath) fileTreeRenamePath = null;

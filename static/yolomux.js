@@ -7250,38 +7250,51 @@ function browserFaviconAccentColors() {
   }
 }
 
-function renderBrowserFaviconDataUrl(count) {
+function renderBrowserAppIconDataUrl(options = {}) {
+  const logicalSize = 64;
+  const size = Math.max(logicalSize, Math.round(Number(options.size) || logicalSize));
+  const showBadge = options.showBadge === true;
+  const count = Math.max(0, Math.floor(Number(options.count) || 0));
   const canvas = document.createElement('canvas');
-  canvas.width = 64;
-  canvas.height = 64;
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext?.('2d');
   if (!ctx || typeof canvas.toDataURL !== 'function') return '';
 
   const faviconAccent = browserFaviconAccentColors();
-  ctx.clearRect(0, 0, 64, 64);
+  ctx.clearRect(0, 0, size, size);
+  ctx.save();
+  ctx.scale(size / logicalSize, size / logicalSize);
   browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10);
   ctx.fillStyle = faviconAccent.bg;
   ctx.fill();
 
-  const label = browserFaviconBadgeLabel(count);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
   ctx.fillStyle = faviconAccent.text;
   ctx.font = '900 86px Arial, sans-serif';
   ctx.save();
-  ctx.translate(25, 39);
+  ctx.translate(showBadge ? 25 : 32, 39);
   ctx.scale(1.22, 1);
   ctx.fillText('Y', 0, 0);
   ctx.restore();
 
-  ctx.textAlign = 'right';
-  ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif';
-  ctx.lineWidth = 5;
-  ctx.strokeStyle = '#f9fafb';
-  ctx.strokeText(label, 62, 50);
-  ctx.fillStyle = count > 0 ? '#d92d20' : '#374151';
-  ctx.fillText(label, 62, 50);
+  if (showBadge) {
+    const label = browserFaviconBadgeLabel(count);
+    ctx.textAlign = 'right';
+    ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = '#f9fafb';
+    ctx.strokeText(label, 62, 50);
+    ctx.fillStyle = count > 0 ? '#d92d20' : '#374151';
+    ctx.fillText(label, 62, 50);
+  }
+  ctx.restore();
   return canvas.toDataURL('image/png');
+}
+
+function renderBrowserFaviconDataUrl(count) {
+  return renderBrowserAppIconDataUrl({count, showBadge: true});
 }
 
 let browserFaviconLastBadge = null;
@@ -9190,7 +9203,10 @@ function shouldNotifyState(state) {
 }
 
 function sendBrowserNotification(title, options = {}) {
-  const notification = new Notification(title, options);
+  const icon = options.icon === undefined
+    ? renderBrowserAppIconDataUrl({size: 192, showBadge: false})
+    : '';
+  const notification = new Notification(title, icon ? {icon, ...options} : options);
   notification.onclick = () => {
     window.focus();
     if (options.session) selectSession(options.session, {userInitiated: true});
@@ -9478,9 +9494,10 @@ function displayToastContainer(session) {
   return document.querySelector('.panel-toast-stack') || attentionAlerts;
 }
 
-function compactNotificationTitle(scope, message) {
+function compactNotificationTitle(scope, message, options = {}) {
   const suffix = String(message || '').trim();
   const label = String(scope || '').trim();
+  if (options.inApp === true) return suffix || label;
   if (!label) return suffix ? `YOLOmux ${suffix}` : 'YOLOmux';
   return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
 }
@@ -9491,17 +9508,17 @@ function sessionNotificationScope(session) {
   return desc ? `${label} ${desc}` : label;
 }
 
-function sessionNotificationTitle(session, state) {
-  return compactNotificationTitle(sessionNotificationScope(session), state?.label || '');
+function sessionNotificationTitle(session, state, options = {}) {
+  return compactNotificationTitle(sessionNotificationScope(session), state?.label || '', options);
 }
 
-function hostNotificationTitle(message) {
-  return compactNotificationTitle(serverHostname, message);
+function hostNotificationTitle(message, options = {}) {
+  return compactNotificationTitle(serverHostname, message, options);
 }
 
 function showAttentionAlert(session, state) {
   const node = showToast(
-    sessionNotificationTitle(session, state),
+    sessionNotificationTitle(session, state, {inApp: true}),
     state.reason,
     {
       container: displayToastContainer(session),
@@ -9538,7 +9555,7 @@ function removeAttentionAlert(id) {
 }
 
 function sendTestNotification() {
-  showToast(t('notify.testTitle', {host: serverHostname}), t('notify.testBody'), {
+  showToast(hostNotificationTitle(t('notify.testToastTitle'), {inApp: true}), t('notify.testBody'), {
     container: displayToastContainer(focusedPanelItem),
   });
   if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
@@ -14646,6 +14663,20 @@ function clearFileIndexStatus(root) {
   syncFileIndexStatusPollInterval();
 }
 
+function markFileIndexRootsRefreshing(roots = []) {
+  let changed = false;
+  for (const root of Array.isArray(roots) ? roots : []) {
+    const normalized = normalizeStoredFileExplorerIndexedDir(root);
+    if (!normalized || !fileExplorerIndexedDirs.has(normalized)) continue;
+    fileExplorerIndexStatus.set(normalized, 'building');
+    fileIndexStatusPollRoots.add(normalized);
+    refreshFileIndexStatus(normalized);
+    changed = true;
+  }
+  syncFileIndexStatusPollInterval();
+  if (changed) updateFileExplorerIndexedDirectoryRows();
+}
+
 // Proactive periodic re-check: re-fetches index-status for every indexed root even if already
 // 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
 function refreshAllIndexedDirsStatus() {
@@ -17647,6 +17678,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       body: JSON.stringify({path: fullPath, new_name: trimmed}),
     });
     const newPath = payload.path;
+    markFileIndexRootsRefreshing(payload.reindex_roots);
     if (fileExplorerSelectedPaths.delete(fullPath)) fileExplorerSelectedPaths.add(newPath);
     if (fileExplorerSelectionAnchor === fullPath) fileExplorerSelectionAnchor = newPath;
     if (fileTreeRenamePath === fullPath) fileTreeRenamePath = null;
@@ -26257,7 +26289,7 @@ function dismissTerminalConnectionToasts(session) {
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
   const node = showToast(
-    compactNotificationTitle(sessionLabel(session), 'terminal'),
+    compactNotificationTitle(sessionLabel(session), 'terminal', {inApp: true}),
     text,
     {
       container: displayToastContainer(session),
@@ -56003,6 +56035,9 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
+      if (commandPaletteNode && !commandPaletteNode.hidden && commandPaletteEffectiveMode() === 'files') {
+        refreshFileQuickOpenCandidates(commandPaletteQuery).catch(error => console.warn('search-index quick-open refresh failed', error));
+      }
     }
     if (payload.role === 'session-files') {
       const session = String(payload.session || '');

@@ -452,6 +452,7 @@
   "notify.pr.review": "{ref} पर समीक्षा {decision}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
+  "notify.testToastTitle": "सूचनाएँ सक्षम हैं",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "Command palette",
   "palette.group.files": "फ़ाइलें",

@@ -1805,12 +1805,18 @@ async function runEditorPreviewSuite() {
     assert.ok(body.includes('container: displayToastContainer(session)'), 'attention notifications use the target pane-local toast stack');
     assert.equal(body.includes('container: attentionAlerts'), false, 'attention notifications do not use the global fixed stack');
     assert.ok(source.includes('function compactNotificationTitle('), 'notification/toast titles use one compact title helper');
-    assert.ok(body.includes('sessionNotificationTitle(session, state)'), 'attention toasts use the compact session notification title');
+    assert.ok(body.includes('sessionNotificationTitle(session, state, {inApp: true})'), 'attention toasts use the shared title helper without redundant external app context');
     assert.ok(source.includes('function sessionNotificationScope(session)'), 'session attention notifications enrich the compact scope through one helper');
     assert.ok(source.includes('sessionTabDescription(session, transcriptMeta.sessions?.[session])'), 'session attention notifications include the same concise description used by tabs');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}'), false, 'attention notifications drop verbose host-prefixed titles');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${message}'), false, 'watched-PR browser notifications drop verbose host-prefixed titles');
-    assert.ok(source.includes("compactNotificationTitle(sessionLabel(session), 'terminal')"), 'terminal connection toasts use the compact session title');
+    assert.ok(source.includes("compactNotificationTitle(sessionLabel(session), 'terminal', {inApp: true})"), 'terminal connection toasts use the shared in-app title path without redundant external app context');
+    assert.ok(source.includes("showToast(hostNotificationTitle(t('notify.testToastTitle'), {inApp: true})"), 'the in-page notification test uses the shared context-free toast title path');
+    assert.ok(source.includes("sendBrowserNotification(t('notify.testTitle', {host: serverHostname})"), 'the browser-to-OS notification test keeps the branded host title');
+    assert.ok(source.includes('function renderBrowserAppIconDataUrl(options = {})'), 'favicon and OS notifications share one app-icon renderer');
+    assert.ok(source.includes('return renderBrowserAppIconDataUrl({count, showBadge: true})'), 'the favicon enables the activity-count badge through the shared renderer');
+    assert.ok(source.includes('renderBrowserAppIconDataUrl({size: 192, showBadge: false})'), 'OS notifications use a badge-free 192px icon through the shared renderer');
+    assert.ok(source.includes("new Notification(title, icon ? {icon, ...options} : options)"), 'the shared OS-notification boundary applies the icon to every notification');
     const notificationApi = loadYolomux('', ['1']);
     notificationApi.setTranscriptInfoForTest('1', {
       selected_pane: {current_path: '/home/test/yolomux.dev8001'},
@@ -1820,6 +1826,7 @@ async function runEditorPreviewSuite() {
       },
     });
     assert.equal(notificationApi.sessionNotificationTitleForTest('1', {label: 'Needs input'}), 'YOLOmux[1 fix: show attention notification description] Needs input', 'attention notification title includes session number plus tab description');
+    assert.equal(notificationApi.sessionNotificationTitleForTest('1', {label: 'Needs input'}, {inApp: true}), 'Needs input', 'in-page attention title omits redundant YOLOmux and session context');
     assert.ok(source.includes("localizedHtml('terminal.connection.reconnectingStatus'"), 'terminal reconnect status is i18n-keyed');
     assert.ok(source.includes("t('terminal.connection.reconnectingToast'"), 'terminal reconnect toast is i18n-keyed');
     assert.ok(source.includes("terminalNotConnectedHtml(session)"), 'terminal-not-connected statuses share the localized helper');
@@ -1830,6 +1837,7 @@ async function runEditorPreviewSuite() {
     assert.equal(source.includes('terminal is not connected</span>'), false, 'terminal-not-connected status does not leak a hardcoded English literal');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['terminal.connection.reconnectingToast'], 'Disconnected. Reconnecting in {seconds}s.', 'terminal reconnect toast has a source locale key');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['notify.testTitle'], 'YOLOmux[{host}] notifications enabled', 'test notification title uses compact host bracket format');
+    assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['notify.testToastTitle'], 'notifications enabled', 'in-page test notification title omits redundant external app context');
     const attentionCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(/\.panel-toast-stack\s*\{[\s\S]*top:\s*8px[\s\S]*z-index:\s*var\(--z-full-screen-overlay\)/.test(attentionCss), 'pane-local toast stacks render below each pane tab strip and above pane contents');
   });
@@ -5843,6 +5851,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
     assert.ok(/if \(type === 'background_owner_changed'\)[\s\S]{0,180}applyBackgroundOwnerStatusPayload\(payload\)/.test(source), 'background_owner_changed applies direct owner status');
     assert.ok(/if \(type === 'background_refresh_done'\)[\s\S]{0,180}payload\.role === 'search-index'[\s\S]{0,160}refreshBackgroundOwnerStatus\(\{force: true\}\)/.test(source), 'search-index refresh completion refreshes owner status');
+    assert.ok(/payload\.role === 'search-index'[\s\S]{0,420}commandPaletteEffectiveMode\(\) === 'files'[\s\S]{0,180}refreshFileQuickOpenCandidates\(commandPaletteQuery\)/.test(source), 'search-index refresh completion reruns an open file search against the rebuilt index');
     assert.ok(/if \(payload\.role === 'session-files'\)[\s\S]{0,260}fetchSessionFiles\(\{silent: true\}\)/.test(source), 'session-files refresh completion refetches the visible Differ payload from the follower cache');
     assert.ok(/if \(type === 'tmux_signals_changed'\)[\s\S]{0,120}applyTmuxSignalsPayload\(payload\)/.test(source), 'tmux_signals_changed applies direct payloads');
     assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
@@ -5869,6 +5878,10 @@ async function runEditorPreviewSuite() {
     const fsPushHelper = source.slice(source.indexOf('async function refreshFileExplorerFromPush'), source.indexOf('function expandUserPath'));
     assert.equal(fsPushHelper.includes('fetchSessionFiles'), false, 'fs_changed refreshes Finder/open-file state without also fetching session-files');
     assert.ok(/if \(type === 'fs_changed'\)[\s\S]{0,180}refreshFileExplorerFromPush\(payload\)/.test(source), 'fs_changed refreshes Finder/open-file state through the shared push helper');
+    const renameSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    const indexSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    assert.ok(/async function renameFileTreePath\([\s\S]*apiFetchJson\('\/api\/fs\/rename'[\s\S]*markFileIndexRootsRefreshing\(payload\.reindex_roots\)/.test(renameSource), 'Finder rename marks every backend-invalidated index root as rebuilding');
+    assert.ok(/function markFileIndexRootsRefreshing\(roots = \[\]\)[\s\S]*fileExplorerIndexStatus\.set\(normalized, 'building'\)[\s\S]*refreshFileIndexStatus\(normalized\)/.test(indexSource), 'renamed-path index refresh uses the shared index-status owner instead of a duplicate search cache');
     assert.ok(source.includes('function clientServerWatchState()'), 'client reports rich watched state, not only filesystem roots');
     assert.ok(source.includes('context_items: transcriptContextWatchRequests()'), 'watch state includes visible transcript context previews only');
     assert.ok(source.includes('state.session_files = clientSessionFilesWatchRequests()'), 'watch state includes the current session-files request');

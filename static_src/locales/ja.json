@@ -402,6 +402,7 @@
   "notify.pr.merged": "PR {ref} がマージされました",
   "notify.pr.review": "{ref} のレビューが {decision} になりました",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
+  "notify.testToastTitle": "通知が有効です",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "コマンドパレット",

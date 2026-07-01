@@ -452,6 +452,7 @@
   "notify.pr.review": "المراجعة {decision} في {ref}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
+  "notify.testToastTitle": "تم تمكين الإشعارات",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "لوحة الأوامر",
   "palette.group.files": "الملفات",

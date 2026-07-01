@@ -2595,7 +2595,7 @@ function dismissTerminalConnectionToasts(session) {
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
   const node = showToast(
-    compactNotificationTitle(sessionLabel(session), 'terminal'),
+    compactNotificationTitle(sessionLabel(session), 'terminal', {inApp: true}),
     text,
     {
       container: displayToastContainer(session),

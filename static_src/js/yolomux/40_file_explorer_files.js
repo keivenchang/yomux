@@ -3244,6 +3244,20 @@ function clearFileIndexStatus(root) {
   syncFileIndexStatusPollInterval();
 }
 
+function markFileIndexRootsRefreshing(roots = []) {
+  let changed = false;
+  for (const root of Array.isArray(roots) ? roots : []) {
+    const normalized = normalizeStoredFileExplorerIndexedDir(root);
+    if (!normalized || !fileExplorerIndexedDirs.has(normalized)) continue;
+    fileExplorerIndexStatus.set(normalized, 'building');
+    fileIndexStatusPollRoots.add(normalized);
+    refreshFileIndexStatus(normalized);
+    changed = true;
+  }
+  syncFileIndexStatusPollInterval();
+  if (changed) updateFileExplorerIndexedDirectoryRows();
+}
+
 // Proactive periodic re-check: re-fetches index-status for every indexed root even if already
 // 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
 function refreshAllIndexedDirsStatus() {

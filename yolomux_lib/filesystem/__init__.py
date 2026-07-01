@@ -195,7 +195,9 @@ def delete_path(raw_path: str) -> dict[str, Any]:
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.rename_path(raw_path, new_name)
+    payload = io_ops.rename_path(raw_path, new_name)
+    payload["reindex_roots"] = search.reindex_roots_for_path(payload["old_path"], reason="fs-rename")
+    return payload
 
 
 def create_directory(raw_path: str) -> dict[str, Any]:

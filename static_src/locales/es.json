@@ -402,6 +402,7 @@
   "notify.pr.merged": "PR {ref} fusionada",
   "notify.pr.review": "Revisión {decision} en {ref}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
+  "notify.testToastTitle": "notificaciones activadas",
   "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "notify.toggleTitle": "Notify when a session needs attention; browser notifications: {state}",
   "palette.aria": "Paleta de comandos",
