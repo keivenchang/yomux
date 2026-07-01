@@ -10012,6 +10012,11 @@ class TmuxWebtermApp:
             raise
 
     def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
+        # Cross-process push and SSE polling are latency optimizations, not correctness boundaries.
+        # A peer can miss both while disconnected, so every explicit status read must first observe
+        # the shared acknowledgement revision and discard a cache built before that revision.
+        if self.merge_shared_attention_acks():
+            self.invalidate_auto_approve_cache()
         if session is not None:
             timings: dict[str, float] = {}
             return self.build_auto_approve_status(session, timings=timings)

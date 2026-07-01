@@ -51,6 +51,56 @@ def test_attention_ack_visible_to_second_instance(monkeypatch, tmp_path, make_ap
     assert second.attention_acknowledged(key) is True
 
 
+def test_auto_approve_read_merges_peer_ack_without_event_subscriber(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    first = make_app()
+    second = make_app()
+    key = first.attention_ack_key("prompt", "1", "cross-port-read")
+    first.acknowledge_attention({"keys": [key]})
+
+    monkeypatch.setattr(second, "refresh_sessions", lambda maintenance=False: [])
+    monkeypatch.setattr(second, "sync_auto_approve_agent_workers", lambda takeover=False: None)
+    monkeypatch.setattr(second, "activity_snapshot_with_recency", lambda snapshot=None: {})
+    monkeypatch.setattr(second, "prompt_and_screen_status", lambda *args, **kwargs: (
+        {"visible": True, "signature": "cross-port-read", "text": "Needs input"},
+        {"key": "needs-input", "text": "Needs input"},
+    ))
+    monkeypatch.setattr(second, "agent_window_status_payloads", lambda *args, **kwargs: [])
+
+    payload, status = second.auto_approve_status("1")
+
+    assert status == HTTPStatus.OK
+    assert payload["prompt_attention_key"] == key
+    assert payload["prompt_attention_acknowledged"] is True
+    assert payload["attention_acks"]["keys"] == [key]
+
+
+def test_auto_approve_roster_read_discards_cache_from_before_peer_ack(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    first = make_app()
+    second = make_app()
+    key = first.attention_ack_key("prompt", "1", "cross-port-cached-read")
+
+    monkeypatch.setattr(second, "refresh_sessions", lambda maintenance=False: [])
+    monkeypatch.setattr(second, "sync_auto_approve_agent_workers", lambda takeover=False: None)
+    monkeypatch.setattr(second, "activity_snapshot_with_recency", lambda snapshot=None: {})
+    monkeypatch.setattr(second, "prompt_and_screen_status", lambda *args, **kwargs: (
+        {"visible": True, "signature": "cross-port-cached-read", "text": "Needs input"},
+        {"key": "needs-input", "text": "Needs input"},
+    ))
+    monkeypatch.setattr(second, "agent_window_status_payloads", lambda *args, **kwargs: [])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+
+    before, before_status = second.auto_approve_status()
+    first.acknowledge_attention({"keys": [key]})
+    after, after_status = second.auto_approve_status()
+
+    assert before_status == after_status == HTTPStatus.OK
+    assert before["sessions"]["1"]["prompt_attention_acknowledged"] is False
+    assert after["sessions"]["1"]["prompt_attention_acknowledged"] is True
+    assert after["sessions"]["1"]["attention_acks"]["keys"] == [key]
+
+
 def test_attention_ack_union_does_not_clobber_peer_keys(monkeypatch, tmp_path, make_app):
     patch_shared_path(monkeypatch, tmp_path)
     first = make_app()

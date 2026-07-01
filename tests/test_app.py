@@ -1192,6 +1192,7 @@ def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):
     stale_payload = {"session_order": ["1"], "sessions": {"1": {"enabled": True}}, "errors": [], "rules": {}}
     with webapp.auto_approve_cache_condition:
         webapp.auto_approve_cache = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (stale_payload, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "merge_shared_attention_acks", lambda: False)
     monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append("refresh") or True)
     try:
         payload, status = webapp.auto_approve_status()
