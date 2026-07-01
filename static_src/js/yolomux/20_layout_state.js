@@ -2526,63 +2526,100 @@ function inactiveTabItems() {
   return sortTabItems(allTabItems().filter(item => !inPane.has(item)));
 }
 
+function readNotificationDelivery() {
+  try {
+    const stored = JSON.parse(storageGet(notificationDeliveryStorageKey, ''));
+    if (!stored || typeof stored !== 'object') return {...notificationDeliveryDefaults};
+    return {inApp: stored.inApp !== false, system: stored.system === true};
+  } catch (_) {
+    return {...notificationDeliveryDefaults};
+  }
+}
+
+function notificationDeliveryEnabled(channel) {
+  if (channel === 'inApp') return notificationDelivery.inApp === true;
+  if (channel === 'system') return notificationDelivery.system === true;
+  return notificationDelivery.inApp === true || notificationDelivery.system === true;
+}
+
+function notificationSystemPermission() {
+  return 'Notification' in window ? Notification.permission : 'unsupported';
+}
+
+function notificationDeliveryItems() {
+  return [
+    menuCommand('In YOLOmux', () => setNotificationDelivery('inApp', !notificationDeliveryEnabled('inApp')), {checked: notificationDeliveryEnabled('inApp'), keepOpen: true, renderMenu: false, className: 'notification-delivery-in-app', detail: 'Show notification popups in YOLOmux.'}),
+    menuCommand('System notifications', () => setNotificationDelivery('system', !notificationDeliveryEnabled('system')), {checked: notificationDeliveryEnabled('system'), keepOpen: true, renderMenu: false, className: 'notification-delivery-system', detail: `Browser permission: ${notificationSystemPermission()}`, disabled: notificationSystemPermission() === 'unsupported'}),
+  ];
+}
+
+let notificationDeliveryPopover = null;
+
+function closeNotificationDeliveryPopover() {
+  if (!notificationDeliveryPopover) return;
+  notificationDeliveryPopover.hidden = true;
+  notifyToggle?.setAttribute('aria-expanded', 'false');
+}
+
+function openNotificationDeliveryPopover() {
+  if (!notifyToggle) return;
+  if (!notificationDeliveryPopover) {
+    notificationDeliveryPopover = document.createElement('div');
+    notificationDeliveryPopover.className = 'app-menu-popover notification-delivery-popover';
+    notificationDeliveryPopover.hidden = true;
+    notificationDeliveryPopover.setAttribute('role', 'menu');
+    document.body.appendChild(notificationDeliveryPopover);
+    document.addEventListener('pointerdown', event => {
+      if (!notificationDeliveryPopover.hidden && !notificationDeliveryPopover.contains(event.target) && event.target !== notifyToggle) closeNotificationDeliveryPopover();
+    });
+  }
+  notificationDeliveryPopover.replaceChildren(...notificationDeliveryItems().map(createAppMenuItem));
+  notificationDeliveryPopover.hidden = false;
+  const rect = notifyToggle.getBoundingClientRect();
+  const width = notificationDeliveryPopover.getBoundingClientRect().width;
+  notificationDeliveryPopover.style.top = `${rect.bottom + 4}px`;
+  notificationDeliveryPopover.style.left = `${Math.max(8, rect.right - width)}px`;
+  notifyToggle.setAttribute('aria-expanded', 'true');
+}
+
 function renderNotifyToggle() {
   if (!notifyToggle) return;
-  const supported = 'Notification' in window;
-  notifyToggle.disabled = readOnlyMode;
-  syncPressedButton(notifyToggle, notificationsEnabled, {
-    labelOn: 'Notify',
-    labelOff: 'Notify',
-  });
-  const browserState = supported ? Notification.permission : 'unsupported';
-  notifyToggle.title = readOnlyMode
-    ? t('notify.adminOnlyTitle')
-    : t('notify.toggleTitle', {state: browserState});
+  syncPressedButton(notifyToggle, notificationDeliveryEnabled(), {labelOn: 'Notifications', labelOff: 'Notifications'});
+  notifyToggle.title = `Notifications: In YOLOmux ${notificationDeliveryEnabled('inApp') ? 'on' : 'off'}; system ${notificationDeliveryEnabled('system') ? 'on' : 'off'}`;
+  notifyToggle.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (notificationDeliveryPopover && !notificationDeliveryPopover.hidden) closeNotificationDeliveryPopover();
+    else openNotificationDeliveryPopover();
+  };
 }
 
-async function toggleNotifications() {
-  if (readOnlyMode) {
-    statusErr(localizedHtml('status.readOnlyChangeNotify'));
-    return;
-  }
-  const nextEnabled = !notificationsEnabled;
-  let browserPermission = 'unsupported';
-  if (nextEnabled && 'Notification' in window && Notification.permission === 'default') {
-    const permission = await Notification.requestPermission();
-    browserPermission = permission;
-  } else if ('Notification' in window) {
-    browserPermission = Notification.permission;
-  }
-  try {
-    const response = await apiFetch(`/api/notify?enabled=${nextEnabled ? '1' : '0'}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${response.status}`);
-    notificationsEnabled = payload.enabled === true;
-  } catch (error) {
-    statusErr(localizedHtml('status.notifyRequestFailed', {error}));
-    return;
-  }
-  renderNotifyToggle();
-  renderSessionButtons();
-  if (notificationsEnabled) {
-    if (browserPermission !== 'granted') {
-      statusOk(`in-page alerts on; browser notifications ${esc(browserPermission)}`);
+function refreshNotificationDeliveryMenuChecks() {
+  for (const [className, channel] of [['notification-delivery-in-app', 'inApp'], ['notification-delivery-system', 'system']]) {
+    for (const node of document.querySelectorAll(`.${className}`)) {
+      const checked = notificationDeliveryEnabled(channel);
+      node.dataset.checked = checked ? 'true' : 'false';
+      node.setAttribute('aria-checked', checked ? 'true' : 'false');
     }
-    sendTestNotification();
-    notifyCurrentAttentionStates();
-  } else {
-    statusOk(`${esc(t('status.notifyOff'))}`);
   }
 }
 
-async function loadNotifyStatus() {
-  try {
-    const response = await apiFetch('/api/notify', {cache: 'no-store'});
-    const payload = await response.json();
-    notificationsEnabled = response.ok && payload.enabled === true;
-  } catch (_) {
-    notificationsEnabled = false;
+async function setNotificationDelivery(channel, enabled) {
+  let system = notificationDelivery.system === true;
+  if (channel === 'system') {
+    system = enabled === true;
+    if (system && notificationSystemPermission() === 'default') system = await Notification.requestPermission() === 'granted';
+    if (system && notificationSystemPermission() !== 'granted') system = false;
   }
+  notificationDelivery = {inApp: channel === 'inApp' ? enabled === true : notificationDelivery.inApp === true, system};
+  storageSet(notificationDeliveryStorageKey, JSON.stringify(notificationDelivery));
+  renderNotifyToggle();
+  refreshNotificationDeliveryMenuChecks();
+  if (notificationDeliveryEnabled(channel)) sendTestNotification({[channel]: true});
+}
+
+function loadNotificationDelivery() {
+  notificationDelivery = readNotificationDelivery();
   renderNotifyToggle();
 }
 
@@ -4284,11 +4321,11 @@ function removeAttentionAlert(id) {
   document.querySelector(`[data-alert-id="${id}"]`)?.remove();
 }
 
-function sendTestNotification() {
-  showToast(hostNotificationTitle(t('notify.testToastTitle'), {inApp: true}), t('notify.testBody'), {
-    container: displayToastContainer(focusedPanelItem),
-  });
-  if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+function sendTestNotification(options = {}) {
+  const inApp = options.inApp === true || (options.inApp === undefined && notificationDeliveryEnabled('inApp'));
+  const system = options.system === true || (options.system === undefined && notificationDeliveryEnabled('system'));
+  if (inApp) showToast(hostNotificationTitle(t('notify.testToastTitle'), {inApp: true}), t('notify.testBody'), {container: displayToastContainer(focusedPanelItem)});
+  if (!system || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     sendBrowserNotification(t('notify.testTitle', {host: serverHostname}), {
       body: t('notify.browserTestBody'),
@@ -4335,7 +4372,7 @@ function trackSessionStateChanges() {
 }
 
 function maybeNotifyState(session, state, options = {}) {
-  if (!notificationsEnabled) return;
+  if (!notificationDeliveryEnabled()) return;
   if (!shouldNotifyState(state)) return;
   const key = `${session}:${stateSignature(state)}`;
   const now = Date.now();
@@ -4352,12 +4389,12 @@ function maybeNotifyState(session, state, options = {}) {
   if (options.force !== true && now - lastSent < 60_000) return;
   setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
   const body = `${state.reason} · ${projectDirName(session, transcriptMeta.sessions?.[session])}`;
-  showAttentionAlert(session, state);
+  if (notificationDeliveryEnabled('inApp')) showAttentionAlert(session, state);
   postEvent(session, 'alert_shown', eventMessageForState(session, state), {
     state: state.key,
     reason: state.reason,
   });
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     sendBrowserNotification(sessionNotificationTitle(session, state), {
       body,
@@ -4419,7 +4456,7 @@ function notifyWatchedPrTransitions(prs) {
 // the PR) + a browser Notification, gated by notificationsEnabled + notify_transitions, deduped and
 // throttled by notifications.throttle_seconds via the shared notificationLastSent map.
 function maybeNotifyWatchedPr(ref, key, message, url) {
-  if (!notificationsEnabled) return;
+  if (!notificationDeliveryEnabled()) return;
   if (!shouldNotifyTransitionKey(key)) return;
   const signature = `watched-pr:${ref}:${key}`;
   const now = Date.now();
@@ -4427,11 +4464,9 @@ function maybeNotifyWatchedPr(ref, key, message, url) {
   const lastSent = notificationLastSent.get(signature) || 0;
   if (now - lastSent < throttleMs) return;
   setLimitedMapEntry(notificationLastSent, signature, now, notificationLastSentLimit);
-  showToast(message, [ref], {
-    onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} },
-  });
+  if (notificationDeliveryEnabled('inApp')) showToast(message, [ref], {onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} }});
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     sendBrowserNotification(hostNotificationTitle(message), {
       body: ref,

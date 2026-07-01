@@ -4785,11 +4785,7 @@ async function boot() {
   statusEl.textContent = t('status.yoloLoading');
   let initialAutoStatusesPromise = Promise.resolve(false);
   if (!shareViewMode) {
-    loadNotifyStatus().catch(error => {
-      console.warn('initial notify-status refresh failed', error);
-      renderNotifyToggle();
-      return false;
-    });
+    loadNotificationDelivery();
     refreshBackgroundOwnerStatus({render: false}).catch(error => {
       console.warn('initial background-owner status refresh failed', error);
       return false;
@@ -4966,11 +4962,11 @@ async function checkForUpdateOnce() {
 function maybeNotifyYoagentJob(notification = {}) {
   const title = String(notification.title || 'YO!agent');
   const body = String(notification.body || '').trim();
-  if (!body || !notificationsEnabled) return;
+  if (!body || !notificationDeliveryEnabled()) return;
   const session = String(notification.session || '').trim();
   const tag = `yoagent-job:${session || 'global'}:${body}`;
-  showToast(title, [body], {session});
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (notificationDeliveryEnabled('inApp')) showToast(title, [body], {session});
+  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     sendBrowserNotification(hostNotificationTitle(title), {
       body,
@@ -5397,7 +5393,6 @@ if (tabMetaToggle) {
   notifyToggle?.parentElement?.insertBefore(tabMetaToggle, notifyToggle);
 }
 if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout'; };
-notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => {
   const modal = document.getElementById('modal');
   modal.classList.remove(CLS.open, 'about-open', 'share-open');

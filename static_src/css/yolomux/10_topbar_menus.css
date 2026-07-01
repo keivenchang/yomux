@@ -761,6 +761,15 @@ body.app-vw-lte-760 .topbar-search {
   top: 100%;
   left: 0;
 }
+.notification-delivery-popover {
+  top: auto;
+  left: auto;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: none;
+}
 .app-menu[data-app-menu="tabs"] > .app-menu-popover {
   max-height: var(--app-menu-tab-max-block-size);
 }

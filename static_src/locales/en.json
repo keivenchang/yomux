@@ -681,7 +681,7 @@
   "pref.updates.check_enabled.help": "When enabled, the server checks https://github.com/keivenchang/yolomux for a newer origin/main version every hour and shows admins the Update & restart card. Off by default.",
   "pref.updates.check_enabled.label": "Check origin/main for updates",
   "pref.updates.notify_level.help": "Minimum YOLOmux version change that checks origin/main and shows the update notification. Patch means any version bump; none disables origin/main update checks.",
-  "pref.updates.notify_level.label": "Notify when change in",
+  "pref.updates.notify_level.label": "Notify when change is version (major.minor.patch, like 0.2.345)",
   "pref.updates.notify_level.major": "major",
   "pref.updates.notify_level.minor": "minor",
   "pref.updates.notify_level.none": "none",

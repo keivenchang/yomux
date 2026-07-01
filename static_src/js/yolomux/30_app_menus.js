@@ -720,11 +720,9 @@ function appMenuTree() {
           detail: t('menu.view.tabMeta.detail'),
           iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
         }),
-        menuCommand(t('menu.view.alert'), toggleNotifications, {
-          checked: notificationsEnabled,
-          disabled: readOnlyMode,
-          detail: readOnlyMode ? t('menu.view.alert.adminDetail') : '',
-          iconHtml: appMenuUiIcon('notify', notificationsEnabled),
+        menuSubmenu(t('menu.view.alert'), notificationDeliveryItems(), {
+          iconHtml: appMenuUiIcon('notify', notificationDeliveryEnabled()),
+          keepOpen: true,
         }),
         menuCommand(t('menu.view.refresh'), refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
@@ -1321,11 +1319,11 @@ function runAppMenuCommand(item) {
   try {
     Promise.resolve(item.action())
       .then(() => {
-        if (keepOpen) renderSessionButtons({force: true});
+        if (keepOpen && item.renderMenu !== false) renderSessionButtons({force: true});
       })
       .catch(error => {
         statusErr(localizedHtml('status.menuCommandFailed', {error}));
-        if (keepOpen) renderSessionButtons({force: true});
+        if (keepOpen && item.renderMenu !== false) renderSessionButtons({force: true});
       });
   } catch (error) {
     statusErr(localizedHtml('status.menuCommandFailed', {error}));

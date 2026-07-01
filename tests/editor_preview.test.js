@@ -6717,7 +6717,7 @@ async function runEditorPreviewSuite() {
     assert.equal(en['pref.general.reload_on_update.label'], 'Show reload prompt after server/client mismatch', 'en server/client-version reload label is specific');
     assert.equal(en['update.available'], 'The YOLOmux server version changed since this browser tab loaded. Do you want to reload the browser?', 'en server/client reload prompt asks whether to reload the browser');
     assert.equal(en['update.dismiss'], 'Keep', 'en server/client reload prompt has a visible Keep action');
-    assert.equal(en['pref.updates.notify_level.label'], 'Notify when change in', 'en update notification threshold label is specific');
+    assert.equal(en['pref.updates.notify_level.label'], 'Notify when change is version (major.minor.patch, like 0.2.345)', 'en update notification threshold label is specific');
     for (const loc of ['es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'vi', 'th', 'tr', 'nl', 'pl', 'it', 'zh-Hans', 'zh-Hant']) {
       const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
       for (const key of contextMenuOpenKeys) {

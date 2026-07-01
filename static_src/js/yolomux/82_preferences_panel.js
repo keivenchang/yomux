@@ -252,15 +252,17 @@ function preferenceSections() {
       {path: 'editor.ensure_final_newline_on_save', label: t('pref.editor.ensure_final_newline_on_save.label'), type: 'boolean', help: t('pref.editor.ensure_final_newline_on_save.help')},
     ]},
     {title: t('pref.section.notifications'), items: [
-      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
-      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
+      {type: 'notification-delivery', channel: 'inApp', label: 'Notification in YOLOmux', help: 'Show notification popups in YOLOmux.'},
+      {type: 'notification-delivery', channel: 'system', label: `Notification on the System (${isMacPlatform() ? 'macOS' : 'PC'})`, help: `Browser permission: ${notificationSystemPermission()}`},
+      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'updates.notify_level', label: t('pref.updates.notify_level.label'), type: 'radio', choices: updateNotifyLevelPreferenceChoices(), help: t('pref.updates.notify_level.help')},
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
-      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
       {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help'), exampleHtml: preferencesStatusPulseExampleHtml},
       {path: 'performance.workflow_transition_glow_seconds', label: t('pref.performance.workflow_transition_glow_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.workflow_transition_glow_seconds.help')},
       {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
+      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
+      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
     ]},
     {title: fileExplorerLabel(), items: [
       {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
@@ -537,6 +539,10 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.type === 'notification-delivery') {
+    const checked = notificationDeliveryEnabled(item.channel) ? ' checked' : '';
+    return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="preference-notification-${esc(item.channel)}">${esc(item.label)}<span class="preferences-setting-help">${esc(item.help)}</span></label><span class="preferences-setting-control"><input type="checkbox" id="preference-notification-${esc(item.channel)}" data-notification-delivery="${esc(item.channel)}"${checked}></span></div>`;
+  }
   if (item.type === 'note') {
     return `<div class="preferences-setting-row preferences-setting-note">${esc(item.text || '')}</div>`;
   }
@@ -856,6 +862,12 @@ function bindPreferencesPanel(panel) {
     }
   });
   panel.addEventListener('change', event => {
+    const delivery = event.target.closest('[data-notification-delivery]');
+    if (delivery && panel.contains(delivery)) {
+      setNotificationDelivery(delivery.dataset.notificationDelivery, delivery.checked);
+      renderPreferencesPanels({force: true});
+      return;
+    }
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
     savePreferenceControl(control);

@@ -3913,7 +3913,7 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     )
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert "GET /api/notify" in metrics["fetchPaths"]
+    assert "GET /api/notify" not in metrics["fetchPaths"]
     assert "GET /api/auto-approve" in metrics["fetchPaths"]
     assert metrics["fetchPaths"].count("POST /api/ensure-session") <= 1
     assert "GET /api/session-metadata" in metrics["fetchPaths"]
@@ -3929,7 +3929,7 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["panelCount"] >= 1
     assert metrics["paneTabCount"] >= 1
     assert metrics["panelVisible"]
-    assert metrics["notifyActive"] is False
+    assert metrics["notifyActive"] is True
     assert metrics["terminalText"] == "fake terminal"
 
 
