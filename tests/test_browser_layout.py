@@ -3207,27 +3207,35 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         showAttentionAlert('1', state);
         const genericAttentionTitle = document.querySelector('.toast[data-toast-kind="attention"] .toast-title')?.textContent?.trim() || '';
         document.querySelectorAll('.toast[data-toast-kind="attention"]').forEach(node => node.remove());
-        autoApproveStates.set('1', {agent_windows: [{kind: 'claude', state: 'approval', window_index: 0, window_label: '0:claude', screen_text: 'Do you want to proceed?'}]});
+        autoApproveStates.set('1', {agent_windows: [{kind: 'claude', state: 'approval', window_index: 0, window_label: '0:claude', screen_text: 'Do you want to proceed with this change? Explain the expected behavior, edge cases, and verification steps before continuing with the requested operation.'}]});
         const agentState = sessionState('1');
         showAttentionAlert('1', agentState);
         showTerminalConnectionToast('1', 'Disconnected', 5000);
         sendTestNotification();
         const title = selector => document.querySelector(selector)?.textContent?.trim() || '';
+        const attentionControls = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-controls');
+        const attentionTab = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-session-tab');
         const attentionPill = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-agent-button');
         const attentionReason = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-reason');
-        const pillRect = attentionPill?.getBoundingClientRect();
-        const reasonRect = attentionReason?.getBoundingClientRect();
+        const controlsRect = attentionControls?.getBoundingClientRect();
+        const reasonRects = [...(attentionReason?.getClientRects?.() || [])];
         const untyped = [...document.querySelectorAll('.toast:not([data-toast-kind]) .toast-title')];
         return {
           externalTitle,
           internalTitle,
           genericAttentionTitle,
           attentionTitle: title('.toast[data-toast-kind="attention"] .toast-title'),
+          attentionTabLabel: title('.toast[data-toast-kind="attention"] .attention-toast-session-tab .session-button-prefix'),
           attentionAgentLabel: title('.toast[data-toast-kind="attention"] .attention-toast-agent-button .tmux-window-name-text'),
           attentionReason: title('.toast[data-toast-kind="attention"] .attention-toast-reason'),
           attentionHasStop: Boolean(document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-agent-button .status-indicator--attention')),
-          attentionPillVisible: Boolean(pillRect && pillRect.width > 0 && pillRect.height > 0),
-          attentionReasonFollowsPill: Boolean(pillRect && reasonRect && (reasonRect.left >= pillRect.right - 1 || reasonRect.top > pillRect.top)),
+          attentionControlsVisible: Boolean(controlsRect && controlsRect.width > 0 && controlsRect.height > 0 && attentionTab && attentionPill),
+          attentionReasonWrapsAroundControls: Boolean(
+            controlsRect
+            && reasonRects.length > 1
+            && reasonRects[0].left >= controlsRect.right - 1
+            && reasonRects.some(rect => rect.top >= controlsRect.bottom - 1 && rect.left <= controlsRect.left + 1)
+          ),
           terminalTitle: title('.toast[data-toast-kind="terminal-connection"] .toast-title'),
           testTitle: untyped.at(-1)?.textContent?.trim() || '',
         };
@@ -3238,11 +3246,12 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         "internalTitle": "Needs input",
         "genericAttentionTitle": "Needs input",
         "attentionTitle": "[1] 0:claude: Needs approval",
+        "attentionTabLabel": "[1]",
         "attentionAgentLabel": "0:claude",
-        "attentionReason": "Do you want to proceed?",
+        "attentionReason": "Do you want to proceed with this change? Explain the expected behavior, edge cases, and verification steps before continuing with the requested operation.",
         "attentionHasStop": True,
-        "attentionPillVisible": True,
-        "attentionReasonFollowsPill": True,
+        "attentionControlsVisible": True,
+        "attentionReasonWrapsAroundControls": True,
         "terminalTitle": "terminal",
         "testTitle": "notifications enabled",
     }, metrics

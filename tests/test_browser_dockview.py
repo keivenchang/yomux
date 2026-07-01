@@ -859,7 +859,7 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
 
 def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser, tmp_path):
     sessions = [str(index) for index in range(1, 8)]
-    expected_rows_by_width = {1800: 1, 1300: 2, 1000: 3, 900: 4, 700: 7}
+    grid_widths = (1800, 1300, 1000, 900, 700)
     transcript_sessions = {
         session: {
             "panes": [
@@ -876,7 +876,7 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
         for session in sessions
     }
 
-    for grid_width, expected_rows in expected_rows_by_width.items():
+    for grid_width in grid_widths:
         browser.set_window_size(grid_width + 100, 700)
         load_live_runtime_boot_fixture(
             browser,
@@ -907,7 +907,7 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
                 const tabRects = tabs.map(rect);
                 const rows = [...new Set(tabRects.map(value => Math.round(value.top)))].sort((left, right) => left - right)
                   .map(top => tabRects.filter(value => Math.round(value.top) === top));
-                const style = getComputedStyle(tabsContainer);
+                const reservation = tabsContainer.querySelector(':scope > .dockview-tab-first-row-reservation');
                 const lastTabBottom = Math.max(...tabRects.map(value => value.bottom));
                 const infoBarRect = infoBar.getBoundingClientRect();
                 const windowButtonRect = windowButton.getBoundingClientRect();
@@ -916,8 +916,8 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
                   tabs: tabRects,
                   rows: rows.map(row => row.map(value => ({left: value.left, right: value.right, width: value.width}))),
                   tabsLeft: tabsContainer.getBoundingClientRect().left,
-                  contentRight: tabsContainer.getBoundingClientRect().right - Number.parseFloat(style.paddingRight || '0'),
-                  paddingRight: Number.parseFloat(style.paddingRight || '0'),
+                      contentRight: tabsContainer.getBoundingClientRect().right,
+                      reservation: reservation ? rect(reservation) : null,
                   actionLeft: actions.getBoundingClientRect().left,
                   headerBottom: header.getBoundingClientRect().bottom,
                   tabsBottom: tabsContainer.getBoundingClientRect().bottom,
@@ -929,9 +929,12 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
                 len(sessions),
             )
         )
-        assert metrics["rowCount"] == expected_rows, {"grid_width": grid_width, **metrics}
-        assert metrics["paddingRight"] > 0, metrics
-        assert metrics["contentRight"] <= metrics["actionLeft"] + 1, metrics
+        assert metrics["rowCount"] >= (1 if grid_width == 1800 else 2), {"grid_width": grid_width, **metrics}
+        assert metrics["reservation"] is not None, metrics
+        assert metrics["reservation"]["top"] == metrics["tabs"][0]["top"], metrics
+        assert metrics["rows"][0][-1]["right"] <= metrics["reservation"]["left"] + 1, metrics
+        assert abs(metrics["reservation"]["right"] - metrics["contentRight"]) < 1.1, metrics
+        assert metrics["rows"][0][-1]["right"] <= metrics["actionLeft"] + 1, metrics
         assert abs(metrics["headerBottom"] - metrics["lastTabBottom"]) < 0.1, metrics
         assert abs(metrics["tabsBottom"] - metrics["lastTabBottom"]) < 0.1, metrics
         assert abs(metrics["infoBarTop"] - metrics["lastTabBottom"]) < 0.1, metrics

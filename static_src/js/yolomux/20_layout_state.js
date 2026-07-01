@@ -4372,7 +4372,7 @@ function attentionToastLine(session, state) {
   const attention = attentionToastAgent(session, state);
   const agent = attention?.agent;
   const reason = attentionToastReason(state, agent);
-  if (!agent || typeof tmuxWindowButtonHtml !== 'function') return reason;
+  if (!agent || typeof tmuxWindowButtonHtml !== 'function' || typeof tmuxPaneTabTokenHtml !== 'function') return reason;
   const visibleName = String(agent.window_label || agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.kind)).trim();
   if (!visibleName) return reason;
   return {
@@ -4380,8 +4380,19 @@ function attentionToastLine(session, state) {
     render: line => {
       line.classList.add('toast-line--attention');
       const marker = document.createElement('span');
-      marker.className = 'attention-toast-agent';
-      marker.innerHTML = tmuxWindowButtonHtml({
+      marker.className = 'attention-toast-controls';
+      const info = transcriptMeta.sessions?.[session];
+      const auto = autoApproveStates.get(session)?.enabled === true;
+      const tabHtml = tmuxPaneTabTokenHtml(session, {
+        tag: 'span',
+        action: false,
+        active: true,
+        info,
+        state,
+        auto,
+        classes: ['attention-toast-session-tab'],
+      });
+      const windowHtml = tmuxWindowButtonHtml({
         tag: 'span',
         visibleName,
         showNumberLabel: false,
@@ -4400,6 +4411,7 @@ function attentionToastLine(session, state) {
           statusBeforeAgent: true,
         }),
       });
+      marker.innerHTML = `${tabHtml}${windowHtml}`;
       const text = document.createElement('span');
       text.className = 'attention-toast-reason';
       text.textContent = reason;

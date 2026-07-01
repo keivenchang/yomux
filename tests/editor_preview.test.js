@@ -1840,7 +1840,9 @@ async function runEditorPreviewSuite() {
     assert.ok(body.includes('attentionToastLine(session, state)'), 'attention toasts route their body through the shared agent-status message renderer');
     assert.ok(body.includes('focusAttentionToastTarget(session, state)'), 'clicking an attention toast follows the shared direct tmux-window route');
     assert.ok(source.includes('function attentionToastLine(session, state)'), 'attention toast status content has one shared renderer');
+    assert.ok(source.includes('tmuxPaneTabTokenHtml(session, {'), 'attention toast status content reuses the shared session Tab renderer');
     assert.ok(source.includes('tmuxWindowButtonHtml({'), 'attention toast status content reuses the tmux sub-window button renderer');
+    assert.ok(source.includes("marker.className = 'attention-toast-controls'"), 'attention toast keeps its shared Tab and sub-window control in one wrap-around group');
     assert.ok(source.includes("classes: ['attention-toast-agent-button']"), 'attention toast status content uses the shared stop/pause-plus-agent button styling');
     assert.ok(source.includes('function pauseToastRemoval(id, node, reason)'), 'hover/focus pauses the shared toast removal timer');
     assert.ok(source.includes("node.addEventListener('pointerenter', () => pauseToastRemoval(id, node, 'Pointer'))"), 'hovering a toast pauses its countdown');
@@ -7181,7 +7183,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.panel-head\s*\{[\s\S]*?padding:\s*2px 1px 0;/.test(css), 'pane tab strip has a 1px left/right edge gap');
     assert.ok(/\.pane-tab\s*\{[\s\S]*?margin:\s*0 1px 0 0;/.test(css), 'pane tabs have a 1px horizontal gap');
     assert.ok(/\.yolomux-dockview \.dv-tabs-and-actions-container\s*\{[\s\S]*?height:\s*auto;[\s\S]*?overflow:\s*visible;/.test(css), 'Dockview pane headers grow vertically when tabs wrap');
-    assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?inline-size:\s*100%;[\s\S]*?max-inline-size:\s*100%;[\s\S]*?padding-inline-end:\s*var\(--dockview-header-actions-reserved-inline-size,\s*0px\);[\s\S]*?height:\s*auto;[\s\S]*?max-height:\s*none;[\s\S]*?overflow:\s*visible;/.test(css), 'Dockview tab strips reserve header-action space consistently on every flex row');
+    assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?inline-size:\s*100%;[\s\S]*?max-inline-size:\s*100%;[\s\S]*?height:\s*auto;[\s\S]*?max-height:\s*none;[\s\S]*?overflow:\s*visible;/.test(css), 'Dockview tab strips wrap across their full width');
+    assert.ok(/\.dockview-tab-first-row-reservation\s*\{[\s\S]*?flex:\s*0 0 var\(--dockview-first-row-reservation-inline-size,\s*0px\)/.test(css), 'Dockview reserves header-action space with a first-row-only flex item');
+    assert.equal(css.includes('padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);'), false, 'Dockview does not reserve header-action space on every wrapped row');
     assert.equal(css.includes('.dockview-tab-row-break'), false, 'Dockview tab strips wrap naturally without synthetic row breaks');
     assert.equal(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex-wrap:\s*nowrap/.test(css), false, 'Dockview pane tabs must not force a one-row nowrap strip');
     assert.ok(/\.yolomux-dockview \.dv-tab\s*\{[\s\S]*?flex:\s*0 0 var\(--dockview-tab-inline-size,\s*var\(--pane-tab-width\)\)/.test(css), 'Dockview pane tabs use the configured preference width by default');

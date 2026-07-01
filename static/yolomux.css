@@ -5384,8 +5384,6 @@ button:disabled:hover { border-color: var(--line); }
   inline-size: 100%;
   max-inline-size: 100%;
   min-width: 0;
-  /* Reserve the pinned pane controls on every flex row, not just the first. */
-  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
   height: auto;
   min-height: var(--pane-tab-height);
   max-height: none;
@@ -5396,6 +5394,12 @@ button:disabled:hover { border-color: var(--line); }
   width: 0;
   height: 0;
   display: none;
+}
+.yolomux-dockview .dockview-tab-first-row-reservation {
+  flex: 0 0 var(--dockview-first-row-reservation-inline-size, 0px);
+  inline-size: var(--dockview-first-row-reservation-inline-size, 0px);
+  block-size: var(--pane-tab-height);
+  pointer-events: none;
 }
 .yolomux-dockview .dv-right-actions-container {
   position: absolute;
@@ -7904,14 +7908,19 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   white-space: normal;
 }
 .toast-line--attention {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
+  display: block;
 }
-.attention-toast-agent {
+.attention-toast-controls {
+  float: inline-start;
   display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex: 0 0 auto;
+  max-inline-size: 100%;
+  margin: 0 5px 2px 0;
+}
+.attention-toast-session-tab {
+  max-inline-size: 100%;
 }
 .attention-toast-agent-button {
   pointer-events: none;
@@ -7927,7 +7936,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .attention-toast-reason {
   min-width: 0;
-  flex: 1 1 160px;
 }
 .toast-line::after,
 .toast-countdown::after {

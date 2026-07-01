@@ -75,8 +75,6 @@
   inline-size: 100%;
   max-inline-size: 100%;
   min-width: 0;
-  /* Reserve the pinned pane controls on every flex row, not just the first. */
-  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
   height: auto;
   min-height: var(--pane-tab-height);
   max-height: none;
@@ -87,6 +85,12 @@
   width: 0;
   height: 0;
   display: none;
+}
+.yolomux-dockview .dockview-tab-first-row-reservation {
+  flex: 0 0 var(--dockview-first-row-reservation-inline-size, 0px);
+  inline-size: var(--dockview-first-row-reservation-inline-size, 0px);
+  block-size: var(--pane-tab-height);
+  pointer-events: none;
 }
 .yolomux-dockview .dv-right-actions-container {
   position: absolute;

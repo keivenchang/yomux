@@ -722,6 +722,10 @@ function dockviewLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayo
   if (options.force !== true && dockviewLayoutState.lastHostLayoutSignature === signature) return;
   dockviewLayoutState.lastHostLayoutSignature = signature;
   api.layout?.(width, height);
+  requestAnimationFrame(() => {
+    if (api !== dockviewLayoutState.api || host !== dockviewLayoutState.host) return;
+    dockviewSyncHeaderActionReservations();
+  });
 }
 
 function dockviewScheduleLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host) {
@@ -822,6 +826,9 @@ function dockviewSyncHeaderActionReservations() {
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
     if (!header) return;
+    const tabsContainer = header.querySelector('.dv-tabs-container');
+    if (!tabsContainer) return;
+    tabsContainer.querySelectorAll(':scope > .dockview-tab-first-row-reservation').forEach(node => node.remove());
     const actions = group.querySelector('.dockview-pane-header-actions:not([hidden])');
     const width = actions ? Math.ceil(appSpaceRect(actions).width || actions.offsetWidth || 0) : 0;
     const reservedWidth = width > 0 ? width + 8 : 0;
@@ -835,6 +842,28 @@ function dockviewSyncHeaderActionReservations() {
       : Math.max(minTabWidth, preferredTabWidth);
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
+    if (!reservedWidth || !headerWidth) return;
+    const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
+    const tabs = Array.from(tabsContainer.querySelectorAll(':scope > .dv-tab'));
+    let usedWidth = 0;
+    let firstExcludedTab = null;
+    for (const tab of tabs) {
+      const style = getComputedStyle(tab);
+      const tabWidth = Math.ceil(appSpaceRect(tab).width || tab.offsetWidth || 0)
+        + Number.parseFloat(style.marginInlineStart || '0')
+        + Number.parseFloat(style.marginInlineEnd || '0');
+      if (usedWidth > 0 && usedWidth + tabWidth > firstRowWidth) {
+        firstExcludedTab = tab;
+        break;
+      }
+      usedWidth += tabWidth;
+    }
+    if (!tabs.length || !usedWidth) return;
+    const reservation = document.createElement('span');
+    reservation.className = 'dockview-tab-first-row-reservation';
+    reservation.setAttribute('aria-hidden', 'true');
+    reservation.style.setProperty('--dockview-first-row-reservation-inline-size', `${Math.max(0, Math.floor(headerWidth - usedWidth))}px`);
+    tabsContainer.insertBefore(reservation, firstExcludedTab);
   });
 }
 
