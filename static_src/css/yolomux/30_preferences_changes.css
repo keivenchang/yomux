@@ -99,6 +99,7 @@
   transition: color 120ms ease, opacity 120ms ease, transform 120ms ease;
 }
 .ui-disclosure-triangle[data-disclosure-expanded="true"],
+.file-tree-row.kind-dir[aria-expanded="true"] > .ui-disclosure-triangle,
 .info-tree-group[open] > summary::before,
 .yoagent-message-details[open] summary::before {
   color: var(--disclosure-triangle-expanded-color);

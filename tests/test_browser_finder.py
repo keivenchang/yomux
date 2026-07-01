@@ -240,6 +240,70 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
     assert all(re.fullmatch(r"[0-9]+", count) for count in metrics["visibleCounts"]), metrics
 
 
+def test_differ_expanded_directory_chevrons_follow_row_state_through_reload(browser, tmp_path):
+    payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/repo/app", "count": 3}],
+        "files": [
+            {"session": "1", "repo": "/repo/app", "path": "toolcalling/fixtures/inputs/qwen3_coder/one.yaml", "abs_path": "/repo/app/toolcalling/fixtures/inputs/qwen3_coder/one.yaml", "status": "M", "mtime": 100},
+            {"session": "1", "repo": "/repo/app", "path": "toolcalling/fixtures/inputs/qwen3_coder/two.yaml", "abs_path": "/repo/app/toolcalling/fixtures/inputs/qwen3_coder/two.yaml", "status": "M", "mtime": 101},
+        ],
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?layout=left&tabs=left:__changes__",
+        sessions=["1"],
+        session_files_payload=payload,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-tree-row[data-path=\"/repo/app/toolcalling/fixtures/inputs/qwen3_coder/one.yaml\"]') !== null"
+        )
+    )
+    browser.refresh()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-tree-row[data-path=\"/repo/app/toolcalling/fixtures/inputs/qwen3_coder/one.yaml\"]') !== null"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const expandedRows = Array.from(document.querySelectorAll('.file-explorer-changes-panel .file-tree-row.kind-dir[aria-expanded="true"]'));
+        const stateFor = row => {
+          const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+          return {
+            path: row.dataset.path,
+            ariaExpanded: row.getAttribute('aria-expanded'),
+            disclosureExpanded: icon?.dataset.disclosureExpanded || '',
+            transform: icon ? getComputedStyle(icon).transform : '',
+          };
+        };
+        const initial = expandedRows.map(stateFor);
+        // A DOM restore can momentarily retain a previous icon data attribute. The row's semantic
+        // expansion state must still keep the visible chevron aligned with its visible children.
+        expandedRows.forEach(row => {
+          row.querySelector(':scope > .file-tree-icon')?.setAttribute('data-disclosure-expanded', 'false');
+        });
+        return {
+          initial,
+          restored: expandedRows.map(stateFor),
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert len(metrics["initial"]) >= 4, metrics
+    assert all(row["ariaExpanded"] == "true" for row in metrics["initial"]), metrics
+    assert all(row["disclosureExpanded"] == "true" for row in metrics["initial"]), metrics
+    assert all(row["transform"] != "none" for row in metrics["initial"]), metrics
+    assert all(row["transform"] != "none" for row in metrics["restored"]), metrics
+
+
 def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, tmp_path):
     session_files_payload = {
         "session": "1",

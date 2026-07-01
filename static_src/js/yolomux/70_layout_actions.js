@@ -1208,6 +1208,12 @@ function projectMetaParts(session, info, options = {}) {
   const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
   const pr = displayPullRequestForGit(info, prGit);
   if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
+  if (showingPrimaryGit) {
+    for (const issue of project.linear || []) {
+      const state = issue.state ? ` ${issue.state}` : '';
+      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+    }
+  }
   if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
   if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
@@ -1216,12 +1222,6 @@ function projectMetaParts(session, info, options = {}) {
   if (pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
-    }
-  }
-  if (showingPrimaryGit) {
-    for (const issue of project.linear || []) {
-      const state = issue.state ? ` ${issue.state}` : '';
-      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
   }
   const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');

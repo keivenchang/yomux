@@ -13944,9 +13944,10 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
   const pendingExpansion = !differMode && entry.kind === 'dir' && fileExplorerPendingExpansions.has(fullPath);
-  const expanded = entry.kind === 'dir' && (differMode
-    ? !changesFolderCollapsed.has(fullPath)
-    : (pendingExpansion || options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
+  const expanded = entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {
+    differMode,
+    autoExpand: options.autoExpand,
+  });
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
@@ -14171,7 +14172,11 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     const collapseSet = renderOptions.collapsedSet instanceof Set ? renderOptions.collapsedSet : null;
     const expandSet = renderOptions.expandedSet instanceof Set ? renderOptions.expandedSet : fileExplorerExpanded;
     const dirExpanded = collapseSet ? !collapseSet.has(fullPath)
-      : (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (fileExplorerPendingExpansions.has(fullPath) || renderOptions.autoExpand === true || expandSet.has(fullPath)));
+      : fileTreeDirectoryExpanded(fullPath, {
+        differMode: isDifferDir,
+        autoExpand: renderOptions.autoExpand,
+        expandedSet: expandSet,
+      });
     if (entry.kind === 'dir' && dirExpanded) {
       const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);
@@ -14327,6 +14332,9 @@ function updateFileTreeGitStatusRows() {
     applyFileTreeRowDerivedState(row, fileTreeRowDerivedState(fullPath, entry, {
       changedAncestorStats,
       differMode: inDiffer,
+      // This incremental refresh runs after the tree renderer. Carry the same expansion source through
+      // it so it cannot overwrite a rendered Differ chevron to collapsed while its child rows remain.
+      expanded: entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {differMode: inDiffer}),
       iconText: row.querySelector(':scope > .file-tree-icon')?.textContent || '',
       preserveDate: true,
       preserveDiff: true,
@@ -17595,14 +17603,15 @@ function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
   }
 }
 
-// Shared expand/collapse for a tree directory row — the macOS-Finder ←/→ behavior must be IDENTICAL on
-// both surfaces, but the Finder uses fileExplorerExpanded (+ lazy fetch via expand/collapseDirectoryRow)
-// while the Differ uses changesFolderCollapsed (+ a changes-panel re-render). One parent dispatches by the
-// row's panel so neither surface needs bespoke key code.
-function fileTreeDirectoryExpanded(row, fullPath) {
-  return row.closest('.file-explorer-changes-panel')
-    ? !changesFolderCollapsed.has(fullPath)
-    : fileExplorerExpanded.has(fullPath);
+// The tree row's aria-expanded state and its descendants must always use this one state calculation. Finder
+// opts into expansion, while Differ defaults to expanded and persists only folders the user collapsed.
+function fileTreeDirectoryExpanded(fullPath, options = {}) {
+  if (options.differMode === true || options.row?.closest?.('.file-explorer-changes-panel')) {
+    return !changesFolderCollapsed.has(fullPath);
+  }
+  return fileExplorerPendingExpansions.has(fullPath)
+    || options.autoExpand === true
+    || (options.expandedSet instanceof Set ? options.expandedSet : fileExplorerExpanded).has(fullPath);
 }
 function setFileTreeDirectoryExpanded(row, fullPath, expand) {
   if (row.closest('.file-explorer-changes-panel')) {
@@ -17644,7 +17653,7 @@ const finderTreeInteractionController = createSharedTreeInteractionController({
     fileExplorerManualSelectionActive = true;
     fileExplorerSelectionAnchor = rows[0]?.dataset?.path || null;
   },
-  isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row, row.dataset.path || ''),
+  isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row.dataset.path || '', {row}),
   setExpanded(row, expanded) {
     const path = row?.dataset?.path || '';
     if (!path || row?.dataset?.kind !== 'dir') return;
@@ -25065,6 +25074,12 @@ function projectMetaParts(session, info, options = {}) {
   const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
   const pr = displayPullRequestForGit(info, prGit);
   if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
+  if (showingPrimaryGit) {
+    for (const issue of project.linear || []) {
+      const state = issue.state ? ` ${issue.state}` : '';
+      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+    }
+  }
   if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
   if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
@@ -25073,12 +25088,6 @@ function projectMetaParts(session, info, options = {}) {
   if (pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
-    }
-  }
-  if (showingPrimaryGit) {
-    for (const issue of project.linear || []) {
-      const state = issue.state ? ` ${issue.state}` : '';
-      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
   }
   const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
@@ -51940,7 +51949,6 @@ function infoRowPrNumber(row = {}) {
 
 function infoRelationshipRecords(rows = infoBranchRows()) {
   const records = [];
-  const tabWorkDescriptions = new Map();
   const noTab = {session: '', label: 'No tab / no AI', title: 'No tab or AI associated with this branch', kind: '', window: '', tabLabel: 'No tab', aiLabel: 'No AI'};
   for (const row of Array.isArray(rows) ? rows : []) {
     const directTabAgents = Array.isArray(row?.tabAgents) && row.tabAgents.length ? row.tabAgents : [];
@@ -51949,15 +51957,6 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
     for (const agent of tabAgents) {
       const session = String(agent?.session || '');
       const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || 'No tab');
-      if (session && !tabWorkDescriptions.has(session)) {
-        const info = transcriptMeta.sessions?.[session];
-        const work = info && typeof sessionWorkDescription === 'function' ? sessionWorkDescription(session, info, 200) : '';
-        tabWorkDescriptions.set(session, work);
-      }
-      const sessionWork = String(tabWorkDescriptions.get(session) || '').trim();
-      const normalizedTabLabel = infoSearchText(tabLabel).toLocaleLowerCase();
-      const normalizedSessionWork = infoSearchText(sessionWork).toLocaleLowerCase();
-      const tabWorkDescription = normalizedSessionWork && !normalizedTabLabel.includes(normalizedSessionWork) ? sessionWork : '';
       const aiLabel = String(agent?.aiLabel || infoTabAgentAiLabel(agent));
       const aiKind = String(agent?.kind || '');
       const tmuxWindowIndex = String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? '');
@@ -51980,7 +51979,6 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tabSession: session,
         tabLabel,
         tabTitle: String(agent?.title || tabLabel),
-        tabWorkDescription,
         aiKey: `${agent?.kind || 'no-ai'}:${agent?.window || ''}:${aiLabel}`,
         aiKind,
         aiAgentKey: aiKind || '__no_ai__',
@@ -52371,7 +52369,6 @@ function infoRecordTabValueHtml(record = {}, options = {}) {
   const attrs = [`data-info-tab-state="${active ? 'active' : 'inactive'}"`];
   if (options.action !== false) attrs.push(`data-info-open-tab="${esc(record.tabSession)}"`);
   const sessionText = sessionLabel(record.tabSession);
-  const detail = String(options.detail ?? record?.tabWorkDescription ?? '').trim();
   const sessionLabelHtml = infoRecordSearchKindMatches(record, 'tab')
     ? infoSearchHighlightHtml(sessionText)
     : undefined;
@@ -52381,8 +52378,6 @@ function infoRecordTabValueHtml(record = {}, options = {}) {
     active,
     title,
     attrs,
-    showDetail: Boolean(detail),
-    detail,
     sessionLabelHtml,
     leadingHtml: options.leadingHtml,
   });

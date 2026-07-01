@@ -595,14 +595,15 @@ function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
   }
 }
 
-// Shared expand/collapse for a tree directory row — the macOS-Finder ←/→ behavior must be IDENTICAL on
-// both surfaces, but the Finder uses fileExplorerExpanded (+ lazy fetch via expand/collapseDirectoryRow)
-// while the Differ uses changesFolderCollapsed (+ a changes-panel re-render). One parent dispatches by the
-// row's panel so neither surface needs bespoke key code.
-function fileTreeDirectoryExpanded(row, fullPath) {
-  return row.closest('.file-explorer-changes-panel')
-    ? !changesFolderCollapsed.has(fullPath)
-    : fileExplorerExpanded.has(fullPath);
+// The tree row's aria-expanded state and its descendants must always use this one state calculation. Finder
+// opts into expansion, while Differ defaults to expanded and persists only folders the user collapsed.
+function fileTreeDirectoryExpanded(fullPath, options = {}) {
+  if (options.differMode === true || options.row?.closest?.('.file-explorer-changes-panel')) {
+    return !changesFolderCollapsed.has(fullPath);
+  }
+  return fileExplorerPendingExpansions.has(fullPath)
+    || options.autoExpand === true
+    || (options.expandedSet instanceof Set ? options.expandedSet : fileExplorerExpanded).has(fullPath);
 }
 function setFileTreeDirectoryExpanded(row, fullPath, expand) {
   if (row.closest('.file-explorer-changes-panel')) {
@@ -644,7 +645,7 @@ const finderTreeInteractionController = createSharedTreeInteractionController({
     fileExplorerManualSelectionActive = true;
     fileExplorerSelectionAnchor = rows[0]?.dataset?.path || null;
   },
-  isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row, row.dataset.path || ''),
+  isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row.dataset.path || '', {row}),
   setExpanded(row, expanded) {
     const path = row?.dataset?.path || '';
     if (!path || row?.dataset?.kind !== 'dir') return;

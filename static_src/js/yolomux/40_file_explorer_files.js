@@ -2368,9 +2368,10 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
   const pendingExpansion = !differMode && entry.kind === 'dir' && fileExplorerPendingExpansions.has(fullPath);
-  const expanded = entry.kind === 'dir' && (differMode
-    ? !changesFolderCollapsed.has(fullPath)
-    : (pendingExpansion || options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
+  const expanded = entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {
+    differMode,
+    autoExpand: options.autoExpand,
+  });
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
@@ -2595,7 +2596,11 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     const collapseSet = renderOptions.collapsedSet instanceof Set ? renderOptions.collapsedSet : null;
     const expandSet = renderOptions.expandedSet instanceof Set ? renderOptions.expandedSet : fileExplorerExpanded;
     const dirExpanded = collapseSet ? !collapseSet.has(fullPath)
-      : (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (fileExplorerPendingExpansions.has(fullPath) || renderOptions.autoExpand === true || expandSet.has(fullPath)));
+      : fileTreeDirectoryExpanded(fullPath, {
+        differMode: isDifferDir,
+        autoExpand: renderOptions.autoExpand,
+        expandedSet: expandSet,
+      });
     if (entry.kind === 'dir' && dirExpanded) {
       const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);
@@ -2751,6 +2756,9 @@ function updateFileTreeGitStatusRows() {
     applyFileTreeRowDerivedState(row, fileTreeRowDerivedState(fullPath, entry, {
       changedAncestorStats,
       differMode: inDiffer,
+      // This incremental refresh runs after the tree renderer. Carry the same expansion source through
+      // it so it cannot overwrite a rendered Differ chevron to collapsed while its child rows remain.
+      expanded: entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {differMode: inDiffer}),
       iconText: row.querySelector(':scope > .file-tree-icon')?.textContent || '',
       preserveDate: true,
       preserveDiff: true,

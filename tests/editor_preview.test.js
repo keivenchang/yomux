@@ -1170,7 +1170,7 @@ async function runEditorPreviewSuite() {
     assert.equal(paneInfoBarMetaHtml.includes('...'), false, 'Info Bar metadata does not use shortText/shortBranch ellipses');
     assert.ok(/class="pane-info-bar-controls"[\s\S]*meta-repo-switch/.test(paneInfoBarMetaHtml), 'Info Bar repo selector is rendered in a fixed controls slot');
     assert.ok(/pane-info-bar-controls[\s\S]*pane-info-bar-scroll-viewport/.test(paneInfoBarMetaHtml), 'Info Bar scroll viewport starts after the fixed repo selector');
-    assert.ok(/pane-info-bar-scroll-viewport[\s\S]*keivenchang\/DIS-2239__parity-commit-link-frontend-crates[\s\S]*DIS-2239 In Review[\s\S]*fix\(performance\): repair v1 PARITY commit \+ case-doc links after/.test(paneInfoBarMetaHtml), 'Info Bar branch, issue state, and title live inside the scroll viewport');
+    assert.ok(/pane-info-bar-scroll-viewport[\s\S]*#76 DRAFT[\s\S]*DIS-2239 In Review[\s\S]*keivenchang\/DIS-2239__parity-commit-link-frontend-crates[\s\S]*fix\(performance\): repair v1 PARITY commit \+ case-doc links after/.test(paneInfoBarMetaHtml), 'Info Bar keeps Linear immediately after the PR, before branch and path metadata');
     const idempotentInfoBarApi = loadYolomux('', ['info-scroll']);
     const idempotentMeta = idempotentInfoBarApi.testElementForId('meta-info-scroll');
     let idempotentMetaHtml = '';
@@ -4094,22 +4094,8 @@ async function runEditorPreviewSuite() {
     assert.equal(appFeatureRecord?.prUrl, 'https://example.test/pull/11', 'YO!info relationship records carry the PR URL so the PR number is clickable');
     assert.equal(appFeatureRecord?.prLifecycleText, 'MERGED', 'YO!info relationship records carry PR lifecycle status for merged badges');
     const appMainRecord = records.find(record => record.pathKey === '/repo/app' && record.branchKey === 'main' && record.tabLabel === 'tab-a');
-    const tabAWorkDescriptions = new Set(records.filter(record => record.tabSession === 'tab-a').map(record => record.tabWorkDescription));
-    assert.equal(tabAWorkDescriptions.size, 1, 'YO!info computes one shared work description per session and reuses it across that session records');
-    const tabAWorkDescription = [...tabAWorkDescriptions][0];
-    assert.ok(tabAWorkDescription.includes('App main PR full description'), 'YO!info gets the displayed Tab work text from the shared session work-description helper');
     assert.equal(appMainRecord?.tabLabel, 'tab-a', 'YO!info keeps the bare session identity separate from the displayed work description');
-    const duplicateWorkRecord = api.infoRelationshipRecords([{
-      path: '/repo/duplicate-work', branch: 'main', branchTitle: 'main',
-      tabAgents: [{session: 'tab-a', tabLabel: `tab-a ${tabAWorkDescription}`}],
-    }])[0];
-    assert.equal(duplicateWorkRecord?.tabWorkDescription, '', 'YO!info does not append work text already carried by an upstream session label');
-    const missingWorkRecord = api.infoRelationshipRecords([{
-      path: '/repo/missing-work', branch: 'main', branchTitle: 'main',
-      tabAgents: [{session: 'missing-session', tabLabel: 'missing-session'}],
-    }])[0];
-    assert.equal(missingWorkRecord?.tabWorkDescription, '', 'YO!info keeps the bare session token when transcript metadata cannot supply work text');
-    assert.equal(api.infoRecordSearchFieldsForTest({id: 'display-only-work', tabKey: '8003', tabSession: '8003', tabLabel: '8003', tabTitle: '8003', tabWorkDescription: 'display only work'}).some(field => field.text.includes('display only work')), false, 'YO!info work description remains display-only and does not change the Tab search identity');
+    assert.equal(Object.hasOwn(appMainRecord, 'tabWorkDescription'), false, 'YO!info relationships do not carry a parallel Tab detail that can drift from the shared tab renderer');
     assert.equal(appMainRecord?.prLifecycleText, 'OPEN', 'YO!info relationship records carry explicit Open lifecycle status');
     assert.equal(appMainRecord?.prCiText, 'CI error', 'YO!info relationship records carry CI status separately from PR description');
     assert.equal(appMainRecord?.aiState, 'working', 'YO!info relationship records carry agent-window state for activity dots');
@@ -4323,7 +4309,7 @@ async function runEditorPreviewSuite() {
     assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && !/\bA(?:S)K\b/.test(pathOnlyHtml), 'YO!info AI rows show shared working/attention activity indicators without a text attention label');
     assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">tmux sub-window:</span>'), 'YO!info leaf rows label Tab session and window actions');
-    assert.ok(/info-tree-field-tab[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">#10: App main PR full description<\/span>/.test(pathOnlyHtml), 'YO!info Tab leaf values render the shared work description after the canonical bracketed session identifier');
+    assert.ok(/info-tree-field-tab[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">App main PR full description<\/span>/.test(pathOnlyHtml), 'YO!info Tab leaf values use the shared tab detail without repeating the PR badge');
     assert.ok(/info-tree-field-branch[\s\S]*?info-tree-meta-updated/.test(pathOnlyHtml) && !pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows attach branch recency to the Git branch instead of rendering a detached Updated row');
     const pathBranchHtml = api.infoTreeHtmlForTest(records, ['path', 'branch']);
     assert.equal((pathBranchHtml.match(/info-tree-field-path|info-tree-field-branch/g) || []).length, 0, 'YO!info hides every identity row already supplied by ancestor groups');
@@ -4334,7 +4320,7 @@ async function runEditorPreviewSuite() {
     const tabPathHtml = api.infoTreeHtmlForTest(records, ['tab', 'path']);
     assert.ok(/data-info-dimension="tab"[\s\S]*<span class="info-tree-group-dimension">Tab\(tmux session\):<\/span>[\s\S]*tab-a/.test(tabPathHtml), 'YO!info Tab group headers render as Tab(tmux session): <value>');
     assert.ok(tabPathHtml.includes('info-tree-tab-token') && tabPathHtml.includes('tmux-pane-tab-token') && tabPathHtml.includes('pane-tab-core') && tabPathHtml.includes('data-info-tab-state='), 'YO!info Tab group headers render through the shared compact tmux pane-tab token');
-    assert.ok(/data-info-dimension="tab"[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">#10: App main PR full description<\/span>/.test(tabPathHtml), 'YO!info Tab group headers render the same shared work description after the canonical bracketed session identifier');
+    assert.ok(/data-info-dimension="tab"[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">App main PR full description<\/span>/.test(tabPathHtml), 'YO!info Tab group headers use the same shared tab detail without repeating the PR badge');
     assert.equal((tabPathHtml.match(/info-tree-field-tab/g) || []).length, 0, 'YO!info hides Tab rows when Tab is already supplied by an ancestor group');
     const numericTabRecord = {...appMainRecord, id: 'numeric-tab-record', tabKey: '1', tabLabel: '1', tabTitle: '1', tabSession: '1'};
     api.setPinnedTabsForTest(['1']);
@@ -4537,8 +4523,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.tmux-pane-tab-token\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)[\s\S]*border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0[\s\S]*font-size:\s*var\(--tab-label-size\)/.test(paneTabCss) && /\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(paneTabCss), 'shared compact tmux pane-tab tokens own inactive and active tab styling');
     assert.ok(/function sessionShouldOfferYoloMarker\(session, info, payload, auto, state = null\)[\s\S]*autoApproveEnabledElsewhere\(payload\)[\s\S]*STATE_KEY\.needsApproval[\s\S]*STATE_KEY\.needsInput/.test(fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')), 'tmux session tabs offer the YO button only for enabled, externally locked, or prompted sessions');
     assert.ok(/function tmuxPaneTabHtml\(session, info, state, auto, options = \{\}\)[\s\S]*sessionTabLeadingActivityHtml\(session, info, auto,[\s\S]*state/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'real tabs, Tabber, and YO!info pass the shared tab state into the shared YO marker offer rule');
-    assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*const detail = String\(options\.detail \?\? record\?\.tabWorkDescription \?\? ''\)\.trim\(\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*showDetail:\s*Boolean\(detail\)[\s\S]*detail,/.test(infoSource), 'YO!info Tab values route shared work text through the compact tmux pane-tab detail path');
-    assert.ok(/function infoRelationshipRecords\(rows = infoBranchRows\(\)\)[\s\S]*const tabWorkDescriptions = new Map\(\)[\s\S]*sessionWorkDescription\(session, info, 200\)[\s\S]*normalizedTabLabel\.includes\(normalizedSessionWork\)[\s\S]*tabWorkDescription,/.test(infoSource), 'YO!info computes shared work text once per session and suppresses a duplicate already carried by the session label');
+    assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*sessionLabelHtml,/.test(infoSource), 'YO!info Tab values delegate their content unchanged to the shared compact tmux pane-tab renderer');
+    assert.equal(infoSource.includes('tabWorkDescription'), false, 'YO!info has no parallel Tab detail source that can duplicate the shared PR badge');
     assert.ok(/\.info-tree-tab-token\s*\{[\s\S]*inline-size:\s*100%[\s\S]*max-width:\s*100%/.test(infoTreeCss), 'YO!info Tab tokens fill their available group or leaf row so shared work text has the same responsive capacity as Tabber');
     assert.ok(/function infoGroupLabelHtml\(group = \{\}\)[\s\S]*leadingHtml:\s*infoTabGroupLeadingActivityHtml\(group\)/.test(infoSource), 'YO!info Tab group status is routed into the shared compact tmux pane-tab token instead of prepending a standalone dot');
     assert.equal(infoSource.includes('infoTabGroupStatusHtml(group)}${tabHtml'), false, 'YO!info Tab group summaries do not prepend a duplicate standalone status dot before the tab token');

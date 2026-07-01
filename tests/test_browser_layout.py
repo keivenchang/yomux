@@ -3487,7 +3487,7 @@ def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tm
     assert metrics["pathTimeWhiteSpace"] == "nowrap", metrics
 
 
-def test_yoinfo_tab_values_show_shared_session_work_description(browser, tmp_path):
+def test_yoinfo_tab_values_match_shared_tab_detail(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -3496,32 +3496,40 @@ def test_yoinfo_tab_values_show_shared_session_work_description(browser, tmp_pat
     )
     metrics = browser.execute_script(
         """
+        transcriptMeta = {sessions: {
+          '8003': {
+            project: {
+              git: {branch: 'feature/shared-tab-detail'},
+              pull_request: {number: 11112, draft: true, title: 'Refactor agent status ownership'},
+            },
+          },
+        }};
         const record = {
           id: 'session-work-8003',
           tabKey: '8003',
           tabSession: '8003',
           tabLabel: '8003',
           tabTitle: '8003',
-          tabWorkDescription: 'Refactor agent status ownership',
         };
-        const bareRecord = {...record, id: 'session-work-bare', tabSession: '8004', tabKey: '8004', tabLabel: '8004', tabTitle: '8004', tabWorkDescription: ''};
         const fixture = document.createElement('div');
         fixture.id = 'yoinfo-session-work-fixture';
         fixture.style.width = '900px';
         fixture.innerHTML = `
           <section id="group-work">${infoTreeHtml([record], ['tab'])}</section>
-          <section id="leaf-work">${infoRecordHtml(record)}</section>
-          <section id="leaf-bare">${infoRecordHtml(bareRecord)}</section>`;
+          <section id="leaf-work">${infoRecordHtml(record)}</section>`;
         document.body.appendChild(fixture);
+        const sharedFixture = document.createElement('div');
+        sharedFixture.innerHTML = tmuxPaneTabTokenHtml('8003', {tag: 'span', action: false});
+        const sharedDetail = sharedFixture.querySelector('.tab-inline-detail');
         const groupLine = fixture.querySelector('#group-work .info-tree-group-label-line');
         const groupToken = groupLine.querySelector('.info-tree-tab-token');
         const groupDetail = groupToken.querySelector('.tab-inline-detail');
         const leafValue = fixture.querySelector('#leaf-work .info-tree-field-tab .info-tree-field-value');
         const leafToken = leafValue.querySelector('.info-tree-tab-token');
         const leafDetail = leafToken.querySelector('.tab-inline-detail');
-        const bareToken = fixture.querySelector('#leaf-bare .info-tree-tab-token');
         const rect = element => element?.getBoundingClientRect();
         return {
+          sharedText: sharedDetail?.textContent || '',
           groupText: groupDetail?.textContent || '',
           leafText: leafDetail?.textContent || '',
           groupSession: groupToken.querySelector('.session-button-number')?.textContent || '',
@@ -3530,16 +3538,17 @@ def test_yoinfo_tab_values_show_shared_session_work_description(browser, tmp_pat
           leafWidthDelta: Math.abs(rect(leafValue).width - rect(leafToken).width),
           groupDetailDisplay: groupDetail ? getComputedStyle(groupDetail).display : '',
           leafDetailDisplay: leafDetail ? getComputedStyle(leafDetail).display : '',
-          bareDetailCount: bareToken.querySelectorAll('.tab-inline-detail').length,
+          groupPrCount: (groupToken.textContent.match(/#11112/g) || []).length,
+          leafPrCount: (leafToken.textContent.match(/#11112/g) || []).length,
         };
         """
     )
-    assert metrics["groupText"] == "Refactor agent status ownership", metrics
-    assert metrics["leafText"] == "Refactor agent status ownership", metrics
+    assert metrics["sharedText"] == "Refactor agent status ownership", metrics
+    assert metrics["groupText"] == metrics["leafText"] == metrics["sharedText"], metrics
     assert metrics["groupSession"] == "[8003]" and metrics["leafSession"] == "[8003]", metrics
     assert metrics["groupWidthDelta"] <= 1 and metrics["leafWidthDelta"] <= 1, metrics
     assert metrics["groupDetailDisplay"] != "none" and metrics["leafDetailDisplay"] != "none", metrics
-    assert metrics["bareDetailCount"] == 0, metrics
+    assert metrics["groupPrCount"] == metrics["leafPrCount"] == 1, metrics
 
 
 def test_yoinfo_leaf_fields_put_pr_before_linear(browser, tmp_path):
