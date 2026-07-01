@@ -271,9 +271,12 @@ STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
+STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS = 60.0
 STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS = STATS_HISTORY_SAMPLER_SECONDS
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
-STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 6.0
+STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 45.0
+STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS * 3
+STATS_AGENT_TOKEN_SCHEMA_VERSION = 2
 STATS_SHARED_FRESH_SECONDS = 3.0
 TMUX_AI_STATUS_VERSION = 1
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
@@ -301,6 +304,7 @@ STATS_HISTORY_SERVER_FIELDS = (
     "tokens_per_agent_total",
     "agent_token_samples",
 )
+STATS_AGENT_TOKEN_HISTORY_FIELDS = frozenset({"tokens_per_agent_total", "agent_token_samples"})
 # Shared history uses this positional form only on disk. Keeping the field order in one place makes
 # the cross-process snapshot compact while readers still accept the older dictionary form.
 STATS_HISTORY_SHARED_BUCKET_FIELDS = (
@@ -1617,6 +1621,7 @@ class TmuxWebtermApp:
     def stats_history_payload_locked(self, since: int = 0, client_id: str = "", token_since: int = 0, token_resolution_seconds: int = 0, history_start: int = 0) -> dict[str, Any]:
         payload = {
             "sequence": self.stats_history_sequence,
+            "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
             "records": self.stats_history_records_locked(since, client_id=client_id, history_start=history_start),
             "retention_seconds": STATS_HISTORY_RETENTION_SECONDS,
             "raw_window_seconds": STATS_HISTORY_RAW_WINDOW_SECONDS,
@@ -1644,6 +1649,7 @@ class TmuxWebtermApp:
                 "rev": 0,
                 "updated_at": 0.0,
                 "sequence": 0,
+                "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
                 "sample": {},
                 "raw_buckets": [],
                 "rollup_buckets": [],
@@ -1788,7 +1794,7 @@ class TmuxWebtermApp:
                     item[field] = float(raw_item.get(field) or 0.0)
                 except (TypeError, ValueError):
                     item[field] = 0.0
-            for field in ("label", "source", "state", "kind"):
+            for field in ("label", "source", "identity", "state", "kind"):
                 text = str(raw_item.get(field) or "").strip()
                 if text:
                     item[field] = text
@@ -1818,6 +1824,7 @@ class TmuxWebtermApp:
         return {
             "updated_at": now,
             "sequence": sequence,
+            "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
             "sample": dict(sample),
             "raw_buckets": sorted(raw_buckets, key=lambda item: (item[0], item[1])),
             "rollup_buckets": sorted(rollup_buckets, key=lambda item: (item[0], item[1])),
@@ -1886,7 +1893,7 @@ class TmuxWebtermApp:
             bucket["server_sequence"] = 0
             self.stats_history_refresh_bucket_sequence_locked(bucket)
 
-    def stats_history_apply_shared_bucket_locked(self, snapshot: Any) -> None:
+    def stats_history_apply_shared_bucket_locked(self, snapshot: Any, include_agent_tokens: bool = True) -> None:
         source = self.stats_history_shared_bucket_from_snapshot(snapshot)
         if source is None:
             return
@@ -1904,24 +1911,29 @@ class TmuxWebtermApp:
             bucket = stats_history_empty_bucket(start, duration)
             buckets[key] = bucket
         for field in STATS_HISTORY_SERVER_FIELDS:
-            bucket[field] = float(source.get(field) or 0.0)
-        bucket["agent_token_rates"] = self.stats_history_agent_token_rates_snapshot(source.get("agent_token_rates"))
+            bucket[field] = 0.0 if not include_agent_tokens and field in STATS_AGENT_TOKEN_HISTORY_FIELDS else float(source.get(field) or 0.0)
+        bucket["agent_token_rates"] = self.stats_history_agent_token_rates_snapshot(source.get("agent_token_rates")) if include_agent_tokens else {}
         server_sequence = int(source.get("server_sequence") or source.get("sequence") or 0)
         bucket["server_sequence"] = server_sequence
         self.stats_history_refresh_bucket_sequence_locked(bucket)
 
-    def stats_history_apply_shared_agent_state(self, stats_history: dict[str, Any]) -> None:
+    def stats_history_apply_shared_agent_state(self, stats_history: dict[str, Any], include_agent_tokens: bool = True) -> None:
         with self.stats_agent_token_lock:
             token_state = stats_history.get("agent_token_state")
-            if isinstance(token_state, dict):
+            if include_agent_tokens and isinstance(token_state, dict):
                 self.stats_agent_token_state = self.stats_history_shared_agent_state_snapshot(token_state)
+            elif not include_agent_tokens:
+                self.stats_agent_token_state = {}
+                self.stats_agent_token_next_sample_at = 0.0
+                self.stats_agent_token_bootstrap_pending = True
             activity_state = stats_history.get("agent_activity_state")
             if isinstance(activity_state, dict):
                 self.stats_agent_activity_state = self.stats_history_shared_agent_state_snapshot(activity_state)
-            try:
-                self.stats_agent_token_next_sample_at = max(self.stats_agent_token_next_sample_at, float(stats_history.get("agent_token_next_sample_at") or 0.0))
-            except (TypeError, ValueError):
-                pass
+            if include_agent_tokens:
+                try:
+                    self.stats_agent_token_next_sample_at = max(self.stats_agent_token_next_sample_at, float(stats_history.get("agent_token_next_sample_at") or 0.0))
+                except (TypeError, ValueError):
+                    pass
             try:
                 self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, float(stats_history.get("agent_token_consumer_until") or 0.0))
             except (TypeError, ValueError):
@@ -1946,18 +1958,22 @@ class TmuxWebtermApp:
         now = time.time()
         fresh = bool(updated_at and (max_age_seconds is None or now - updated_at <= max_age_seconds))
         if rev != self.stats_history_shared_rev:
+            try:
+                include_agent_tokens = int(stats_history.get("agent_token_schema_version") or 0) == STATS_AGENT_TOKEN_SCHEMA_VERSION
+            except (TypeError, ValueError):
+                include_agent_tokens = False
             raw_buckets = stats_history.get("raw_buckets") if isinstance(stats_history.get("raw_buckets"), list) else []
             rollup_buckets = stats_history.get("rollup_buckets") if isinstance(stats_history.get("rollup_buckets"), list) else []
             with self.stats_history_lock:
                 self.stats_history_clear_server_fields_locked()
                 for bucket in [*rollup_buckets, *raw_buckets]:
-                    self.stats_history_apply_shared_bucket_locked(bucket)
+                    self.stats_history_apply_shared_bucket_locked(bucket, include_agent_tokens=include_agent_tokens)
                 try:
                     self.stats_history_sequence = max(self.stats_history_sequence, int(stats_history.get("sequence") or 0))
                 except (TypeError, ValueError):
                     pass
                 self.stats_history_compact_locked(now)
-            self.stats_history_apply_shared_agent_state(stats_history)
+            self.stats_history_apply_shared_agent_state(stats_history, include_agent_tokens=include_agent_tokens)
             self.stats_history_shared_rev = rev
             self.stats_history_shared_loaded = True
         sample = stats_history.get("sample") if isinstance(stats_history.get("sample"), dict) else {}
@@ -2074,11 +2090,13 @@ class TmuxWebtermApp:
         with self.stats_agent_token_lock:
             if token_consumer:
                 self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, sample_time + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS)
-            if sample_time > self.stats_agent_token_consumer_until:
-                return False
-            if sample_time < self.stats_agent_token_next_sample_at:
-                return False
-            sample_seconds = STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS if self.stats_agent_token_bootstrap_pending else self.stats_agent_token_sample_seconds()
+            consumer_active = sample_time <= self.stats_agent_token_consumer_until
+            sample_seconds = self.stats_agent_token_sample_seconds() if consumer_active else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+            if self.stats_agent_token_bootstrap_pending:
+                sample_seconds = STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS
+            elif sample_time < self.stats_agent_token_next_sample_at:
+                if not consumer_active or self.stats_agent_token_next_sample_at - sample_time <= sample_seconds:
+                    return False
             self.stats_agent_token_next_sample_at = sample_time + sample_seconds
             self.stats_agent_token_bootstrap_pending = False
             return True
@@ -2126,13 +2144,16 @@ class TmuxWebtermApp:
         kind = str(row.get("kind") or "").strip().lower()
         if not transcript:
             return None
-        generated_tokens = session_files.transcript_generated_tokens(Path(transcript), kind)
+        transcript_path = Path(transcript)
+        generated_tokens = session_files.transcript_generated_tokens(transcript_path, kind)
         if generated_tokens is None:
             return None
+        row["_stats_agent_token_identity"] = session_files.transcript_usage_identity(transcript_path, kind)
         return generated_tokens
 
     def stats_agent_token_count(self, row: dict[str, Any]) -> float | None:
         row.pop("_stats_agent_token_source", None)
+        row.pop("_stats_agent_token_identity", None)
         transcript_tokens = self.stats_agent_transcript_token_count(row)
         if transcript_tokens is not None:
             row["_stats_agent_token_source"] = "transcript"
@@ -2182,7 +2203,7 @@ class TmuxWebtermApp:
                     "total": tokens,
                     "samples": 1.0,
                     "tokens": tokens,
-                    "seconds": bucket_seconds,
+                    "seconds": overlap,
                     "source": "transcript",
                 }],
             })
@@ -2226,14 +2247,23 @@ class TmuxWebtermApp:
                     if token_count is None:
                         continue
                     token_source = str(row.get("_stats_agent_token_source") or "sample").strip() or "sample"
+                    token_identity = str(row.get("_stats_agent_token_identity") or token_source).strip() or token_source
                     label = self.stats_agent_token_label(row)
                     previous = self.stats_agent_token_state.get(key)
                     previous_source = str(previous.get("source") or "") if isinstance(previous, dict) else ""
+                    previous_identity = str(previous.get("identity") or previous_source) if isinstance(previous, dict) else ""
                     previous_tokens = float(previous.get("tokens") or 0.0) if isinstance(previous, dict) else 0.0
                     previous_time = float(previous.get("time") or 0.0) if isinstance(previous, dict) else 0.0
-                    if previous and previous_source == token_source and token_count >= previous_tokens and sample_time > previous_time:
+                    elapsed = sample_time - previous_time
+                    if (
+                        previous
+                        and previous_source == token_source
+                        and previous_identity == token_identity
+                        and token_count >= previous_tokens
+                        and 0 < elapsed <= STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS
+                    ):
                         agent_token_records.extend(self.stats_agent_token_delta_records(key, label, previous_time, sample_time, token_count - previous_tokens))
-                    self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source}
+                    self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source, "identity": token_identity}
             for key in list(self.stats_agent_token_state):
                 if key not in seen_keys:
                     self.stats_agent_token_state.pop(key, None)

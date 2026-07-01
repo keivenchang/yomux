@@ -2667,6 +2667,29 @@ async function runEditorPreviewSuite() {
     assert.ok(/data-js-debug-axis-max="agentTokens"[^>]*>100</.test(html), '100 tokens over one sampled minute stays 100 tokens/min after the server stores it in a two-minute history bucket');
   });
 
+  test('YO!stats clears incompatible token history when the server schema changes', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 42,
+      agent_token_schema_version: 1,
+      records: [{
+        start: Math.floor(now / 1000),
+        duration: 1,
+        sequence: 42,
+        agent_token_samples: 1,
+        agent_token_rates: [{key: 'stale|0|codex', label: 'stale:0:codex', total: 500, samples: 1, tokens: 500, seconds: 60, source: 'transcript'}],
+      }],
+    });
+    assert.ok(api.debugPanelHtmlForTest().includes('stale:0:codex'), 'the initial token schema renders its token series');
+
+    api.debugGraphApplyServerHistoryForTest({sequence: 43, agent_token_schema_version: 2, records: []});
+
+    assert.equal(api.debugGraphBucketSummaryForTest(now).agentTokenSchemaVersion, 2, 'the client tracks the replacement token schema');
+    assert.equal(api.debugPanelHtmlForTest().includes('stale:0:codex'), false, 'a schema change removes stale token bars and legend entries');
+  });
+
   test('YO!stats split charts render deterministic Y-axis max labels with units', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();

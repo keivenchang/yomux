@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -38,8 +39,8 @@ SESSION_FILES_MAX_HOURS = 24 * 14
 SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
 _TRANSCRIPT_SCAN_CACHE_MAX = 64
 _TRANSCRIPT_SCAN_TAIL_BYTES = 512
-_CODEX_TRANSCRIPT_SCAN_VERSION = 2
-_CLAUDE_TRANSCRIPT_SCAN_VERSION = 2
+_CODEX_TRANSCRIPT_SCAN_VERSION = 3
+_CLAUDE_TRANSCRIPT_SCAN_VERSION = 3
 _CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str, str, bool], dict[str, Any]] = {}
 _CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str], dict[str, Any]] = {}
 
@@ -200,6 +201,7 @@ def new_claude_transcript_scan_state() -> dict[str, Any]:
         "size": 0,
         "raw_changes": {},
         "generated_tokens": 0.0,
+        "usage_tokens_by_message_id": {},
         "parsed_tail": b"",
     }
 
@@ -270,7 +272,19 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
     message = record.get("message")
     if not isinstance(message, dict):
         return
-    state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + claude_usage_generated_tokens(message.get("usage"))
+    generated_tokens = claude_usage_generated_tokens(message.get("usage"))
+    message_id = str(message.get("id") or "").strip()
+    if message_id:
+        tokens_by_message_id = state.get("usage_tokens_by_message_id")
+        if not isinstance(tokens_by_message_id, dict):
+            tokens_by_message_id = {}
+            state["usage_tokens_by_message_id"] = tokens_by_message_id
+        previous_tokens = numeric_token_value(tokens_by_message_id.get(message_id))
+        if generated_tokens > previous_tokens:
+            state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + generated_tokens - previous_tokens
+            tokens_by_message_id[message_id] = generated_tokens
+    elif generated_tokens:
+        state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + generated_tokens
     raw_changes = state.get("raw_changes")
     if not isinstance(raw_changes, dict):
         raw_changes = {}
@@ -364,7 +378,9 @@ def numeric_token_value(value: Any) -> float:
 def generated_usage_tokens(usage: Any) -> float:
     if not isinstance(usage, dict):
         return 0.0
-    return sum(numeric_token_value(usage.get(key)) for key in (
+    # Providers expose these names as aliases or nested subsets, not additive counters. In
+    # particular, Codex reasoning_output_tokens is already included in output_tokens.
+    return max((numeric_token_value(usage.get(key)) for key in (
         "output_tokens",
         "outputTokens",
         "completion_tokens",
@@ -373,7 +389,18 @@ def generated_usage_tokens(usage: Any) -> float:
         "generatedTokens",
         "reasoning_output_tokens",
         "reasoningOutputTokens",
-    ))
+    )), default=0.0)
+
+
+def transcript_usage_identity(path: Path, kind: str) -> str:
+    try:
+        stat = path.stat()
+        with path.open("rb") as handle:
+            prefix_digest = hashlib.sha256(handle.readline(4096)).hexdigest()[:16]
+    except OSError:
+        return ""
+    resolved = str(path.expanduser().resolve(strict=False))
+    return f"{str(kind or '').strip().lower()}:{int(stat.st_dev)}:{int(stat.st_ino)}:{prefix_digest}:{resolved}"
 
 
 def claude_usage_generated_tokens(usage: Any) -> float:

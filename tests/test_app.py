@@ -338,6 +338,49 @@ def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monk
     assert isinstance(data["stats_history"]["raw_buckets"][0], list)
 
 
+def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+    writer = app_module.TmuxWebtermApp([])
+    reader = app_module.TmuxWebtermApp([])
+    reader.background_owner = StatsRoleOwner(owner=False, port=8002)
+    sample_time = time.time()
+    sample = {"time": sample_time, "pid": 8003, "cpu_percent": 12.0, "system_cpu_percent": 24.0}
+    try:
+        with writer.stats_history_lock:
+            writer.stats_history_merge_record_locked({
+                "time": sample_time,
+                "cpu_total_percent": 12.0,
+                "cpu_count": 1,
+                "tokens_per_agent_total": 600.0,
+                "agent_token_samples": 1,
+                "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 600.0, "samples": 1, "tokens": 600.0, "seconds": 60.0, "source": "transcript"}],
+            }, sample_time, fields=app_module.STATS_HISTORY_SERVER_FIELDS, client_id=None)
+        with writer.stats_agent_token_lock:
+            writer.stats_agent_token_state = {"1|0|codex": {"tokens": 600.0, "time": sample_time, "label": "1:0:codex", "source": "transcript", "identity": "old-transcript"}}
+        old_snapshot = writer.stats_history_shared_snapshot(sample)
+        old_snapshot.pop("agent_token_schema_version")
+        old_snapshot["rev"] = 1
+        status = writer.tmux_ai_status_empty()
+        status["stats_history"] = old_snapshot
+        common.TMUX_AI_STATUS_PATH.write_text(json.dumps(status), encoding="utf-8")
+
+        assert reader.merge_shared_stats_history(max_age_seconds=None)["ok"] is True
+        with reader.stats_history_lock:
+            history = reader.stats_history_payload_locked()
+        with reader.stats_agent_token_lock:
+            token_state = dict(reader.stats_agent_token_state)
+    finally:
+        writer.control_server.stop()
+        reader.control_server.stop()
+
+    assert history["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
+    assert sum(record["cpu_count"] for record in history["records"]) == 1
+    assert sum(record["agent_token_samples"] for record in history["records"]) == 0
+    assert all(not record["agent_token_rates"] for record in history["records"])
+    assert token_state == {}
+
+
 def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch, tmp_path):
     monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
     monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
@@ -375,6 +418,7 @@ def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch,
     }])
     def token_count(row):
         row["_stats_agent_token_source"] = "transcript"
+        row["_stats_agent_token_identity"] = "codex:dev:inode:digest:/tmp/codex.jsonl"
         return 250.0
 
     monkeypatch.setattr(owner, "stats_agent_token_count", token_count)
@@ -384,7 +428,7 @@ def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch,
         with owner.stats_agent_token_lock:
             assert owner.stats_agent_token_consumer_until >= sample_time
             owner.stats_agent_token_state = {
-                "1|0|codex": {"tokens": 100.0, "time": previous_time, "label": "1:0:codex", "source": "transcript"}
+                "1|0|codex": {"tokens": 100.0, "time": previous_time, "label": "1:0:codex", "source": "transcript", "identity": "codex:dev:inode:digest:/tmp/codex.jsonl"}
             }
             owner.stats_agent_token_next_sample_at = 0.0
         owner.record_stats_global_sample(trigger="sampler", token_consumer=False)
@@ -397,6 +441,9 @@ def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch,
     token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
     assert sum(item["tokens"] for item in token_records) == pytest.approx(150.0)
     assert sum(record["agent_token_samples"] for record in history["records"]) >= 1
+    data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    assert data["stats_history"]["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
+    assert data["stats_history"]["agent_token_state"]["1|0|codex"]["identity"] == "codex:dev:inode:digest:/tmp/codex.jsonl"
 
 
 def test_background_status_includes_performance_summary():
@@ -598,16 +645,15 @@ def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch
     system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
     claude_transcript = tmp_path / "claude.jsonl"
     codex_transcript = tmp_path / "codex.jsonl"
+    previous_claude_tokens = [0]
 
     def write_usage_transcripts(claude_tokens: int, codex_tokens: int, mtime: float) -> None:
-        claude_transcript.write_text(
-            json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": claude_tokens}, "content": []}}) + "\n",
-            encoding="utf-8",
-        )
-        codex_transcript.write_text(
-            json.dumps({"type": "response_item", "payload": {"info": {"total_token_usage": {"output_tokens": codex_tokens}}}}) + "\n",
-            encoding="utf-8",
-        )
+        claude_delta = claude_tokens - previous_claude_tokens[0]
+        previous_claude_tokens[0] = claude_tokens
+        with claude_transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "assistant", "message": {"id": f"msg-{claude_tokens}", "usage": {"output_tokens": claude_delta}, "content": []}}) + "\n")
+        with codex_transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "response_item", "payload": {"info": {"total_token_usage": {"output_tokens": codex_tokens}}}}) + "\n")
         os.utime(claude_transcript, (mtime, mtime))
         os.utime(codex_transcript, (mtime, mtime))
 
@@ -667,7 +713,7 @@ def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch
     assert sum(record["agent_token_samples"] for record in records) == 4
 
 
-def test_stats_sampler_skips_token_scans_without_consumer(monkeypatch):
+def test_stats_sampler_bootstraps_token_scan_without_consumer(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     wall_times = iter([1000.0])
     monotonic_times = iter([50.0])
@@ -681,17 +727,35 @@ def test_stats_sampler_skips_token_scans_without_consumer(monkeypatch):
     monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
     monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
     monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/rollout.jsonl"}])
-    monkeypatch.setattr(webapp, "stats_agent_token_count", lambda _row: (_ for _ in ()).throw(AssertionError("token scan should be gated")))
+    token_scans = []
+    monkeypatch.setattr(webapp, "stats_agent_token_count", lambda _row: token_scans.append(True) or 100.0)
     try:
-        payload = webapp.stats_sample_payload(token_consumer=False)
+        payload = webapp.record_stats_global_sample(trigger="sampler")
         with webapp.stats_history_lock:
             history = webapp.stats_history_payload_locked(0, client_id="client-a")
     finally:
         webapp.control_server.stop()
 
-    assert payload["ok"] is True
+    assert payload["time"] == 1000.0
+    assert token_scans == [True]
     assert sum(record["agent_activity_samples"] for record in history["records"]) == 1
     assert sum(record["agent_token_samples"] for record in history["records"]) == 0
+
+
+def test_stats_token_sampling_uses_idle_cadence_and_accelerates_for_consumer():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        with webapp.stats_agent_token_lock:
+            webapp.stats_agent_token_bootstrap_pending = False
+            webapp.stats_agent_token_next_sample_at = 0.0
+            webapp.stats_agent_token_consumer_until = 0.0
+        assert webapp.stats_agent_token_sampling_due(1000.0) is True
+        assert webapp.stats_agent_token_next_sample_at == 1000.0 + app_module.STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+        assert webapp.stats_agent_token_sampling_due(1001.0) is False
+        assert webapp.stats_agent_token_sampling_due(1001.0, token_consumer=True) is True
+        assert webapp.stats_agent_token_next_sample_at == 1001.0 + app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS
+    finally:
+        webapp.control_server.stop()
 
 
 def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch):
@@ -796,6 +860,67 @@ def test_stats_agent_token_rates_use_transcript_counter_and_reset_baseline(monke
     assert second["_agent_token_records"][0]["agent_token_rates"][0]["tokens"] == pytest.approx(120.0)
     assert second["_agent_token_records"][0]["agent_token_rates"][0]["source"] == "transcript"
     assert "_agent_token_records" not in reset
+
+
+def test_stats_agent_token_rate_resets_baseline_on_transcript_identity_change(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    rows = [[{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"}] for _index in range(3)]
+    token_samples = iter([(100.0, "transcript-a"), (220.0, "transcript-b"), (340.0, "transcript-b")])
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: rows.pop(0))
+
+    def token_count(row):
+        tokens, identity = next(token_samples)
+        row["_stats_agent_token_source"] = "transcript"
+        row["_stats_agent_token_identity"] = identity
+        return tokens
+
+    monkeypatch.setattr(webapp, "stats_agent_token_count", token_count)
+    try:
+        first = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
+        switched = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
+        continued = webapp.stats_agent_activity_record(1120.0, include_token_rates=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert "_agent_token_records" not in first
+    assert "_agent_token_records" not in switched
+    assert sum(record["agent_token_rates"][0]["tokens"] for record in continued["_agent_token_records"]) == pytest.approx(120.0)
+
+
+def test_stats_agent_token_rate_resets_baseline_after_unobserved_gap(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    rows = [[{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"}] for _index in range(2)]
+    transcript_tokens = iter([100.0, 220.0])
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: rows.pop(0))
+    monkeypatch.setattr(webapp, "stats_agent_transcript_token_count", lambda _row: next(transcript_tokens))
+    try:
+        first = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
+        resumed = webapp.stats_agent_activity_record(1000.0 + app_module.STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS + 1.0, include_token_rates=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert "_agent_token_records" not in first
+    assert "_agent_token_records" not in resumed
+
+
+def test_stats_agent_token_delta_records_accumulate_actual_overlap_seconds():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        records = [
+            *webapp.stats_agent_token_delta_records("1|0|codex", "1:0:codex", 1000.0, 1010.0, 100.0),
+            *webapp.stats_agent_token_delta_records("1|0|codex", "1:0:codex", 1010.0, 1020.0, 100.0),
+        ]
+        with webapp.stats_history_lock:
+            for record in records:
+                webapp.stats_history_merge_record_locked(record, 1020.0, fields=app_module.STATS_HISTORY_SERVER_FIELDS, client_id=None)
+            history = webapp.stats_history_payload_locked()
+    finally:
+        webapp.control_server.stop()
+
+    token_item = next(item for record in history["records"] for item in record["agent_token_rates"])
+    assert token_item["tokens"] == pytest.approx(200.0)
+    assert token_item["seconds"] == pytest.approx(20.0)
+    assert token_item["tokens"] / token_item["seconds"] * 60 == pytest.approx(600.0)
 
 
 def test_stats_agent_token_rates_ignore_visible_counter_changes(monkeypatch):

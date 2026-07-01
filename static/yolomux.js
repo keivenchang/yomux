@@ -34028,6 +34028,7 @@ let jsDebugStatsHistoryFlushInFlight = false;
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsAgentTokenSequence = 0;
 let jsDebugStatsAgentTokenResolutionSeconds = 0;
+let jsDebugStatsAgentTokenSchemaVersion = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
@@ -34831,6 +34832,7 @@ function clearJsDebugGraphData() {
   jsDebugGraphRawBuckets.clear();
   jsDebugGraphRollupBuckets.clear();
   resetDebugGraphAgentTokenHistory();
+  jsDebugStatsAgentTokenSchemaVersion = 0;
   jsDebugGraphEventBuckets.clear();
   jsDebugGraphEventResponseBytes.clear();
   jsDebugGraphEventRefTimes.clear();
@@ -34911,6 +34913,11 @@ function debugGraphApplyServerAgentTokenRates(bucket, rates) {
 
 function debugGraphApplyServerHistory(history = {}) {
   if (!history || typeof history !== 'object') return;
+  const tokenSchemaVersion = Number(history.agent_token_schema_version);
+  if (Number.isFinite(tokenSchemaVersion) && tokenSchemaVersion > 0 && tokenSchemaVersion !== jsDebugStatsAgentTokenSchemaVersion) {
+    clearDebugGraphAgentTokenData();
+    jsDebugStatsAgentTokenSchemaVersion = tokenSchemaVersion;
+  }
   const sequence = Number(history.sequence);
   if (Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
   const records = Array.isArray(history.records) ? history.records : [];
@@ -34949,6 +34956,17 @@ function resetDebugGraphAgentTokenHistory() {
   jsDebugStatsAgentTokenSequence = 0;
   jsDebugStatsAgentTokenResolutionSeconds = 0;
   jsDebugGraphAgentTokenBuckets.clear();
+}
+
+function clearDebugGraphAgentTokenData() {
+  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
+    for (const bucket of map.values()) {
+      bucket.tokensPerAgentTotal = 0;
+      bucket.agentTokenSamples = 0;
+      bucket.agentTokenRates = new Map();
+    }
+  }
+  resetDebugGraphAgentTokenHistory();
 }
 
 function debugGraphAggregateBucket(map, source, scaleMs) {
@@ -35865,6 +35883,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     rollupBuckets: jsDebugGraphRollupBuckets.size,
     agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
     agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
+    agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
     displayBuckets: buckets.length,
     eventRefs: jsDebugGraphEventBuckets.size,
     scaleSeconds: jsDebugGraphScaleSeconds,

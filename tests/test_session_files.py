@@ -128,7 +128,7 @@ def test_transcript_scans_collect_generated_usage_with_changes(tmp_path):
                         "cached_input_tokens": 500,
                         "output_tokens": 17,
                         "reasoning_output_tokens": 3,
-                        "total_tokens": 1520,
+                        "total_tokens": 1017,
                     }
                 }
             },
@@ -141,9 +141,54 @@ def test_transcript_scans_collect_generated_usage_with_changes(tmp_path):
 
     assert claude_details["changes"][str(tmp_path / "src" / "app.py")] == {"M"}
     assert claude_details["usage"]["generated_tokens"] == 11
-    assert codex_details["usage"]["generated_tokens"] == 20
+    assert codex_details["usage"]["generated_tokens"] == 17
     assert session_files.transcript_generated_tokens(claude_path, "claude", str(tmp_path)) == 11
-    assert session_files.transcript_generated_tokens(codex_path, "codex", str(tmp_path)) == 20
+    assert session_files.transcript_generated_tokens(codex_path, "codex", str(tmp_path)) == 17
+
+
+def test_generated_usage_tokens_treats_reasoning_as_output_subset():
+    assert session_files.generated_usage_tokens({"output_tokens": 17, "reasoning_output_tokens": 3}) == 17
+    assert session_files.generated_usage_tokens({"reasoning_output_tokens": 3}) == 3
+    assert session_files.generated_usage_tokens({"outputTokens": 17, "completion_tokens": 17}) == 17
+
+
+def test_transcript_usage_identity_changes_after_in_place_replacement(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text('{"session":"first"}\n', encoding="utf-8")
+    first = session_files.transcript_usage_identity(transcript, "codex")
+
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write('{"event":"append"}\n')
+    appended = session_files.transcript_usage_identity(transcript, "codex")
+
+    transcript.write_text('{"session":"replacement"}\n', encoding="utf-8")
+    replacement = session_files.transcript_usage_identity(transcript, "codex")
+
+    assert first
+    assert appended == first
+    assert replacement
+    assert replacement != first
+
+
+def test_claude_transcript_usage_deduplicates_repeated_message_ids(tmp_path):
+    session_files._CLAUDE_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "claude.jsonl"
+
+    def line(message_id, output_tokens):
+        return json.dumps({
+            "type": "assistant",
+            "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []},
+        }) + "\n"
+
+    transcript.write_text(line("msg-1", 11), encoding="utf-8")
+    first = session_files.scan_claude_transcript_details(transcript)
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(line("msg-1", 11) + line("msg-1", 13) + line("msg-2", 7))
+
+    details = session_files.scan_claude_transcript_details(transcript)
+
+    assert first["usage"]["generated_tokens"] == 11
+    assert details["usage"]["generated_tokens"] == 20
 
 
 def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypatch):
