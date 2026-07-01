@@ -720,6 +720,7 @@ const summaryStreams = new Map();
 const autoApproveStates = new Map();
 const promptAttentionClears = new Map();
 const attentionAcknowledgementTimers = new Map();
+const attentionAcknowledgementPendingKeys = new Set();
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;

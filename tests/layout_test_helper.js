@@ -875,6 +875,8 @@ globalThis.__layoutTestApi = {
   jsDebugTextForClipboardForTest: jsDebugTextForClipboard,
   recordSseDebugEventForTest: recordSseDebugEvent,
   recordClientPerfCounterForTest: recordClientPerfCounter,
+  clientPerfSummaryForTest: clientPerfSummary,
+  clearClientPerfCountersForTest: clearClientPerfCounters,
   shareDebugTextForClipboardForTest: shareDebugTextForClipboard,
   shareDebugProfileUploadPayloadForTest: shareDebugProfileUploadPayload,
   recordJsDebugEventForTest: recordJsDebugEvent,

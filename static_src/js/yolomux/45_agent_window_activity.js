@@ -614,10 +614,18 @@ function clearAgentWindowAcknowledgementVisual(key) {
 
 function showAgentWindowAcknowledgementVisual(key, options = {}) {
   if (!key) return false;
+  const acknowledgementKey = String(options.acknowledgementKey || '');
+  const current = agentWindowAcknowledgementVisuals.get(key);
+  if (agentWindowAcknowledgementVisualActive(key) && String(current?.acknowledgementKey || '') === acknowledgementKey) {
+    if (options.refresh !== false && current?.refreshed !== true) {
+      current.refreshed = true;
+      refreshAgentWindowActivityDisplays();
+    }
+    return true;
+  }
   const durationMs = agentWindowAcknowledgementVisualDurationMs();
   const startedAtMs = Date.now();
   const untilMs = startedAtMs + durationMs;
-  const acknowledgementKey = String(options.acknowledgementKey || '');
   clearAgentWindowAcknowledgementVisual(key);
   const timer = setTimeout(() => {
     const visual = agentWindowAcknowledgementVisuals.get(key);
@@ -636,7 +644,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
     state: options.visualState === 'attention' ? (sourceAgent.state || STATE_KEY.needsInput) : (sourceAgent.state || STATE_KEY.idle),
     working_stopped_ts: Number(options.stoppedAt || sourceAgent.working_stopped_ts || sourceAgent.workingStoppedTs || 0),
   } : null;
-  agentWindowAcknowledgementVisuals.set(key, {startedAtMs, untilMs, durationMs, timer, agent: visualAgent});
+  agentWindowAcknowledgementVisuals.set(key, {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent});
   if (options.refresh !== false) refreshAgentWindowActivityDisplays();
   return true;
 }

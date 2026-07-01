@@ -5109,6 +5109,10 @@ function handleClientPushEventNow(type, payload = {}) {
     if (payload.data) applyAutoApprovePayload(payload.data);
     return;
   }
+  if (type === 'attention_acks_changed') {
+    applyAttentionAcknowledgementResponse(payload);
+    return;
+  }
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
@@ -5223,7 +5227,7 @@ function installClientEventStream() {
     clientEventsConnected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);

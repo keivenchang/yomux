@@ -3647,12 +3647,22 @@ class TmuxWebtermApp:
         if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
             return {"ok": False, "error": f"unsupported background client event: {event_type}"}
         if event_type == "attention_acks_changed":
+            with self.attention_ack_lock:
+                previous_keys = set(self.attention_ack_keys)
             if not self.merge_shared_attention_acks():
                 return {"ok": True, "accepted": True, "noop": True}
             self.invalidate_auto_approve_cache()
+            raw_payload = request.get("payload")
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+            raw_acknowledged = payload.get("acknowledged") if isinstance(payload.get("acknowledged"), list) else []
+            with self.attention_ack_lock:
+                current_keys = set(self.attention_ack_keys)
+                payload_keys = {str(key) for key in raw_acknowledged if str(key) in current_keys}
+                acknowledged = sorted(payload_keys | (current_keys - previous_keys))
+                acknowledged_at = {key: self.attention_ack_keys[key] for key in acknowledged}
             self.publish_client_event(
-                "auto_approve_changed",
-                {"refresh": True, "trigger": "attention_ack_sync"},
+                "attention_acks_changed",
+                {"acknowledged": acknowledged, "acknowledged_at": acknowledged_at},
                 trigger="background-fanout",
                 cache="ready",
             )
@@ -9402,30 +9412,34 @@ class TmuxWebtermApp:
         while len(keys) > ATTENTION_ACK_MAX_KEYS:
             keys.pop(min(keys, key=lambda item: keys[item]), None)
 
-    def write_shared_attention_acks_union(self, local_keys: dict[str, float]) -> int:
+    def write_shared_attention_acks_union(self, local_keys: dict[str, float]) -> tuple[int, list[str]]:
         now = time.time()
         with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
             status = self._read_shared_tmux_ai_status_locked()
             attention = status.get("attention_acks") if isinstance(status.get("attention_acks"), dict) else {}
             merged, rev = self._read_shared_attention_acks_locked()
-            for key, ts in local_keys.items():
-                if key and ts > 0:
-                    merged[key] = max(ts, merged.get(key, 0.0))
             self._prune_attention_ack_dict(merged, now)
-            rev += 1
-            status["attention_acks"] = {
-                "rev": rev,
-                "updated_at": now,
-                "keys": merged,
-                "writer": self.background_owner.owner_payload(),
-                **({"legacy_rev": attention.get("legacy_rev")} if isinstance(attention, dict) and attention.get("legacy_rev") else {}),
-            }
-            self._write_shared_tmux_ai_status_locked(status)
+            before_keys = set(merged)
+            for key, ts in local_keys.items():
+                if key and ts > 0 and key not in merged:
+                    merged[key] = ts
+            self._prune_attention_ack_dict(merged, now)
+            newly_acknowledged = sorted(set(merged) - before_keys)
+            if newly_acknowledged:
+                rev += 1
+                status["attention_acks"] = {
+                    "rev": rev,
+                    "updated_at": now,
+                    "keys": merged,
+                    "writer": self.background_owner.owner_payload(),
+                    **({"legacy_rev": attention.get("legacy_rev")} if isinstance(attention, dict) and attention.get("legacy_rev") else {}),
+                }
+                self._write_shared_tmux_ai_status_locked(status)
         with self.attention_ack_lock:
             self.attention_ack_keys = dict(merged)
         with self.client_watch_lock:
             self.client_watch_attention_ack_rev = rev
-        return rev
+        return rev, newly_acknowledged
 
     def merge_shared_attention_acks(self) -> bool:
         # Hold file_lock across the whole read->rev-check->apply. write_shared_attention_acks_union
@@ -9447,16 +9461,21 @@ class TmuxWebtermApp:
         return changed
 
     def poll_attention_acks_client_event_once(self) -> list[str]:
+        with self.attention_ack_lock:
+            previous_keys = set(self.attention_ack_keys)
         if not self.merge_shared_attention_acks():
             return []
         self.invalidate_auto_approve_cache()
+        with self.attention_ack_lock:
+            acknowledged = sorted(set(self.attention_ack_keys) - previous_keys)
+            acknowledged_at = {key: self.attention_ack_keys[key] for key in acknowledged}
         self.publish_client_event(
-            "auto_approve_changed",
-            {"refresh": True, "trigger": "attention_ack_sync"},
+            "attention_acks_changed",
+            {"acknowledged": acknowledged, "acknowledged_at": acknowledged_at},
             trigger="timer",
             cache="ready",
         )
-        return ["auto_approve_changed"]
+        return ["attention_acks_changed"]
 
     def acknowledge_attention(self, payload: dict[str, Any] | None) -> tuple[dict[str, Any], HTTPStatus]:
         source = payload if isinstance(payload, dict) else {}
@@ -9470,26 +9489,31 @@ class TmuxWebtermApp:
         if not keys:
             return {"error": "attention acknowledgement keys required"}, HTTPStatus.BAD_REQUEST
         now = time.time()
+        rev, newly_acknowledged = self.write_shared_attention_acks_union({key: now for key in keys})
         with self.attention_ack_lock:
-            for key in keys:
-                self.attention_ack_keys[key] = now
-            self.prune_attention_ack_keys_locked(now)
-        self.write_shared_attention_acks_union({key: now for key in keys})
+            acknowledged_at = {key: self.attention_ack_keys[key] for key in keys if key in self.attention_ack_keys}
+        result = {
+            "ok": True,
+            "acknowledged": keys,
+            "acknowledged_at": acknowledged_at,
+            "changed": bool(newly_acknowledged),
+            "rev": rev,
+            "status": int(HTTPStatus.OK),
+        }
+        if not newly_acknowledged:
+            return result, HTTPStatus.OK
+        event_payload = {
+            "acknowledged": newly_acknowledged,
+            "acknowledged_at": {key: acknowledged_at[key] for key in newly_acknowledged},
+        }
         self.notify_background_client_event_followers(
             "attention_acks_changed",
-            {},
-            self.shared_background_client_event_record("attention_acks_changed", {}),
+            event_payload,
+            self.shared_background_client_event_record("attention_acks_changed", event_payload),
         )
         self.invalidate_auto_approve_cache()
-        auto_payload, status = self.auto_approve_status()
-        if status == HTTPStatus.OK and isinstance(auto_payload, dict):
-            self.publish_client_event(
-                "auto_approve_changed",
-                {"status": int(status), "data": auto_payload},
-                trigger="attention_ack",
-                cache="ready",
-            )
-        return {"ok": True, "acknowledged": keys, "auto_approve": auto_payload, "status": int(status)}, HTTPStatus.OK
+        self.publish_client_event("attention_acks_changed", event_payload, trigger="attention_ack", cache="ready")
+        return result, HTTPStatus.OK
 
     @staticmethod
     def agent_window_index_key(value: Any) -> str:

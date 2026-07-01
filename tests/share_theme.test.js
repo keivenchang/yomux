@@ -650,6 +650,28 @@ async function runShareThemeSuite() {
       assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), true, 'typed xterm bytes acknowledge the active red/yellow agent status');
       assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
     }
+    {
+      const acknowledgementApi = loadYolomux('', ['1']);
+      const attentionKey = '["agent-window","1","0","%1","claude","needs-input","burst"]';
+      acknowledgementApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'claude'}]});
+      acknowledgementApi.setAutoApproveStateForTest('1', {agent_windows: [
+        {kind: 'claude', state: 'needs-input', window_index: 0, pane_target: '%1', current: true, window_active: true, attention_key: attentionKey},
+      ]});
+      const fetchCalls = [];
+      acknowledgementApi.setFetchForTest((url, options = {}) => {
+        fetchCalls.push({url: String(url), body: JSON.parse(options.body || '{}')});
+        return new Promise(() => {});
+      });
+      acknowledgementApi.clearClientPerfCountersForTest();
+      for (let index = 0; index < 25; index += 1) {
+        assert.equal(acknowledgementApi.acknowledgeAgentWindowActivityForTest('1', 0, {localOnly: false, delayMs: 0}), true, 'repeated input remains covered by the first acknowledgement');
+      }
+      const perf = Object.fromEntries(acknowledgementApi.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
+      assert.deepStrictEqual(fetchCalls.filter(call => call.url === '/api/attention-ack'), [{url: '/api/attention-ack', body: {keys: [attentionKey]}}], 'an unresolved acknowledgement suppresses duplicate POSTs for the same attention event');
+      assert.equal(perf.renderPanels?.count, 1, 'an acknowledgement burst rebuilds the pane surfaces only for the first input');
+      assert.equal(perf.renderPaneTabStrips?.count, 1, 'an acknowledgement burst rebuilds pane-tab status only for the first input');
+      assert.equal(perf.renderSessionButtons?.count, 1, 'an acknowledgement burst rebuilds topbar session buttons only for the first input');
+    }
     // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
     // each repo owns its own compact comparison line instead.
     const compactFinderPanel = api.fileExplorerChangesPanelHtml();

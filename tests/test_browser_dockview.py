@@ -1488,6 +1488,7 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
             "panes": [
                 {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
                 {"target": "%2", "window": 2, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+                {"target": "%3", "window": 3, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
             ],
         },
     }
@@ -1499,6 +1500,7 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
                 "enabled": True,
                 "agent_windows": [
                     {"kind": "claude", "state": "needs-input", "window_index": 2, "window_label": "2:claude", "current": True, "window_active": True, "screen_text": "waiting", "attention_key": attention_key},
+                    {"kind": "codex", "state": "working", "window_index": 3, "window_label": "3:codex", "current": False, "window_active": False, "working_elapsed_seconds": 4},
                 ],
             },
         },
@@ -1522,7 +1524,8 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
               && socket?.readyState === WebSocket.OPEN
               && !!document.querySelector('.panel-detail-row [data-window-index="2"]')
               && !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-agent-icon')
-              && !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention');
+              && !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot.status-indicator--attention')
+              && !!document.querySelector('.panel-detail-row [data-window-index="3"] .agent-window-status-dot.status-indicator--working');
             """
         )
     )
@@ -1530,17 +1533,35 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
     immediate = browser.execute_script(
         """
         const terminal = window.__bootTerminalInstances[0];
+        clearClientPerfCounters();
         const beforeFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
         terminal._onData('a');
+        const unrelatedWorkingBall = document.querySelector('.panel-detail-row [data-window-index="3"] .agent-window-status-dot.status-indicator--working');
+        for (const character of 'bcdefghijklmnopqrstuvwxy') terminal._onData(character);
         const afterFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []).length;
+        const perf = Object.fromEntries(clientPerfSummary().map(counter => [counter.name, counter]));
         return {
           hasActivity: !!document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-activity, .panel-detail-row [data-window-index="2"] .agent-window-agent-icon, .panel-detail-row [data-window-index="2"] .agent-window-status-dot'),
           ackPosts: window.__bootFetches.filter(entry => entry.path === '/api/attention-ack').length,
           newSocketFrames: afterFrames - beforeFrames,
+          unrelatedBallStable: unrelatedWorkingBall === document.querySelector('.panel-detail-row [data-window-index="3"] .agent-window-status-dot.status-indicator--working'),
+          renderPanels: perf.renderPanels?.count || 0,
+          renderPaneTabStrips: perf.renderPaneTabStrips?.count || 0,
+          renderSessionButtons: perf.renderSessionButtons?.count || 0,
+          terminalInputs: perf['term.onData']?.count || 0,
         };
         """
     )
-    assert immediate == {"hasActivity": True, "ackPosts": 0, "newSocketFrames": 1}
+    assert immediate == {
+        "hasActivity": True,
+        "ackPosts": 0,
+        "newSocketFrames": 25,
+        "unrelatedBallStable": True,
+        "renderPanels": 1,
+        "renderPaneTabStrips": 1,
+        "renderSessionButtons": 1,
+        "terminalInputs": 25,
+    }
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """

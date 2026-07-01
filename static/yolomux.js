@@ -721,6 +721,7 @@ const summaryStreams = new Map();
 const autoApproveStates = new Map();
 const promptAttentionClears = new Map();
 const attentionAcknowledgementTimers = new Map();
+const attentionAcknowledgementPendingKeys = new Set();
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
@@ -6685,11 +6686,12 @@ function recordAttentionAcknowledgementKey(key) {
 function applyAttentionAcknowledgementResponse(payload = {}) {
   const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
+  const changedSessions = new Set();
   for (const [session, current] of autoApproveStates) {
     if (!current || typeof current !== 'object') continue;
     const next = {...current};
     let changed = false;
-    if (keys.includes(String(next.prompt_attention_key || next.prompt?.attention_key || ''))) {
+    if (keys.includes(String(next.prompt_attention_key || next.prompt?.attention_key || '')) && next.prompt_attention_acknowledged !== true) {
       next.prompt_attention_acknowledged = true;
       if (next.prompt && typeof next.prompt === 'object') next.prompt = {...next.prompt, attention_acknowledged: true};
       changed = true;
@@ -6697,32 +6699,45 @@ function applyAttentionAcknowledgementResponse(payload = {}) {
     if (Array.isArray(next.agent_windows)) {
       next.agent_windows = next.agent_windows.map(agent => {
         if (!agent || typeof agent !== 'object') return agent;
-        if (keys.includes(String(agent.attention_key || ''))) {
+        if (keys.includes(String(agent.attention_key || '')) && agent.attention_acknowledged !== true) {
           changed = true;
           return {...agent, attention_acknowledged: true};
         }
-        if (keys.includes(String(agent.cooldown_attention_key || ''))) {
+        if (keys.includes(String(agent.cooldown_attention_key || '')) && agent.cooldown_acknowledged !== true) {
           changed = true;
           return {...agent, cooldown_acknowledged: true};
         }
         return agent;
       });
     }
-    if (changed) autoApproveStates.set(session, next);
+    if (changed) {
+      autoApproveStates.set(session, next);
+      changedSessions.add(session);
+    }
   }
   if (payload?.auto_approve && typeof applyAutoApprovePayload === 'function') {
     applyAutoApprovePayload(payload.auto_approve);
   } else {
-    const sessionsToRefresh = new Set();
-    for (const key of keys) {
-      try {
-        const parts = JSON.parse(String(key || ''));
-        if (Array.isArray(parts) && parts[1]) sessionsToRefresh.add(String(parts[1]));
-      } catch (_) {}
-    }
-    for (const session of sessionsToRefresh) refreshTrackedSessionChrome(session);
+    for (const session of changedSessions) refreshTrackedSessionChrome(session);
+    if (!changedSessions.size) return false;
     updateTopbarActivityStatus();
     syncTerminalAttentionHighlights();
+  }
+  return true;
+}
+
+async function submitAttentionAcknowledgementKeys(keys) {
+  try {
+    const payload = await apiFetchJson('/api/attention-ack', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({keys}),
+    });
+    applyAttentionAcknowledgementResponse(payload);
+  } catch (error) {
+    console.warn('attention acknowledgement failed', error);
+  } finally {
+    for (const key of keys) attentionAcknowledgementPendingKeys.delete(key);
   }
 }
 
@@ -6733,15 +6748,10 @@ function postAttentionAcknowledgementKeys(keys, options = {}) {
     applyAttentionAcknowledgementResponse({acknowledged: unique});
     return true;
   }
-  apiFetchJson('/api/attention-ack', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({keys: unique}),
-  })
-    .then(applyAttentionAcknowledgementResponse)
-    .catch(error => {
-      console.warn('attention acknowledgement failed', error);
-    });
+  const pending = unique.filter(key => !attentionAcknowledgementPendingKeys.has(key) && !attentionAcknowledgementKeyIsRecorded(key));
+  if (!pending.length) return true;
+  for (const key of pending) attentionAcknowledgementPendingKeys.add(key);
+  submitAttentionAcknowledgementKeys(pending);
   return true;
 }
 
@@ -6752,7 +6762,7 @@ function acknowledgeAttentionKeys(keys, options = {}) {
   if (delayMs > 0) {
     for (const key of unique) {
       const existing = attentionAcknowledgementTimers.get(key);
-      if (existing) clearTimeout(existing);
+      if (existing) continue;
       const timer = setTimeout(() => {
         attentionAcknowledgementTimers.delete(key);
         postAttentionAcknowledgementKeys([key], {...options, delayMs: 0});
@@ -16324,10 +16334,18 @@ function clearAgentWindowAcknowledgementVisual(key) {
 
 function showAgentWindowAcknowledgementVisual(key, options = {}) {
   if (!key) return false;
+  const acknowledgementKey = String(options.acknowledgementKey || '');
+  const current = agentWindowAcknowledgementVisuals.get(key);
+  if (agentWindowAcknowledgementVisualActive(key) && String(current?.acknowledgementKey || '') === acknowledgementKey) {
+    if (options.refresh !== false && current?.refreshed !== true) {
+      current.refreshed = true;
+      refreshAgentWindowActivityDisplays();
+    }
+    return true;
+  }
   const durationMs = agentWindowAcknowledgementVisualDurationMs();
   const startedAtMs = Date.now();
   const untilMs = startedAtMs + durationMs;
-  const acknowledgementKey = String(options.acknowledgementKey || '');
   clearAgentWindowAcknowledgementVisual(key);
   const timer = setTimeout(() => {
     const visual = agentWindowAcknowledgementVisuals.get(key);
@@ -16346,7 +16364,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
     state: options.visualState === 'attention' ? (sourceAgent.state || STATE_KEY.needsInput) : (sourceAgent.state || STATE_KEY.idle),
     working_stopped_ts: Number(options.stoppedAt || sourceAgent.working_stopped_ts || sourceAgent.workingStoppedTs || 0),
   } : null;
-  agentWindowAcknowledgementVisuals.set(key, {startedAtMs, untilMs, durationMs, timer, agent: visualAgent});
+  agentWindowAcknowledgementVisuals.set(key, {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent});
   if (options.refresh !== false) refreshAgentWindowActivityDisplays();
   return true;
 }
@@ -55972,6 +55990,10 @@ function handleClientPushEventNow(type, payload = {}) {
     if (payload.data) applyAutoApprovePayload(payload.data);
     return;
   }
+  if (type === 'attention_acks_changed') {
+    applyAttentionAcknowledgementResponse(payload);
+    return;
+  }
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
@@ -56086,7 +56108,7 @@ function installClientEventStream() {
     clientEventsConnected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);

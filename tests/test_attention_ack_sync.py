@@ -119,12 +119,14 @@ def test_attention_ack_poll_publishes_once_per_revision(monkeypatch, tmp_path, m
     published = []
     monkeypatch.setattr(second, "publish_client_event", lambda *args, **kwargs: published.append(args) or {})
 
-    assert second.poll_attention_acks_client_event_once() == ["auto_approve_changed"]
+    assert second.poll_attention_acks_client_event_once() == ["attention_acks_changed"]
     assert second.poll_attention_acks_client_event_once() == []
     assert len(published) == 1
+    assert published[0][0] == "attention_acks_changed"
+    assert published[0][1]["acknowledged"] == [key]
 
 
-def test_attention_ack_background_event_translates_to_auto_approve_refresh(monkeypatch, tmp_path, make_app):
+def test_attention_ack_background_event_publishes_scoped_key_patch(monkeypatch, tmp_path, make_app):
     patch_shared_path(monkeypatch, tmp_path)
     first = make_app()
     second = make_app()
@@ -133,14 +135,66 @@ def test_attention_ack_background_event_translates_to_auto_approve_refresh(monke
     published = []
     monkeypatch.setattr(second, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)) or {"id": 1})
 
-    result = second.handle_background_client_event({"event_type": "attention_acks_changed", "payload": {}})
+    result = second.handle_background_client_event({"event_type": "attention_acks_changed", "payload": {"acknowledged": [key]}})
 
     assert result["ok"] is True
     assert result["accepted"] is True
     assert second.attention_acknowledged(key) is True
-    assert published[0][0][0] == "auto_approve_changed"
-    assert published[0][0][1] == {"refresh": True, "trigger": "attention_ack_sync"}
+    assert published[0][0][0] == "attention_acks_changed"
+    assert published[0][0][1]["acknowledged"] == [key]
     assert published[0][1]["trigger"] == "background-fanout"
+
+
+def test_attention_ack_background_event_includes_missed_revision_keys(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    first = make_app()
+    second = make_app()
+    missed_key = first.attention_ack_key("agent-window", "8001", "0", "%1", "claude", "approval", "missed")
+    event_key = first.attention_ack_key("agent-window", "8002", "1", "%2", "codex", "approval", "event")
+    first.acknowledge_attention({"keys": [missed_key]})
+    first.acknowledge_attention({"keys": [event_key]})
+    published = []
+    monkeypatch.setattr(second, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)) or {"id": 1})
+
+    result = second.handle_background_client_event({"event_type": "attention_acks_changed", "payload": {"acknowledged": [event_key]}})
+
+    assert result["accepted"] is True
+    assert published[0][0][0] == "attention_acks_changed"
+    assert published[0][0][1]["acknowledged"] == [missed_key, event_key]
+
+
+def test_duplicate_attention_ack_is_noop_and_preserves_first_timestamp(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    key = app.attention_ack_key("agent-window", "8002", "1", "%27", "codex", "needs-input", "same-event")
+    published = []
+    notified = []
+    invalidated = []
+    monkeypatch.setattr(app, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)) or {})
+    monkeypatch.setattr(app, "notify_background_client_event_followers", lambda *args, **kwargs: notified.append((args, kwargs)))
+    monkeypatch.setattr(app, "invalidate_auto_approve_cache", lambda: invalidated.append(True))
+
+    first, first_status = app.acknowledge_attention({"keys": [key]})
+    first_data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    first_timestamp = first_data["attention_acks"]["keys"][key]
+    first_rev = first_data["attention_acks"]["rev"]
+    published.clear()
+    notified.clear()
+    invalidated.clear()
+
+    duplicate, duplicate_status = app.acknowledge_attention({"keys": [key]})
+    duplicate_data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+
+    assert first_status == duplicate_status == HTTPStatus.OK
+    assert first["changed"] is True
+    assert duplicate["changed"] is False
+    assert duplicate["rev"] == first_rev
+    assert duplicate["acknowledged_at"][key] == first_timestamp
+    assert duplicate_data["attention_acks"]["rev"] == first_rev
+    assert duplicate_data["attention_acks"]["keys"][key] == first_timestamp
+    assert published == []
+    assert notified == []
+    assert invalidated == []
 
 
 def test_attention_ack_shared_file_prunes_stale_keys(monkeypatch, tmp_path, make_app):

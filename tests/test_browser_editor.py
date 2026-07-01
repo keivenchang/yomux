@@ -546,7 +546,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["preview"]["previewHidden"] is False, metrics
     assert metrics["preview"]["gutterHidden"] is True, metrics
     assert metrics["preview"]["wrapHidden"] is True, metrics
-    assert metrics["preview"]["findHidden"] is True, metrics
+    assert metrics["preview"]["findHidden"] is False, metrics
     assert metrics["preview"]["modeHidden"] is False, metrics
     assert metrics["preview"]["diffExpandHidden"] is True, metrics
     assert metrics["preview"]["diffRefsHidden"] is True, metrics
