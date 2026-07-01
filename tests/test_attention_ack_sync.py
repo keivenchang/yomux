@@ -85,6 +85,31 @@ def test_attention_ack_persists_across_new_instance(monkeypatch, tmp_path, make_
     assert restarted.attention_acknowledged(key) is True
 
 
+def test_attention_instance_generation_is_shared_across_servers_and_refresh(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    first = make_app()
+    second = make_app()
+    args = ("1", "0", "%1", "claude", "approval", "same-visible-prompt")
+
+    first_event = first.shared_agent_window_attention_instance_signature(*args)
+    second_event = second.shared_agent_window_attention_instance_signature(*args)
+    key = first.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", first_event)
+    first.acknowledge_attention({"keys": [key]})
+    second.merge_shared_attention_acks()
+    restarted = make_app()
+    restarted.merge_shared_attention_acks()
+
+    assert first_event == second_event == restarted.shared_agent_window_attention_instance_signature(*args) == "same-visible-prompt:1"
+    assert restarted.attention_acknowledged(key) is True
+    assert restarted.attention_acknowledged_at(key) is not None
+
+    first.shared_agent_window_attention_instance_signature("1", "0", "%1", "claude", "idle", "")
+    next_event = restarted.shared_agent_window_attention_instance_signature(*args)
+
+    assert next_event == "same-visible-prompt:2"
+    assert restarted.attention_acknowledged(first.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", next_event)) is False
+
+
 def test_attention_ack_poll_publishes_once_per_revision(monkeypatch, tmp_path, make_app):
     patch_shared_path(monkeypatch, tmp_path)
     first = make_app()

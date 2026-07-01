@@ -1028,26 +1028,29 @@ def test_attention_acknowledgement_is_server_owned(monkeypatch, tmp_path):
         assert result["acknowledged"] == [key]
 
         payload = webapp.auto_approve_session_status("1", discovered_sessions={})
-        assert payload["attention_acks"] == {"keys": [key]}
+        assert payload["attention_acks"]["keys"] == [key]
+        assert payload["attention_acks"]["acknowledged_at"][key] > 0
         assert payload["prompt_attention_acknowledged"] is True
         assert payload["prompt"]["attention_acknowledged"] is True
     finally:
         webapp.control_server.stop()
 
 
-def test_agent_window_attention_key_uses_per_window_hash_transitions():
+def test_agent_window_attention_key_uses_shared_per_window_hash_transitions(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module.common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(app_module.common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
     webapp = app_module.TmuxWebtermApp(["1"])
     first_screen = {"key": "approval", "question_text": "Do you want to proceed?", "prompt_hash": "command-a"}
     second_screen = {"key": "approval", "question_text": "Do you want to proceed?", "prompt_hash": "command-b"}
     try:
-        signature = lambda screen: webapp.agent_window_attention_instance_signature(
+        signature = lambda screen: webapp.shared_agent_window_attention_instance_signature(
             "8001", "1", "%15", "claude", "approval", webapp.agent_window_attention_signature("approval", screen)
         )
         first_a = signature(first_screen)
         repeated_a = signature(first_screen)
         first_b = signature(second_screen)
         returned_a = signature(first_screen)
-        webapp.agent_window_attention_instance_signature("8001", "1", "%15", "claude", "idle", "")
+        webapp.shared_agent_window_attention_instance_signature("8001", "1", "%15", "claude", "idle", "")
         after_idle_a = signature(first_screen)
     finally:
         webapp.control_server.stop()

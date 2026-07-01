@@ -230,6 +230,7 @@ METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
 ATTENTION_ACK_MAX_KEYS = 4096
 ATTENTION_ACK_TTL_SECONDS = 7 * 24 * 3600
+ATTENTION_INSTANCE_MAX_ENTRIES = 2048
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 30.0
 SESSION_FILES_CACHE_VERSION = 1
@@ -1638,6 +1639,7 @@ class TmuxWebtermApp:
             "rev": 0,
             "updated_at": 0.0,
             "attention_acks": {"rev": 0, "updated_at": 0.0, "keys": {}},
+            "attention_instances": {"updated_at": 0.0, "instances": {}},
             "stats_history": {
                 "rev": 0,
                 "updated_at": 0.0,
@@ -1709,6 +1711,8 @@ class TmuxWebtermApp:
                 attention["rev"] = 0
             attention["legacy_rev"] = legacy.get("rev", 0)
         status["attention_acks"] = attention if isinstance(attention, dict) else {}
+        attention_instances = data.get("attention_instances") if isinstance(data.get("attention_instances"), dict) else {}
+        status["attention_instances"] = attention_instances
         stats_history = data.get("stats_history") if isinstance(data.get("stats_history"), dict) else {}
         status["stats_history"] = stats_history if isinstance(stats_history, dict) else {}
         return status
@@ -9259,7 +9263,24 @@ class TmuxWebtermApp:
                 return value
         return state
 
-    def agent_window_attention_instance_signature(
+    @staticmethod
+    def agent_window_attention_instance_key(session: str, window: str, pane_target: str, kind: str) -> str:
+        return "\x1f".join((session, window, pane_target, kind))
+
+    @staticmethod
+    def prune_attention_instances(instances: dict[str, dict[str, Any]], now: float) -> None:
+        for key, record in list(instances.items()):
+            try:
+                updated_at = float(record.get("updated_at") or 0.0)
+            except (AttributeError, TypeError, ValueError):
+                updated_at = 0.0
+            if not isinstance(record, dict) or now - updated_at > ATTENTION_ACK_TTL_SECONDS:
+                instances.pop(key, None)
+        while len(instances) > ATTENTION_INSTANCE_MAX_ENTRIES:
+            oldest = min(instances, key=lambda item: float(instances[item].get("updated_at") or 0.0))
+            instances.pop(oldest, None)
+
+    def shared_agent_window_attention_instance_signature(
         self,
         session: str,
         window: str,
@@ -9268,24 +9289,37 @@ class TmuxWebtermApp:
         state: str,
         prompt_hash: str,
     ) -> str:
-        key = "\x1f".join((session, window, pane_target, kind))
         attention_state = state in {"approval", "needs-approval", "needs-input", "interrupted"}
-        with self.agent_window_transition_lock:
-            previous = dict(self.agent_window_transition_state.get(key, {}))
-            previous_hash = str(previous.get("attention_prompt_hash") or "")
+        key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
+        now = time.time()
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            container = status.get("attention_instances") if isinstance(status.get("attention_instances"), dict) else {}
+            instances = container.get("instances") if isinstance(container.get("instances"), dict) else {}
+            instances = {str(instance_key): dict(record) for instance_key, record in instances.items() if isinstance(record, dict)}
+            self.prune_attention_instances(instances, now)
+            previous = dict(instances.get(key, {}))
+            previous_hash = str(previous.get("active_prompt_hash") or "")
             try:
                 generation = max(0, int(previous.get("attention_generation", 0)))
             except (TypeError, ValueError):
                 generation = 0
             if not attention_state or not prompt_hash:
-                previous["attention_prompt_hash"] = ""
-                self.agent_window_transition_state[key] = previous
+                if previous_hash:
+                    previous["active_prompt_hash"] = ""
+                    previous["updated_at"] = now
+                    instances[key] = previous
+                    status["attention_instances"] = {"updated_at": now, "instances": instances}
+                    self._write_shared_tmux_ai_status_locked(status)
                 return ""
             if prompt_hash != previous_hash:
                 generation += 1
-                previous["attention_prompt_hash"] = prompt_hash
+                previous["active_prompt_hash"] = prompt_hash
                 previous["attention_generation"] = generation
-            self.agent_window_transition_state[key] = previous
+                previous["updated_at"] = now
+                instances[key] = previous
+                status["attention_instances"] = {"updated_at": now, "instances": instances}
+                self._write_shared_tmux_ai_status_locked(status)
         return f"{prompt_hash}:{generation}"
 
     def agent_window_attention_key(self, session: str, window: str, pane_target: str, kind: str, state: str, signature: str) -> str:
@@ -9309,18 +9343,30 @@ class TmuxWebtermApp:
             self.prune_attention_ack_keys_locked()
             return key in self.attention_ack_keys
 
+    def attention_acknowledged_at(self, key: str) -> float | None:
+        if not key:
+            return None
+        with self.attention_ack_lock:
+            self.prune_attention_ack_keys_locked()
+            try:
+                acknowledged_at = float(self.attention_ack_keys.get(key) or 0.0)
+            except (TypeError, ValueError):
+                return None
+        return acknowledged_at if acknowledged_at > 0 else None
+
     def attention_ack_payload_for_session(self, session: str) -> dict[str, Any]:
         with self.attention_ack_lock:
             self.prune_attention_ack_keys_locked()
-            keys = []
-            for key in self.attention_ack_keys:
+            acknowledged_at: dict[str, float] = {}
+            for key, ts in self.attention_ack_keys.items():
                 try:
                     parts = json.loads(key)
                 except (TypeError, ValueError):
                     continue
                 if isinstance(parts, list) and len(parts) >= 2 and str(parts[1]) == str(session):
-                    keys.append(key)
-        return {"keys": sorted(keys)}
+                    acknowledged_at[key] = ts
+        keys = sorted(acknowledged_at)
+        return {"keys": keys, "acknowledged_at": {key: acknowledged_at[key] for key in keys}}
 
     def invalidate_auto_approve_cache(self) -> None:
         with self.auto_approve_cache_condition:
@@ -9611,7 +9657,7 @@ class TmuxWebtermApp:
             paths = [str(item.get("path") or "") for item in path_entries if isinstance(item, dict) and str(item.get("path") or "")]
             fallback_path = str(path_record.get("path") or "") if isinstance(path_record, dict) else ""
             prompt_hash = self.agent_window_attention_signature(state, screen)
-            attention_signature = self.agent_window_attention_instance_signature(
+            attention_signature = self.shared_agent_window_attention_instance_signature(
                 session,
                 window,
                 str(agent.pane_target or ""),
@@ -9654,9 +9700,11 @@ class TmuxWebtermApp:
             if attention_key:
                 row["attention_key"] = attention_key
                 row["attention_acknowledged"] = self.attention_acknowledged(attention_key)
+                row["attention_acknowledged_at"] = self.attention_acknowledged_at(attention_key)
             if cooldown_attention_key:
                 row["cooldown_attention_key"] = cooldown_attention_key
                 row["cooldown_acknowledged"] = self.attention_acknowledged(cooldown_attention_key)
+                row["cooldown_acknowledged_at"] = self.attention_acknowledged_at(cooldown_attention_key)
             rows.append(row)
         state_rank = {"working": 0, "approval": 1, "needs-input": 2, "idle": 3}
         rows.sort(key=lambda item: (state_rank.get(str(item.get("state") or ""), 9), item.get("window_index") if isinstance(item.get("window_index"), int) else 9999, int(item.get("_agent_order") or 0)))
