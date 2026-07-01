@@ -2041,9 +2041,17 @@ function clearJsDebugServerHistory() {
 }
 
 function startJsDebugStatsPolling() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsPollTimer) return;
-  if (!jsDebugStatsPanelVisible()) return;
-  armJsDebugStatsPolling({pollNow: true});
+  syncJsDebugStatsPolling({pollNow: true});
+}
+
+function syncJsDebugStatsPolling({pollNow = true} = {}) {
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) {
+    stopJsDebugStatsPolling();
+    return false;
+  }
+  if (jsDebugStatsPollTimer && !pollNow) return true;
+  armJsDebugStatsPolling({pollNow});
+  return true;
 }
 
 async function primeJsDebugStatsBeforeLongLivedStreams() {
@@ -2054,8 +2062,7 @@ async function primeJsDebugStatsBeforeLongLivedStreams() {
 
 if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
-    if (jsDebugStatsPanelVisible()) startJsDebugStatsPolling();
-    else stopJsDebugStatsPolling();
+    syncJsDebugStatsPolling({pollNow: document.visibilityState === 'visible'});
   });
 }
 

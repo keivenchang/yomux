@@ -9989,6 +9989,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
   updatePanelInactiveOverlays();
+  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: true});
   if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
@@ -36199,9 +36200,17 @@ function clearJsDebugServerHistory() {
 }
 
 function startJsDebugStatsPolling() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsPollTimer) return;
-  if (!jsDebugStatsPanelVisible()) return;
-  armJsDebugStatsPolling({pollNow: true});
+  syncJsDebugStatsPolling({pollNow: true});
+}
+
+function syncJsDebugStatsPolling({pollNow = true} = {}) {
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) {
+    stopJsDebugStatsPolling();
+    return false;
+  }
+  if (jsDebugStatsPollTimer && !pollNow) return true;
+  armJsDebugStatsPolling({pollNow});
+  return true;
 }
 
 async function primeJsDebugStatsBeforeLongLivedStreams() {
@@ -36212,8 +36221,7 @@ async function primeJsDebugStatsBeforeLongLivedStreams() {
 
 if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
-    if (jsDebugStatsPanelVisible()) startJsDebugStatsPolling();
-    else stopJsDebugStatsPolling();
+    syncJsDebugStatsPolling({pollNow: document.visibilityState === 'visible'});
   });
 }
 

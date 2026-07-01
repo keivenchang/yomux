@@ -858,6 +858,7 @@ globalThis.__layoutTestApi = {
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() { return {firstSampleReceived: jsDebugStatsFirstSampleReceived, inFlight: jsDebugStatsPollInFlight}; },
   startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
+  syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
   stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
   flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
