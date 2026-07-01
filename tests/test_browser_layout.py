@@ -2046,6 +2046,17 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert set(metrics["visibleNameDisplays"]).issubset({"flex", "inline-flex"})
     assert "none" not in set(metrics["visibleNameDisplays"])
     assert set(metrics["visibleNumberDisplays"]) == {"none"}
+    short_meta = browser.execute_script(
+        """
+        const meta = document.getElementById('meta');
+        meta.classList.remove('pane-info-bar-meta-overflow');
+        document.getElementById('scroll-text').textContent = 'yolomux.dev8003 · ~/yolomux.dev8003 · 9 ahead · 10 dirty';
+        const metaRect = meta.getBoundingClientRect();
+        const zoneRect = document.querySelector('.pane-info-bar-popover-zone').getBoundingClientRect();
+        return {metaRight: metaRect.right, zoneRight: zoneRect.right};
+        """
+    )
+    assert abs(short_meta["metaRight"] - short_meta["zoneRight"]) <= 1
 
 
 @pytest.mark.parametrize(

@@ -8651,7 +8651,15 @@ class TmuxWebtermApp:
         if result.returncode != 0:
             error = cmd_error(result, "tmux new-session failed")
             return {"session": session, "created": False, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
-        color = self.tmux_theme_color or tmux_theme_color_from_settings(settings_payload().get("settings", {}))
+        settings = settings_payload().get("settings", {})
+        status_mode = str(settings.get("appearance", {}).get("tmux_status_bar", "off"))
+        status_commands = [["set-option", "-t", tmux_session_target(session), "status", "off"]] if status_mode == "off" else [
+            ["set-option", "-t", tmux_session_target(session), "status", "on"],
+            ["set-option", "-t", tmux_session_target(session), "status-position", status_mode],
+        ]
+        for status_command in status_commands:
+            tmux(status_command, timeout=3.0)
+        color = self.tmux_theme_color or tmux_theme_color_from_settings(settings)
         theme_result = apply_tmux_theme_color_to_new_session(session, color, runner=tmux)
         self.tmux_theme_color = color
         if theme_result.get("errors"):

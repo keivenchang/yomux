@@ -1041,6 +1041,17 @@ body.theme-light .drop-slot.drag-over {
   overflow: hidden;
   white-space: nowrap;
 }
+/* The window buttons own the left edge of the Info Bar.  Metadata shares the
+   remaining flex row, using its natural width when it fits and shrinking only
+   when necessary so its right edge stays aligned with the pane. */
+.pane-info-bar-popover-zone .pane-info-bar-meta {
+  flex: 0 1 auto;
+  margin-inline-start: auto;
+  justify-content: flex-end;
+}
+.pane-info-bar-popover-zone .pane-info-bar-scroll-viewport {
+  flex: 0 1 auto;
+}
 .pane-info-bar-controls,
 .pane-info-bar-fixed-sep {
   flex: 0 0 auto;

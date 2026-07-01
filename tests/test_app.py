@@ -2274,6 +2274,7 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     assert status == HTTPStatus.OK
     assert payload["session"] == "1"
     assert commands[0][:6] == ["new-session", "-d", "-s", "1", "-c", str(tmp_path)]
+    assert ["set-option", "-t", "1:", "status", "off"] in commands
     assert ["set-option", "-t", "1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
     assert ["set-window-option", "-t", "1:", "pane-active-border-style", "fg=#7c3aed"] in commands
     assert commands[-1] == ["refresh-client", "-S"]

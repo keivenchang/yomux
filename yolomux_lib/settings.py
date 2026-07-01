@@ -167,6 +167,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": {
         "theme": "dark",
         "terminal_theme": "follow-app",
+        "tmux_status_bar": "off",
         "date_time_hour_cycle": "24",
         "ui_font_size": 13,
         "terminal_font_size": 13,
@@ -406,6 +407,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("appearance", "active_color"): set(UI_COLOR_CHOICES),
     ("appearance", "separator_color"): set(SEPARATOR_COLOR_CHOICES),
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
+    ("appearance", "tmux_status_bar"): {"off", "top", "bottom"},
     ("appearance", "date_time_hour_cycle"): {"24", "12"},
     ("share", "view_fit"): {"cover", "contain"},
     ("appearance", "editor_color_scheme"): {
@@ -497,6 +499,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, YO markers, and tmux status/pane chrome). Green is the default.",
     ("appearance", "separator_color"): "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Theme preserves the dark/light defaults.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
+    ("appearance", "tmux_status_bar"): "off | top | bottom. Native tmux status bar position for new sessions. The YOLOmux Info Bar remains at the top of each pane.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
     ("appearance", "ui_font_size"): "Pixels, 6-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 6-28. Applied live to xterm.js terminals.",
@@ -596,6 +599,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("appearance", "editor_cursor_color"): "Appearance",
     ("appearance", "date_time_hour_cycle"): "Appearance",
     ("appearance", "terminal_theme"): "Terminal and Editor",
+    ("appearance", "tmux_status_bar"): "Terminal and Editor",
     ("appearance", "terminal_font_size"): "Terminal and Editor",
     ("appearance", "editor_font_size"): "Terminal and Editor",
     ("appearance", "preview_font_size"): "Terminal and Editor",

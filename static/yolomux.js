@@ -33292,6 +33292,11 @@ function preferenceSections() {
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
       ], help: t('pref.appearance.terminal_theme.help')},
+      {path: 'appearance.tmux_status_bar', label: t('pref.appearance.tmux_status_bar.label'), type: 'radio', choices: [
+        {value: 'off', label: t('pref.appearance.tmux_status_bar.off')},
+        {value: 'top', label: t('pref.appearance.tmux_status_bar.top')},
+        {value: 'bottom', label: t('pref.appearance.tmux_status_bar.bottom')},
+      ], help: t('pref.appearance.tmux_status_bar.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
       {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
       {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 6, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
@@ -33496,7 +33501,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
   if (path === 'appearance.date_time_hour_cycle') add(['date', 'time', 'clock', 'hour', 'hours', '12', '24', 'am', 'pm']);
-  if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'codex', 'claude']);
+  if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme' || path === 'appearance.tmux_status_bar') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'tmux', 'status', 'codex', 'claude']);
   if (path.startsWith('editor.') || path.includes('editor_') || path.startsWith('terminal_editor.')) add(['code', 'edit', 'codemirror', 'monaco']);
   if (path === 'terminal_editor.word_wrap') add(['softwrap', 'wrapping']);
   if (path === 'terminal_editor.line_numbers') add(['numbers', 'gutter']);
