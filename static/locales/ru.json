@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE сервера: изменения каталогов",
   "pref.performance.server_event_poll_ms.help": "Интервал серверного SSE-опроса в секундах для сигнатур файлов, открытых в видимых редакторах, перед отправкой изменений в браузеры. Минимум 0,250 с.",
   "pref.performance.server_event_poll_ms.label": "SSE сервера: изменения файлов редактора",
+  "pref.performance.statusSample.acknowledged": "Подтверждённое состояние",
+  "pref.performance.statusSample.pulse": "Пульсация состояния",
   "pref.performance.tab_popover_follow_delay_ms.help": "Сокращённая задержка при переходе между вкладками, когда всплывающее окно с деталями уже открыто.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Задержка следования деталей вкладки",
   "pref.performance.tab_popover_show_delay_ms.help": "Начальная задержка перед открытием всплывающего окна с деталями вкладки.",

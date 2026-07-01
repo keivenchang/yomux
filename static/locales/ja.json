@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "サーバー SSE: ディレクトリ変更",
   "pref.performance.server_event_poll_ms.help": "表示中ペインで開いているエディターファイルのシグネチャを確認し、変更をブラウザーへ送るまでのサーバー側 SSE ポーリング間隔（秒）。最小 0.250 秒。",
   "pref.performance.server_event_poll_ms.label": "サーバー SSE: エディターのファイル変更",
+  "pref.performance.statusSample.acknowledged": "確認済みステータス",
+  "pref.performance.statusSample.pulse": "ステータスのパルス",
   "pref.performance.tab_popover_follow_delay_ms.help": "1 つのタブ詳細ポップアップが既に開いている状態でタブ間を移動するときの、より短い遅延。",
   "pref.performance.tab_popover_follow_delay_ms.label": "タブ詳細の追従遅延",
   "pref.performance.tab_popover_show_delay_ms.help": "タブ詳細のポップアップが開くまでの初回遅延。",

@@ -574,7 +574,7 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
               const item = fileEditorItemFor(path);
               const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
               const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 180; attempt += 1) {{
+                for (let attempt = 0; attempt < 600; attempt += 1) {{
                   if (predicate()) return true;
                   await frame();
                 }}

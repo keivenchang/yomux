@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "⟦Šéřṽéř ŠŠÉ: đířéçťóřý-çĥáñǧé ƥółł·············⟧",
   "pref.performance.server_event_poll_ms.help": "⟦Šéřṽéř-šíđé ŠŠÉ ƥółł íñťéřṽáł íñ šéçóñđš ƒóř óƥéñ éđíťóř ƒíłé šíǧñáťúřéš ƀéƒóřé ƥúšĥíñǧ ƒíłé çĥáñǧéš ťó ƀřóŵšéřš. Ɱíñíɱúɱ 0.250 š.····················································⟧",
   "pref.performance.server_event_poll_ms.label": "⟦Šéřṽéř ŠŠÉ: éđíťóř ƒíłé-çĥáñǧé ƥółł··············⟧",
+  "pref.performance.statusSample.acknowledged": "⟦Áçķñóŵłéđǧéđ šťáťúš········⟧",
+  "pref.performance.statusSample.pulse": "⟦Šťáťúš ƥúłšé·····⟧",
   "pref.performance.tab_popover_follow_delay_ms.help": "⟦Šĥóřťéř đéłáý ŵĥéñ ɱóṽíñǧ ƀéťŵééñ ťáƀš áƒťéř óñé ťáƀ đéťáíłš ƥóƥúƥ íš áłřéáđý óƥéñ.·································⟧",
   "pref.performance.tab_popover_follow_delay_ms.label": "⟦Ťáƀ đéťáíł ƒółłóŵ đéłáý·········⟧",
   "pref.performance.tab_popover_show_delay_ms.help": "⟦Íñíťíáł đéłáý ƀéƒóřé á ťáƀ đéťáíłš ƥóƥúƥ óƥéñš.···················⟧",

@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE máy chủ: thay đổi thư mục",
   "pref.performance.server_event_poll_ms.help": "Khoảng thăm dò SSE phía máy chủ, tính bằng giây, cho chữ ký tệp đang mở trong trình sửa ở pane hiển thị trước khi đẩy thay đổi tệp tới trình duyệt. Tối thiểu 0,250 giây.",
   "pref.performance.server_event_poll_ms.label": "SSE máy chủ: thay đổi tệp trình sửa",
+  "pref.performance.statusSample.acknowledged": "Trạng thái đã xác nhận",
+  "pref.performance.statusSample.pulse": "Nhịp trạng thái",
   "pref.performance.tab_popover_follow_delay_ms.help": "Shorter delay when moving between tabs after one tab details popup is already open.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Tab detail follow delay",
   "pref.performance.tab_popover_show_delay_ms.help": "Initial delay before a tab details popup opens.",

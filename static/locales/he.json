@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE שרת: שינויי תיקיות",
   "pref.performance.server_event_poll_ms.help": "מרווח סריקת SSE בצד השרת, בשניות, עבור חתימות קבצים פתוחים בעורכים גלויים לפני שליחת שינויי קבצים לדפדפנים. מינימום 0.250 שנ׳.",
   "pref.performance.server_event_poll_ms.label": "SSE שרת: שינויי קבצי עורך",
+  "pref.performance.statusSample.acknowledged": "מצב שאושר",
+  "pref.performance.statusSample.pulse": "פעימת מצב",
   "pref.performance.tab_popover_follow_delay_ms.help": "השהיה קצרה יותר במעבר בין לשוניות לאחר שחלון קופץ של פרטי לשונית כבר פתוח.",
   "pref.performance.tab_popover_follow_delay_ms.label": "השהיית מעקב פרטי לשונית",
   "pref.performance.tab_popover_show_delay_ms.help": "השהיה ראשונית לפני פתיחת חלון קופץ של פרטי לשונית.",

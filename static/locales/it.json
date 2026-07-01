@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE server: modifiche directory",
   "pref.performance.server_event_poll_ms.help": "Intervallo di polling SSE lato server, in secondi, per le firme dei file aperti negli editor visibili prima di inviare le modifiche ai browser. Minimo 0,250 s.",
   "pref.performance.server_event_poll_ms.label": "SSE server: modifiche file editor",
+  "pref.performance.statusSample.acknowledged": "Stato confermato",
+  "pref.performance.statusSample.pulse": "Impulso di stato",
   "pref.performance.tab_popover_follow_delay_ms.help": "Shorter delay when moving between tabs after one tab details popup is already open.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Tab detail follow delay",
   "pref.performance.tab_popover_show_delay_ms.help": "Initial delay before a tab details popup opens.",

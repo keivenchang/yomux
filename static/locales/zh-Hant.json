@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "伺服器 SSE：目錄變更輪詢",
   "pref.performance.server_event_poll_ms.help": "伺服器端 SSE 輪詢可見窗格中開啟編輯器檔案特徵的間隔（秒），用來在檔案變更後推送給瀏覽器。最低 0.250 秒。",
   "pref.performance.server_event_poll_ms.label": "伺服器 SSE：編輯器檔案變更輪詢",
+  "pref.performance.statusSample.acknowledged": "已確認狀態",
+  "pref.performance.statusSample.pulse": "狀態脈衝",
   "pref.performance.tab_popover_follow_delay_ms.help": "已開啟一個分頁詳情彈出視窗後，在分頁間移動時的較短延遲。",
   "pref.performance.tab_popover_follow_delay_ms.label": "分頁詳情跟隨延遲",
   "pref.performance.tab_popover_show_delay_ms.help": "分頁詳情彈出視窗開啟前的初始延遲。",

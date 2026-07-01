@@ -163,28 +163,26 @@ function yoagentEffortPreferenceChoicesForBackend(backend) {
   return backend === 'claude' ? yoagentClaudeEffortPreferenceChoices() : backend === 'codex' ? yoagentCodexEffortPreferenceChoices() : [];
 }
 
-function preferencesStatusPulseExampleItem(state, acknowledging = false) {
-  return {
-    state,
-    icon: '●',
-    label: acknowledging ? 'Acknowledged status' : 'Status pulse',
-    pulseActive: !acknowledging,
-    transitionPulseActive: !acknowledging,
-    acknowledged: false,
-    acknowledging,
-  };
-}
-
 function preferencesStatusPulseExampleMarkerHtml(state, group) {
   const tabBall = group === 'tab';
   const acknowledging = group === 'acknowledgement';
-  const activityHtml = agentWindowActivityIconHtml('codex', state, 0, {
-    item: preferencesStatusPulseExampleItem(state, acknowledging),
-    label: acknowledging ? 'Acknowledged status' : 'Status pulse',
-    statusOnly: true,
-    subwindowGlyphPulse: !tabBall,
+  const subwindow = !tabBall;
+  const label = t(acknowledging ? 'pref.performance.statusSample.acknowledged' : 'pref.performance.statusSample.pulse');
+  const sampleOptions = {surface: subwindow ? 'subwindow' : 'tab', pulse: !acknowledging, acknowledging, label};
+  const item = agentWindowStatusSampleItem(state, sampleOptions);
+  const activityClasses = [
+    'agent-window-activity',
+    subwindow ? 'agent-window-activity--subwindow' : '',
+    agentWindowActivityToneWrapperClass(state),
+    acknowledging ? 'agent-window-activity--acknowledging' : '',
+    'agent-window-activity--status-only',
+  ].filter(Boolean).join(' ');
+  const style = agentWindowActivityStyleAttribute(agentWindowActivityTone(state), item, {
+    subwindowGlyphPulse: subwindow,
     acknowledgementPreview: acknowledging,
   });
+  const dotHtml = agentWindowStatusDotHtmlForTone(state, sampleOptions);
+  const activityHtml = `<span class="${esc(activityClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${dotHtml}</span>`;
   const surfaceClass = tabBall
     ? 'session-agent-activity-marker'
     : 'tmux-window-button keyboard-legend-status-glyph';
@@ -192,7 +190,7 @@ function preferencesStatusPulseExampleMarkerHtml(state, group) {
 }
 
 function preferencesStatusPulseExampleHtml() {
-  const states = [STATE_KEY.working, 'cooldown', 'attention'];
+  const states = AGENT_WINDOW_VISIBLE_TONES;
   const groupHtml = group => `<span class="preferences-status-pulse-example-group" data-status-pulse-example="${esc(group)}">${states.map(state => preferencesStatusPulseExampleMarkerHtml(state, group)).join('')}</span>`;
   return `<span class="preferences-status-pulse-example">${groupHtml('tab')}${groupHtml('subwindow')}${groupHtml('acknowledgement')}</span>`;
 }

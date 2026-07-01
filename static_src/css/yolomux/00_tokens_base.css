@@ -64,6 +64,8 @@
   --brand-green-dark: #3f6f00;
   --about-brand-red: #ef4444;
   --accent-gold: #f5c542;
+  --agent-status-working-rgb: 82 210 115;
+  --agent-status-attention-ring-rgb: 255 51 71;
   --agent-status-cooldown: #ffd633;
   --agent-status-cooldown-rgb: 255 214 51;
   --menu-accent: var(--accent);

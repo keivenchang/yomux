@@ -186,11 +186,13 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         "codex": f"ymx-{os.getpid()}-{uuid.uuid4().hex[:6]}",
     }
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    mock_cwd = tmp_path / "mock-cwd"
+    mock_cwd.mkdir()
 
     for agent, session in sessions.items():
         created = _tmux(
             socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
+            f"cd {mock_cwd} && exec python3 {REPO_ROOT}/tools/{agent}.py --mock",
         )
         assert created.returncode == 0, f"tmux new-session failed for {agent}: {created.stderr or created.stdout}"
 

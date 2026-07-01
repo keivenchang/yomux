@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "服务器 SSE：目录更改轮询",
   "pref.performance.server_event_poll_ms.help": "服务器端 SSE 轮询可见窗格中已打开编辑器文件特征的间隔（秒），用于在文件更改后推送给浏览器。最低 0.250 秒。",
   "pref.performance.server_event_poll_ms.label": "服务器 SSE：编辑器文件更改轮询",
+  "pref.performance.statusSample.acknowledged": "已确认状态",
+  "pref.performance.statusSample.pulse": "状态脉冲",
   "pref.performance.tab_popover_follow_delay_ms.help": "已打开一个标签页详情弹出窗口后，在标签页间移动时的较短延迟。",
   "pref.performance.tab_popover_follow_delay_ms.label": "标签页详情跟随延迟",
   "pref.performance.tab_popover_show_delay_ms.help": "标签页详情弹出窗口打开前的初始延迟。",

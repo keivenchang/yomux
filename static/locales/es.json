@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE del servidor: cambios de directorio",
   "pref.performance.server_event_poll_ms.help": "Intervalo de sondeo SSE del servidor, en segundos, para firmas de archivos abiertos en editores visibles antes de enviar cambios al navegador. Mínimo 0,250 s.",
   "pref.performance.server_event_poll_ms.label": "SSE del servidor: cambios de archivo del editor",
+  "pref.performance.statusSample.acknowledged": "Estado confirmado",
+  "pref.performance.statusSample.pulse": "Pulso de estado",
   "pref.performance.tab_popover_follow_delay_ms.help": "Retraso más corto al moverse entre pestañas cuando ya hay un popup de detalles abierto.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Retraso de seguimiento de detalles de pestaña",
   "pref.performance.tab_popover_show_delay_ms.help": "Retraso inicial antes de que se abra el popup de detalles de una pestaña.",

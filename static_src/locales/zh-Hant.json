@@ -598,6 +598,8 @@
   "pref.path.settings": "設定",
   "pref.performance.agent_status_pulse_period_ms.help": "Sets the breathing-pulse cadence for green play, yellow pause, and red stop status glyphs. The pulse uses roughly 125ms steps to limit repaint cost.",
   "pref.performance.agent_status_pulse_period_ms.label": "狀態球脈衝週期",
+  "pref.performance.statusSample.acknowledged": "已確認狀態",
+  "pref.performance.statusSample.pulse": "狀態脈衝",
   "pref.performance.auto_approve_interval_seconds.help": "新啟用的優樂工作程式檢查可見 tmux 提示的頻率。",
   "pref.performance.auto_approve_interval_seconds.label": "優樂工作程式輪詢間隔",
   "pref.performance.event_log_refresh_ms.help": "瀏覽器重新整理開啟的優樂/事件記錄窗格的頻率。",

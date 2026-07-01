@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE serveur : changements de répertoires",
   "pref.performance.server_event_poll_ms.help": "Intervalle de sondage SSE côté serveur, en secondes, pour les signatures des fichiers ouverts dans les éditeurs visibles avant de pousser les changements aux navigateurs. Minimum 0,250 s.",
   "pref.performance.server_event_poll_ms.label": "SSE serveur : changements de fichiers éditeur",
+  "pref.performance.statusSample.acknowledged": "État acquitté",
+  "pref.performance.statusSample.pulse": "Pulsation d’état",
   "pref.performance.tab_popover_follow_delay_ms.help": "Délai plus court lors du passage entre onglets quand une fenêtre de détails d'onglet est déjà ouverte.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Délai de suivi des détails d'onglet",
   "pref.performance.tab_popover_show_delay_ms.help": "Délai initial avant l'ouverture d'une fenêtre de détails d'onglet.",

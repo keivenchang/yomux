@@ -179,7 +179,7 @@ _CODEX_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
 </svg>"""
 
 
-def _agent_status_glyph_html(kind, state, element_id):
+def _agent_status_glyph_html(kind, state, element_id, *, subwindow=False):
     svg = _CLAUDE_WORKING_ICON_SVG if kind == "claude" else _CODEX_WORKING_ICON_SVG
     label = f"{'Claude' if kind == 'claude' else 'Codex'} {state}"
     dot_classes = [
@@ -194,7 +194,7 @@ def _agent_status_glyph_html(kind, state, element_id):
     if state in ("attention", "cooldown"):
         dot_classes.append("attention-pulse")
     return f"""
-      <span class="agent-window-activity agent-window-activity--{state}" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
+      <span class="agent-window-activity{' agent-window-activity--subwindow' if subwindow else ''} agent-window-activity--{state}" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
         <span id="{element_id}" class="agent-icon {kind} agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--{state} agent-window-agent-icon--{state}" aria-label="{label}" title="{label}">
           {svg}
         </span>
@@ -203,8 +203,8 @@ def _agent_status_glyph_html(kind, state, element_id):
     """
 
 
-def _working_agent_glyph_html(kind, element_id):
-    return _agent_status_glyph_html(kind, "working", element_id)
+def _working_agent_glyph_html(kind, element_id, *, subwindow=False):
+    return _agent_status_glyph_html(kind, "working", element_id, subwindow=subwindow)
 
 
 def _tabber_window_button_html(kind, label, glyph_html, active=False):
@@ -795,18 +795,18 @@ def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windo
         </button>
         <button id="window-button" class="tab tmux-window-button active">
           <span class="tmux-window-name-label">
-            {_working_agent_glyph_html("claude", "window-claude")}
+            {_working_agent_glyph_html("claude", "window-claude", subwindow=True)}
             <span class="tmux-window-name-text">0:claude</span>
           </span>
         </button>
         <div id="tabber-claude-row" class="file-tree-row tabber-row selected" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("claude", "0:claude", _working_agent_glyph_html("claude", "tabber-claude"))}
+            {_tabber_window_button_html("claude", "0:claude", _working_agent_glyph_html("claude", "tabber-claude", subwindow=True))}
           </span>
         </div>
         <div id="tabber-codex-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("codex", "1:codex", _working_agent_glyph_html("codex", "tabber-codex"))}
+            {_tabber_window_button_html("codex", "1:codex", _working_agent_glyph_html("codex", "tabber-codex", subwindow=True))}
           </span>
         </div>
       </section>
@@ -1082,7 +1082,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="bar-button" class="tab tmux-window-button active">
             <span class="tmux-window-name-label">
-              {_agent_status_glyph_html("codex", "working", "bar-working")}
+              {_agent_status_glyph_html("codex", "working", "bar-working", subwindow=True)}
               <span class="tmux-window-name-text">0:codex</span>
             </span>
           </span>
@@ -1090,7 +1090,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="stable-button" class="tab tmux-window-button">
             <span class="tmux-window-name-label">
-              <span class="agent-window-activity agent-window-activity--working">
+                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--working">
                 <span id="stable-working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--working status-indicator--working">●</span>
               </span>
               <span class="tmux-window-name-text">3:codex</span>
@@ -1100,7 +1100,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="stale-cooldown-button" class="tab tmux-window-button">
             <span class="tmux-window-name-label">
-              <span class="agent-window-activity agent-window-activity--cooldown">
+                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown">
                 <span id="stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
               </span>
               <span class="tmux-window-name-text">4:codex</span>
@@ -1110,7 +1110,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="active-stale-cooldown-button" class="tab tmux-window-button active">
             <span class="tmux-window-name-label">
-              <span class="agent-window-activity agent-window-activity--cooldown">
+                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown">
                 <span id="active-stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
               </span>
               <span class="tmux-window-name-text">5:codex</span>
@@ -1119,12 +1119,12 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         </div>
         <div class="session-agent-window-block">
           <div id="popover-row" class="session-agent-row current">
-            {_agent_status_glyph_html("claude", "attention", "popover-attention")}
+            {_agent_status_glyph_html("claude", "attention", "popover-attention", subwindow=True)}
           </div>
         </div>
         <div class="file-tree-row tabber-row" data-tabber-type="window">
           <span class="tabber-window-label">
-            {_agent_status_glyph_html("codex", "cooldown", "tabber-cooldown")}
+            {_agent_status_glyph_html("codex", "cooldown", "tabber-cooldown", subwindow=True)}
             <span class="tabber-window-text">1:codex</span>
           </span>
         </div>
@@ -1307,13 +1307,13 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         </div>
         <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("claude", "0:claude", _agent_status_glyph_html("claude", "cooldown", "tabber-window-cooldown"))}
+            {_tabber_window_button_html("claude", "0:claude", _agent_status_glyph_html("claude", "cooldown", "tabber-window-cooldown", subwindow=True))}
           </span>
         </div>
         <div id="info-pane" class="pane-info-bar">
           <button id="info-button" class="tab tmux-window-button active">
             <span class="tmux-window-name-label">
-              {_agent_status_glyph_html("codex", "attention", "info-attention")}
+              {_agent_status_glyph_html("codex", "attention", "info-attention", subwindow=True)}
               <span class="tmux-window-name-text">1:codex</span>
             </span>
           </button>
@@ -1457,7 +1457,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
         </div>
         <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 22px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-window-working"))}
+            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-window-working", subwindow=True))}
           </span>
         </div>
       </section>
@@ -1760,7 +1760,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
       </div>
       <button id="info-button" class="tab tmux-window-button">
         <span class="tmux-window-name-label">
-          <span id="info" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.37s">
+          <span id="info" class="agent-window-activity agent-window-activity--subwindow agent-window-activity--attention" style="--attention-animation-delay:-0.37s">
             <span id="info-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
             </span>
@@ -1773,7 +1773,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
         <span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">
           <span class="tab tmux-window-button tabber-window-button" data-tabber-window-button="shared">
             <span class="tmux-window-name-label">
-              <span id="tabber" class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s">
+              <span id="tabber" class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s">
                 <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#667ef8" d="M3 12a9 9 0 1 0 18 0A9 9 0 0 0 3 12z"/></svg>
                 </span>
@@ -3981,7 +3981,7 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
     expected_names = {"tab": "agent-status-opacity-pulse", "subwindow": "agent-status-opacity-pulse", "acknowledgement": "agent-status-acknowledgement-fade"}
     for group, expected_name in expected_names.items():
         markers = groups[group]["markers"]
-        assert [marker["state"] for marker in markers] == ["working", "cooldown", "attention"], metrics
+        assert [marker["state"] for marker in markers] == ["working", "attention", "cooldown"], metrics
         assert all(marker["animationName"] == expected_name for marker in markers), metrics
         assert all(marker["duration"] == "2s" and marker["delay"] == metrics["rootDelay"] for marker in markers), metrics
         assert all(marker["timingFunction"].startswith("steps(16") and marker["iterations"] == "infinite" for marker in markers), metrics

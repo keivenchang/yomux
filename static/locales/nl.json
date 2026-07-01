@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "Server-SSE: mapwijzigingen",
   "pref.performance.server_event_poll_ms.help": "Serverzijde SSE-pollinterval in seconden voor bestandssignaturen van open editors in zichtbare panelen voordat wijzigingen naar browsers worden gestuurd. Minimum 0,250 s.",
   "pref.performance.server_event_poll_ms.label": "Server-SSE: editorbestandswijzigingen",
+  "pref.performance.statusSample.acknowledged": "Bevestigde status",
+  "pref.performance.statusSample.pulse": "Statuspuls",
   "pref.performance.tab_popover_follow_delay_ms.help": "Shorter delay when moving between tabs after one tab details popup is already open.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Tab detail follow delay",
   "pref.performance.tab_popover_show_delay_ms.help": "Initial delay before a tab details popup opens.",

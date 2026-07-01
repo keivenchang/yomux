@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE الخادم: تغييرات المجلدات",
   "pref.performance.server_event_poll_ms.help": "فاصل استطلاع SSE على الخادم بالثواني لتواقيع ملفات المحرر المفتوحة في الأجزاء المرئية قبل دفع تغييرات الملفات إلى المتصفحات. الحد الأدنى 0.250 ث.",
   "pref.performance.server_event_poll_ms.label": "SSE الخادم: تغييرات ملفات المحرر",
+  "pref.performance.statusSample.acknowledged": "حالة تم الإقرار بها",
+  "pref.performance.statusSample.pulse": "نبض الحالة",
   "pref.performance.tab_popover_follow_delay_ms.help": "تأخير أقصر عند التنقل بين التبويبات بعد فتح نافذة تفاصيل تبويب منبثقة.",
   "pref.performance.tab_popover_follow_delay_ms.label": "تأخير متابعة تفاصيل التبويب",
   "pref.performance.tab_popover_show_delay_ms.help": "التأخير الأولي قبل فتح نافذة تفاصيل التبويب المنبثقة.",

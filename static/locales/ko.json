@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "서버 SSE: 디렉터리 변경",
   "pref.performance.server_event_poll_ms.help": "보이는 패널에서 열린 편집기 파일 시그니처를 확인해 변경 사항을 브라우저로 보내기 전 서버 측 SSE 폴링 간격(초)입니다. 최소 0.250초.",
   "pref.performance.server_event_poll_ms.label": "서버 SSE: 편집기 파일 변경",
+  "pref.performance.statusSample.acknowledged": "확인된 상태",
+  "pref.performance.statusSample.pulse": "상태 펄스",
   "pref.performance.tab_popover_follow_delay_ms.help": "탭 상세 팝업이 이미 열린 상태에서 탭 간 이동 시 적용되는 짧은 지연 시간입니다.",
   "pref.performance.tab_popover_follow_delay_ms.label": "탭 상세 추적 지연",
   "pref.performance.tab_popover_show_delay_ms.help": "탭 상세 팝업이 열리기까지의 초기 지연 시간입니다.",

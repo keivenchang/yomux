@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "सर्वर SSE: डायरेक्टरी बदलाव",
   "pref.performance.server_event_poll_ms.help": "दिख रहे पैन में खुले एडिटर फ़ाइल signatures के लिए, फ़ाइल बदलाव ब्राउज़र को भेजने से पहले सर्वर-side SSE poll interval (सेकंड में)। न्यूनतम 0.250 s।",
   "pref.performance.server_event_poll_ms.label": "सर्वर SSE: एडिटर फ़ाइल बदलाव",
+  "pref.performance.statusSample.acknowledged": "स्वीकृत स्थिति",
+  "pref.performance.statusSample.pulse": "स्थिति पल्स",
   "pref.performance.tab_popover_follow_delay_ms.help": "एक टैब details popup पहले से खुला होने पर टैब के बीच जाने पर कम देरी।",
   "pref.performance.tab_popover_follow_delay_ms.label": "टैब detail follow देरी",
   "pref.performance.tab_popover_show_delay_ms.help": "टैब details popup खुलने से पहले की प्रारंभिक देरी।",

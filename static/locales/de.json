@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "Server-SSE: Verzeichnisänderungen",
   "pref.performance.server_event_poll_ms.help": "Serverseitiges SSE-Abfrageintervall in Sekunden für sichtbare Editor-Dateisignaturen, bevor Dateiänderungen an Browser gesendet werden. Minimum 0,250 s.",
   "pref.performance.server_event_poll_ms.label": "Server-SSE: Editor-Dateiänderungen",
+  "pref.performance.statusSample.acknowledged": "Bestätigter Status",
+  "pref.performance.statusSample.pulse": "Statuspuls",
   "pref.performance.tab_popover_follow_delay_ms.help": "Kürzere Verzögerung beim Wechsel zwischen Tabs, wenn bereits ein Tabdetail-Popup offen ist.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Folgeverzögerung der Tabdetails",
   "pref.performance.tab_popover_show_delay_ms.help": "Anfangsverzögerung, bevor ein Popup mit Tabdetails erscheint.",

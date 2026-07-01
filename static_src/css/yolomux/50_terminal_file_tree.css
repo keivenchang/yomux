@@ -115,8 +115,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   position: absolute;
   z-index: var(--z-terminal-overlay-low);
   pointer-events: none;
-  background: rgb(var(--attention-ring-rgb, 255 51 71) / 0.16);
-  box-shadow: inset 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.24);
+  background: rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0.16);
+  box-shadow: inset 0 0 0 1px rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0.24);
   border-radius: 6px;
 }
 .terminal .xterm-rows .terminal-attention-question-row {

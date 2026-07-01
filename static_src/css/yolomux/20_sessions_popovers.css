@@ -136,7 +136,7 @@
 .status-indicator--working {
   color: var(--pr-status-passing);
   --agent-status-ball-fill: var(--pr-status-passing);
-  --attention-ring-rgb: 82 210 115;
+  --attention-ring-rgb: var(--agent-status-working-rgb);
 }
 .status-indicator--cooldown {
   color: var(--agent-status-cooldown);
@@ -196,7 +196,7 @@
 .status-indicator--attention {
   color: var(--danger-text);
   --agent-status-ball-fill: var(--bad);
-  --attention-ring-rgb: 255 51 71;
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
 .status-indicator--dot.status-indicator--attention {
   color: var(--bad);
@@ -290,10 +290,10 @@
    [symbol][ball]. Activity is communicated by opacity, never glow. The active/current state is the
    only status that animates the symbol itself. */
 .agent-window-activity--attention {
-  --attention-ring-rgb: 255 51 71;
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
 .agent-window-activity--cooldown {
-  --attention-ring-rgb: 245 197 66;
+  --attention-ring-rgb: var(--agent-status-cooldown-rgb);
 }
 /* Status balls own their size through --agent-status-ball-size instead of inheriting the surrounding
    surface's icon/font size. The symbol can be compact in a window button while the ball stays identical
@@ -368,13 +368,13 @@
 }
 @keyframes attention-ring-fade {
   0%, 100% {
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-border-rest-alpha, 0.56));
-    box-shadow: 0 0 0 0 rgb(var(--attention-ring-rgb, 255 51 71) / 0), 0 0 var(--attention-ring-rest-glow-size, 5px) rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-rest-glow-alpha, 0.24));
+    border-color: rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-border-rest-alpha, 0.56));
+    box-shadow: 0 0 0 0 rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0), 0 0 var(--attention-ring-rest-glow-size, 5px) rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-rest-glow-alpha, 0.24));
     filter: saturate(var(--attention-pulse-saturate-rest, 1)) brightness(var(--attention-pulse-brightness-rest, 1));
   }
   45%, 55% {
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-border-peak-alpha, 1));
-    box-shadow: 0 0 0 2px rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-outline-alpha, 0.72)), 0 0 var(--attention-ring-peak-glow-size, 26px) rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-glow-alpha, 0.68));
+    border-color: rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-border-peak-alpha, 1));
+    box-shadow: 0 0 0 2px rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-peak-outline-alpha, 0.72)), 0 0 var(--attention-ring-peak-glow-size, 26px) rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-peak-glow-alpha, 0.68));
     filter: saturate(var(--attention-pulse-saturate-peak, 1)) brightness(var(--attention-pulse-brightness-peak, 1));
   }
 }

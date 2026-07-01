@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE เซิร์ฟเวอร์: การเปลี่ยนไดเรกทอรี",
   "pref.performance.server_event_poll_ms.help": "ช่วงเวลา polling SSE ฝั่งเซิร์ฟเวอร์เป็นวินาทีสำหรับลายเซ็นไฟล์เอดิเตอร์ที่เปิดในพาเนลที่มองเห็น ก่อนส่งการเปลี่ยนไฟล์ไปยังเบราว์เซอร์ ขั้นต่ำ 0.250 วินาที",
   "pref.performance.server_event_poll_ms.label": "SSE เซิร์ฟเวอร์: การเปลี่ยนไฟล์เอดิเตอร์",
+  "pref.performance.statusSample.acknowledged": "สถานะที่รับทราบแล้ว",
+  "pref.performance.statusSample.pulse": "การกะพริบสถานะ",
   "pref.performance.tab_popover_follow_delay_ms.help": "Shorter delay when moving between tabs after one tab details popup is already open.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Tab detail follow delay",
   "pref.performance.tab_popover_show_delay_ms.help": "Initial delay before a tab details popup opens.",

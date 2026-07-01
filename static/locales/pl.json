@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "SSE serwera: zmiany katalogów",
   "pref.performance.server_event_poll_ms.help": "Interwał sondowania SSE po stronie serwera, w sekundach, dla sygnatur plików otwartych w widocznych edytorach przed wysłaniem zmian do przeglądarek. Minimum 0,250 s.",
   "pref.performance.server_event_poll_ms.label": "SSE serwera: zmiany plików edytora",
+  "pref.performance.statusSample.acknowledged": "Potwierdzony stan",
+  "pref.performance.statusSample.pulse": "Pulsowanie stanu",
   "pref.performance.tab_popover_follow_delay_ms.help": "Shorter delay when moving between tabs after one tab details popup is already open.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Tab detail follow delay",
   "pref.performance.tab_popover_show_delay_ms.help": "Initial delay before a tab details popup opens.",

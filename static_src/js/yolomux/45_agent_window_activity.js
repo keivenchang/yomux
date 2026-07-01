@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Shared Claude/Codex tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
 
+const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'cooldown']);
+const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'cooldown', STATE_KEY.working]);
+
+function agentWindowVisibleTone(value) {
+  return AGENT_WINDOW_VISIBLE_TONES.includes(value);
+}
+
 function agentWindowPathEntries(agent) {
   const entries = [];
   const seen = new Set();
@@ -319,7 +326,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
   for (const agent of agents) {
     const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session);
     const tone = agentWindowStatusToneForItem(item);
-    if (!item || !['acknowledged', 'attention', 'cooldown', STATE_KEY.working].includes(tone)) continue;
+    if (!item || (tone !== 'acknowledged' && !agentWindowVisibleTone(tone))) continue;
     const rank = tone === 'acknowledged' ? 8 : agentWindowActivityVisualRank(item.state);
     const selectedRank = selected ? (selected.item.acknowledging === true ? 8 : agentWindowActivityVisualRank(selected.item.state)) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
@@ -328,7 +335,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
   }
   if (!selected) return {agents, hasAttributedWindows, agent: null, item: null};
-  const allAggregateTones = ['attention', 'cooldown', STATE_KEY.working]
+  const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES
     .filter(tone => visibleItems.some(entry => entry.tone === tone));
   const item = {
     ...selected.item,
@@ -913,14 +920,38 @@ function agentWindowStatusToneForItem(item) {
   if (item?.acknowledging === true) return 'acknowledged';
   if (item?.acknowledged === true) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  return ['attention', 'cooldown', STATE_KEY.working].includes(tone) ? tone : '';
+  return agentWindowVisibleTone(tone) ? tone : '';
 }
 
 function agentWindowActivityToneWrapperClass(tone) {
   const normalizedTone = agentWindowActivityTone(tone);
-  return ['attention', 'cooldown', STATE_KEY.working].includes(normalizedTone)
+  return agentWindowVisibleTone(normalizedTone)
     ? `agent-window-activity--${agentWindowStatusToneClass(normalizedTone)}`
     : '';
+}
+
+function agentWindowStatusSampleItem(tone, options = {}) {
+  const state = agentWindowActivityTone(tone);
+  const pulse = options.pulse === true;
+  return {
+    state,
+    icon: String(options.icon || '●'),
+    label: String(options.label || ''),
+    pulseActive: pulse,
+    transitionPulseActive: pulse,
+    acknowledged: false,
+    acknowledging: options.acknowledging === true,
+  };
+}
+
+function agentWindowStatusDotHtmlForTone(tone, options = {}) {
+  const subwindow = options.surface === 'subwindow';
+  return agentWindowStatusDotHtml(agentWindowStatusSampleItem(tone, options), {
+    animate: options.pulse === true,
+    subwindowGlyphPulse: subwindow,
+    acknowledgementPreview: options.acknowledging === true,
+    label: options.label,
+  });
 }
 
 function agentWindowStatusDotHtml(item, options = {}) {
@@ -932,18 +963,18 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const pulse = !acknowledging && animate && item.pulseActive !== false;
   const subwindowPulse = pulse;
   const transitionPulse = !acknowledging && animate && item.transitionPulseActive === true && item.acknowledged !== true;
-  const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
-  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const transitionGlow = pulse && agentWindowVisibleTone(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
   // Acknowledged is the temporary gray color/timing tone, not a new shape. Keep the original
   // play/stop/pause modifier so live feedback and the Preferences example use the same renderer.
-  const acknowledgementShapeClass = acknowledging && [STATE_KEY.working, 'attention', 'cooldown'].includes(item.state)
+  const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone(item.state)
     ? `status-indicator--${item.state}`
     : '';
   const aggregateTones = Array.isArray(item.aggregateTones)
-    ? item.aggregateTones.filter(value => ['attention', 'cooldown', STATE_KEY.working].includes(value)).slice(0, 3)
+    ? item.aggregateTones.filter(agentWindowVisibleTone).slice(0, AGENT_WINDOW_VISIBLE_TONES.length)
     : [];
   const allAggregateTones = Array.isArray(item.allAggregateTones)
-    ? item.allAggregateTones.filter(value => ['attention', 'cooldown', STATE_KEY.working].includes(value))
+    ? item.allAggregateTones.filter(agentWindowVisibleTone)
     : aggregateTones;
   const aggregateToneClasses = aggregateTones.length > 1
     ? [
@@ -967,15 +998,17 @@ function agentWindowStatusDotHtml(item, options = {}) {
     aggregateToneClasses,
     {pulse},
   );
-  return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
+  const label = String(options.label || '').trim();
+  const accessibility = label ? ` role="img" aria-label="${esc(label)}"` : ' aria-hidden="true"';
+  return `<span class="${esc(classes)}"${accessibility}>${esc(item.icon)}</span>`;
 }
 
 function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
-  if (![STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone)) return '';
+  if (tone !== 'active' && !agentWindowVisibleTone(tone)) return '';
   const styles = [];
   const pulseEnabled = item?.pulseActive !== false && typeof statusPulseAnimationEnabled === 'function' && statusPulseAnimationEnabled();
   const subwindowPulse = item?.pulseActive !== false;
-  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
   const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse;
   if (hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
   if (item?.transitionPulseActive === true && item?.acknowledged !== true) {
@@ -1029,6 +1062,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
   const wrapperClasses = [
     'agent-window-activity',
+    subwindowGlyphPulse ? 'agent-window-activity--subwindow' : '',
     toneWrapperClass || `agent-window-activity--${stateKey}`,
     acknowledging ? 'agent-window-activity--acknowledging' : '',
     acknowledged ? 'agent-window-activity--acknowledged' : '',

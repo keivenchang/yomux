@@ -598,6 +598,8 @@
   "pref.path.settings": "ajustes",
   "pref.performance.agent_status_pulse_period_ms.help": "Sets the breathing-pulse cadence for green play, yellow pause, and red stop status glyphs. The pulse uses roughly 125ms steps to limit repaint cost.",
   "pref.performance.agent_status_pulse_period_ms.label": "Periodo de pulso de la bola de estado",
+  "pref.performance.statusSample.acknowledged": "Estado confirmado",
+  "pref.performance.statusSample.pulse": "Pulso de estado",
   "pref.performance.auto_approve_interval_seconds.help": "Con qué frecuencia los trabajadores YOLO recién activados inspeccionan los avisos visibles de tmux.",
   "pref.performance.auto_approve_interval_seconds.label": "Intervalo de sondeo del trabajador YOLO",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

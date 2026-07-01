@@ -2177,11 +2177,12 @@ function globalActivityStatusLineHtml() {
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
   const activityToneClass = typeof agentWindowActivityToneWrapperClass === 'function' ? agentWindowActivityToneWrapperClass(tone) : '';
+  const dotHtml = agentWindowStatusDotHtmlForTone(tone, {surface: 'topbar', pulse: false});
   return `
     <span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-count', extraClass, count ? 'active' : ''))}">
       <span class="topbar-activity-count-number">${esc(String(count))}</span>
       <span class="${esc(['agent-window-activity', 'agent-window-activity--status-only', activityToneClass, 'topbar-activity-ball'].join(' '))}" aria-hidden="true">
-        <span class="${esc(statusIndicatorDotClasses(tone, 'agent-window-status-dot', {pulse: false}))}">●</span>
+        ${dotHtml}
       </span>
     </span>
   `;
@@ -2654,13 +2655,17 @@ function keyboardShortcutCatalog() {
 }
 
 function keyboardLegendStatusSample(kind, text = '●', options = {}) {
-  if (options.glyph === true && ['working', 'cooldown', 'attention'].includes(kind)) {
-    const classes = `${statusIndicatorDotClasses(kind, 'agent-window-status-dot', {pulse: options.pulse === true})}${options.pulse === true ? ' agent-window-status-dot--subwindow-pulse' : ''}`;
-    return `<span class="tmux-window-button keyboard-legend-status-glyph" aria-hidden="true"><span class="agent-window-activity"><span class="${esc(classes)}">${esc(text)}</span></span></span>`;
+  if (agentWindowVisibleTone(kind)) {
+    const subwindow = options.glyph === true;
+    const dotHtml = agentWindowStatusDotHtmlForTone(kind, {
+      surface: subwindow ? 'subwindow' : 'legend',
+      pulse: options.pulse === true,
+      icon: text,
+    });
+    if (!subwindow) return dotHtml;
+    const toneClass = agentWindowActivityToneWrapperClass(kind);
+    return `<span class="tmux-window-button keyboard-legend-status-glyph" aria-hidden="true"><span class="${esc(['agent-window-activity', 'agent-window-activity--status-only', 'agent-window-activity--subwindow', toneClass].join(' '))}">${dotHtml}</span></span>`;
   }
-  if (kind === 'working') return `<span class="status-indicator status-indicator--dot status-indicator--working">${esc(text)}</span>`;
-  if (kind === 'cooldown') return `<span class="status-indicator status-indicator--dot status-indicator--cooldown">${esc(text)}</span>`;
-  if (kind === 'attention') return `<span class="status-indicator status-indicator--dot status-indicator--attention">${esc(text)}</span>`;
   if (kind === 'idle') return `<span class="status-indicator status-indicator--dot status-indicator--idle">${esc(text)}</span>`;
   return `<span class="keyboard-legend-swatch keyboard-legend-swatch-${esc(kind)}" aria-hidden="true"></span>`;
 }

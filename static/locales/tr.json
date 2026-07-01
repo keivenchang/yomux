@@ -667,6 +667,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "Sunucu SSE: dizin değişiklikleri",
   "pref.performance.server_event_poll_ms.help": "Görünür bölmelerdeki açık düzenleyici dosya imzaları için değişiklikleri tarayıcılara göndermeden önce kullanılan sunucu tarafı SSE yoklama aralığı, saniye cinsinden. En az 0,250 sn.",
   "pref.performance.server_event_poll_ms.label": "Sunucu SSE: düzenleyici dosya değişiklikleri",
+  "pref.performance.statusSample.acknowledged": "Onaylanan durum",
+  "pref.performance.statusSample.pulse": "Durum darbesi",
   "pref.performance.tab_popover_follow_delay_ms.help": "Shorter delay when moving between tabs after one tab details popup is already open.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Tab detail follow delay",
   "pref.performance.tab_popover_show_delay_ms.help": "Initial delay before a tab details popup opens.",
