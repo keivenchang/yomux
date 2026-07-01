@@ -94,13 +94,15 @@ export PATH="${HOME}/.local/bin:${HOME}/.local/node-v22.11.0-linux-x64/bin:${PAT
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
 
-# YO!agent's Claude backend runs `claude` non-interactively. On macOS that binary
-# authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT read
-# primaryApiKey from ~/.claude.json the way the Linux build does. The detached server
-# bypasses the ~/bin/claude wrapper (PATH resolves ~/.local/bin/claude first), so mirror
-# that wrapper here: export the stored primaryApiKey as ANTHROPIC_API_KEY when it is not
-# already set. Exported (not passed on argv) so the key never appears in `ps`.
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -r "${HOME}/.claude.json" ]]; then
+# YO!agent's Claude backend runs `claude` non-interactively. On macOS, the `claude`
+# binary authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT
+# read primaryApiKey from ~/.claude.json the way the Linux build does, so export the
+# stored primaryApiKey as ANTHROPIC_API_KEY when it is not already set. Exported (not
+# passed on argv) so the key never appears in `ps`. Linux is excluded: its `claude`
+# build already reads primaryApiKey from ~/.claude.json directly, and forcing the env
+# var here collides with a claude.ai (OAuth) login stored in the same file.
+# TODO: verify this is still accurate on the current macOS `claude` release.
+if [[ "$(uname -s)" == "Darwin" && -z "${ANTHROPIC_API_KEY:-}" && -r "${HOME}/.claude.json" ]]; then
   ANTHROPIC_API_KEY="$("$python_bin" -c 'import json, os
 try:
     print(json.load(open(os.path.expanduser("~/.claude.json"))).get("primaryApiKey") or "")
