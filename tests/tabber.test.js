@@ -1497,10 +1497,10 @@ async function runTabberSuite() {
     const renamedSessionHtml = renamedSessionApi.tmuxPaneTabHtml('8002b', renamedSessionApi.transcriptInfoForTest('8002b'), null, false);
     assert.equal(renamedSessionApi.itemLabel('8002b'), '8002b', 'renamed non-numeric tmux sessions use the tmux name as the visible label');
     assert.equal(renamedSessionApi.resolveLayoutItem('9'), '8002b', 'the old shortcut label still resolves to the renamed session');
-    assert.ok(renamedSessionHtml.includes('session-button-name') && renamedSessionHtml.includes('>8002b<'), 'renamed tmux tab chrome shows the real session name');
+    assert.ok(renamedSessionHtml.includes('session-button-name') && renamedSessionHtml.includes('>[8002b]<'), 'renamed tmux tab chrome shows the bracketed real session name');
     assert.equal(/session-button-number">9<\/span>/.test(renamedSessionHtml), false, 'renamed tmux tab chrome does not prepend the stale shortcut label');
     const renamedSessionRow = renamedSessionApi.tabberRenderedRowsForTest().find(row => row.type === 'session' && row.title.split('\n')[0] === '8002b');
-    assert.ok(renamedSessionRow?.nameHtml.includes('>8002b<'), 'Tabber session rows inherit the same renamed-session tab chrome');
+    assert.ok(renamedSessionRow?.nameHtml.includes('>[8002b]<'), 'Tabber session rows inherit the same bracketed renamed-session tab chrome');
 
     // Render guard: real labels (never synthetic node names); active window marked; absolute path rows present.
     const rows = api.tabberRenderedRowsForTest();

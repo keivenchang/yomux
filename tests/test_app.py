@@ -2537,6 +2537,15 @@ def test_agent_window_working_completion_gets_a_fresh_pause_timestamp(monkeypatc
     assert still_completed["working_stopped_ts"] == completed["working_stopped_ts"]
 
 
+def test_agent_window_idle_baseline_does_not_turn_historical_activity_into_completion():
+    webapp = app_module.TmuxWebtermApp(["interview"])
+    try:
+        stopped_at = webapp.agent_window_working_stopped_ts("interview", "0", "%20", "codex", "idle", 200.0)
+    finally:
+        webapp.control_server.stop()
+    assert stopped_at == 0.0
+
+
 def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
     created_targets = []
 

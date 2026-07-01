@@ -2039,6 +2039,9 @@ body.theme-light .app-menu-tab-command:focus-visible {
   border: 0;
   font-weight: 500;
 }
+.session-button-identifier {
+  font-weight: 700;
+}
 .session-button-prefix {
   flex: 0 0 auto;
   min-width: max-content;

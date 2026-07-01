@@ -9202,7 +9202,6 @@ class TmuxWebtermApp:
         kind: str,
         state: str,
         observed_ts: float,
-        fallback_last_active_ts: float,
     ) -> float:
         key = "\x1f".join((session, window, pane_target, kind))
         with self.agent_window_transition_lock:
@@ -9212,9 +9211,11 @@ class TmuxWebtermApp:
             if state == "working":
                 stopped_ts = 0.0
             elif state == "idle":
-                # Each working->idle transition needs a fresh key. The activity ledger can hold
-                # terminal output from an older run whose pause was already acknowledged.
-                stopped_ts = observed_ts if previous_state == "working" else previous_stopped_ts or fallback_last_active_ts
+                # A completion belongs only to a working->idle transition observed by this
+                # tracker. Activity recency is historical metadata: treating it as a stop
+                # fabricates a yellow completion when a renamed or newly discovered session is
+                # first seen idle.
+                stopped_ts = observed_ts if previous_state == "working" else previous_stopped_ts
             else:
                 stopped_ts = 0.0
             # Keep the prompt-transition fields alongside the working transition. A later
@@ -9636,7 +9637,6 @@ class TmuxWebtermApp:
                 kind,
                 state,
                 observed_ts,
-                last_active_ts,
             )
             window_index: int | None
             try:

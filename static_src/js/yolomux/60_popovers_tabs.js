@@ -413,7 +413,7 @@ function sessionNumberNameHtml(session, options = {}) {
   const label = sessionLabel(session);
   const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml) : esc(label);
-  return `<span class="${className}">${labelHtml}</span>`;
+  return `<strong class="${className} session-button-identifier">[${labelHtml}]</strong>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {

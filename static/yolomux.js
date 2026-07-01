@@ -7760,7 +7760,7 @@ function sessionStateHtml(state) {
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
   if ([STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state?.key)) return '';
-  if (!state || [STATE_KEY.idle, STATE_KEY.working, 'done'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
+  if (!state || [STATE_KEY.idle, STATE_KEY.working, 'done', 'cooldown'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
     clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
     session: state.session,
@@ -22450,7 +22450,7 @@ function sessionNumberNameHtml(session, options = {}) {
   const label = sessionLabel(session);
   const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml) : esc(label);
-  return `<span class="${className}">${labelHtml}</span>`;
+  return `<strong class="${className} session-button-identifier">[${labelHtml}]</strong>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {

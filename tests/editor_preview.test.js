@@ -1973,7 +1973,8 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('>YO<'), 'tab includes YO marker');
     assert.equal(/session-yolo-marker[^"]*tab-symbol/.test(html), false, 'YO marker stays visible when metadata badges are hidden');
     assert.ok(/body\.tab-meta-hidden \.pane-tab \.tab-symbol,\s*body\.tab-meta-hidden \.tmux-pane-tab-token \.tab-symbol\s*\{\s*display:\s*none/.test(fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8')), 'hidden tab metadata removes tab-symbol chips from both regular and compact tmux tab tokens');
-    assert.ok(html.includes('>4<'), 'tab includes session number');
+    assert.ok(html.includes('>[4]<'), 'tab includes bracketed session number');
+    assert.ok(/\.session-button-identifier\s*\{\s*font-weight:\s*700/.test(fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8')), 'shared session identifiers render bold across every tab surface');
     assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
     assertNoStandalonePrBadge(html, 'merged default-branch tab');
     const noStatusBallHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
@@ -2131,7 +2132,9 @@ async function runEditorPreviewSuite() {
     ]});
     const cooldownSessionState = api.sessionState('4', {agents: [{kind: 'claude'}, {kind: 'codex'}], panes: []});
     assert.equal(cooldownSessionState.key, 'cooldown', 'a session whose visible child windows are all cooldown gets a yellow session-level state');
-    assert.ok(api.tmuxPaneTabHtml('4', {agents: [{kind: 'claude'}, {kind: 'codex'}], panes: []}, cooldownSessionState, true).includes('status-indicator--cooldown'), 'the parent Tab dot uses the shared cooldown tone');
+    const cooldownSessionTabHtml = api.tmuxPaneTabHtml('4', {agents: [{kind: 'claude'}, {kind: 'codex'}], panes: []}, cooldownSessionState, true);
+    assert.ok(cooldownSessionTabHtml.includes('status-indicator--cooldown'), 'the parent Tab dot uses the shared cooldown tone');
+    assert.equal(cooldownSessionTabHtml.includes('session-state-cooldown'), false, 'the parent Tab does not render an empty duplicate cooldown badge');
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
       {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', working_stopped_ts: stoppedAt},
@@ -4253,7 +4256,7 @@ async function runEditorPreviewSuite() {
     const numericTabMarkerHtml = numericTabHtml.match(/<span class="session-agent-activity-marker[^"]*">[\s\S]*?<\/span><\/span>/)?.[0] || '';
     assert.ok(numericTabHtml.includes('pane-tab-pin-icon'), 'YO!info Tab(tmux session) token shows the shared pinned-tab icon when the session is pinned');
     assert.ok(/session-yolo-marker[^"]*active[\s\S]*data-auto-session="1"/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the shared YO button state');
-    assert.ok(/session-button-number">1<\/span>/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the same numeric session label as the real tab');
+    assert.ok(/session-button-number session-button-identifier">\[1\]<\/strong>/.test(numericTabHtml), 'YO!info Tab(tmux session) token shows the same bold bracketed numeric session label as the real tab');
     assert.equal(/session-state-badge/.test(numericTabHtml), false, 'YO!info Tab(tmux session) token omits redundant text badges when the session needs input');
     assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(numericTabMarkerHtml), 'YO!info Tab(tmux session) token shows the shared colored working status ball');
     assert.equal(numericTabMarkerHtml.includes('agent-icon'), false, 'YO!info Tab(tmux session) token omits the Claude/Codex icon');
@@ -4267,7 +4270,7 @@ async function runEditorPreviewSuite() {
     ];
     const statusPriorityHtml = api.infoTreeHtmlForTest(statusPriorityRecords, ['tab'], {key: 'tab', dir: 'asc'});
     const tabSummaryFor = label => {
-      const index = statusPriorityHtml.indexOf(`>${label}</`);
+      const index = statusPriorityHtml.indexOf(`>[${label}]</`);
       const start = statusPriorityHtml.lastIndexOf('<summary', index);
       const end = statusPriorityHtml.indexOf('</summary>', index);
       return start >= 0 && end >= 0 ? statusPriorityHtml.slice(start, end) : '';
