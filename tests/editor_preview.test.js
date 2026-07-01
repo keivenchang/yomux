@@ -2024,10 +2024,10 @@ async function runEditorPreviewSuite() {
     });
     const popover = api.sessionPopoverHtml('4', info, 'claude', true);
     assert.ok(/popover-title">tmux session 4 ·/.test(popover), 'session popover title labels the header as a tmux session');
-    assert.ok(/popover-subtitle[\s\S]*branch-indicator[^>]*>MAIN<[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<[\s\S]*ci: Update the dep/.test(popover), 'merged PR popover header mirrors the tab convention: MAIN chip, purple #number chip, then title');
+    assert.ok(/popover-subtitle[\s\S]*branch-indicator[^>]*>MAIN<[\s\S]*href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<[\s\S]*ci: Update the dep/.test(popover), 'merged PR popover header links the purple #number chip using the shared inferred GitHub URL');
     assert.equal(popover.includes('#9961:'), false, 'merged PR popover header omits the old #number text prefix');
     assert.ok(/popover-label">branch<\/div><div class="popover-value"><span class="ci-indicator tab-symbol branch-indicator[^"]*">MAIN<\/span>/.test(popover), 'merged PR popover branch row uses the same MAIN chip as the tab');
-    assert.ok(/popover-label">PR<\/div><div class="popover-value"><span class="ci-indicator tab-symbol pr-number-chip pr-status-merged[^"]*">#9961<\/span>/.test(popover), 'merged PR popover PR row uses the same purple #number chip as the tab');
+    assert.ok(/popover-label">PR<\/div><div class="popover-value"><a href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*<span class="ci-indicator tab-symbol pr-number-chip pr-status-merged[^"]*">#9961<\/span><\/a>/.test(popover), 'merged PR popover PR row links the same purple #number chip as the header');
     assert.equal(popover.includes('#9961 MERGED'), false, 'merged PR popover omits redundant MERGED text');
     assert.equal(popover.includes('PR #9961'), false, 'merged PR popover avoids repeating PR before the #number value');
     assert.equal(popover.includes('popover-label">desc'), false, 'merged PR popover omits the desc row because the header already carries the PR title');
@@ -5396,8 +5396,8 @@ async function runEditorPreviewSuite() {
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'needs-input', text: 'waiting for input'}});
     visibleRows[1].textContent = 'Tip: this is not the prompt';
     visibleRows[3].textContent = 'Something something sentence something?';
-    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'attention state falls back to a visible question row when payload text is generic');
-    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), true, 'fallback chooses the newest visible question-looking row');
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), false, 'generic attention state does not guess from a historical question-looking terminal row');
+    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), false, 'a prior typed question is never presented as the current agent question');
   });
 
   test('attention shortcut footer hint is not highlighted as a question', () => {
@@ -5490,7 +5490,7 @@ async function runEditorPreviewSuite() {
     assert.equal(container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]').length, 0, 'all wrapped overlay segments are removed');
   });
 
-  test('attention fallback highlights wrapped question without swallowing nearby text', () => {
+  test('attention highlight requires an explicit question payload', () => {
     const api = loadYolomux('', ['1']);
     api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
     const container = api.testElementForId('terminal-pane-1');
@@ -5518,14 +5518,45 @@ async function runEditorPreviewSuite() {
     });
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'needs-input', text: 'waiting for input'}});
 
-    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'generic attention state falls back to the visible wrapped question');
-    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'fallback does not merge unrelated header text');
-    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'fallback includes the first wrapped question row');
-    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), true, 'fallback includes the second wrapped question row');
-    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), false, 'fallback leaves unrelated nearby text unmarked');
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), false, 'generic attention state does not infer a question from terminal history');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'generic attention leaves header text unmarked');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), false, 'generic attention does not mark a prior wrapped question');
+    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), false, 'generic attention does not mark continuation text');
+    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), false, 'generic attention leaves nearby text unmarked');
     const overlays = container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]');
-    assert.equal(overlays.length, 2, 'fallback wrapped question creates multiple overlay segments');
-    assert.equal(overlays[1].style.width, `${'is in chat?'.length * 10}px`, 'fallback highlight stops before explanatory parenthetical text');
+    assert.equal(overlays.length, 0, 'generic attention creates no red question overlay');
+  });
+
+  test('attention highlight uses the latest visible copy of the explicit question', () => {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
+    const container = api.testElementForId('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 900, height: 100, right: 900, bottom: 100};
+    const xtermRows = new TestElement('xterm-duplicate-question-rows');
+    xtermRows.className = 'xterm-rows';
+    xtermRows.rect = {left: 0, top: 0, width: 900, height: 100, right: 900, bottom: 100};
+    const questionText = 'Should I continue with the fix?';
+    const visibleRows = [`❯ ${questionText}`, 'Earlier terminal output', `Claude: ${questionText}`, '1. Continue', '2. Stop']
+      .map((text, index) => {
+        const row = new TestElement(`duplicate-question-row-${index}`);
+        row.textContent = text;
+        row.rect = {left: 0, top: index * 20, width: 900, height: 20, right: 900, bottom: (index + 1) * 20};
+        xtermRows.appendChild(row);
+        return row;
+      });
+    container.appendChild(xtermRows);
+    api.registerTerminalForTest('1', {
+      cols: 90,
+      rows: 5,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'needs-input', text: questionText, question_text: questionText}});
+
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'explicit question payload paints a terminal overlay');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'stale earlier copy of the question stays unmarked');
+    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), true, 'latest visible prompt copy is marked');
   });
 
   test('attention prompt fragment expands to the full visible question sentence', () => {

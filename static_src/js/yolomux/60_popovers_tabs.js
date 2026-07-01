@@ -538,6 +538,14 @@ function githubPullRequestUrlFromGit(git, number) {
   return repoUrl && number ? `${repoUrl}/pull/${number}` : '';
 }
 
+function pullRequestWithUrl(git, pr) {
+  if (!pr?.number) return null;
+  return {
+    ...pr,
+    url: pr.url || githubPullRequestUrlFromGit(git, pr.number),
+  };
+}
+
 function defaultBranchHeadPullRequestForGit(info, git) {
   const project = info?.project || {};
   if (!isDefaultBranch(git)) return null;
@@ -733,10 +741,10 @@ function filePopoverPathHtml(path) {
 function sessionPopoverSubtitleHtml(session, info, fallback = '') {
   const project = info?.project || {};
   const git = project.git;
-  const pr = displayPullRequest(info);
+  const pr = pullRequestWithUrl(git, displayPullRequest(info));
   const chips = [];
   if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
-  if (pr?.number) chips.push(pullRequestNumberIndicatorHtml(session, pr));
+  if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
   const text = pr?.number
     ? shortText(pr.title || pr.description || '', 220)
     : String(fallback || '');
@@ -754,7 +762,7 @@ function sessionBranchValueHtml(session, info) {
 }
 
 function pullRequestPopoverRowHtml(session, pr) {
-  const prParts = [pullRequestNumberIndicatorHtml(session, pr), pullRequestAuthorHtml(pr)].filter(Boolean);
+  const prParts = [pullRequestNumberChipLinkHtml(session, pr), pullRequestAuthorHtml(pr)].filter(Boolean);
   const checks = pullRequestChecksHtml(pr);
   if (checks) prParts.push(checks);
   const review = pullRequestReviewInlineHtml(pr);
@@ -980,7 +988,7 @@ function agentTranscriptRowsHtml(agent) {
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
-  const pr = displayPullRequest(info);
+  const pr = pullRequestWithUrl(git, displayPullRequest(info));
   const linear = project.linear || [];
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
@@ -1121,11 +1129,7 @@ function pullRequestNumberChipLinkHtml(session, pr) {
 
 function pullRequestForBranch(git, branch, info) {
   const pr = branch?.current ? displayPullRequest(info) || branch.pull_request : branch?.pull_request;
-  if (!pr?.number) return null;
-  return {
-    ...pr,
-    url: pr.url || githubPullRequestUrlFromGit(git, pr.number),
-  };
+  return pullRequestWithUrl(git, pr);
 }
 
 function branchListBranchHtml(session, git, branch) {

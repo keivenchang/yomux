@@ -1945,30 +1945,6 @@ function terminalAttentionRowsLikelyWrapped(previous, item) {
   return cols > 0 && rawText.length >= Math.max(1, cols - 2);
 }
 
-function terminalAttentionFallbackContext(rows, item) {
-  let rawText = '';
-  const rawMap = [];
-  rows.forEach((record, rowIndex) => {
-    if (rowIndex > 0) {
-      const previous = rows[rowIndex - 1];
-      const previousText = terminalAttentionRawText(previous?.rawText || previous?.text || '').replace(/\s+$/g, '');
-      const separator = terminalAttentionRowsLikelyWrapped(previous, item)
-        ? (previousText.endsWith('-') ? '' : ' ')
-        : '. ';
-      for (let index = 0; index < separator.length; index += 1) {
-        rawText += separator[index];
-        rawMap.push(null);
-      }
-    }
-    const rowText = terminalAttentionRawText(record?.rawText || record?.text || '');
-    for (let index = 0; index < rowText.length; index += 1) {
-      rawText += rowText[index];
-      rawMap.push({record, column: index});
-    }
-  });
-  return terminalAttentionNormalizeMappedText(rawText, rawMap);
-}
-
 function terminalAttentionSegmentsForRange(context, start, length, highlightText) {
   const end = start + length;
   const segments = [];
@@ -2151,7 +2127,9 @@ function terminalAttentionSpanSegments(item, rows, candidate) {
   if (!needle) return [];
   for (const separator of ['', ' ']) {
     const context = terminalAttentionJoinedContext(rows, separator);
-    const start = context.text.indexOf(needle);
+    // A terminal viewport can retain an earlier copy of the same prompt. The active prompt is the
+    // latest matching sentence, not the first one left in scrollback above it.
+    const start = context.text.lastIndexOf(needle);
     if (start < 0) continue;
     const containingRange = terminalAttentionContainingQuestionRange(context, start, needle.length);
     const expandsWrappedFragment = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start);
@@ -2181,41 +2159,6 @@ function terminalAttentionSpanSegments(item, rows, candidate) {
   return [];
 }
 
-function terminalAttentionQuestionFallbackSpan(record) {
-  const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
-  const trimmedEnd = rawText.replace(/\s+$/g, '');
-  if (!/[?？]$/.test(trimmedEnd)) return null;
-  const questionEnd = Math.max(trimmedEnd.lastIndexOf('?'), trimmedEnd.lastIndexOf('？')) + 1;
-  const questionPrefix = trimmedEnd.slice(0, questionEnd);
-  const ranges = terminalAttentionQuestionSentenceRanges(questionPrefix);
-  const sentence = ranges.length ? ranges[ranges.length - 1].text : terminalAttentionTextPart(trimmedEnd);
-  const start = Math.max(0, rawText.lastIndexOf(sentence));
-  return {highlightStart: start, highlightLength: Math.max(1, sentence.length), highlightText: sentence};
-}
-
-function terminalAttentionQuestionFallbackSegments(item, rows) {
-  const context = terminalAttentionFallbackContext(rows, item);
-  const ranges = terminalAttentionQuestionSentenceRanges(context.text);
-  for (let index = ranges.length - 1; index >= 0; index -= 1) {
-    const range = ranges[index];
-    const segments = terminalAttentionSegmentsForRange(context, range.start, range.length, range.text);
-    if (segments.length) return segments;
-  }
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (terminalAttentionQuestionFallback(rows[index].text)) {
-      const span = terminalAttentionQuestionFallbackSpan(rows[index]);
-      if (span) return [{...rows[index], ...span}];
-    }
-  }
-  return [];
-}
-
-function terminalAttentionQuestionFallback(text) {
-  const trimmed = terminalAttentionTextPart(text);
-  if (!trimmed || !/[?？]\s*$/.test(trimmed)) return false;
-  return !/^(>|❯|\$|#)\s*$/.test(trimmed);
-}
-
 function terminalAttentionQuestionSegments(item, questionTexts = []) {
   const rows = terminalAttentionRowTexts(item);
   if (!rows.length) return [];
@@ -2224,7 +2167,7 @@ function terminalAttentionQuestionSegments(item, questionTexts = []) {
     const segments = terminalAttentionSpanSegments(item, rows, candidate);
     if (segments.length) return segments;
   }
-  return terminalAttentionQuestionFallbackSegments(item, rows);
+  return [];
 }
 
 function terminalAttentionQuestionRow(item, questionTexts = []) {
