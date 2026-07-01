@@ -206,7 +206,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'the --active agent glyph keeps the glow-cadence; status states use a static symbol plus an opacity-pulsed ball');
     assert.ok(/\.agent-window-activity\s*\{[\s\S]*display:\s*inline-flex[\s\S]*gap:\s*2px/.test(sessionsCss), 'agent status symbols and balls render side by side through the shared inline-flex activity wrapper');
     assert.ok(/\.pane-tab-core\s*\{[\s\S]*gap:\s*2px/.test(paneTabsCss), 'session tab chrome keeps each leading icon only 2px from the next item');
-    assert.ok(/\.pane-tab \.session-button-prefix\s*\{[\s\S]*gap:\s*0/.test(paneTabsCss), 'the session number touches its metadata group without a wasted prefix gap');
+    assert.ok(/\.session-button-prefix\s*\{[\s\S]*gap:\s*0/.test(sessionsCss), 'the shared session prefix keeps the identifier tight to its metadata group without a wasted gap');
     assert.ok(/\.pane-tab \.session-button-text\s*\{[\s\S]*gap:\s*1px/.test(paneTabsCss), 'tab metadata and description use the compact 1px content gap');
     assert.ok(/\.tmux-window-button\s*\{[\s\S]*padding-inline:\s*2px/.test(paneTabsCss), 'sub-window buttons use compact horizontal padding');
     assert.ok(/\.tmux-window-button \.tmux-window-name-label\s*\{[\s\S]*gap:\s*1px/.test(paneTabsCss), 'sub-window agent identity and labels share a visible one-pixel minimum gap');

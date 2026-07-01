@@ -131,6 +131,7 @@ def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(br
       <section class="tab-prefix-fixture">
         <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
         <button id="without-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="long-name" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><strong class="session-button-name session-button-identifier">[dynamo-utils.production]</strong></span><span class="session-button-text">keivenc</span></span></button>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 16px; background: #202633; }
@@ -156,6 +157,14 @@ def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(br
     assert abs(metrics["withoutBall"]["markerWidth"] - metrics["withBall"]["markerWidth"]) <= 0.5, metrics
     assert abs(metrics["withoutBall"]["textLeft"] - metrics["withBall"]["textLeft"]) <= 0.5, metrics
     assert metrics["withBall"]["numberWidth"] < 2 * metrics["withBall"]["markerWidth"], metrics
+    long_name = browser.execute_script(
+        """
+        const name = document.querySelector('#long-name .session-button-name');
+        return {clientWidth: name.clientWidth, scrollWidth: name.scrollWidth, text: name.textContent};
+        """
+    )
+    assert long_name["text"] == "[dynamo-utils.production]", long_name
+    assert long_name["scrollWidth"] <= long_name["clientWidth"], long_name
 
 
 _CLAUDE_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">

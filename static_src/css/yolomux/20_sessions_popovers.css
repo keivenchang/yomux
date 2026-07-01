@@ -16,7 +16,7 @@
   min-width: max-content;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
   overflow: visible;
   white-space: nowrap;
 }
@@ -37,7 +37,7 @@
 .session-button-name {
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 72px;
+  max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
   color: #f2f5f8;

@@ -1279,7 +1279,8 @@ async function runTabberSuite() {
     assert.equal(/\.file-tree-row\.tabber-row\.tabber-active-session \.tabber-session-tab/.test(css), false, 'A5: Tabber active styling stays on the shared tmux tab token');
     assert.ok(/\.file-tree-row\.tabber-row\.selected \.tabber-session-tab\s*\{[\s\S]*box-shadow:\s*0 0 0 1px var\(--active-control-focus-ring\)/.test(css), 'A2/A3: selected tree rows keep a visible focus ring on the tab-shaped label');
     assert.ok(/\.tmux-pane-tab-token > \.pane-tab-core\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*inline-size:\s*100%/.test(css), 'TR3: shared compact tmux tab chrome stretches its pane-tab core');
-    assert.ok(/\.tmux-pane-tab-token \.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*min-width:\s*0/.test(css), 'A4/TR1: the shared compact tmux tab token keeps the session number prefix visible before detail truncation');
+    assert.ok(/\.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*min-width:\s*max-content[\s\S]*overflow:\s*visible/.test(css), 'A4/TR1: one shared intrinsic session prefix preserves the identifier while the detail flexes');
+    assert.equal(/\.session-button-(?:name|prefix)[\s\S]{0,160}max-width:\s*(?:72|120)px/.test(css), false, 'A4/TR1: session labels do not carry fixed pixel capacity caps');
     assert.ok(/\.tmux-pane-tab-token \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*max-width:\s*none/.test(css), 'A4/TR1: the shared compact tmux tab token stretches tab detail text');
     assert.ok(/body\.theme-light \.tmux-pane-tab-token:not\(\.active\) \.session-button-name,[\s\S]*body\.theme-light \.tmux-pane-tab-token:not\(\.active\) \.session-button-detail\s*\{[\s\S]*color:\s*currentColor/.test(css), 'compact tmux tab tokens own light-mode child label inheritance');
     assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.pane-tab-core/.test(css), false, 'TR3: Tabber no longer owns the compact tab core flex rule');

@@ -1008,7 +1008,7 @@ body.theme-light .drop-slot.drag-over {
 .panel-session-label .session-button-name {
   color: inherit;
   font-weight: 500;
-  max-width: 120px;
+  max-width: none;
 }
 .panel-session-label .session-button-dir {
   max-width: 104px;
@@ -1298,12 +1298,6 @@ body.theme-light .drop-slot.drag-over {
   min-width: 0;
   inline-size: 100%;
 }
-.tmux-pane-tab-token .session-button-prefix {
-  flex: 0 0 auto;
-  min-width: 0;
-  overflow: visible;
-  gap: 0;
-}
 .tmux-pane-tab-token .session-button-text {
   flex: 1 1 auto;
   min-width: 0;
@@ -1562,19 +1556,10 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   background: rgba(8, 18, 5, 0.16);
   border-color: rgba(8, 18, 5, 0.28);
 }
-.pane-tab .session-button-prefix {
-  flex: 0 0 auto;
-  min-width: 0;
-  overflow: visible;
-  gap: 0;
-}
 .pane-tab .session-button-text {
   flex: 1 1 auto;
   min-width: 0;
   gap: 1px;
-}
-.pane-tab .session-button-name {
-  max-width: 72px;
 }
 .pane-tab:not(.active) .session-button-dir {
   max-width: none;
