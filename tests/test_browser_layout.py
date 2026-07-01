@@ -6809,6 +6809,8 @@ def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_p
           overviewVisible: !host.querySelector('.file-editor-find-overview').hidden,
           overviewTops: [...host.querySelectorAll('.file-editor-find-overview-tick')].map(node => Number.parseFloat(node.style.top)),
           active: host.querySelectorAll('.file-editor-preview-find-match.active').length,
+          activeColor: getComputedStyle(host.querySelector('.file-editor-preview-find-match.active')).color,
+          activeBackground: getComputedStyle(host.querySelector('.file-editor-preview-find-match.active')).backgroundColor,
           count: host.querySelector('.file-editor-preview-find-count').textContent,
           inputFocused: document.activeElement === input,
         };
@@ -6830,9 +6832,10 @@ def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_p
         return {opened, moved, closed};
         """
     )
-    opened = {**metrics["opened"], "overviewTops": None}
-    assert opened == {"visible": True, "matches": 2, "overviewTicks": 2, "overviewVisible": True, "overviewTops": None, "active": 1, "count": "1/2", "inputFocused": True}
+    opened = {**metrics["opened"], "overviewTops": None, "activeColor": None, "activeBackground": None}
+    assert opened == {"visible": True, "matches": 2, "overviewTicks": 2, "overviewVisible": True, "overviewTops": None, "active": 1, "activeColor": None, "activeBackground": None, "count": "1/2", "inputFocused": True}
     assert metrics["opened"]["overviewTops"][0] < metrics["opened"]["overviewTops"][1], metrics
+    assert metrics["opened"]["activeColor"] != metrics["opened"]["activeBackground"], metrics
     assert metrics["moved"] == {"activeIndex": 1, "overviewActiveIndex": 1, "count": "2/2"}
     assert metrics["closed"] == {"hidden": True, "matches": 0, "overviewHidden": True, "startsWith": True, "endsWith": True}
 
