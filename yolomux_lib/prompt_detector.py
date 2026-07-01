@@ -570,7 +570,7 @@ _CLAUDE_GOAL_ACTIVE_RE = re.compile(
     re.IGNORECASE,
 )
 _COMPLETED_TASKS_RE = re.compile(
-    r"\ball\s+\d+\s+tasks?\s+(?:are\s+)?(?:complete|completed|done|finished)\b",
+    r"\b(?:all\s+\d+\s+tasks?|both\s+goal\s+items)\s+(?:are\s+)?(?:complete|completed|done|finished)\b",
     re.IGNORECASE,
 )
 _COMPLETED_FOLLOWUP_QUESTION_RE = re.compile(

@@ -1696,6 +1696,22 @@ def test_completed_claude_followup_beats_persistent_goal_active_footer():
     assert state["question_text"] == "Want me to remove the orphaned cache?"
 
 
+def test_completed_goal_items_followup_beats_persistent_goal_active_footer():
+    visible_text = "\n".join([
+        "Both goal items complete and verified.",
+        "(Notes edited this session; want me to commit + push them?)",
+        "* Sautéed for 2m 33s · 2 shells still running",
+        "◎ /goal active (31m)",
+        "❯ commit and push the notes",
+        "▶▶ bypass permissions on · 2 shells · ← for agents · ↓ to manage",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "want me to commit + push them?"
+
+
 def test_ask_user_question_footer_parts_are_recognized():
     # The AskUserQuestion footer hints ("↑/↓ to navigate", "n to add notes", "Tab to switch questions")
     # count as a footer line so the block is bounded correctly.

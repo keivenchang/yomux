@@ -8447,12 +8447,12 @@ class TmuxWebtermApp:
     @requires_known_session()
     def tmux_status_mode(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         target = tmux_session_target(session)
-        status_result = tmux(["show-option", "-t", target, "-v", "status"], timeout=3.0)
+        status_result = tmux(["show-options", "-A", "-t", target, "-v", "status"], timeout=3.0)
         if status_result.returncode != 0:
             return {"session": session, "error": cmd_error(status_result, "tmux status read failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
         if status_result.stdout.strip().lower() != "on":
             return {"session": session, "status": "none"}, HTTPStatus.OK
-        position_result = tmux(["show-option", "-t", target, "-v", "status-position"], timeout=3.0)
+        position_result = tmux(["show-options", "-A", "-t", target, "-v", "status-position"], timeout=3.0)
         if position_result.returncode != 0:
             return {"session": session, "error": cmd_error(position_result, "tmux status position read failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
         position = position_result.stdout.strip().lower()

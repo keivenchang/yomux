@@ -2302,8 +2302,8 @@ def test_cycle_tmux_status_mode_reads_and_updates_one_session(monkeypatch):
     assert payload == {"session": "1", "status": "bottom"}
     commands = [args for args, _timeout in tmux_calls]
     assert commands == [
-        ["show-option", "-t", "1:", "-v", "status"],
-        ["show-option", "-t", "1:", "-v", "status-position"],
+        ["show-options", "-A", "-t", "1:", "-v", "status"],
+        ["show-options", "-A", "-t", "1:", "-v", "status-position"],
         ["set-option", "-t", "1:", "status", "on"],
         ["set-option", "-t", "1:", "status-position", "bottom"],
     ]
