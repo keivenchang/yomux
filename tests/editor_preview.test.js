@@ -1527,6 +1527,31 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('data-window-index="0"') && html.includes('data-window-index="1"'), 'the next tmux-signals push adds a bare new window to the existing bar without waiting for transcript metadata');
   });
 
+  await testAsync('successful tmux signal snapshots remove dead transcript sub-windows from the bar', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const staleInfo = {panes: [
+      {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex'},
+      {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude'},
+    ]};
+    api.applyTmuxSignalsPayloadForTest({
+      ok: true,
+      sessions: {'meta-preview': {windows: ['meta-preview:0', 'meta-preview:1']}},
+      windows: [
+        {key: 'meta-preview:0', session: 'meta-preview', window_index: '0', active: true, panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', active: true, current_command: 'codex'}]},
+        {key: 'meta-preview:1', session: 'meta-preview', window_index: '1', active: false, panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', active: true, current_command: 'claude'}]},
+      ],
+    });
+    api.applyTmuxSignalsPayloadForTest({
+      patch: true,
+      ok: true,
+      removed_window_keys: ['meta-preview:0'],
+      windows: [],
+    });
+
+    const indexes = [...api.tmuxWindowBarHtml('meta-preview', staleInfo).matchAll(/data-window-index="([^"]+)"/g)].map(match => match[1]);
+    assert.deepStrictEqual(indexes, ['1'], 'a successful tmux signal removal prunes the stale 0:codex transcript pane immediately');
+  });
+
   await testAsync('direct tmux sub-window clicks do not bounce through stale transcript or partial signal pushes', async () => {
     const api = loadYolomux('', ['meta-preview']);
     const button0 = tmuxWindowButtonElement('meta-preview', '0', true);

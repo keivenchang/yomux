@@ -7099,6 +7099,14 @@ function tmuxSignalWindowsForSession(session) {
   return tmuxSignalWindows().filter(windowRecord => tmuxSignalWindowSession(windowRecord) === sessionText);
 }
 
+function tmuxSignalSnapshotAuthoritativeForSession(session) {
+  const sessionText = String(session || '').trim();
+  if (!sessionText || tmuxSignalState?.ok !== true || !Array.isArray(tmuxSignalState.windows)) return false;
+  const sessionRecords = tmuxSignalState.sessions;
+  return Boolean(sessionRecords && typeof sessionRecords === 'object' && sessionRecords[sessionText])
+    || tmuxSignalWindowsForSession(sessionText).length > 0;
+}
+
 function tmuxSignalWindowForSessionIndex(session, windowIndex) {
   const sessionText = String(session || '').trim();
   const windowText = String(windowIndex ?? '').trim();
@@ -30713,26 +30721,35 @@ function tmuxWindowAgentKey(name) {
   return 'other';
 }
 
+function tmuxWindowBarPaneFromSignal(windowRecord) {
+  const windowIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+  if (windowIndex === null) return null;
+  const activePane = (windowRecord.panes || []).find(pane => pane?.active === true) || windowRecord.panes?.[0] || {};
+  return {
+    window: windowIndex,
+    window_name: windowRecord.window_name || activePane.current_command || `window ${windowIndex}`,
+    pane: activePane.pane_index ?? '',
+    pane_id: activePane.pane_id || activePane.target || '',
+    target: activePane.target || activePane.pane_id || '',
+    current_path: activePane.current_path || '',
+    command: activePane.current_command || '',
+    active: activePane.active === true,
+    window_active: windowRecord.active === true,
+  };
+}
+
 function tmuxWindowBarPanes(session, info) {
   const panes = Array.isArray(info) ? info : info?.panes;
+  const signalWindows = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : [];
+  if (typeof tmuxSignalSnapshotAuthoritativeForSession === 'function' && tmuxSignalSnapshotAuthoritativeForSession(session)) {
+    return signalWindows.map(tmuxWindowBarPaneFromSignal).filter(Boolean);
+  }
   const result = Array.isArray(panes) ? [...panes] : [];
   const knownWindows = new Set(result.map(pane => tmuxWindowIndexKey(pane?.window ?? pane?.window_index)).filter(index => index !== null));
-  if (typeof tmuxSignalWindowsForSession !== 'function') return result;
-  for (const windowRecord of tmuxSignalWindowsForSession(session)) {
+  for (const windowRecord of signalWindows) {
     const windowIndex = tmuxWindowIndexKey(windowRecord?.window_index);
     if (windowIndex === null || knownWindows.has(windowIndex)) continue;
-    const activePane = (windowRecord.panes || []).find(pane => pane?.active === true) || windowRecord.panes?.[0] || {};
-    result.push({
-      window: windowIndex,
-      window_name: windowRecord.window_name || activePane.current_command || `window ${windowIndex}`,
-      pane: activePane.pane_index ?? '',
-      pane_id: activePane.pane_id || activePane.target || '',
-      target: activePane.target || activePane.pane_id || '',
-      current_path: activePane.current_path || '',
-      command: activePane.current_command || '',
-      active: activePane.active === true,
-      window_active: windowRecord.active === true,
-    });
+    result.push(tmuxWindowBarPaneFromSignal(windowRecord));
     knownWindows.add(windowIndex);
   }
   return result;

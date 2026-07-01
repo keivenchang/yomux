@@ -1827,6 +1827,14 @@ function tmuxSignalWindowsForSession(session) {
   return tmuxSignalWindows().filter(windowRecord => tmuxSignalWindowSession(windowRecord) === sessionText);
 }
 
+function tmuxSignalSnapshotAuthoritativeForSession(session) {
+  const sessionText = String(session || '').trim();
+  if (!sessionText || tmuxSignalState?.ok !== true || !Array.isArray(tmuxSignalState.windows)) return false;
+  const sessionRecords = tmuxSignalState.sessions;
+  return Boolean(sessionRecords && typeof sessionRecords === 'object' && sessionRecords[sessionText])
+    || tmuxSignalWindowsForSession(sessionText).length > 0;
+}
+
 function tmuxSignalWindowForSessionIndex(session, windowIndex) {
   const sessionText = String(session || '').trim();
   const windowText = String(windowIndex ?? '').trim();
