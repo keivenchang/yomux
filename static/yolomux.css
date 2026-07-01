@@ -4246,6 +4246,10 @@ body.theme-light .js-debug-graph-view {
   color: var(--bad);
   font-weight: 800;
 }
+.changes-diff-file-label {
+  color: var(--muted);
+  font-weight: 700;
+}
 .changes-count-badge {
   margin-inline-start: 5px;
 }
@@ -11253,7 +11257,8 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
-  flex: 0 0 6.5ch;
+  flex: 0 0 auto;
+  min-width: 6.5ch;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;

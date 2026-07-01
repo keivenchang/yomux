@@ -1073,6 +1073,10 @@ body.theme-light .js-debug-graph-view {
   color: var(--bad);
   font-weight: 800;
 }
+.changes-diff-file-label {
+  color: var(--muted);
+  font-weight: 700;
+}
 .changes-count-badge {
   margin-inline-start: 5px;
 }

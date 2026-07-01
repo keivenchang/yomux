@@ -1177,6 +1177,19 @@ function sessionFileDiffText(item) {
   ].filter(Boolean);
 }
 
+// Directory status counts intentionally differ from diff numstat: +N/-N here means added/deleted FILES,
+// while a leaf's existing +N/-N still means added/removed LINES.
+function sessionFileStatusCountParts(counts = {}) {
+  const added = Number(counts.added || 0);
+  const deleted = Number(counts.deleted || 0);
+  const parts = [
+    Number.isFinite(added) && added > 0 ? {kind: 'add', text: `+${added}`} : null,
+    Number.isFinite(deleted) && deleted > 0 ? {kind: 'remove', text: `-${deleted}`} : null,
+  ].filter(Boolean);
+  if (parts.length) parts.push({kind: 'file-label', text: 'files'});
+  return parts;
+}
+
 function sortedSessionFiles(files) {
   const items = Array.isArray(files) ? files.slice() : [];
   const uploadOrder = item => item?.uploaded === true ? 1 : 0;
@@ -1482,10 +1495,27 @@ function updateSyntheticTreeEntryMtime(entry, mtime) {
 function buildSessionFileTree(repoPath, sessionFiles) {
   const entriesByDir = new Map(); // normalizedDirPath → [{name, kind, mtime?, size?}]
   const sessionFilesMap = new Map(); // absPath → sessionFileItem
+  const directoryStatusCounts = new Map(); // normalizedDirPath → {added, deleted} file counts
+  const countedStatusPaths = new Set();
   for (const item of sessionFiles) {
     const absPath = item.abs_path || (repoPath && item.path ? `${repoPath}/${item.path}` : item.path || '');
     if (!absPath) continue;
     sessionFilesMap.set(absPath, item);
+    const status = sessionFileDisplayStatus(item);
+    if ((status === 'A' || status === 'U' || status === '?' || status === 'D') && !countedStatusPaths.has(absPath)) {
+      countedStatusPaths.add(absPath);
+      let directory = normalizeDirectoryPath(dirnameOf(absPath));
+      while (directory && pathIsInsideDirectory(directory, repoPath)) {
+        const counts = directoryStatusCounts.get(directory) || {added: 0, deleted: 0};
+        if (status === 'D') counts.deleted += 1;
+        else counts.added += 1;
+        directoryStatusCounts.set(directory, counts);
+        if (directory === normalizeDirectoryPath(repoPath)) break;
+        const parent = normalizeDirectoryPath(dirnameOf(directory));
+        if (!parent || parent === directory) break;
+        directory = parent;
+      }
+    }
     const relPath = item.path || (absPath.startsWith(repoPath + '/') ? absPath.slice(repoPath.length + 1) : basenameOf(absPath));
     const parts = relPath.split('/').filter(Boolean);
     if (!parts.length) continue;
@@ -1513,7 +1543,7 @@ function buildSessionFileTree(repoPath, sessionFiles) {
     }
   }
   const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
-  return {entries: topLevel, entriesByDir, sessionFilesMap};
+  return {entries: topLevel, entriesByDir, sessionFilesMap, directoryStatusCounts};
 }
 
 function initializeDefaultCollapsedChangesFolders(entriesByDir) {
@@ -1531,13 +1561,14 @@ function initializeDefaultCollapsedChangesFolders(entriesByDir) {
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
   const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
-  const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(treeRoot, sessionFiles);
+  const {entries, entriesByDir, sessionFilesMap, directoryStatusCounts} = buildSessionFileTree(treeRoot, sessionFiles);
   const renderedRows = entries.length + Array.from(entriesByDir.values()).reduce((total, childEntries) => total + (Array.isArray(childEntries) ? childEntries.length : 0), 0);
   recordClientPerfCounter('sessionFilesRender', 0, {nodes: entriesByDir.size, rows: renderedRows});
   initializeDefaultCollapsedChangesFolders(entriesByDir);
   renderTreeChildren(container, treeRoot, entries, 0, {
     entriesByDir,
     sessionFilesMap,
+    directoryStatusCounts,
     differMode: true,
     compact: options.compact,
     repoForDiffer: treeRoot,

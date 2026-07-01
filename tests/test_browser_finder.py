@@ -196,6 +196,7 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
             {"session": "1", "repo": "/repo/app", "path": "src/a.py", "abs_path": "/repo/app/src/a.py", "status": "M", "mtime": 100, "added": 2, "removed": 1},
             {"session": "1", "repo": "/repo/app", "path": "src/b.py", "abs_path": "/repo/app/src/b.py", "status": "M", "mtime": 110, "added": 3, "removed": 4},
             {"session": "1", "repo": "/repo/app", "path": "docs/only.md", "abs_path": "/repo/app/docs/only.md", "status": "A", "mtime": 120, "added": 9, "removed": 0},
+            {"session": "1", "repo": "/repo/app", "path": "archive/old.md", "abs_path": "/repo/app/archive/old.md", "status": "D", "mtime": 130, "added": 0, "removed": 9},
         ],
     }
     load_live_runtime_boot_fixture(
@@ -207,7 +208,7 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return Array.from(document.querySelectorAll('#panel-__files__ .file-tree-dir-count:not([hidden])')).some(node => node.textContent.trim() === '1')"
+                "return Array.from(document.querySelectorAll('#panel-__files__ .file-tree-dir-count:not([hidden])')).some(node => node.textContent.trim() === '2')"
         )
     )
     metrics = browser.execute_script(
@@ -216,12 +217,17 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
         const rows = Array.from(panel.querySelectorAll('.file-tree-row.kind-dir'));
         const records = rows.map(row => {
           const count = row.querySelector(':scope > .file-tree-dir-count');
+          const diff = row.querySelector(':scope > .file-tree-diff');
+          const signedCount = diff?.querySelector('.changes-diff-add, .changes-diff-remove');
+          const label = diff?.querySelector('.changes-diff-file-label');
           return {
             path: row.dataset.path || '',
             text: row.textContent.trim().replace(/\\s+/g, ' '),
-            diff: row.querySelector(':scope > .file-tree-diff')?.textContent.trim().replace(/\\s+/g, ' ') || '',
+            diff: diff?.textContent.trim().replace(/\\s+/g, ' ') || '',
             count: count?.textContent.trim() || '',
             hidden: count?.hidden !== false,
+            signedColor: signedCount ? getComputedStyle(signedCount).color : '',
+            labelColor: label ? getComputedStyle(label).color : '',
           };
         });
         return {
@@ -236,8 +242,16 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert not metrics["hasFileChangedLabel"], metrics
-    assert {"2", "1"}.issubset(set(metrics["visibleCounts"])), metrics
+    assert "2" in set(metrics["visibleCounts"]), metrics
     assert all(re.fullmatch(r"[0-9]+", count) for count in metrics["visibleCounts"]), metrics
+    diff_by_path = {record["path"]: record["diff"] for record in metrics["records"]}
+    records_by_path = {record["path"]: record for record in metrics["records"]}
+    assert diff_by_path["/repo/app/docs"] == "+1 files", metrics
+    assert diff_by_path["/repo/app/archive"] == "-1 files", metrics
+    assert records_by_path["/repo/app/docs"]["hidden"] is True, metrics
+    assert records_by_path["/repo/app/archive"]["hidden"] is True, metrics
+    assert records_by_path["/repo/app/docs"]["signedColor"] != records_by_path["/repo/app/docs"]["labelColor"], metrics
+    assert records_by_path["/repo/app/archive"]["signedColor"] != records_by_path["/repo/app/archive"]["labelColor"], metrics
 
 
 def test_differ_expanded_directory_chevrons_follow_row_state_through_reload(browser, tmp_path):

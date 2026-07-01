@@ -569,6 +569,14 @@ _CLAUDE_GOAL_ACTIVE_RE = re.compile(
     r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
     re.IGNORECASE,
 )
+_COMPLETED_TASKS_RE = re.compile(
+    r"\ball\s+\d+\s+tasks?\s+(?:are\s+)?(?:complete|completed|done|finished)\b",
+    re.IGNORECASE,
+)
+_COMPLETED_FOLLOWUP_QUESTION_RE = re.compile(
+    r"\b(?P<question>(?:want|would|should|shall|can|could)\s+(?:me|i|we)\b[^?]{0,320}\?)",
+    re.IGNORECASE,
+)
 _SHELL_PROMPT_RE = re.compile(r"[@:][^@\s]+[$#](?:\s+\S.*)?$")
 # Header of the Ctrl-T todo overlay, e.g. "11 tasks (0 done, 1 in progress, 10 open)" — also matches
 # singular "1 task (...)". The whole overlay is a bounded block: everything below this header is
@@ -1008,6 +1016,24 @@ def visible_agent_working(visible_text: str) -> bool:
     return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
 
 
+def completed_agent_followup_question(visible_text: str) -> str:
+    """Return a current agent follow-up after an explicit task-completion summary, if present."""
+    lines = normalize_capture_text(visible_text).splitlines()[-80:]
+    completion_index = max(
+        (index for index, line in enumerate(lines) if _COMPLETED_TASKS_RE.search(line)),
+        default=-1,
+    )
+    if completion_index < 0:
+        return ""
+    for line in lines[completion_index + 1:]:
+        if _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
+            continue
+        match = _COMPLETED_FOLLOWUP_QUESTION_RE.search(_clean_prompt_block_line(line))
+        if match:
+            return match.group("question").strip()
+    return ""
+
+
 def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
     """Return the newest current visible status counter, ignoring stale rows above real output."""
     visible_text = normalize_capture_text(visible_text)
@@ -1418,6 +1444,21 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
             "confidence": 0.75,
             "evidence_lines": _matching_evidence_lines(visible_text, None, interrupted_question) or [interrupted_question],
             "prompt_hash": _hash_prompt_parts(interrupted_question),
+        }
+    completed_followup = completed_agent_followup_question(visible_text)
+    if completed_followup:
+        return {
+            "key": "needs-input",
+            "text": completed_followup,
+            "agent": _infer_agent(visible_text),
+            "prompt_kind": "question",
+            "question_text": completed_followup,
+            "command": None,
+            "options": [],
+            "selected_option": 0,
+            "confidence": 0.9,
+            "evidence_lines": _matching_evidence_lines(visible_text, None, completed_followup) or [completed_followup],
+            "prompt_hash": _hash_prompt_parts(completed_followup),
         }
     counter = visible_agent_status_counter(visible_text)
     if counter is not None:

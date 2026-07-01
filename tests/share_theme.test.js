@@ -254,8 +254,8 @@ async function runShareThemeSuite() {
     assert.ok(changesHtml.includes('file-tree-row kind-file git-modified has-agent'), 'changed-file rows use the shared file-tree row renderer and inline-agent layout');
     assert.ok(/file-tree-git-status"[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(changesHtml), 'changed-file rows show and label the M status badge in the shared file-tree status slot');
     assert.ok(/file-tree-git-status"[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(changesHtml), 'added changed-file rows label the A status badge');
-    assert.ok(changesHtml.includes('file-tree-dir-count">2</span>'), 'changed-file folders show a bare recursive changed-file count from the shared row renderer');
-    assert.equal(changesHtml.includes('files changed</span>'), false, 'changed-file folders do not repeat the file-count label in the tree row metadata');
+    assert.ok(changesHtml.includes('changes-diff-file-label">files</span>'), 'Differ directories label their signed added/deleted file counts through the shared diff metadata slot');
+    assert.equal(changesHtml.includes('file-tree-dir-count">2</span>'), false, 'a Differ directory with a signed file count does not repeat the same total as a bare count');
     assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
     assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
     assert.ok(/class="file-tree-row kind-dir[^"]*"[^>]*data-path="\/repo\/app\/src"[\s\S]*<span class="file-tree-date"[^>]*>[^<]+<\/span>/.test(changesHtml), 'Differ directory rows show the same non-empty date slot as Finder');

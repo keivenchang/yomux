@@ -1679,6 +1679,23 @@ def test_real_interrupted_capture_beats_goal_active_working_chrome():
     assert state["selected_option"] == 0
 
 
+def test_completed_claude_followup_beats_persistent_goal_active_footer():
+    visible_text = "\n".join([
+        "All 5 tasks complete. The backup is fully migrated.",
+        "Want me to remove the orphaned cache?",
+        "* Brewed for 12m 6s · 2 shells still running",
+        "◎ /goal active (4h)",
+        "❯ yes, remove the orphaned cache",
+        "▶▶ bypass permissions on · 2 shells · ← for agents · ↓ to manage",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert prompt_detector.visible_agent_working(visible_text) is True
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Want me to remove the orphaned cache?"
+
+
 def test_ask_user_question_footer_parts_are_recognized():
     # The AskUserQuestion footer hints ("↑/↓ to navigate", "n to add notes", "Tab to switch questions")
     # count as a footer line so the block is bounded correctly.

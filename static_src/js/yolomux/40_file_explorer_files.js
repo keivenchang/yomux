@@ -2320,14 +2320,18 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
-  const dirCountText = entry.kind === 'dir'
-    ? (differMode
-      ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
-      : fileTreeDirCountText(changedAncestor?.count))
-    : '';
   const directoryDiffParts = entry.kind === 'dir'
-    ? (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))
+    ? (differMode
+      ? sessionFileStatusCountParts(options.directoryStatusCounts?.get(fullPath) || {})
+      : (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {})))
     : [];
+  const dirCountText = entry.kind === 'dir'
+    ? (differMode && directoryDiffParts.length
+      ? ''
+      : (differMode
+        ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
+        : fileTreeDirCountText(changedAncestor?.count)))
+    : '';
   const icon = options.iconText != null
     ? String(options.iconText)
     : (entry.kind === 'dir' ? disclosureTriangleGlyph(options.expanded === true) : (entry.kind === 'file' ? fileIconFor(entry.name) : '·'));
