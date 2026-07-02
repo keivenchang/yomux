@@ -1843,6 +1843,76 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
     assert working_energy_delta < yellow_energy_delta, visual_scores
 
 
+def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof agentWindowActivityIconHtml === 'function' && typeof setAttentionAnimationClockDelay === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const duration = 1550;
+          globalThis.yolomuxEnableBroadStatusPulse = false;
+          agentStatusPulsePeriodMs = duration;
+          document.documentElement.style.setProperty('--pulse-duration', `${duration / 1000}s`);
+          document.documentElement.style.setProperty('--status-pulse-step-count', '12');
+          setAttentionAnimationClockDelay();
+          const host = document.createElement('div');
+          document.body.appendChild(host);
+          const item = {
+            state: 'working',
+            icon: '●',
+            label: 'Codex working',
+            pulseActive: true,
+            transitionPulseActive: true,
+            acknowledged: false,
+          };
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+          const samples = [];
+          let previousDot = null;
+          for (let index = 0; index < 5; index += 1) {
+            host.innerHTML = agentWindowActivityIconHtml('codex', 'working', 0, {
+              session: '1',
+              window_index: 0,
+              current: true,
+              statusOnly: true,
+              item,
+            });
+            await frame();
+            const dot = host.querySelector('.agent-window-status-dot');
+            const animation = dot?.getAnimations?.().find(value => value.animationName === 'agent-status-opacity-pulse');
+            const timing = animation?.effect?.getComputedTiming?.() || {};
+            const sampledAt = Date.now();
+            const expectedProgress = ((sampledAt % duration) + duration) % duration / duration;
+            const progress = Number(timing.progress);
+            const phaseDistance = Math.min(Math.abs(progress - expectedProgress), 1 - Math.abs(progress - expectedProgress));
+            samples.push({
+              replaced: previousDot !== null && previousDot !== dot,
+              progress,
+              expectedProgress,
+              phaseDistance,
+              opacity: Number(getComputedStyle(dot).opacity),
+              delay: getComputedStyle(dot).animationDelay,
+            });
+            previousDot = dot;
+            await pause(260);
+          }
+          host.remove();
+          done({samples});
+        })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert all(sample["replaced"] for sample in metrics["samples"][1:]), metrics
+    assert all(sample["phaseDistance"] < 0.08 for sample in metrics["samples"]), metrics
+    assert len({round(sample["progress"], 2) for sample in metrics["samples"]}) >= 4, metrics
+    assert len({round(sample["opacity"], 2) for sample in metrics["samples"]}) >= 3, metrics
+
+
 def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path):
     page = tmp_path / "attention-dot-reduced-motion.html"
     page.write_text(page_html("""

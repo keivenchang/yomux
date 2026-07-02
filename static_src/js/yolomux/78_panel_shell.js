@@ -2021,7 +2021,9 @@ function updatePanelWindowStepButtons(session, info) {
     return;
   }
   bars.forEach(existing => {
-    if (existing.outerHTML === html) return;
+    const existingSignature = agentWindowActivityMarkupSignature(existing.outerHTML);
+    const nextSignature = agentWindowActivityMarkupSignature(html);
+    if (existingSignature === nextSignature) return;
     const replacement = replacementFromHtml();
     if (replacement) {
       existing.replaceWith(replacement);

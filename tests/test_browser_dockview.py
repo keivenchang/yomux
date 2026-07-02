@@ -2032,6 +2032,22 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
     assert data["dotBoxShadow"] in ("", "none"), data
     assert data["dotBeforeAnimationName"] == "none", data
     assert data["dotBeforeFilter"] == "none", data
+    identity = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const before = document.querySelector('.agent-window-agent-icon--working')?.closest('.tmux-window-button');
+        const beforeDot = before?.querySelector('.agent-window-status-dot');
+        setTimeout(() => {
+          updatePanelWindowStepButtons('1', transcriptMeta.sessions?.['1']);
+          requestAnimationFrame(() => {
+            const after = document.querySelector('.agent-window-agent-icon--working')?.closest('.tmux-window-button');
+            const afterDot = after?.querySelector('.agent-window-status-dot');
+            done({sameButton: before === after, sameDot: beforeDot === afterDot});
+          });
+        }, 25);
+        """
+    )
+    assert identity == {"sameButton": True, "sameDot": True}, identity
 
 
 @pytest.mark.skip(reason="window selectors no longer render polling-driven agent or state glyphs")

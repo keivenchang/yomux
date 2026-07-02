@@ -1033,6 +1033,12 @@ function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
   return styles.length ? ` style="${esc(styles.join('; '))}"` : '';
 }
 
+function agentWindowActivityMarkupSignature(value) {
+  // A new ball needs a fresh wall-clock phase, but phase alone is not a semantic DOM change. Ignore
+  // only this property when a renderer decides whether an existing window bar can stay mounted.
+  return String(value || '').replace(/--attention-animation-delay:\s*-?[0-9.]+s;?\s*/g, '');
+}
+
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return '';

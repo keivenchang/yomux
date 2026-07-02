@@ -7693,9 +7693,10 @@ function attentionAnimationClockDelay(now = Date.now(), durationMs = agentStatus
 }
 
 function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulsePeriodMs, property = attentionAnimationDelayProperty) {
-  const value = property === attentionAnimationDelayProperty
-    ? attentionAnimationClockDelay(now, durationMs)
-    : attentionAnimationDelay(now, durationMs);
+  // This style is stamped into newly rendered status markup. Derive it from the current wall-clock
+  // phase instead of copying the root's older delay: renderers can replace a ball without going
+  // through the explicit animation synchronizer, and reusing that old delay restarts its pulse.
+  const value = attentionAnimationDelay(now, durationMs);
   return `${property}: ${value}`;
 }
 
@@ -17005,6 +17006,12 @@ function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
     styles.push(`--agent-status-acknowledgement-delay: ${-elapsedMs / 1000}s`);
   }
   return styles.length ? ` style="${esc(styles.join('; '))}"` : '';
+}
+
+function agentWindowActivityMarkupSignature(value) {
+  // A new ball needs a fresh wall-clock phase, but phase alone is not a semantic DOM change. Ignore
+  // only this property when a renderer decides whether an existing window bar can stay mounted.
+  return String(value || '').replace(/--attention-animation-delay:\s*-?[0-9.]+s;?\s*/g, '');
 }
 
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
@@ -30979,7 +30986,9 @@ function updatePanelWindowStepButtons(session, info) {
     return;
   }
   bars.forEach(existing => {
-    if (existing.outerHTML === html) return;
+    const existingSignature = agentWindowActivityMarkupSignature(existing.outerHTML);
+    const nextSignature = agentWindowActivityMarkupSignature(html);
+    if (existingSignature === nextSignature) return;
     const replacement = replacementFromHtml();
     if (replacement) {
       existing.replaceWith(replacement);

@@ -2406,9 +2406,10 @@ function attentionAnimationClockDelay(now = Date.now(), durationMs = agentStatus
 }
 
 function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulsePeriodMs, property = attentionAnimationDelayProperty) {
-  const value = property === attentionAnimationDelayProperty
-    ? attentionAnimationClockDelay(now, durationMs)
-    : attentionAnimationDelay(now, durationMs);
+  // This style is stamped into newly rendered status markup. Derive it from the current wall-clock
+  // phase instead of copying the root's older delay: renderers can replace a ball without going
+  // through the explicit animation synchronizer, and reusing that old delay restarts its pulse.
+  const value = attentionAnimationDelay(now, durationMs);
   return `${property}: ${value}`;
 }
 
