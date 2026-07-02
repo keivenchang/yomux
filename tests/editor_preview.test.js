@@ -2890,7 +2890,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-bar--agentToken\s*\{[\s\S]*fill:\s*var\(--js-debug-series-color/.test(debugPaneCss), 'YO!stats agent token bars use the per-agent series color');
     assert.equal(debugPaneCss.includes('.js-debug-chart--legend-footer') || debugPaneCss.includes('.js-debug-chart-legend-footer'), false, 'YO!stats has one shared header legend layout for every chart');
     assert.ok(/\.js-debug-y-axis span\s*\{[\s\S]*position:\s*absolute[\s\S]*top:\s*var\(--js-debug-axis-y/.test(debugPaneCss), 'YO!stats Y-axis labels use chart-coordinate positioning');
-    assert.ok(/\.js-debug-grid-line\s*\{[\s\S]*stroke-width:\s*0\.4/.test(debugPaneCss), 'YO!stats grid guide lines are very thin');
+    assert.ok(/\.js-debug-grid-line\s*\{[\s\S]*stroke-width:\s*0\.4/.test(debugPaneCss), 'YO!stats default grid guide lines stay very thin');
+    assert.ok(/\.js-debug-grid-line--integer\s*\{[\s\S]*stroke:\s*color-mix\(in srgb, var\(--text\) 55%, var\(--line\)\)[\s\S]*stroke-width:\s*0\.7/.test(debugPaneCss), 'YO!stats integer guides reuse theme tokens with a clearer stroke');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*#3f4754/.test(debugPaneCss), 'YO!stats idle agent status uses a visible dark gray token');
     assert.ok(/body\.theme-light \.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*var\(--editor-line-number\)/.test(debugPaneCss), 'YO!stats idle agent status uses a brighter light-mode gray token');
     assert.ok(/\.js-debug-area--idleAgents\s*\{[\s\S]*fill:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle stacked area uses the darker idle status fill');
@@ -3565,6 +3566,39 @@ async function runEditorPreviewSuite() {
       assert.ok(axisMatch && gridMatch, `activity chart exposes comparable axis/grid coordinates for tick ${value}`);
       assert.ok(Math.abs(Number(axisMatch[1]) - ((Number(gridMatch[1]) / 120) * 100)) < 0.05, `activity chart aligns label and grid line for tick ${value}`);
     }
+    const denseApi = loadYolomux('?debug=1&sessions=debug', ['1']);
+    denseApi.clearJsDebugEventsForTest();
+    denseApi.debugGraphApplyServerHistoryForTest({
+      sequence: 90,
+      records: [{
+        start: Math.floor(now / 1000),
+        duration: 1,
+        sequence: 90,
+        ask_agent_total: 1,
+        run_agent_total: 2,
+        transition_agent_total: 1,
+        idle_agent_total: 11,
+        active_agent_total: 4,
+        inactive_agent_total: 11,
+        agent_activity_samples: 1,
+      }],
+    });
+    const denseHtml = denseApi.debugPanelHtmlForTest();
+    const denseActivityHtml = denseHtml.slice(denseHtml.indexOf('data-js-debug-chart="activity"'), denseHtml.indexOf('</section>', denseHtml.indexOf('data-js-debug-chart="activity"')));
+    assert.equal((denseActivityHtml.match(/data-js-debug-grid-line="activity"/g) || []).length, 16, 'activity chart draws one guide for every integer from 15 through 0');
+    assert.ok(denseActivityHtml.includes('data-js-debug-grid-value="14"') && denseActivityHtml.includes('data-js-debug-grid-value="12"'), 'activity chart keeps guides for integers omitted from the thinned axis labels');
+    assert.equal(denseActivityHtml.includes('data-js-debug-axis-value="14"'), false, 'activity chart may thin integer labels without removing their guides');
+
+    const atomicApi = loadYolomux('?debug=1&sessions=debug', ['1']);
+    atomicApi.clearJsDebugEventsForTest();
+    const atomicStart = Math.floor(now / 1000);
+    atomicApi.debugGraphApplyServerHistoryForTest({sequence: 91, records: [{start: atomicStart, duration: 1, sequence: 91, ask_agent_total: 0, run_agent_total: 1, transition_agent_total: 0, idle_agent_total: 12, active_agent_total: 1, inactive_agent_total: 12, agent_activity_samples: 1}]});
+    atomicApi.debugGraphApplyServerHistoryForTest({sequence: 92, records: [{start: atomicStart, duration: 1, sequence: 92, ask_agent_total: 1, run_agent_total: 0, transition_agent_total: 0, idle_agent_total: 12, active_agent_total: 1, inactive_agent_total: 12, agent_activity_samples: 1}]});
+    const atomicStatus = Object.fromEntries(atomicApi.debugGraphSeriesDataForTest(now)
+      .filter(series => DEBUG_AGENT_STATUS_SERIES.includes(series.key))
+      .map(series => [series.key, series.values.at(-1)]));
+    assert.deepStrictEqual(atomicStatus, {askAgents: 1, workingAgents: 0, transitionAgents: 0, idleAgents: 12}, 'same-bucket agent status is replaced as one mutually exclusive snapshot');
+    assert.equal(Object.values(atomicStatus).reduce((total, value) => total + value, 0), 13, 'atomic agent-status replacement keeps the stacked total equal to the roster');
     for (const series of DEBUG_AGENT_STATUS_SERIES) {
       assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats renders the ${series} area outline`);
       assert.ok(html.includes(`data-js-debug-area-series="${series}"`), `YO!stats renders the ${series} filled area`);

@@ -12,7 +12,7 @@ load makes a failure hard to read. Focused pytest lanes are available with
 Usage:
   python3 tools/check.py
   python3 tools/check.py --serial
-  python3 tools/check.py --lane pytest-browser
+  python3 tools/check.py --lane pytest-boot
   python3 tools/check.py --no-tool-guard
 """
 
@@ -36,7 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TOOL_LOCK_PATH = Path(tempfile.gettempdir()) / "yolomux-expensive-tools.lock"
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
-EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-browser", "pytest-e2e"})
+EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e"})
 
 
 @dataclass(frozen=True)
@@ -118,9 +118,17 @@ def lanes() -> list[Lane]:
             True,
         ),
         Lane(
+            "pytest-boot",
+            "pytest boot smoke",
+            (Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),),
+        ),
+        Lane(
             "pytest-browser",
             "pytest browser",
-            (Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e", "-q"]),),
+            (
+                Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),
+                Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e and not boot", "-q"]),
+            ),
             True,
         ),
         Lane(

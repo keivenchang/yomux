@@ -332,7 +332,64 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
         """
     )
     assert max(item["deltaY"] for item in metrics) <= 0.75, metrics
-    assert all(0 < item["strokeWidth"] <= 0.5 for item in metrics), metrics
+    assert all(0 < item["strokeWidth"] <= 0.8 for item in metrics), metrics
+
+
+def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(browser, tmp_path):
+    axis_max = 12
+    labeled_values = list(range(axis_max, -1, -2))
+    grid_values = list(range(axis_max, -1, -1))
+    labels_html = "".join(
+        f'<span data-js-debug-axis-value="{value}">{value}</span>'
+        for value in labeled_values
+    )
+    grid_html = "".join(
+        f'<line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-value="{value}" x1="0" y1="{8 + (1 - value / axis_max) * 104:.1f}" x2="600" y2="{8 + (1 - value / axis_max) * 104:.1f}" vector-effect="non-scaling-stroke"></line>'
+        for value in grid_values
+    )
+    page = tmp_path / "debug-agent-status-hidden-integer-guides.html"
+    page.write_text(page_html(f"""
+      <section class="js-debug-graph-view">
+        <div class="js-debug-y-axis">{labels_html}</div>
+        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
+          <rect class="js-debug-area js-debug-area--idleAgents" data-idle-fill x="0" y="8" width="600" height="104"></rect>
+          {grid_html}
+        </svg>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: #111827; color: #e5e7eb; }
+      .js-debug-graph-view { width: 560px; }
+      .js-debug-line-chart { width: 520px; height: 220px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const lines = [...document.querySelectorAll('[data-js-debug-grid-value]')];
+        const labels = new Set([...document.querySelectorAll('[data-js-debug-axis-value]')].map(node => node.dataset.jsDebugAxisValue));
+        const hidden = lines.filter(line => !labels.has(line.dataset.jsDebugGridValue));
+        const rgb = value => {
+          const numbers = (String(value).match(/[0-9.]+/g) || []).slice(0, 3).map(Number);
+          return String(value).startsWith('color(srgb') ? numbers.map(number => number * 255) : numbers;
+        };
+        const lineColor = rgb(getComputedStyle(lines[0]).stroke);
+        const idleColor = rgb(getComputedStyle(document.querySelector('[data-idle-fill]')).fill);
+        const colorDistance = Math.sqrt(lineColor.reduce((total, value, index) => total + ((value - idleColor[index]) ** 2), 0));
+        return {
+          count: lines.length,
+          values: lines.map(line => Number(line.dataset.jsDebugGridValue)),
+          hiddenValues: hidden.map(line => Number(line.dataset.jsDebugGridValue)),
+          fullWidth: lines.every(line => line.getAttribute('x1') === '0' && line.getAttribute('x2') === '600'),
+          strokeWidths: lines.map(line => Number.parseFloat(getComputedStyle(line).strokeWidth)),
+          colorDistance,
+        };
+        """
+    )
+    assert metrics["count"] == axis_max + 1
+    assert metrics["values"] == grid_values
+    assert metrics["hiddenValues"] == [11, 9, 7, 5, 3, 1]
+    assert metrics["fullWidth"] is True
+    assert all(0.6 <= width <= 0.8 for width in metrics["strokeWidths"]), metrics
+    assert metrics["colorDistance"] >= 20, metrics
 
 
 def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_path):
@@ -625,6 +682,7 @@ def test_debug_graph_waiting_meta_uses_shared_animated_ellipsis(browser, tmp_pat
     assert metrics["labelText"] == "Waiting for server stats", metrics
 
 
+@pytest.mark.boot
 def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
     selected_path = "/home/test/project/state.txt"
     source_bundle = tmp_path / "yolomux-source.js"

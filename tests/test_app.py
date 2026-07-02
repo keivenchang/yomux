@@ -1133,6 +1133,28 @@ def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch)
     assert idle["inactive_agent_total"] == 1
 
 
+def test_stats_agent_activity_record_counts_each_logical_window_once(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["8001"])
+    monkeypatch.setattr(
+        webapp,
+        "stats_agent_window_rows",
+        lambda: [
+            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 101},
+            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 102},
+            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 103},
+        ],
+    )
+    try:
+        record = webapp.stats_agent_activity_record(1000.0, include_token_rates=False)
+    finally:
+        webapp.control_server.stop()
+
+    assert record["run_agent_total"] == 1
+    assert record["idle_agent_total"] == 0
+    assert record["active_agent_total"] == 1
+    assert sum(record[key] for key in ("ask_agent_total", "run_agent_total", "transition_agent_total", "idle_agent_total")) == 1
+
+
 def test_stats_agent_activity_record_counts_sticky_cooldown_as_transition(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(

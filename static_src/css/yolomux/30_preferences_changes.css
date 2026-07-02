@@ -451,6 +451,10 @@ body.theme-light .js-debug-graph-view {
   stroke: color-mix(in srgb, var(--line) 72%, transparent);
   stroke-width: 0.4;
 }
+.js-debug-grid-line--integer {
+  stroke: color-mix(in srgb, var(--text) 55%, var(--line));
+  stroke-width: 0.7;
+}
 .js-debug-line {
   stroke-width: 1;
   stroke-linecap: round;

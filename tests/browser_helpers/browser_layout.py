@@ -2155,6 +2155,103 @@ def load_live_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwarg
     browser.get(page.as_uri() + search)
 
 
+def live_runtime_boot_health(browser):
+    return browser.execute_script(
+        """
+        const root = document.getElementById('appRoot');
+        const grid = document.getElementById('grid');
+        const rootRect = root?.getBoundingClientRect();
+        let activeLocale = '';
+        let localeError = '';
+        let collapsedPreferenceSectionIds = [];
+        let collapsedPreferenceSectionsError = '';
+        try {
+          activeLocale = typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : '';
+        } catch (error) {
+          localeError = String(error?.stack || error);
+        }
+        try {
+          collapsedPreferenceSectionIds = Array.from(collapsedPreferenceSections || []);
+        } catch (error) {
+          collapsedPreferenceSectionsError = String(error?.stack || error);
+        }
+        const visiblePanels = Array.from(document.querySelectorAll('.panel')).filter(panel => {
+          const rect = panel.getBoundingClientRect();
+          const style = getComputedStyle(panel);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        return {
+          documentReady: document.readyState,
+          errors: window.__bootErrors || [],
+          rejections: window.__bootRejections || [],
+          localeError,
+          collapsedPreferenceSectionsError,
+          activeLocale,
+          htmlLang: document.documentElement.lang || '',
+          htmlDir: document.documentElement.dir || '',
+          bodyTextLength: document.body?.innerText?.length || 0,
+          appRootPresent: Boolean(root),
+          appRootWidth: rootRect?.width || 0,
+          appRootHeight: rootRect?.height || 0,
+          gridChildren: grid?.children?.length || 0,
+          gridHtmlLength: grid?.innerHTML?.length || 0,
+          visiblePanels: visiblePanels.length,
+          paneTabs: document.querySelectorAll('.dockview-pane-tab').length,
+          collapsedPreferenceSectionIds,
+        };
+        """
+    )
+
+
+def install_live_runtime_boot_error_tracker(browser):
+    browser.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+              window.__bootErrors = [];
+              window.__bootRejections = [];
+              addEventListener('error', event => window.__bootErrors.push({
+                message: event.message || String(event.error || event),
+                filename: event.filename || '',
+                lineno: event.lineno || 0,
+                colno: event.colno || 0,
+                stack: event.error?.stack || '',
+              }));
+              addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
+            """,
+        },
+    )
+
+
+def assert_live_runtime_boot_healthy(browser, case_name, *, expected_locale="en", timeout=8):
+    def settled(driver):
+        metrics = live_runtime_boot_health(driver)
+        fatal = bool(metrics["errors"] or metrics["rejections"] or metrics["localeError"] or metrics["collapsedPreferenceSectionsError"])
+        rendered = metrics["gridChildren"] > 0 and metrics["visiblePanels"] > 0 and metrics["paneTabs"] > 0
+        return fatal or rendered
+
+    try:
+        WebDriverWait(browser, timeout).until(settled)
+    except TimeoutException:
+        pass
+    metrics = live_runtime_boot_health(browser)
+    message = f"full-bundle boot case {case_name!r} failed: {metrics}"
+    assert metrics["documentReady"] == "complete", message
+    assert metrics["errors"] == [], message
+    assert metrics["rejections"] == [], message
+    assert metrics["localeError"] == "", message
+    assert metrics["collapsedPreferenceSectionsError"] == "", message
+    assert metrics["activeLocale"] == expected_locale, message
+    assert metrics["htmlLang"] == expected_locale, message
+    assert metrics["bodyTextLength"] > 0, message
+    assert metrics["appRootPresent"] is True, message
+    assert metrics["appRootWidth"] > 0 and metrics["appRootHeight"] > 0, message
+    assert metrics["gridChildren"] > 0 and metrics["gridHtmlLength"] > 0, message
+    assert metrics["visiblePanels"] > 0, message
+    assert metrics["paneTabs"] > 0, message
+    return metrics
+
+
 def load_dockview_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwargs):
     browser.set_window_size(1200, 700)
     fixture_kwargs.setdefault("file_explorer_open_intent", "0")

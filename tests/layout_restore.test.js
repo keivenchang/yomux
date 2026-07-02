@@ -35,6 +35,15 @@ const {
 } = require('./layout_test_helper');
 
 async function runLayoutRestoreSuite() {
+  test('saved Preferences layout state does not translate before i18n initialization', () => {
+    const state = encodeURIComponent(JSON.stringify({
+      v: 1,
+      preferences: {collapsedSections: ['Appearance', 'File Explorer']},
+    }));
+    const api = loadYolomux(`?state=${state}`, ['1']);
+    assert.equal(api.i18nActiveLocaleId(), 'en');
+  });
+
   test('bootstrap, state, and editor chrome resolve visible labels lazily', () => {
     const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');

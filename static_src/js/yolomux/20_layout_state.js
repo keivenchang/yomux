@@ -735,11 +735,12 @@ function applyLayoutUrlEditorSeed(editor = {}) {
   }
 }
 
-function applyLayoutUrlPreferencesSeed(preferences = {}) {
+function applyLayoutUrlPreferencesSeed(preferences = {}, options = {}) {
   if (!preferences || typeof preferences !== 'object') return;
   if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
   if (Array.isArray(preferences.collapsedSections)) {
-    setCollapsedPreferenceSections(layoutUrlStringArray(preferences.collapsedSections, 200), {sections: preferenceSections()});
+    const sections = options.includeLocalizedSections === true ? preferenceSections() : [];
+    setCollapsedPreferenceSections(layoutUrlStringArray(preferences.collapsedSections, 200), {sections});
   }
   if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
 }
@@ -803,6 +804,7 @@ function applyPendingLayoutUrlState() {
     layoutUrlStateApplied = true;
     return false;
   }
+  applyLayoutUrlPreferencesSeed(state.preferences || {}, {includeLocalizedSections: true});
   if (Array.isArray(state.scroll) && typeof applyShareScrollSnapshot === 'function') {
     applyShareScrollSnapshot(state.scroll);
     requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));

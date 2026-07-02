@@ -412,6 +412,7 @@ function debugGraphNewBucket(startMs, durationMs) {
     activeAgentTotal: 0,
     inactiveAgentTotal: 0,
     agentActivitySamples: 0,
+    agentStatusSequence: -1,
     tokensPerAgentTotal: 0,
     agentTokenSamples: 0,
     agentTokenRates: new Map(),
@@ -677,6 +678,7 @@ function debugGraphMergeBucket(target, source) {
   target.activeAgentTotal += source.activeAgentTotal || 0;
   target.inactiveAgentTotal += source.inactiveAgentTotal || 0;
   target.agentActivitySamples += source.agentActivitySamples || 0;
+  target.agentStatusSequence = Math.max(Number(target.agentStatusSequence ?? -1), Number(source.agentStatusSequence ?? -1));
   target.tokensPerAgentTotal += source.tokensPerAgentTotal || 0;
   target.agentTokenSamples += source.agentTokenSamples || 0;
   debugGraphMergeAgentTokenRates(target, source);
@@ -910,28 +912,49 @@ function debugGraphApplyServerRecord(record) {
   bucket.cpuCount = Math.max(bucket.cpuCount, Number(record.cpu_count || 0));
   bucket.systemCpuTotalPercent = Math.max(bucket.systemCpuTotalPercent, Number(record.system_cpu_total_percent || 0));
   bucket.systemCpuCount = Math.max(bucket.systemCpuCount, Number(record.system_cpu_count || 0));
-  const askAgentTotal = Number(record.ask_agent_total);
-  const runAgentTotal = Number(record.run_agent_total);
-  const transitionAgentTotal = Number(record.transition_agent_total);
-  const idleAgentTotal = Number(record.idle_agent_total);
-  const hasSplitAgentTotals = Number.isFinite(askAgentTotal) || Number.isFinite(runAgentTotal) || Number.isFinite(transitionAgentTotal) || Number.isFinite(idleAgentTotal);
-  if (hasSplitAgentTotals) {
-    bucket.askAgentTotal = Math.max(bucket.askAgentTotal, Number(record.ask_agent_total || 0));
-    bucket.runAgentTotal = Math.max(bucket.runAgentTotal, Number(record.run_agent_total || 0));
-    const fallbackIdleAgentTotal = Number.isFinite(idleAgentTotal) ? Number(record.idle_agent_total || 0) : Number(record.inactive_agent_total || 0);
-    const normalizedTransitionAgentTotal = Math.max(0, Number(record.transition_agent_total || 0) - (Number.isFinite(idleAgentTotal) ? 0 : fallbackIdleAgentTotal));
-    bucket.transitionAgentTotal = Math.max(bucket.transitionAgentTotal, normalizedTransitionAgentTotal);
-    bucket.idleAgentTotal = Math.max(bucket.idleAgentTotal, fallbackIdleAgentTotal);
-  } else {
-    bucket.runAgentTotal = Math.max(bucket.runAgentTotal, Number(record.active_agent_total || 0));
-    bucket.idleAgentTotal = Math.max(bucket.idleAgentTotal, Number(record.inactive_agent_total || 0));
-  }
-  bucket.activeAgentTotal = Math.max(bucket.activeAgentTotal, Number(record.active_agent_total || 0));
-  bucket.inactiveAgentTotal = Math.max(bucket.inactiveAgentTotal, Number(record.inactive_agent_total || 0));
-  bucket.agentActivitySamples = Math.max(bucket.agentActivitySamples, Number(record.agent_activity_samples || 0));
+  debugGraphApplyServerAgentStatus(bucket, record);
   bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
   bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
   debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
+}
+
+function debugGraphAgentStatusSnapshot(record) {
+  const askAgentTotal = Number(record?.ask_agent_total);
+  const runAgentTotal = Number(record?.run_agent_total);
+  const transitionAgentTotal = Number(record?.transition_agent_total);
+  const idleAgentTotal = Number(record?.idle_agent_total);
+  const hasSplitAgentTotals = [askAgentTotal, runAgentTotal, transitionAgentTotal, idleAgentTotal].some(Number.isFinite);
+  if (!hasSplitAgentTotals && !Number.isFinite(Number(record?.active_agent_total)) && !Number.isFinite(Number(record?.inactive_agent_total))) return null;
+  const ask = hasSplitAgentTotals ? Math.max(0, askAgentTotal || 0) : 0;
+  const run = hasSplitAgentTotals ? Math.max(0, runAgentTotal || 0) : Math.max(0, Number(record.active_agent_total || 0));
+  const idle = hasSplitAgentTotals && Number.isFinite(idleAgentTotal)
+    ? Math.max(0, idleAgentTotal)
+    : Math.max(0, Number(record.inactive_agent_total || 0));
+  const transition = hasSplitAgentTotals
+    ? Math.max(0, (transitionAgentTotal || 0) - (Number.isFinite(idleAgentTotal) ? 0 : idle))
+    : 0;
+  return {
+    askAgentTotal: ask,
+    runAgentTotal: run,
+    transitionAgentTotal: transition,
+    idleAgentTotal: idle,
+    activeAgentTotal: ask + run + transition,
+    inactiveAgentTotal: idle,
+    agentActivitySamples: Math.max(0, Number(record.agent_activity_samples || 0)),
+  };
+}
+
+function debugGraphApplyServerAgentStatus(bucket, record) {
+  const snapshot = debugGraphAgentStatusSnapshot(record);
+  if (!snapshot) return;
+  const sequence = Number(record.sequence);
+  if (Number.isFinite(sequence)) {
+    if (sequence < Number(bucket.agentStatusSequence ?? -1)) return;
+    bucket.agentStatusSequence = sequence;
+  } else if (snapshot.agentActivitySamples < Number(bucket.agentActivitySamples || 0)) {
+    return;
+  }
+  Object.assign(bucket, snapshot);
 }
 
 function debugGraphApplyServerProcesses(bucket, servers) {
@@ -1940,6 +1963,11 @@ function debugGraphIntegerAxisValues(max) {
   return values;
 }
 
+function debugGraphIntegerGridValues(max) {
+  const axisMax = Math.max(0, Math.ceil(Number(max) || 0));
+  return Array.from({length: axisMax + 1}, (_unused, index) => axisMax - index);
+}
+
 function debugGraphIntegerAxisHtml(group, max) {
   const axisMax = Math.max(0, Math.ceil(Number(max) || 0));
   const ticks = debugGraphIntegerAxisValues(axisMax);
@@ -1971,7 +1999,7 @@ function debugGraphGridLinesHtml(group, axisMax) {
   const max = Math.max(0, Number(axisMax) || 0);
   const fallbackMax = max > 0 ? max : 1;
   const values = group.integerGridLines === true
-    ? debugGraphIntegerAxisValues(max)
+    ? debugGraphIntegerGridValues(max)
     : [fallbackMax, fallbackMax / 2, 0];
   return values.map(value => {
     const y = debugGraphGridLineY(value, max).toFixed(1);

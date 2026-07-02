@@ -32,9 +32,13 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
     assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e and not browser", "-q"]
+    boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
+    assert boot_lane.default is False
+    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
-    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e", "-q"]
+    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e and not boot", "-q"]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]
@@ -70,10 +74,28 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "-m",
         "pytest",
         "tests",
+        "-m",
+        "boot",
+        "-q",
+    ]
+    assert lanes["pytest-browser"].steps[1].args == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
         "-n",
         "auto",
         "-m",
-        "browser and not e2e",
+        "browser and not e2e and not boot",
+        "-q",
+    ]
+    assert lanes["pytest-boot"].steps[0].args == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-m",
+        "boot",
         "-q",
     ]
 

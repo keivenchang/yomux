@@ -2593,6 +2593,8 @@ class TmuxWebtermApp:
         with self.stats_agent_token_lock:
             for index, row in enumerate(rows):
                 key = self.stats_agent_token_key(row, index)
+                if key in seen_keys:
+                    continue
                 seen_keys.add(key)
                 activity_kind = self.stats_agent_activity_kind_locked(row, key, sample_time, transition_seconds)
                 if activity_kind == "ask":
@@ -2632,7 +2634,7 @@ class TmuxWebtermApp:
             for key in list(self.stats_agent_activity_state):
                 if key not in seen_keys:
                     self.stats_agent_activity_state.pop(key, None)
-        active_agents = max(0, len(rows) - inactive_agents)
+        active_agents = max(0, len(seen_keys) - inactive_agents)
         record: dict[str, Any] = {
             "time": sample_time,
             "ask_agent_total": ask_agents,
