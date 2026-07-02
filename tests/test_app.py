@@ -436,6 +436,38 @@ def test_shared_stats_history_keeps_cpu_for_every_yolomux_server(monkeypatch, tm
     assert processes["port:9103"]["cpu_count"] == 1.0
 
 
+def test_shared_stats_history_merges_missing_process_rows_when_bucket_is_already_newer(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", tmp_path / "stats-client-history.json")
+    monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+    first_writer = app_module.TmuxWebtermApp([])
+    second_writer = app_module.TmuxWebtermApp([])
+    reader = app_module.TmuxWebtermApp([])
+    first_writer.background_owner = StatsRoleOwner(owner=False, port=9101)
+    second_writer.background_owner = StatsRoleOwner(owner=False, port=9102)
+    reader.background_owner = StatsRoleOwner(owner=False, port=9199)
+    sample_time = time.time()
+    try:
+        first_writer.record_stats_process_sample({"time": sample_time, "pid": 9101, "started_at": sample_time - 1, "cpu_percent": 10.0})
+        reader.merge_shared_stats_client_history()
+        with reader.stats_history_lock:
+            bucket = next(iter(reader.stats_history_raw_buckets.values()))
+            bucket["servers"]["port:9101"]["sequence"] = 999
+            reader.stats_history_refresh_bucket_sequence_locked(bucket)
+        second_writer.record_stats_process_sample({"time": sample_time, "pid": 9102, "started_at": sample_time - 2, "cpu_percent": 20.0})
+        reader.merge_shared_stats_client_history()
+        with reader.stats_history_lock:
+            history = reader.stats_history_payload_locked()
+    finally:
+        first_writer.control_server.stop()
+        second_writer.control_server.stop()
+        reader.control_server.stop()
+
+    processes = next(record["servers"] for record in history["records"] if "port:9102" in record["servers"])
+    assert set(processes) == {"port:9101", "port:9102"}
+    assert processes["port:9102"]["cpu_total_percent"] == 20.0
+
+
 def test_stats_process_history_batches_disk_writes_without_losing_one_second_cpu_samples(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "stats_history_uses_shared_status", lambda: False)

@@ -1967,12 +1967,10 @@ class TmuxWebtermApp:
             return
         buckets = self.stats_history_rollup_buckets if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS else self.stats_history_raw_buckets
         bucket = buckets.get((start, duration))
-        source_sequence = int(source.get("sequence") or 0)
         # The shared snapshot carries the full 24-hour history even though normal writes change
-        # only one bucket. Do not rebuild every local client/server map for unchanged buckets;
-        # that transient object churn was retaining hundreds of MiB in the stats owner.
-        if bucket is not None and source_sequence <= int(bucket.get("sequence") or 0):
-            return
+        # only one client or server row. A bucket-level sequence cannot decide freshness here:
+        # another newer row can hide an older-but-missing process row until a browser reloads
+        # from the full snapshot. Preserve the no-churn property per row instead.
         if bucket is None:
             bucket = stats_history_empty_bucket(start, duration)
             buckets[(start, duration)] = bucket
@@ -1982,16 +1980,24 @@ class TmuxWebtermApp:
                 clean_client_id = stats_history_client_id(client_id)
                 if not clean_client_id or not isinstance(source_client, dict):
                     continue
+                source_sequence = int(source_client.get("sequence") or 0)
+                existing_client = bucket["clients"].get(clean_client_id)
+                if isinstance(existing_client, dict) and source_sequence <= int(existing_client.get("sequence") or 0):
+                    continue
                 client_bucket = stats_history_empty_client_bucket()
                 for field in STATS_HISTORY_BROWSER_FIELDS:
                     client_bucket[field] = float(source_client.get(field) or 0.0)
-                client_bucket["sequence"] = int(source_client.get("sequence") or 0)
+                client_bucket["sequence"] = source_sequence
                 bucket["clients"][clean_client_id] = client_bucket
         source_servers = source.get("servers")
         if isinstance(source_servers, dict):
             for process_id, source_process in source_servers.items():
                 clean_process_id = str(process_id or "").strip()
                 if not clean_process_id or not isinstance(source_process, dict):
+                    continue
+                source_sequence = int(source_process.get("sequence") or 0)
+                existing_process = bucket["servers"].get(clean_process_id)
+                if isinstance(existing_process, dict) and source_sequence <= int(existing_process.get("sequence") or 0):
                     continue
                 process_bucket = stats_history_empty_process_bucket()
                 for field in STATS_HISTORY_PROCESS_FIELDS:
@@ -2000,7 +2006,7 @@ class TmuxWebtermApp:
                 process_bucket["pid"] = int(source_process.get("pid") or 0)
                 process_bucket["port"] = int(source_process.get("port") or 0)
                 process_bucket["started_at"] = float(source_process.get("started_at") or 0.0)
-                process_bucket["sequence"] = int(source_process.get("sequence") or 0)
+                process_bucket["sequence"] = source_sequence
                 bucket["servers"][clean_process_id] = process_bucket
         self.stats_history_refresh_bucket_sequence_locked(bucket)
 
