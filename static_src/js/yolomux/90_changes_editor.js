@@ -845,9 +845,10 @@ function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
   if (!payload || payload.loaded !== true) return false;
   const visibleFiles = Array.isArray(files) ? files : (Array.isArray(payload.files) ? payload.files : []);
   if (visibleFiles.length) return true;
-  if (sessionFilesRepoRoots(payload).length > 0) return true;
   if ((Array.isArray(payload.errors) ? payload.errors : []).length) return true;
   if ((Array.isArray(payload.warnings) ? payload.warnings : []).length) return true;
+  if (sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
+  if (sessionFilesRepoRoots(payload).length > 0) return true;
   return !sessionFilesPayloadIsRefreshingElsewhere(payload) && sessionFilesPayloadIsRootlessEmpty(payload);
 }
 
@@ -1674,6 +1675,8 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       fileList.hidden = false;
       if (repoFiles.length) {
         renderChangedFileList(fileList, repo, repoFiles, {compact});
+      } else if (options.loading === true) {
+        fileList.innerHTML = '';
       } else {
         fileList.innerHTML = `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>`;
       }

@@ -1048,6 +1048,58 @@ def test_local_owner_search_index_refresh_request_starts_root_build(no_control_s
     assert result["refresh"] == {"root": str(tmp_path), "state": "building"}
 
 
+def test_local_owner_session_files_refresh_request_starts_requested_cache_key(no_control_socket, monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    owner_key = webapp.session_files_cache_key("payload", {"1": info}, "1", 24.0, "HEAD", "current", None)
+    requested_key = (*owner_key[:-1], (("1", ("follower-snapshot",)),))
+    starts = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
+    monkeypatch.setattr(webapp, "start_session_files_cache_refresh", lambda *args: starts.append(args) or True)
+    try:
+        result = webapp.request_background_refresh(
+            BACKGROUND_ROLE_SESSION_FILES,
+            {
+                "session": "1",
+                "hours": 24.0,
+                "from_ref": "HEAD",
+                "to_ref": "current",
+                "repo_refs": {},
+                "cache_key": repr(requested_key),
+                "cache_key_data": requested_key,
+            },
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert result["refreshing"] is True
+    assert len(starts) == 1
+    cache_key, target, session, infos, hours, from_ref, to_ref, repo_refs = starts[0]
+    assert cache_key == requested_key
+    assert target == webapp.refresh_session_files_payload_cache
+    assert session == "1"
+    assert infos == {"1": info}
+    assert hours == 24.0
+    assert from_ref == "HEAD"
+    assert to_ref == "current"
+    assert repo_refs == {}
+
+
+def test_local_owner_tabber_refresh_request_starts_worker(no_control_socket, monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    starts = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: starts.append(True) or True)
+    try:
+        result = webapp.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "follower-refresh"})
+    finally:
+        webapp.control_server.stop()
+
+    assert result["refreshing"] is True
+    assert starts == [True]
+
+
 def test_search_index_warm_takeover_loads_disk_without_rebuild_timing_regression(monkeypatch, tmp_path):
     (tmp_path / "target.py").write_text("print('x')\n", encoding="utf-8")
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

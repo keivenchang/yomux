@@ -1778,6 +1778,7 @@ globalThis.__layoutTestApi = {
     });
   },
   applySessionFilesPayloadFromPushForTest: applySessionFilesPayloadFromPush,
+  sessionFilesPanelIsLoadingForTest: sessionFilesPanelIsLoading,
   sessionFilesPushRequestMatchesCurrentForTest: sessionFilesPushRequestMatchesCurrent,
   changedFileOwnerSessionForPathForTest: changedFileOwnerSessionForPath,
   fileTreeChangedAncestorStatsForTest(payload) {

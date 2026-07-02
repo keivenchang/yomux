@@ -2941,6 +2941,10 @@ class TmuxWebtermApp:
                     "Background refresh accepted by local owner",
                     self.background_refresh_event_details(role, request_payload, extra={"source": "owner-request"}),
                 )
+                if role == BACKGROUND_ROLE_SESSION_FILES and ("session" in request_payload or "cache_key_data" in request_payload):
+                    result["refreshing"] = self.start_requested_session_files_cache_refresh(request_payload)
+                elif role == BACKGROUND_ROLE_TABBER_ACTIVITY:
+                    result["refreshing"] = self.start_tabber_activity_cache_refresh()
         elif self.background_refresh_should_fallback(result):
             self.record_background_fallback(role, result, payload)
         if result.get("coalesced"):
@@ -5439,6 +5443,45 @@ class TmuxWebtermApp:
             tuple((name, session_info_cache_signature(info)) for name, info in sorted(infos.items())),
         )
 
+    def session_files_refresh_request_payload(
+        self,
+        cache_key: tuple[Any, ...],
+        session: str | None,
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> dict[str, Any]:
+        return {
+            "session": session or "",
+            "hours": session_files.bounded_session_files_hours(hours),
+            "from_ref": str(from_ref or ""),
+            "to_ref": str(to_ref or ""),
+            "repo_refs": repo_refs or {},
+            "cache_key": repr(cache_key),
+            "cache_key_data": cache_key,
+        }
+
+    def requested_session_files_cache_key(
+        self,
+        payload: dict[str, Any],
+        fallback: tuple[Any, ...],
+    ) -> tuple[Any, ...]:
+        def freeze(value: Any) -> Any:
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(item) for item in value)
+            return value
+
+        requested = freeze(payload.get("cache_key_data"))
+        if not isinstance(requested, tuple) or len(requested) != len(fallback):
+            return fallback
+        # The owner may observe newer tmux/transcript metadata than the follower, so only the final
+        # info signature may differ. All request-controlled dimensions must match before the owner
+        # writes under the follower's key.
+        if requested[:-1] != fallback[:-1]:
+            return fallback
+        return requested
+
     def session_files_disk_cache_path(self, key: tuple[Any, ...]) -> tuple[Path, str]:
         key_text = self.client_event_payload_signature(key)
         signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
@@ -5893,7 +5936,12 @@ class TmuxWebtermApp:
 
     def start_session_files_cache_refresh(self, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
         if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": repr(cache_key)})
+            if target == self.refresh_session_files_payload_cache and len(args) >= 6:
+                session, _infos, hours, from_ref, to_ref, repo_refs = args[:6]
+                request_payload = self.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs)
+            else:
+                request_payload = {"cache_key": repr(cache_key), "cache_key_data": cache_key}
+            self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, request_payload)
             return False
         with self.session_files_cache_lock:
             if cache_key in self.session_files_refreshing_cache_keys:
@@ -5902,6 +5950,30 @@ class TmuxWebtermApp:
         worker = threading.Thread(target=target, args=(cache_key, *args), daemon=True)
         worker.start()
         return True
+
+    def start_requested_session_files_cache_refresh(self, payload: dict[str, Any]) -> bool:
+        session = str(payload.get("session") or "").strip()
+        scope = [session] if session else list(self.sessions)
+        infos, _errors = discover_sessions(scope)
+        if session and session not in infos:
+            return False
+        hours = session_files.bounded_session_files_hours(self.float_value(payload.get("hours"), 24.0))
+        from_ref = str(payload.get("from_ref") or "").strip() or None
+        to_ref = str(payload.get("to_ref") or "").strip() or None
+        raw_repo_refs = payload.get("repo_refs")
+        repo_refs = raw_repo_refs if isinstance(raw_repo_refs, dict) else {}
+        fallback_key = self.session_files_cache_key("payload", infos, session or None, hours, from_ref, to_ref, repo_refs)
+        cache_key = self.requested_session_files_cache_key(payload, fallback_key)
+        return self.start_session_files_cache_refresh(
+            cache_key,
+            self.refresh_session_files_payload_cache,
+            session or None,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+        )
 
     def cached_session_files_payload_for_info(
         self,
@@ -5921,7 +5993,10 @@ class TmuxWebtermApp:
                     self.start_session_files_cache_refresh(key, self.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
                 else:
                     self.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
-                    refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session, "cache_key": repr(key)})
+                    refresh_result = self.request_background_refresh(
+                        BACKGROUND_ROLE_SESSION_FILES,
+                        self.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
+                    )
                     self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
                     if self.background_refresh_should_fallback(refresh_result):
                         payload, _status, _hit, _age = self.compute_session_files_cache_entry(
@@ -5930,7 +6005,10 @@ class TmuxWebtermApp:
                         )
             return payload
         if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session, "cache_key": repr(key)})
+            refresh_result = self.request_background_refresh(
+                BACKGROUND_ROLE_SESSION_FILES,
+                self.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
+            )
             self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
             if self.background_refresh_should_fallback(refresh_result):
                 payload, _status, _hit, _age = self.compute_session_files_cache_entry(
@@ -6021,7 +6099,10 @@ class TmuxWebtermApp:
                     cache_meta["refreshing"] = refreshing
                 else:
                     self.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
-                    refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": session or "", "cache_key": repr(cache_key)})
+                    refresh_result = self.request_background_refresh(
+                        BACKGROUND_ROLE_SESSION_FILES,
+                        self.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs),
+                    )
                     self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
                     if self.background_refresh_should_fallback(refresh_result):
                         payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
@@ -6047,7 +6128,10 @@ class TmuxWebtermApp:
                         cache_meta["refreshing_elsewhere"] = True
         else:
             if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                refresh_result = self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"session": session or "", "cache_key": repr(cache_key)})
+                refresh_result = self.request_background_refresh(
+                    BACKGROUND_ROLE_SESSION_FILES,
+                    self.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs),
+                )
                 self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
                 if self.background_refresh_should_fallback(refresh_result):
                     payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
