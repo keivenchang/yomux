@@ -3142,6 +3142,19 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
         const firstRowRight = rows[0]?.right || 0;
         const laterRowRight = Math.max(...rows.slice(1).map(row => row.right));
         const actionsRect = actions.getBoundingClientRect();
+        const tabsOverlapActions = tabs.filter(rect => (
+          rect.left < actionsRect.right - 1
+          && rect.right > actionsRect.left + 1
+          && rect.top < actionsRect.bottom - 1
+          && rect.bottom > actionsRect.top + 1
+        ));
+        const lastRowLastTab = rows.at(-1)?.rects.at(-1);
+        const lastRowHit = lastRowLastTab
+          ? document.elementFromPoint(
+              Math.round(lastRowLastTab.left + lastRowLastTab.width / 2),
+              Math.round(lastRowLastTab.top + lastRowLastTab.height / 2),
+            )
+          : null;
         const activeTab = group.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab');
         const activeRect = activeTab.getBoundingClientRect();
         const hit = document.elementFromPoint(Math.round(activeRect.left + activeRect.width / 2), Math.round(activeRect.top + activeRect.height / 2));
@@ -3156,7 +3169,9 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
           actionLeft: Math.round(actionsRect.left),
           firstRowRight,
           laterRowRight,
+          tabsOverlapActions,
           tabsOverlapToolbar: tabs.filter(rect => rect.bottom > toolbar.top + 1),
+          lastRowTabClickable: Boolean(lastRowHit?.closest?.('.dockview-pane-tab')),
           activeTab: rectFor(activeRect),
           activeTabClickable: Boolean(hit?.closest?.('.dockview-pane-tab') === activeTab),
         };
@@ -3166,8 +3181,10 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
     assert metrics["tabsOverflowX"] == "visible", metrics
     assert metrics["tabsScrollWidth"] <= metrics["tabsClientWidth"] + 1, metrics
     assert metrics["firstRowRight"] <= metrics["actionLeft"] - 1, metrics
-    assert metrics["laterRowRight"] <= metrics["actionLeft"] - 1, metrics
+    assert metrics["laterRowRight"] > metrics["actionLeft"] + 1, metrics
+    assert metrics["tabsOverlapActions"] == [], metrics
     assert metrics["tabsOverlapToolbar"] == [], metrics
+    assert metrics["lastRowTabClickable"] is True, metrics
     assert metrics["header"]["height"] >= (metrics["tabHeight"] * 2) - 2, metrics
     assert metrics["activeTab"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
     assert metrics["header"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
