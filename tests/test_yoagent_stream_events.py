@@ -49,8 +49,10 @@ def test_textless_reasoning_delta_uses_truthful_minimal_state():
     assert codex_events[0]["text"] == "reasoning..."
     assert claude_events[0]["text"] == "thinking... (~50 tokens)"
     assert claude_events[0]["metadata"] == {"estimated_tokens": 50}
-    assert yoagent_stream_event_auxiliary_line(codex_events[0]) == "thinking: reasoning..."
-    assert yoagent_stream_event_auxiliary_line(claude_events[0]) == "thinking... (~50 tokens)"
+    assert codex_events[0]["heartbeat"] is True
+    assert claude_events[0]["heartbeat"] is True
+    assert yoagent_stream_event_auxiliary_line(codex_events[0]) == "thinking"
+    assert yoagent_stream_event_auxiliary_line(claude_events[0]) == "thinking"
 
 
 def test_stream_events_preserve_long_text_without_truncation_marker():

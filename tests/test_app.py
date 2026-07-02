@@ -622,6 +622,45 @@ def test_background_owner_claim_payload_reports_claim_noop_and_conflict():
     assert payload["claimed"] is False
     assert payload["was_owner"] is False
     assert payload["error"] == "owner lock is held"
+    assert payload["user_message"]["key"] == "common.requestFailed"
+    assert payload["diagnostic"] == "owner lock is held"
+
+
+def test_sampled_background_event_forwards_one_shared_descriptor_parent():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.background_refresh_event_log_lock = threading.Lock()
+    webapp.background_refresh_event_log_counts = {}
+    webapp.background_refresh_event_log_last_emit_counts = {}
+    calls = []
+    webapp.log_event = lambda *args, **kwargs: calls.append((args, kwargs)) or {"time": "event-1"}
+    target = {
+        "key": "backgroundOwner.sessionFiles",
+        "params": {},
+        "fallback": "Session files",
+    }
+
+    saved = webapp.log_sampled_background_refresh_event(
+        "background_refresh_started",
+        app_module.BACKGROUND_ROLE_SESSION_FILES,
+        "Session-files background refresh started",
+        {"role": app_module.BACKGROUND_ROLE_SESSION_FILES},
+        message_key="events.message.backgroundRefresh.started",
+        message_params={"target": target},
+    )
+
+    assert saved == {"time": "event-1"}
+    assert calls == [(
+        (
+            None,
+            "background_refresh_started",
+            "Session-files background refresh started",
+            {"role": app_module.BACKGROUND_ROLE_SESSION_FILES, "sample_count": 1},
+        ),
+        {
+            "message_key": "events.message.backgroundRefresh.started",
+            "message_params": {"target": target},
+        },
+    )]
 
 
 def test_performance_metrics_payload_ranks_response_bytes():
@@ -1558,6 +1597,7 @@ def test_share_debug_profile_is_opt_in_and_redacted(monkeypatch, tmp_path):
         denied, denied_status = webapp.record_share_debug_profile(disabled["token"], {"kind": "share-replay-health"})
         assert denied_status == HTTPStatus.FORBIDDEN
         assert denied["error"] == "debug/profiling upload is not enabled for this share"
+        assert denied["user_message"]["key"] == "share.error.debugProfileDisabled"
 
         payload, status = webapp.record_share_debug_profile(
             enabled["token"],
@@ -1602,6 +1642,7 @@ def test_share_token_clamps_mode_scheme_viewers_and_allows_concurrent_shares():
         )
         assert status == HTTPStatus.BAD_REQUEST
         assert payload["error"] == "write shares require https"
+        assert payload["user_message"]["key"] == "share.error.writeHttps"
 
         payload, status = webapp.create_share_token(
             "6",
@@ -1698,6 +1739,7 @@ def test_active_share_payload_and_stop_active_share():
         missing_status, missing_status_code = webapp.share_status_payload("wrong-token")
         assert missing_status_code == HTTPStatus.UNAUTHORIZED
         assert missing_status["active"] is False
+        assert missing_status["user_message"]["key"] == "share.error.tokenExpired"
 
         second, second_status = webapp.create_share_token(
             "6",
@@ -1749,10 +1791,12 @@ def test_share_viewer_registration_enforces_cap_and_decrements():
         wrong_session, wrong_status = webapp.register_share_viewer(payload["token"], "8")
         assert wrong_status == HTTPStatus.FORBIDDEN
         assert wrong_session["error"] == "share token is scoped to a different session"
+        assert wrong_session["user_message"]["key"] == "share.error.differentSession"
 
         rejected, rejected_status = webapp.register_share_viewer(payload["token"], "6", "viewer-b")
         assert rejected_status == HTTPStatus.FORBIDDEN
         assert rejected["error"] == "share viewer limit reached"
+        assert rejected["user_message"]["key"] == "share.error.viewerLimitReached"
         status_frame = webapp.share_status_frame_payload(payload["token"])
         assert status_frame["viewer_details"][0]["ip"] == "203.0.113.4"
         assert status_frame["viewer_details"][0]["browser"] == "Chrome 125.0.0.0"
@@ -2082,6 +2126,36 @@ def test_tmux_session_exists_payload_is_read_only_and_refreshes_roster(monkeypat
     assert status == HTTPStatus.OK
     assert payload == {"session": "2", "exists": False, "ok": True}
     assert webapp.sessions == ["1", "3"]
+
+
+def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: ([], "tmux discovery failed"))
+    webapp.refresh_sessions = lambda maintenance=False: []
+    try:
+        failures = [
+            webapp.record_stats_history_payload("invalid"),
+            webapp.client_event({"session": "missing", "type": "test", "message": "message"}),
+            webapp.acknowledge_attention({}),
+            webapp.build_auto_approve_status("missing"),
+            webapp.cancel_yoagent_chat(""),
+            webapp.tmux_session_exists_payload("1"),
+        ]
+    finally:
+        webapp.control_server.stop()
+
+    assert all(status != HTTPStatus.OK for _payload, status in failures)
+    assert all(payload.get("user_message", {}).get("key") for payload, _status in failures)
+    assert failures[0][0]["user_message"] == {
+        "key": "request.error.object",
+        "params": {"field": "payload"},
+        "fallback": "payload must be an object",
+    }
+    assert failures[-1][0]["diagnostic"] == "tmux discovery failed"
+    command_failure = app_module.tmux_command_failure_payload("1", "raw tmux stderr")
+    assert command_failure["diagnostic"] == "raw tmux stderr"
+    assert command_failure["user_message"]["key"] == "terminal.window.failed"
+    assert command_failure["user_message"]["params"]["error"]["key"] == "common.requestFailed"
 
 
 def test_session_files_memory_cache_is_bounded():
@@ -2979,8 +3053,8 @@ def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (infos, []))
     monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: {})
 
-    def fake_build_summary(info, project, files):
-        calls.append(info.session)
+    def fake_build_summary(info, project, files, locale="en"):
+        calls.append((info.session, locale))
         return {
             "session": info.session,
             "agent": "",
@@ -3007,7 +3081,7 @@ def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert calls[-3:] == ["3", "2", "1"]
+    assert calls[-3:] == [("3", "en"), ("2", "en"), ("1", "en")]
     assert payload["session_order"] == ["3", "2", "1"]
 
 
@@ -3020,7 +3094,7 @@ def test_activity_summary_payload_all_scope_includes_visible_tmux_sessions(monke
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1", "external"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: discovered.append(list(sessions)) or ({name: infos[name] for name in sessions if name in infos}, []))
     monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: {})
-    monkeypatch.setattr(app_module, "build_session_activity_summary", lambda info, project, files: {"session": info.session, "agent": "", "active": False, "repos": [], "files": {"count": 0, "added": 0, "removed": 0}, "lines": []})
+    monkeypatch.setattr(app_module, "build_session_activity_summary", lambda info, project, files, locale="en": {"session": info.session, "agent": "", "active": False, "repos": [], "files": {"count": 0, "added": 0, "removed": 0}, "lines": []})
     webapp = app_module.TmuxWebtermApp(["1"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     summary_hours = []
@@ -3061,7 +3135,7 @@ def test_activity_summary_payload_batches_recent_events_for_multiple_sessions(mo
     }
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({name: infos[name] for name in sessions if name in infos}, []))
     monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: {})
-    monkeypatch.setattr(app_module, "build_session_activity_summary", lambda info, project, files: {"session": info.session, "agent": "", "active": False, "repos": [], "files": {"count": 0, "added": 0, "removed": 0}, "lines": []})
+    monkeypatch.setattr(app_module, "build_session_activity_summary", lambda info, project, files, locale="en": {"session": info.session, "agent": "", "active": False, "repos": [], "files": {"count": 0, "added": 0, "removed": 0}, "lines": []})
     webapp = app_module.TmuxWebtermApp(["1", "2", "3"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     webapp.cached_session_files_payload_for_info = lambda info, hours=24.0: {"files": [], "repos": [], "errors": []}
@@ -3754,8 +3828,8 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: project_payload)
     monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: files_payload)
 
-    def fake_build(info, project, files):
-        calls.append(info.session)
+    def fake_build(info, project, files, locale="en"):
+        calls.append((info.session, locale))
         return {"session": info.session, "agent": "codex", "active": False, "repos": [str(tmp_path)], "files": {"count": 1, "added": 1, "removed": 0}, "lines": ["cached test"], "local": "cached test"}
 
     monkeypatch.setattr(app_module, "build_session_activity_summary", fake_build)
@@ -3780,7 +3854,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     finally:
         webapp.control_server.stop()
 
-    assert calls == ["5", "5"]
+    assert calls == [("5", "en"), ("5", "en"), ("5", "zh-Hant")]
     assert first["global"]["files"] == {"count": 1, "added": 1, "removed": 0}
     assert first["agents"][0]["label"] == "session '5' 0:codex"
     assert first["agents"][0]["recent_paths"][0]["path"] == str(tmp_path)
@@ -7759,6 +7833,38 @@ def test_yoagent_prompt_answer_uses_verified_selector_path(monkeypatch):
     assert entered == ["%1"]
 
 
+def test_yoagent_controller_reuses_shared_locale_keys(monkeypatch):
+    calls = []
+
+    def fake_yoagent_text(locale, key, **params):
+        calls.append((key, params))
+        return key
+
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(controller_module, "yoagent_text", fake_yoagent_text)
+    monkeypatch.setattr(webapp, "record_yoagent_message", lambda _role, content, **_kwargs: {"content": content})
+    monkeypatch.setattr(webapp, "publish_yoagent_conversation_changed", lambda _reason: None)
+    monkeypatch.setattr(webapp, "log_event", lambda *_args, **_kwargs: None)
+    target = {
+        "prompt": {"visible": True},
+        "screen": {"key": "approval"},
+    }
+
+    try:
+        prefix = webapp.yoagent_controller.yoagent_prompt_answer_error_prefix(target)
+        result = webapp.record_yoagent_action_result(
+            {"session": "1", "target": {"session": "1", "transport": "tmux-legacy"}},
+            "done",
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert prefix == "yoagent.action.acceptance.approval"
+    assert result is not None
+    assert ("common.tmuxSession", {"label": "`1`"}) in calls
+    assert ("common.result", {}) in calls
+
+
 def test_yoagent_prompt_target_rejects_free_text_with_options_status(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     target = {
@@ -7927,7 +8033,18 @@ def test_yoagent_notify_all_idle_job_tracks_blockers_then_fires(monkeypatch):
     assert waiting["jobs"][0]["last_observed_state"]["states"] == {"1": "idle", "2": "working"}
     assert second == [payload["job"]["id"]]
     assert fired["jobs"][0]["status"] == "fired"
-    assert any(item[0] == "yoagent_jobs_changed" and item[1].get("notification", {}).get("body") == "all watched tmux sessions are idle" for item in events)
+    notifications = [
+        item[1]["notification"]
+        for item in events
+        if item[0] == "yoagent_jobs_changed" and isinstance(item[1].get("notification"), dict)
+    ]
+    assert any(notification.get("body") == "all watched tmux sessions are idle" for notification in notifications)
+    assert any(
+        notification.get("title_key") == "brand.tab.agent"
+        and notification.get("body_key") == "yoagent.job.notification.allIdle"
+        and notification.get("body_params") == {}
+        for notification in notifications
+    )
 
 
 def test_yoagent_notify_needs_input_and_blocked_jobs_fire_on_prompt_states(monkeypatch):
@@ -8074,8 +8191,9 @@ def test_yoagent_jobs_reload_from_persisted_state(monkeypatch):
 def test_yoagent_job_fails_and_notifies_when_target_disappears(monkeypatch):
     install_fake_yolomux_state(monkeypatch)
     events = []
+    logged = []
     webapp = app_module.TmuxWebtermApp(["6"])
-    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: logged.append((args, kwargs)) or {"time": f"event-{len(logged)}"})
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
@@ -8092,6 +8210,14 @@ def test_yoagent_job_fails_and_notifies_when_target_disappears(monkeypatch):
     assert jobs["jobs"][0]["status"] == "failed"
     assert jobs["jobs"][0]["result"]["error"] == "unknown session: 6"
     assert any(item[0] == "yoagent_jobs_changed" and item[1].get("reason") == "yoagent_job_failed" and item[1].get("notification") for item in events)
+    failed_args, failed_kwargs = next(item for item in logged if item[0][1] == "yoagent_job_failed")
+    assert failed_args[3]["diagnostic"] == "unknown session: 6"
+    assert failed_kwargs["message_key"] == "yoagent.job.notification.failed"
+    assert failed_kwargs["message_params"]["reason"] == {
+        "key": "yoagent.error.targetSessionMissing",
+        "params": {},
+        "fallback": "The target tmux session no longer exists.",
+    }
 
 
 def test_yoagent_action_preview_blocks_approval_prompt(monkeypatch):
@@ -8263,13 +8389,33 @@ def test_yoagent_cli_auth_failure_is_actionable(monkeypatch):
     assert payload["backend"] == "claude"
     assert payload["backend_used"] == "deterministic"
     assert payload["fallback"] is True
-    assert "Claude CLI is not logged in" in payload["fallback_reason"]
+    assert "The Claude CLI backend is not logged in" in payload["fallback_reason"]
     assert "claude auth login" in payload["fallback_reason"]
+    assert payload["fallback_reason_key"] == "det.noBackend.noCredentials"
+    assert payload["fallback_reason_params"] == {"provider": "Claude CLI", "command": "`claude auth login`"}
 
 
-def test_yoagent_cli_fallback_keeps_non_auth_error():
+def test_yoagent_cli_fallback_localizes_non_auth_error():
     reason = app_module.yoagent_cli_fallback_reason("codex", "model overloaded")
-    assert reason == "model overloaded"
+    assert reason == "The Codex CLI backend failed; showing the activity context."
+
+
+def test_yoagent_direct_backend_keeps_raw_failure_as_cli_diagnostic(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "run_yoagent_codex_cli", lambda *_args, **_kwargs: ("", "model overloaded", ""))
+    try:
+        answer, fallback_reason, cli = webapp.run_yoagent_direct_prompt_backend("codex", "status?", locale="en")
+    finally:
+        webapp.control_server.stop()
+
+    assert answer == ""
+    assert fallback_reason == "The Codex CLI backend failed; showing the activity context."
+    assert cli["error"] == "model overloaded"
+    assert cli["fallback_reason_message"] == {
+        "key": "yoagent.error.backendFailed",
+        "params": {"backend": "Codex CLI"},
+        "fallback": "The Codex CLI backend failed; showing the activity context.",
+    }
 
 
 def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
@@ -8808,7 +8954,7 @@ def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
     assert calls[0][2] == payload["stream_id"]
     assert [message["role"] for message in conversation["messages"]] == ["assistant"]
     assert conversation["messages"][0]["content"] == "Start with the YO!agent streaming fix."
-    assert "model CLI time" in conversation["messages"][0]["details"]
+    assert any(row["key"] == "yoagent.details.modelCliTime" for row in conversation["messages"][0]["detailRows"])
     assert conversation["messages"][0]["responseMs"] > 0
     assert any(event_type == "yoagent_stream_delta" for event_type, _payload in events)
     assert any(event_type == "yoagent_conversation_changed" for event_type, _payload in events)
@@ -9220,6 +9366,12 @@ def test_self_update_dryrun_is_noop_with_plan():
     assert result["ok"] is True
     assert result["dryrun"] is True
     assert result["restarting"] is False
+    assert result["error"] == "dryrun: nothing pulled, server not restarted"
+    assert result["user_message"] == {
+        "key": "update.result.dryRun",
+        "params": {},
+        "fallback": "dryrun: nothing pulled, server not restarted",
+    }
     assert any("git pull" in step for step in result["plan"])
 
 
@@ -9235,6 +9387,8 @@ def test_self_update_requires_xterm_assets_before_restart(monkeypatch, tmp_path)
     assert result["ok"] is False
     assert result["restarting"] is False
     assert "xterm" in result["error"]
+    assert result["user_message"]["key"] == "update.result.assetsUnavailable"
+    assert result["user_message"]["fallback"] == result["error"]
     assert any("xterm assets" in step for step in result["plan"])
 
 
@@ -9251,7 +9405,43 @@ def test_self_update_restarts_after_xterm_assets_are_ready(monkeypatch, tmp_path
 
     assert result["ok"] is True
     assert result["restarting"] is True
+    assert result["error"] == "updated; restarting now"
+    assert result["user_message"]["key"] == "update.result.restarting"
     assert calls == [str(tmp_path)]
+
+
+def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(monkeypatch):
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["1", "2"]
+    webapp.refresh_sessions = lambda maintenance=True: []
+
+    invalid_window, invalid_window_status = webapp.tmux_select_window("1", "bad")
+    renamed, renamed_status = webapp.rename_session("1", "2")
+    monkeypatch.setattr(app_module, "tmux_has_exact_session", lambda _session: False)
+    missing, missing_status = webapp.ensure_session("1")
+    monkeypatch.setattr(app_module, "available_agent_commands", lambda: [])
+    unavailable, unavailable_status = webapp.create_next_session("codex")
+    no_files, no_files_status = webapp.upload_editor_files([])
+
+    assert invalid_window_status == HTTPStatus.BAD_REQUEST
+    assert invalid_window["error"] == "window must be a non-negative integer"
+    assert invalid_window["user_message"]["key"] == "terminal.window.invalidNumber"
+    assert renamed_status == HTTPStatus.CONFLICT
+    assert renamed["error"] == "session already exists: 2"
+    assert renamed["user_message"] == {
+        "key": "rename.error.exists",
+        "params": {"name": "2"},
+        "fallback": "session already exists: 2",
+    }
+    assert missing_status == HTTPStatus.NOT_FOUND
+    assert missing["error"] == "session no longer exists: 1"
+    assert missing["user_message"]["key"] == "status.sessionEnded"
+    assert unavailable_status == HTTPStatus.NOT_FOUND
+    assert unavailable["error"] == "codex is not available on this server PATH"
+    assert unavailable["user_message"]["key"] == "session.error.agentUnavailablePath"
+    assert no_files_status == HTTPStatus.BAD_REQUEST
+    assert no_files["error"] == "no files supplied"
+    assert no_files["user_message"]["key"] == "upload.error.noFiles"
 
 
 def test_ensure_xterm_runtime_assets_downloads_static_fallback_without_npm(monkeypatch, tmp_path):

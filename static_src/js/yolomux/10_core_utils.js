@@ -36,7 +36,7 @@ async function apiFetchJson(url, options = {}) {
   const response = await apiFetch(url, options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
     error.status = response.status;
     error.statusText = response.statusText || '';
     error.payload = payload || {};
@@ -61,7 +61,7 @@ async function apiFetchJsonQuiet(url, options = {}) {
   const response = await fetch(url, requestOptions);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
     error.status = response.status;
     error.statusText = response.statusText || '';
     error.payload = payload || {};
@@ -69,6 +69,78 @@ async function apiFetchJsonQuiet(url, options = {}) {
     throw error;
   }
   return payload;
+}
+
+function messageDescriptorText(descriptor, fallback = '') {
+  const value = descriptor && typeof descriptor === 'object' ? descriptor : {};
+  const key = String(value.key || '').trim();
+  if (key) {
+    const template = i18nResolve(key);
+    if (template !== null) {
+      const rawParams = value.params && typeof value.params === 'object' ? value.params : {};
+      const params = Object.fromEntries(Object.entries(rawParams).map(([name, param]) => [
+        name,
+        param && typeof param === 'object' && ('key' in param || 'fallback' in param)
+          ? messageDescriptorText(param)
+          : param,
+      ]));
+      return i18nInterpolate(template, params);
+    }
+  }
+  return String(value.fallback || fallback || '');
+}
+
+function messageFieldDescriptor(value, field = 'message') {
+  const source = value && typeof value === 'object' ? value : {};
+  const name = String(field || 'message');
+  const params = source[`${name}_params`];
+  return {
+    key: String(source[`${name}_key`] || ''),
+    params: params && typeof params === 'object' ? params : {},
+    fallback: String(source[name] || ''),
+  };
+}
+
+function structuredMessageText(value, field = 'message', fallback = '') {
+  return messageDescriptorText(messageFieldDescriptor(value, field), fallback);
+}
+
+function structuredMessageSnapshot(value, field = 'message') {
+  const descriptor = messageFieldDescriptor(value, field);
+  const name = String(field || 'message');
+  return {
+    [name]: descriptor.fallback,
+    [`${name}_key`]: descriptor.key,
+    [`${name}_params`]: {...descriptor.params},
+  };
+}
+
+function userMessageText(value, fallback = '') {
+  const source = value && typeof value === 'object' ? value : {};
+  const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
+  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
+  return messageDescriptorText(descriptor, payload.error || source.message || fallback || '');
+}
+
+function userMessageSnapshot(value, fallback = '') {
+  const source = value && typeof value === 'object' ? value : {};
+  const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
+  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
+  const fallbackDescriptor = fallback && typeof fallback === 'object' ? fallback : {};
+  const fallbackText = typeof fallback === 'object' ? String(fallbackDescriptor.fallback || '') : String(fallback || '');
+  const key = String(descriptor.key || fallbackDescriptor.key || '');
+  const rawParams = descriptor.key ? descriptor.params : fallbackDescriptor.params;
+  const params = rawParams && typeof rawParams === 'object' ? rawParams : {};
+  const sourceText = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+  const rawFallback = String(payload.error || source.message || sourceText || fallbackText || '');
+  return {
+    error: rawFallback,
+    user_message: {
+      key,
+      params: {...params},
+      fallback: String(descriptor.fallback || rawFallback),
+    },
+  };
 }
 
 function clientPushCanSupplyData() {
@@ -1124,7 +1196,22 @@ function writeStoredEditorLineNumbers(value) {
 }
 
 function defaultCollapsedPreferenceSections() {
-  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads/Downloads']);
+  return new Set(DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS);
+}
+
+function normalizeCollapsedPreferenceSections(values, sections = []) {
+  const validIds = new Set(Object.values(PREFERENCE_SECTION_IDS));
+  const legacyTitleIds = new Map(Object.entries(LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE));
+  for (const section of sections) {
+    const id = String(section?.id || '');
+    const title = String(section?.title || '');
+    if (validIds.has(id) && title) legacyTitleIds.set(title, id);
+  }
+  return new Set(Array.from(values || [], value => {
+    const text = String(value || '');
+    if (validIds.has(text)) return text;
+    return legacyTitleIds.get(text) || '';
+  }).filter(Boolean));
 }
 
 function readStoredCollapsedPreferenceSections() {
@@ -1133,7 +1220,7 @@ function readStoredCollapsedPreferenceSections() {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
-    return new Set(parsed.filter(item => typeof item === 'string' && item));
+    return normalizeCollapsedPreferenceSections(parsed);
   } catch (_) {
     return defaultCollapsedPreferenceSections();
   }
@@ -1141,6 +1228,17 @@ function readStoredCollapsedPreferenceSections() {
 
 function writeStoredCollapsedPreferenceSections() {
   storageSet(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
+}
+
+function setCollapsedPreferenceSections(values, options = {}) {
+  const previousIds = Array.from(collapsedPreferenceSections || []);
+  const next = normalizeCollapsedPreferenceSections(values, options.sections || []);
+  const nextIds = Array.from(next);
+  collapsedPreferenceSections = next;
+  if (options.persist === true && (previousIds.length !== nextIds.length || previousIds.some((id, index) => id !== nextIds[index]))) {
+    writeStoredCollapsedPreferenceSections();
+  }
+  return collapsedPreferenceSections;
 }
 
 function cleanDiffRef(value, fallback = '') {
@@ -1356,8 +1454,10 @@ function globalThemeIsDark(mode = globalThemeMode) {
 
 function globalThemeLabel(mode = globalThemeMode) {
   const normalized = normalizeGlobalThemeMode(mode);
-  if (normalized === 'system') return `System (${resolvedGlobalThemeMode(mode)})`;
-  return normalized === 'dark' ? 'Dark' : 'Light';
+  if (normalized === 'system') return t('pref.appearance.theme.systemResolved', {
+    resolved: t(`pref.appearance.theme.${resolvedGlobalThemeMode(mode)}`),
+  });
+  return t(`pref.appearance.theme.${normalized}`);
 }
 
 function nextGlobalThemeMode(mode = globalThemeMode) {
@@ -1459,8 +1559,8 @@ function syncPressedButton(button, active, options = {}) {
 
 function syncFileExplorerHiddenButton(button) {
   syncPressedButton(button, fileExplorerShowHidden, {
-    labelOn: 'Hide dotfiles (.*)',
-    labelOff: 'Show hidden files (dotfiles)',
+    labelOn: t('finder.toolbar.hideHidden'),
+    labelOff: t('finder.toolbar.hidden'),
   });
 }
 
@@ -1533,8 +1633,8 @@ function renderTabMetaToggle() {
   document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
   if (!tabMetaToggle) return;
   syncPressedButton(tabMetaToggle, tabMetaVisible, {
-    labelOn: 'Hide tab metadata',
-    labelOff: 'Show tab metadata',
+    labelOn: t('menu.view.tabMeta.hide'),
+    labelOff: t('menu.view.tabMeta.show'),
   });
 }
 
@@ -1966,7 +2066,7 @@ function renderTransportWarning() {
   const port = location.port || '9998';
   const selfSigned = `python3 yolomux.py --port ${port} --self-signed`;
   const cert = `python3 yolomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;
-  httpsWarning.dataset.tip = `No HTTPS. Highly recommend that you restart with ${selfSigned}. Or use ${cert}.`;
+  httpsWarning.dataset.tip = t('app.noHttpsDetail', {selfSigned, cert});
   httpsWarning.setAttribute('aria-label', httpsWarning.dataset.tip);
   httpsWarning.tabIndex = 0;
 }
@@ -2685,7 +2785,7 @@ async function copyTextToClipboard(text) {
   textarea.select();
   const copied = document.execCommand?.('copy') === true;
   textarea.remove();
-  if (!copied) throw new Error('clipboard copy is unavailable');
+  if (!copied) throw new Error(t('common.clipboardUnavailable'));
 }
 
 function copyTextToClipboardViaCopyEvent(text) {
@@ -3361,7 +3461,7 @@ async function copyTmuxSelectionToClipboard(session, term = null, container = nu
       statusEl.textContent = error.message || t('status.nothingSelected');
       return false;
     }
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    statusErr(esc(userMessageText(error, t('status.copyFailed', {error}))));
     return false;
   } finally {
     clearTerminalVisibleSelection(session, term, container, 'copy-tmux-selection');
@@ -3372,7 +3472,7 @@ async function fetchTmuxSelectionText(session) {
   const payload = await apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'});
   const text = payload?.copied ? String(payload.text || '') : '';
   if (!text) {
-    const error = new Error(payload?.error === 'tmux copy mode is not active' ? t('status.nothingSelected') : (payload?.error || t('status.nothingSelected')));
+    const error = new Error(userMessageText(payload, t('status.nothingSelected')));
     error.noClipboardText = true;
     throw error;
   }

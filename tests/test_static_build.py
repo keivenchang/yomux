@@ -7,7 +7,14 @@ from tools.static_build import build_pseudo_catalog
 from tools.static_build import check_css_braces
 from tools.static_build import i18n_untranslated_entries
 from tools.static_build import i18n_untranslated_report
+from tools.static_build import i18n_literal_key_errors
+from tools.static_build import i18n_visible_literal_sink_errors
+from tools.static_build import locale_expected_keys
+from tools.static_build import locale_registry_errors
+from tools.static_build import locale_semantic_errors
 from tools.static_build import locale_key_errors
+from tools.static_build import plural_family_bases
+from tools.static_build import source_catalogs
 from tools.static_build import lint_duplicate_functions
 from tools.static_build import lint_repeated_raw_component_literals
 from tools.static_build import lint_raw_window_viewport_reads
@@ -43,10 +50,130 @@ def test_locale_key_parity_flags_missing_and_extra():
     assert locale_key_errors({"en": {"a": "A"}, "fr": {"a": "Aa"}}) == []
 
 
+def test_locale_registry_matches_source_catalog_stems():
+    assert locale_registry_errors(source_catalogs()) == []
+    assert locale_registry_errors({"en": {}, "made-up": {}}) == [
+        "missing registered locale catalogs: ar, de, es, fr, he, hi, it, ja, ko, nl, pl, pt-BR, ru, th, tr, vi, zh-Hans, zh-Hant",
+        "unregistered source locale catalogs: made-up",
+    ]
+
+
+def test_locale_key_parity_requires_exact_locale_plural_categories():
+    source = {"item.one": "{count} item", "item.other": "{count} items"}
+    missing_many = {"en": source, "fr": {"item.one": "{count} article", "item.other": "{count} articles"}}
+    assert locale_key_errors(missing_many) == ["fr.json missing keys: item.many"]
+
+    exact = {**missing_many["fr"], "item.many": "{count} articles"}
+    assert locale_key_errors({"en": source, "fr": exact}) == []
+    unexpected = {**exact, "item.few": "{count} articles"}
+    assert locale_key_errors({"en": source, "fr": unexpected}) == ["fr.json has unknown keys: item.few"]
+
+
+def test_shipped_catalogs_have_all_611_locale_specific_plural_forms():
+    catalogs = source_catalogs()
+    source = catalogs["en"]
+    assert len(plural_family_bases(source)) == 47
+    extras = 0
+    for locale, catalog in catalogs.items():
+        if locale == "en":
+            continue
+        expected = locale_expected_keys(source, locale)
+        assert set(catalog) == expected
+        extras += len(expected) - len(source)
+    assert extras == 611
+
+
+def test_i18n_literal_key_errors_checks_exact_and_plural_calls_but_skips_dynamic_prefixes(tmp_path):
+    js_source = tmp_path / "surface.js"
+    js_source.write_text(
+        "t('present.key');\n"
+        "localizedHtml('missing.key');\n"
+        "tPlural('count.files', count);\n"
+        "t('dynamic.prefix.' + suffix);\n",
+        encoding="utf-8",
+    )
+    python_source = tmp_path / "surface.py"
+    python_source.write_text(
+        "server_string(locale, 'present.server')\n"
+        "server_string(\n"
+        "    locale,\n"
+        "    'missing.server',\n"
+        ")\n"
+        "yoagent_text(locale, 'missing.yoagent')\n"
+        "user_message_payload('missing.payload', 'raw diagnostic')\n"
+        "message_descriptor('missing.descriptor', 'raw diagnostic')\n"
+        "message_fields('message', 'missing.fields', 'raw diagnostic')\n"
+        "RequestValidationError('raw diagnostic', 'missing.validation')\n"
+        "worker.update_last_action('missing.action', 'raw diagnostic')\n"
+        "log_event(None, 'test', 'raw diagnostic', message_key='missing.event')\n"
+        "server_string(locale, dynamic_key)\n"
+        "server_plural(locale, 'missing.plural', count)\n"
+        "SURFACE_I18N_KEY_MAP = {'status': 'missing.map'}\n",
+        encoding="utf-8",
+    )
+    catalog = {
+        "present.key": "Present",
+        "present.server": "Present on the server",
+        "count.files.one": "{count} file",
+    }
+    errors = i18n_literal_key_errors(catalog, [js_source, python_source])
+    assert len(errors) == 12
+    assert "surface.js:2 missing i18n key(s): missing.key" in errors[0]
+    assert "surface.js:3 missing i18n key(s): count.files.other" in errors[1]
+    assert "surface.py:2 missing i18n key(s): missing.server" in errors[2]
+    assert "surface.py:6 missing i18n key(s): missing.yoagent" in errors[3]
+    assert "surface.py:7 missing i18n key(s): missing.payload" in errors[4]
+    assert "surface.py:8 missing i18n key(s): missing.descriptor" in errors[5]
+    assert "surface.py:9 missing i18n key(s): missing.fields" in errors[6]
+    assert "surface.py:10 missing i18n key(s): missing.validation" in errors[7]
+    assert "surface.py:11 missing i18n key(s): missing.action" in errors[8]
+    assert "surface.py:12 missing i18n key(s): missing.event" in errors[9]
+    assert "surface.py:14 missing i18n key(s): missing.plural.one, missing.plural.other" in errors[10]
+    assert "surface.py:15 missing i18n key(s): missing.map" in errors[11]
+
+
+def test_i18n_visible_literal_sink_errors_rejects_visible_prose_but_allows_units(tmp_path):
+    js_source = tmp_path / "surface.js"
+    js_source.write_text(
+        "node.textContent = 'Raw visible status';\n"
+        "node.title = t('present.key');\n"
+        "node.setAttribute('aria-label', 'Raw accessible label');\n"
+        "statusErr('Raw toast error');\n"
+        "latency.textContent = '-- ms';\n"
+        "node.textContent = `Raw template ${name}`;\n"
+        "node.innerHTML = `<span>${action.label}</span>`;\n",
+        encoding="utf-8",
+    )
+    css_source = tmp_path / "surface.css"
+    css_source.write_text(
+        ".raw::before { content: \"Raw CSS label\"; }\n"
+        ".localized::before { content: attr(data-label); }\n"
+        ".glyph::before { content: \"Aa\"; }\n",
+        encoding="utf-8",
+    )
+
+    assert i18n_visible_literal_sink_errors([js_source, css_source]) == [
+        "surface.css:1 visible literal bypasses i18n: 'Raw CSS label'",
+        "surface.js:1 visible literal bypasses i18n: 'Raw visible status'",
+        "surface.js:3 visible literal bypasses i18n: 'Raw accessible label'",
+        "surface.js:4 visible literal bypasses i18n: 'Raw toast error'",
+        "surface.js:6 visible literal bypasses i18n: 'Raw template ${name}'",
+        "surface.js:7 raw user-visible field bypasses i18n: 'action.label'",
+    ]
+
+
+def test_i18n_visible_literal_sink_tree_is_clean():
+    assert i18n_visible_literal_sink_errors() == []
+
+
 def test_pseudo_value_accents_text_keeps_tokens_and_pads():
-    out = pseudo_value("Save {name}")
+    protected = "`git status` https://example.com/a /static/yolomux.js ~/repo/file Ctrl-Alt-C <strong>safe</strong>"
+    out = pseudo_value(f"Save {{name}} as {{date:%Y%m%d}}-{{seq:03d}} with {protected}")
     assert out.startswith("⟦") and out.endswith("⟧")
     assert "{name}" in out          # interpolation tokens are preserved verbatim
+    assert "{date:%Y%m%d}" in out and "{seq:03d}" in out  # documented format tokens are also syntax
+    for token in ("`git status`", "https://example.com/a", "/static/yolomux.js", "~/repo/file", "Ctrl-Alt-C", "<strong>", "</strong>"):
+        assert token in out
     assert "Save" not in out        # the rest is accented
     assert "·" in out               # padded to surface overflow
 
@@ -58,9 +185,7 @@ def test_build_pseudo_catalog_covers_every_source_key():
     assert "{n}" in pseudo["y"]
 
 
-def test_i18n_untranslated_report_lists_real_matches_and_allows_brand_strings(monkeypatch):
-    import tools.static_build as sb
-    monkeypatch.setattr(sb, "I18N_UNTRANSLATED_BASELINE", {})
+def test_i18n_untranslated_report_lists_real_matches_and_allows_brand_strings():
     catalogs = {
         "en": {
             "about.github": "YOLOmux GitHub",
@@ -75,18 +200,113 @@ def test_i18n_untranslated_report_lists_real_matches_and_allows_brand_strings(mo
     }
     entries = i18n_untranslated_entries(catalogs)
     assert entries["zh-Hant"] == ["pref.uploads.custom_actions.label"]
-    warnings, errors = sb.i18n_untranslated_report(catalogs, sample_limit=None)
+    warnings, errors = i18n_untranslated_report(catalogs, sample_limit=None)
     assert warnings == ["WARNING: i18n untranslated values in zh-Hant.json: 1; keys: pref.uploads.custom_actions.label"]
-    assert errors == []
+    assert errors == ["zh-Hant.json has 1 unintended English fallback value(s)"]
 
 
-def test_i18n_untranslated_report_uses_baseline_for_regression(monkeypatch):
-    import tools.static_build as sb
+def test_i18n_untranslated_report_fails_every_unintended_fallback():
     catalogs = {"en": {"a": "Alpha", "b": "Beta"}, "fr": {"a": "Alpha", "b": "Beta"}}
-    monkeypatch.setattr(sb, "I18N_UNTRANSLATED_BASELINE", {"fr": 1})
-    warnings, errors = sb.i18n_untranslated_report(catalogs, sample_limit=1)
+    warnings, errors = i18n_untranslated_report(catalogs, sample_limit=1)
     assert warnings == ["WARNING: i18n untranslated values in fr.json: 2; keys: a (+1 more)"]
-    assert errors == ["fr.json untranslated-value count regressed: 2 > baseline 1"]
+    assert errors == ["fr.json has 2 unintended English fallback value(s)"]
+
+
+def test_i18n_untranslated_report_does_not_hide_graph_labels_by_locale():
+    catalogs = {
+        "en": {"debug.graph.chart.clientLatency": "Client latency"},
+        "fr": {"debug.graph.chart.clientLatency": "Client latency"},
+        "zh-Hant": {"debug.graph.chart.clientLatency": "Client latency"},
+    }
+    entries = i18n_untranslated_entries(catalogs)
+    assert entries["fr"] == ["debug.graph.chart.clientLatency"]
+    assert entries["zh-Hant"] == ["debug.graph.chart.clientLatency"]
+
+
+def test_locale_semantic_errors_enforces_placeholders_and_protected_syntax():
+    catalogs = {
+        "en": {
+            "a": "Open {count} at `git show HEAD` via https://example.test/x",
+            "b": "Done",
+        },
+        "fr": {
+            "a": "Ouvrir {total} avec `git show main` via https://example.test/y",
+            "b": "Terminé",
+        },
+    }
+    errors = [error for error in locale_semantic_errors(catalogs) if not error.startswith("missing registered locale catalogs:")]
+    assert any("fr.json placeholder drift at a" in error for error in errors)
+    assert any("fr.json protected-token drift at a" in error for error in errors)
+
+
+def test_locale_semantic_errors_validate_locale_only_plural_forms_against_other():
+    catalogs = {
+        "en": {"item.one": "Open {count} item", "item.other": "Open {count} items via `git status`"},
+        "fr": {
+            "item.one": "Ouvrir {count} élément",
+            "item.other": "Ouvrir {count} éléments via `git status`",
+            "item.many": "Ouvrir {total} éléments via `git diff`",
+        },
+    }
+    errors = locale_semantic_errors(catalogs)
+    assert any("fr.json placeholder drift at item.many" in error for error in errors)
+    assert any("fr.json protected-token drift at item.many" in error for error in errors)
+
+
+def test_locale_semantic_errors_protects_documented_format_tokens_without_interpolating_them():
+    catalogs = {
+        "en": {"template": "Use {date:%Y%m%d}, {seq:03d}, and {name}."},
+        "fr": {"template": "Utiliser {date:%d%m%Y}, {seq:03d} et {name}."},
+    }
+    errors = locale_semantic_errors(catalogs)
+    assert not any("placeholder drift" in error for error in errors)
+    assert any("fr.json protected-token drift at template" in error for error in errors)
+
+
+def test_locale_semantic_errors_protects_absolute_asset_paths_without_matching_html_tags():
+    catalogs = {
+        "en": {"asset": "Load /static/xterm.js before </main>."},
+        "fr": {"asset": "Charger /static/terminal.js avant </main>."},
+    }
+    errors = [error for error in locale_semantic_errors(catalogs) if not error.startswith("missing registered locale catalogs:")]
+    assert errors == [
+        "fr.json protected-token drift at asset: expected {'/static/xterm.js': 1, '</main>': 1}, got {'/static/terminal.js': 1, '</main>': 1}"
+    ]
+
+
+def test_locale_semantic_errors_rejects_blank_translation_for_nonblank_source():
+    errors = [
+        error
+        for error in locale_semantic_errors({"en": {"a": "Visible text"}, "fr": {"a": ""}})
+        if not error.startswith("missing registered locale catalogs:")
+    ]
+    assert errors == ["fr.json blank translation at a"]
+
+
+def test_locale_semantic_errors_requires_chinese_yo_brand_marker():
+    catalogs = {
+        "en": {"brand": "Open YO!stats"},
+        "zh-Hans": {"brand": "打开 AI 统计"},
+        "zh-Hant": {"brand": "開啟 YO!統計"},
+    }
+    errors = locale_semantic_errors(catalogs)
+    assert "zh-Hans.json must localize YO as 优 at brand" in errors
+    assert "zh-Hant.json must localize YO as 優 at brand" in errors
+
+
+def test_locale_semantic_errors_rejects_prose_under_former_broad_exemptions():
+    catalogs = {
+        "en": {
+            "pref.yoagent.claude_model.fable": "Fable 5 (most capable)",
+            "state.short.blocked": "Blocked",
+        },
+        "fr": {
+            "pref.yoagent.claude_model.fable": "Fable 5 (most capable)",
+            "state.short.blocked": "Blocked",
+        },
+    }
+    entries = i18n_untranslated_entries(catalogs)
+    assert entries["fr"] == ["pref.yoagent.claude_model.fable", "state.short.blocked"]
 
 
 def test_i18n_untranslated_report_cited_zh_key_before_and_after_backfill():

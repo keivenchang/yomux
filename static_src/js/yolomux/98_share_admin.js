@@ -149,6 +149,7 @@ function openShareModalChrome(titleText) {
   if (!modal || !title || !body) return {};
   modal.classList.remove('about-open');
   modal.classList.add('share-open', 'open');
+  relocalizeModalChrome({content: false});
   title.textContent = titleText;
   body.innerHTML = '';
   scheduleSharePopupLayerPublish();
@@ -186,15 +187,15 @@ function syncShareProtocolControls(form) {
   if (hint) hint.textContent = http.checked ? t('share.hint.http') : '';
 }
 
-function renderShareCreateView(errorText = '') {
-  const {body} = openShareModalChrome(t('share.title'));
+function renderShareCreateView() {
+  const {body} = openShareModalChrome(t('brand.share'));
   if (!body) return;
-  body.innerHTML = shareCreateFormHtml(errorText);
+  body.innerHTML = shareCreateFormHtml();
   bindShareCreateForm(body);
   scheduleSharePopupLayerPublish();
 }
 
-function shareCreateFormHtml(errorText = '') {
+function shareCreateFormHtml() {
   const sharedSessions = shareSessionsFromLayout();
   if (!sharedSessions.length && !currentSessionActionTarget()) {
     return `<div class="share-modal-message">${esc(t('share.noSession'))}</div>`;
@@ -204,6 +205,7 @@ function shareCreateFormHtml(errorText = '') {
   const maxViewersDefault = Math.max(1, Math.min(300, Math.round(Number(shareDefaultMaxViewers) || 2)));
   const readOnlyChecked = shareDefaultReadOnly || !shareTlsAvailable();
   const defaultScheme = shareDefaultSchemeForForm(readOnlyChecked);
+  const errorText = shareCreateErrorPayload ? userMessageText(shareCreateErrorPayload) : '';
   return `<form class="share-modal-form" id="shareCreateForm">
     <div class="share-create-controls">
     <label class="share-field">
@@ -340,18 +342,18 @@ function bindShareEntries(root) {
   });
 }
 
-function renderShareManageView(errorText = '') {
-  const {body} = openShareModalChrome(t('share.manageTitle'));
+function renderShareManageView() {
+  const {body} = openShareModalChrome(t('brand.share'));
   if (!body) return;
   if (!shareHasActiveShare()) {
-    renderShareCreateView(errorText);
+    renderShareCreateView();
     return;
   }
   const list = activeShares.map(shareEntryHtml).join('');
   body.innerHTML = `<div class="share-result">
     <div class="share-create-panel">
       <div class="share-section-title">${esc(t('share.newShare'))}</div>
-      ${shareCreateFormHtml(errorText)}
+      ${shareCreateFormHtml()}
     </div>
     <div class="share-active-panel">
       <div class="share-section-title">${esc(t('share.activeShares', {count: activeShares.length}))}</div>
@@ -370,6 +372,38 @@ function renderShareResultView(share = activeShare) {
   renderShareManageView();
 }
 
+function shareCreateFormValues(form) {
+  if (!form) return null;
+  return {
+    ttlMinutes: form.elements.ttl_minutes?.value || '',
+    maxViewers: form.elements.max_viewers?.value || '',
+    readOnly: form.elements.read_only?.checked === true,
+    debugProfile: form.elements.debug_profile?.checked === true,
+    scheme: form.elements.scheme?.value || '',
+  };
+}
+
+function restoreShareCreateFormValues(form, values) {
+  if (!form || !values) return;
+  if (form.elements.ttl_minutes) form.elements.ttl_minutes.value = values.ttlMinutes;
+  if (form.elements.max_viewers) form.elements.max_viewers.value = values.maxViewers;
+  if (form.elements.read_only) form.elements.read_only.checked = values.readOnly;
+  if (form.elements.debug_profile) form.elements.debug_profile.checked = values.debugProfile;
+  const scheme = form.querySelector(`input[name="scheme"][value="${cssEscape(values.scheme)}"]`);
+  if (scheme) scheme.checked = true;
+  syncShareProtocolControls(form);
+}
+
+function relocalizeShareModal() {
+  if (!shareModalIsVisible()) return false;
+  const previousForm = document.getElementById('shareCreateForm');
+  const values = shareCreateFormValues(previousForm);
+  if (shareHasActiveShare()) renderShareManageView();
+  else renderShareCreateView();
+  restoreShareCreateFormValues(document.getElementById('shareCreateForm'), values);
+  return true;
+}
+
 async function createShareFromForm(form) {
   const submit = form.querySelector('button[type="submit"]');
   const error = form.querySelector('.share-error');
@@ -378,6 +412,7 @@ async function createShareFromForm(form) {
     error.hidden = true;
     error.textContent = '';
   }
+  shareCreateErrorPayload = null;
   try {
     const payload = shareCreatePayloadFromForm(form);
     const createdShare = normalizeSharePayload(await apiFetchJson('/api/share', {
@@ -397,9 +432,10 @@ async function createShareFromForm(form) {
     renderShareManageView();
     statusOk(localizedHtml('share.created'));
   } catch (err) {
+    shareCreateErrorPayload = userMessageSnapshot(err);
     if (error) {
       error.hidden = false;
-      error.textContent = err?.message || String(err);
+      error.textContent = userMessageText(shareCreateErrorPayload);
     }
   } finally {
     if (submit) submit.disabled = false;
@@ -443,7 +479,8 @@ async function extendActiveShare(tokenOrShortId = '', addSeconds = 600) {
 }
 
 async function showShareModal() {
-  openShareModalChrome(t('share.title'));
+  shareCreateErrorPayload = null;
+  openShareModalChrome(t('brand.share'));
   const {body} = shareModalElements();
   if (body) body.textContent = t('common.loading');
   const shares = await refreshActiveShare({silent: true});
@@ -461,7 +498,7 @@ function updateShareViewerBanner() {
   text.className = 'share-viewer-banner-text';
   text.textContent = t('share.viewerBanner', {
     host,
-    mode: share?.mode === 'rw' ? t('share.mode.write') : t('share.mode.readOnly'),
+    mode: share?.mode === 'rw' ? t('share.mode.write') : t('common.readOnly'),
     time: shareTimeLeftText(share),
   });
   const fit = document.createElement('button');
@@ -485,8 +522,8 @@ function updateShareViewerBanner() {
     debug.type = 'button';
     debug.className = 'share-view-fit-toggle share-debug-copy control-active-hover';
     debug.dataset.shareViewerControl = 'debug';
-    debug.textContent = 'debug';
-    debug.title = 'Copy share mirror diagnostics';
+    debug.textContent = t('debug.copy');
+    debug.title = t('share.debug.copyDiagnostics');
     debug.setAttribute('aria-label', debug.title);
     debug.addEventListener('click', event => {
       event.preventDefault();
@@ -601,21 +638,28 @@ function shareReadonlyPointerEventHitsScrollContainer(event) {
   return Boolean(descriptor?.element && descriptor.element === event.target);
 }
 
-function restoreShareReadonlyScrollTarget(target) {
+function shareReadonlyScrollStateForTarget(target) {
   const descriptor = shareScrollTargetForElement(target);
-  if (!descriptor?.target) return false;
+  if (!descriptor?.target) return null;
   const state = shareLastAppliedScrollByTarget.get(descriptor.target);
-  if (!state) return false;
+  if (!state) return null;
   const top = Math.max(0, Math.round(Number(state.top || 0)));
   const left = Math.max(0, Math.round(Number(state.left || 0)));
-  if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
-    descriptor.term.scrollToLine(top);
-    return true;
-  }
-  if (!descriptor.element) return false;
-  descriptor.element.scrollTop = top;
-  descriptor.element.scrollLeft = left;
-  return true;
+  return {descriptor, top, left};
+}
+
+function shareReadonlyScrollMatchesAppliedState(target) {
+  const snapshot = shareReadonlyScrollStateForTarget(target);
+  if (!snapshot?.descriptor?.element) return false;
+  return Math.round(Number(snapshot.descriptor.element.scrollTop || 0)) === snapshot.top
+    && Math.round(Number(snapshot.descriptor.element.scrollLeft || 0)) === snapshot.left;
+}
+
+function restoreShareReadonlyScrollTarget(target) {
+  const snapshot = shareReadonlyScrollStateForTarget(target);
+  if (!snapshot) return false;
+  const {descriptor, top, left} = snapshot;
+  return applyShareScrollDescriptorPosition(descriptor, top, left);
 }
 
 function restoreShareScrollTargetByKey(target) {
@@ -631,14 +675,7 @@ function restoreShareScrollTargetByKey(target) {
   };
   const descriptor = shareScrollElementForPayload(payload);
   if (!descriptor) return false;
-  if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
-    descriptor.term.scrollToLine(payload.top);
-    return true;
-  }
-  if (!descriptor.element) return false;
-  descriptor.element.scrollTop = payload.top;
-  descriptor.element.scrollLeft = payload.left;
-  return true;
+  return applyShareScrollDescriptorPosition(descriptor, payload.top, payload.left);
 }
 
 function scheduleShareScrollRestoreByKey(target, options = {}) {
@@ -679,6 +716,10 @@ function blockShareReadonlyInteraction(event) {
   if (!shareSemanticReadOnlyMirrorEnabled()) return;
   if (event.target?.closest?.('[data-share-viewer-control]')) return;
   if (event.type === 'scroll') {
+    // Host-authored scrolls must reach virtualized widgets such as CodeMirror so they can mount the
+    // rows at the mirrored offset. Only a scroll that diverges from the authoritative host position
+    // is local input and needs to be restored/stopped.
+    if (shareReadonlyScrollMatchesAppliedState(event.target)) return;
     restoreShareReadonlyScrollTarget(event.target);
     event.stopImmediatePropagation?.();
     event.stopPropagation?.();

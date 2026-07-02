@@ -1,7 +1,11 @@
+import json
 import re
+from pathlib import Path
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+from tools.static_build import build_asset
+from yolomux_lib.locales import SHIPPED_LOCALES
 
 
 def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
@@ -342,8 +346,8 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <path data-cpu-server="peer" class="js-debug-line js-debug-line--cpu js-debug-line--pattern js-debug-line--pattern-dot" style="--js-debug-series-color: var(--accent-gold)" d="M0 6L20 6"></path>
           <path data-cpu-server="system" class="js-debug-line js-debug-line--systemCpu js-debug-line--pattern js-debug-line--pattern-solid" d="M0 7L20 7"></path>
           <path data-client-line="solid" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-solid" d="M0 8L20 8"></path>
-          <path data-client-line="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" d="M0 10L20 10"></path>
-          <path data-client-line="dot" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--js-debug-api-sse-total-series)" d="M0 11L20 11"></path>
+          <path data-client-line="peer" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" d="M0 10L20 10"></path>
+          <path data-client-line="total" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--bad)" d="M0 11L20 11"></path>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="cyan" style="--js-debug-series-color: var(--js-debug-agent-token-cyan)" x="0" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="orange" style="--js-debug-series-color: var(--js-debug-agent-token-orange)" x="2" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="magenta" style="--js-debug-series-color: var(--js-debug-agent-token-magenta)" x="4" y="9" width="1" height="1"></rect>
@@ -358,8 +362,8 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         <span class="js-debug-legend-swatch js-debug-legend-swatch--cpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--agentTokenTotal" style="--js-debug-series-color: var(--js-debug-agent-token-total)"></span>
-        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" x1="0" y1="2" x2="18" y2="2"></line></svg>
-        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="dot" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--js-debug-api-sse-total-series)" x1="0" y1="2" x2="18" y2="2"></line></svg>
+        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="peer" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" x1="0" y1="2" x2="18" y2="2"></line></svg>
+        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="total" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--bad)" x1="0" y1="2" x2="18" y2="2"></line></svg>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
@@ -393,7 +397,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
             expected: {
               api: colorFor('var(--js-debug-api-series)'),
               sse: colorFor('var(--js-debug-sse-series)'),
-              apiSseTotal: colorFor('var(--js-debug-api-sse-total-series)'),
+              apiSseTotal: colorFor('var(--bad)'),
               cpu: colorFor('var(--active-accent-bright)'),
               systemCpu: colorFor('var(--bad)'),
             },
@@ -406,8 +410,9 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               swatchWidth: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).width,
               swatchBackground: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).backgroundImage,
             },
-            clientLines: Object.fromEntries(['solid', 'dash', 'dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
-            clientLegend: Object.fromEntries(['dash', 'dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-legend="${pattern}"]`)).strokeDasharray])),
+            clientLines: Object.fromEntries(['solid', 'peer', 'total'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
+            clientOpacity: Object.fromEntries(['solid', 'peer', 'total'].map(pattern => [pattern, Number(getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).opacity)])),
+            clientLegend: Object.fromEntries(['peer', 'total'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-legend="${pattern}"]`)).strokeDasharray])),
             cpuLines: Object.fromEntries(['current', 'peer', 'system'].map(server => [server, getComputedStyle(document.querySelector(`[data-cpu-server="${server}"]`)).strokeDasharray])),
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
@@ -446,10 +451,12 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert "repeating-linear-gradient" in item["total"]["swatchBackground"], (theme, item)
         assert item["clientLines"] == {
             "solid": "none",
-            "dash": "6px, 4px",
-            "dot": "1px, 3px",
+            "peer": "1px, 3px",
+            "total": "1px, 3px",
         }, (theme, item)
-        assert item["clientLegend"] == {"dash": item["clientLines"]["dash"], "dot": item["clientLines"]["dot"]}, (theme, item)
+        assert item["clientOpacity"]["solid"] == 1, (theme, item)
+        assert 0 < item["clientOpacity"]["peer"] == item["clientOpacity"]["total"] < item["clientOpacity"]["solid"], (theme, item)
+        assert item["clientLegend"] == {"peer": item["clientLines"]["peer"], "total": item["clientLines"]["total"]}, (theme, item)
         assert item["cpuLines"] == {"current": "none", "peer": "1px, 3px", "system": "none"}, (theme, item)
 
 
@@ -616,6 +623,408 @@ def test_debug_graph_waiting_meta_uses_shared_animated_ellipsis(browser, tmp_pat
     assert metrics["dotCount"] == 3, metrics
     assert all(name == "moving-ellipsis-dot" for name in metrics["animationNames"]), metrics
     assert metrics["labelText"] == "Waiting for server stats", metrics
+
+
+def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
+    selected_path = "/home/test/project/state.txt"
+    source_bundle = tmp_path / "yolomux-source.js"
+    source_bundle.write_text(build_asset("yolomux.js"), encoding="utf-8")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=files,1,debug",
+        sessions=["1"],
+        runtime_script_uri=source_bundle.as_uri(),
+        file_explorer_open_intent="1",
+        fs_entries={
+            "/home/test": [{"name": "project", "path": "/home/test/project", "kind": "dir"}],
+            "/home/test/project": [{"name": "state.txt", "path": selected_path, "kind": "file", "size": 17}],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyLocale === 'function'
+              && typeof openKeyboardShortcutsOverlay === 'function'
+              && typeof debugGraphApplyServerHistory === 'function'
+              && typeof fileEditorItemFor === 'function'
+              && typeof applyLayoutSlots === 'function'
+              && typeof jsDebugGraphChartGroups !== 'undefined'
+              && window.__terminalOpened >= 1
+              && window.__eventSources.length >= 1
+              && document.querySelector('#grid') !== null;
+            """
+        )
+    )
+    locale_catalogs = {
+        path.stem: json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(Path("static_src/locales").glob("*.json"))
+    }
+    assert set(locale_catalogs) == set(SHIPPED_LOCALES)
+    metrics = browser.execute_async_script(
+        r"""
+        const localeCatalogs = arguments[0];
+        const selectedPath = arguments[1];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          for (const [locale, catalog] of Object.entries(localeCatalogs)) {
+            i18nSetCatalogForTest(locale, catalog);
+          }
+          const selectLocale = async locale => {
+            // A real picker change persists general.language before applyLocale(). Keep the fixture's
+            // settings response in lock-step so a concurrent settings refresh cannot race the matrix
+            // back to the bootstrap English preference.
+            clientSettings = mergeSettingObjects(clientSettings, {general: {language: locale}});
+            window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, {general: {language: locale}});
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+              await applyLocale(locale);
+              await frame();
+              await frame();
+              if (i18nActiveLocale === locale) return;
+            }
+            throw new Error(`locale switch did not settle: ${locale} -> ${i18nActiveLocale}`);
+          };
+          stopJsDebugStatsPolling();
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 240; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+
+          // Keep all stateful pane families mounted while the global Help overlay and YO!stats
+          // relocalize. This catches locale refreshes that accidentally clear Finder, CodeMirror,
+          // or terminal state even when the translated labels themselves look correct.
+          const editorPath = '/home/test/project/locale-state.md';
+          const editorItem = fileEditorItemFor(editorPath);
+          const editorText = Array.from({length: 48}, (_value, index) => `STATE_${String(index + 1).padStart(2, '0')}_${'X'.repeat(160)}`).join('\n');
+          fileEditorWrapEnabled = false;
+          setFileState(editorPath, {
+            kind: 'text', content: editorText, original: editorText, dirty: false,
+            language: 'markdown', gitRoot: '/home/test/project', gitTracked: true,
+            gitHasHistory: true, gitHistory: [{ref: 'HEAD'}],
+          });
+          setFileEditorViewMode(editorPath, 'edit', editorItem);
+          registerFileEditorLayoutItem(editorPath, {item: editorItem});
+          fileExplorerRoot = '/home/test';
+          fileExplorerRootMode = 'fixed';
+          fileExplorerExpanded.clear();
+          fileExplorerExpanded.add('/home/test/project');
+          fileExplorerSelectedPaths.clear();
+          fileExplorerSelectedPaths.add(selectedPath);
+          fileExplorerSelectionAnchor = selectedPath;
+          fileExplorerSelectionLead = selectedPath;
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = splitNode('row', leafNode('finder'), splitNode(
+            'row',
+            leafNode('editor'),
+            splitNode('col', leafNode('terminal'), leafNode('stats'), 50),
+            48,
+          ), 24);
+          next.finder = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
+          next.editor = paneStateWithTabs([editorItem], editorItem);
+          next.terminal = paneStateWithTabs(['1'], '1');
+          next.stats = paneStateWithTabs([debugPaneItemId], debugPaneItemId);
+          applyLayoutSlots(next, {focusSession: editorItem, forceFull: true});
+          const finderRootReady = await waitFor(() => panelNodes.get(fileExplorerItemId)
+            ?.querySelector('.file-tree-row[data-path="/home/test/project"]'));
+          if (finderRootReady) {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const projectRow = finder.querySelector('.file-tree-row[data-path="/home/test/project"]');
+            await ensureDirectoryRowExpanded(projectRow, '/home/test/project');
+            updateFileExplorerCurrentFileHighlight();
+          }
+          const panesReady = await waitFor(() => {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = terminals.get('1');
+            const stats = panelNodes.get(debugPaneItemId);
+            return finder?.querySelector(`.file-tree-row[data-path="${selectedPath}"]`)
+              && editor?._cmView?.scrollDOM
+              && terminal?.term?.element?.isConnected
+              && stats?.querySelector('[data-js-debug-graph]');
+          });
+          if (!panesReady) {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = terminals.get('1');
+            const stats = panelNodes.get(debugPaneItemId);
+            done({
+              error: 'stateful locale-matrix panes did not initialize',
+              readiness: {
+                finder: Boolean(finder),
+                finderRows: Array.from(finder?.querySelectorAll('.file-tree-row[data-path]') || []).map(row => row.dataset.path),
+                editor: Boolean(editor),
+                editorView: Boolean(editor?._cmView?.scrollDOM),
+                terminal: Boolean(terminal),
+                terminalConnected: terminal?.term?.element?.isConnected === true,
+                stats: Boolean(stats),
+                statsGraph: Boolean(stats?.querySelector('[data-js-debug-graph]')),
+                layout: JSON.parse(JSON.stringify(layoutSlots)),
+              },
+              bootErrors: window.__bootErrors,
+              bootRejections: window.__bootRejections,
+            });
+            return;
+          }
+          const editorView = panelNodes.get(editorItem)._cmView;
+          const editorAnchor = editorText.indexOf('STATE_24') + 5;
+          editorView.dispatch({selection: {anchor: editorAnchor, head: editorAnchor + 4}});
+          editorView.scrollDOM.scrollTop = 81;
+          editorView.scrollDOM.scrollLeft = 47;
+          const codeMirrorState = () => ({
+            viewPreserved: panelNodes.get(editorItem)?._cmView === editorView,
+            anchor: editorView.state.selection.main.anchor,
+            head: editorView.state.selection.main.head,
+            scrollTop: Math.round(editorView.scrollDOM.scrollTop),
+            scrollLeft: Math.round(editorView.scrollDOM.scrollLeft),
+          });
+          const codeMirrorLocaleState = {before: codeMirrorState()};
+          await selectLocale('de');
+          await frame();
+          await frame();
+          codeMirrorLocaleState.after = codeMirrorState();
+          editorView.scrollDOM.scrollTop = 73;
+          const terminalItem = terminals.get('1');
+          terminalItem.term.element.textContent = 'TERM_STATE_137';
+
+          const now = Date.now();
+          const clientId = jsDebugStatsClientIdForRequest();
+          debugGraphApplyServerHistory({
+            sequence: 190,
+            records: [{
+              start: Math.floor((now - 500) / 1000),
+              duration: 1,
+              sequence: 190,
+              api_count: 3,
+              sse_count: 2,
+              latency_total_ms: 12,
+              latency_count: 1,
+              bandwidth_bytes: 4096,
+              cpu_total_percent: 10,
+              cpu_count: 1,
+              system_cpu_total_percent: 20,
+              system_cpu_count: 1,
+              clients: {
+                [clientId]: {api_count: 3, sse_count: 2, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 4096},
+                'client-peer': {api_count: 4, sse_count: 1, latency_total_ms: 24, latency_count: 1, bandwidth_bytes: 2048},
+              },
+            }],
+          });
+          await selectLocale('vi');
+          openKeyboardShortcutsOverlay();
+          const beforeHeading = keyboardShortcutsNode?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '';
+          const normalizedText = value => String(value || '').replace(/\s+/g, ' ').trim();
+          const visibleSurfaceValues = roots => {
+            const values = [];
+            const visible = node => {
+              const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+              if (!element) return false;
+              for (let current = element; current; current = current.parentElement) {
+                if (current.hasAttribute?.('hidden')) return false;
+                const style = getComputedStyle(current);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+              }
+              return true;
+            };
+            for (const root of roots.filter(Boolean)) {
+                  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                    const value = normalizedText(node.textContent);
+                    if (value && visible(node)) values.push({
+                      sink: 'text',
+                      value,
+                      element: node.parentElement?.outerHTML || '',
+                      technical: Boolean(node.parentElement?.closest?.('kbd, code, pre')),
+                    });
+                  }
+              for (const node of [root, ...root.querySelectorAll('*')]) {
+                if (!visible(node)) continue;
+                for (const attribute of ['title', 'aria-label', 'placeholder']) {
+                      const value = normalizedText(node.getAttribute?.(attribute));
+                      if (value) values.push({sink: attribute, value, element: node.outerHTML || ''});
+                }
+              }
+            }
+            return values;
+          };
+          const obviousSourceEnglishLeaks = (locale, catalog, values) => {
+            if (locale === 'en') return [];
+            const english = localeCatalogs.en;
+            const keysBySourceValue = new Map();
+            for (const [key, raw] of Object.entries(english)) {
+              if (typeof raw !== 'string') continue;
+              const source = normalizedText(raw);
+              if (!keysBySourceValue.has(source)) keysBySourceValue.set(source, []);
+              keysBySourceValue.get(source).push(key);
+            }
+            const candidates = [];
+            for (const [source, keys] of keysBySourceValue) {
+              // If any key intentionally retains this source value in the target catalog, it is a
+              // technical/proper-name value, not evidence of an untranslated visible sink.
+              if (keys.some(key => normalizedText(catalog[key]) === source)) continue;
+              const matchInsideValue = source.length >= 10
+                && !/[{}<>`\n]/.test(source)
+                && /[A-Za-z]{3,}\s+[A-Za-z]{3,}/.test(source);
+              candidates.push({source, keys, matchInsideValue});
+            }
+            const leaks = [];
+            for (const entry of values) {
+              if (entry.technical) continue;
+              for (const candidate of candidates) {
+                if (entry.value !== candidate.source
+                    && (!candidate.matchInsideValue || !entry.value.includes(candidate.source))) continue;
+                leaks.push({sink: entry.sink, value: entry.value, source: candidate.source, keys: candidate.keys.slice(0, 4), element: entry.element.slice(0, 600)});
+                if (leaks.length >= 12) return leaks;
+              }
+            }
+            return leaks;
+          };
+          const preservedState = () => {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = terminals.get('1');
+            const selectedRow = finder?.querySelector(`.file-tree-row[data-path="${selectedPath}"]`);
+            return {
+              finderConnected: finder?.isConnected === true,
+              finderRoot: fileExplorerRoot,
+              finderExpanded: fileExplorerExpanded.has('/home/test/project'),
+              finderSelected: fileExplorerSelectedPaths.has(selectedPath) && selectedRow?.classList.contains('selected') === true,
+              finderAnchor: fileExplorerSelectionAnchor,
+              editorConnected: editor?.isConnected === true,
+              editorViewPreserved: editor?._cmView === editorView,
+              editorText: editor?._cmView?.state.doc.toString() || '',
+              editorAnchor: editor?._cmView?.state.selection.main.anchor ?? -1,
+              editorHead: editor?._cmView?.state.selection.main.head ?? -1,
+              editorScrollTop: Math.round(editor?._cmView?.scrollDOM.scrollTop || 0),
+              terminalConnected: terminal?.term?.element?.isConnected === true,
+              terminalPreserved: terminal === terminalItem,
+              terminalText: terminal?.term?.element?.textContent || '',
+              };
+            };
+          const baselineState = preservedState();
+          const surfaceMatrix = {};
+          for (const [locale, catalog] of Object.entries(localeCatalogs)) {
+            await selectLocale(locale);
+            await frame();
+            await frame();
+            const help = keyboardShortcutsNode;
+            const stats = panelNodes.get(debugPaneItemId);
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = panelNodes.get('1');
+            const expectedChartTitles = jsDebugGraphChartGroups.map(group => catalog[group.labelKey]);
+            surfaceMatrix[locale] = {
+              activeLocale: i18nActiveLocale,
+              resolvedHelpHeading: t('shortcuts.title'),
+              helpHeading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+              helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
+              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+              languageTitle: document.querySelector('.topbar-language')?.title || '',
+              lang: document.documentElement.lang,
+              dir: document.documentElement.dir,
+              helpConnected: Boolean(help?.isConnected),
+              statsConnected: Boolean(stats?.isConnected),
+              state: preservedState(),
+              englishLeaks: obviousSourceEnglishLeaks(
+                locale,
+                catalog,
+                visibleSurfaceValues([help, stats, finder, editor, terminal]),
+              ),
+              expected: {
+                helpHeading: catalog['shortcuts.title'],
+                statsTitle: catalog['tab.debug'],
+                chartTitles: expectedChartTitles,
+                languageTitle: catalog['language.switcher'],
+              },
+            };
+          }
+          await selectLocale('zh-Hant');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const help = keyboardShortcutsNode;
+          const helpText = help?.textContent || '';
+          const stats = panelNodes.get(debugPaneItemId);
+          const statsText = stats?.textContent || '';
+          const zhHant = {
+            heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+            sections: Array.from(help?.querySelectorAll('.keyboard-shortcuts-section h3') || []).map(node => node.textContent),
+            englishLeak: /Agent status glyphs|Color meanings|Icon meanings|YO button meanings|Menus, palettes, and pickers|Open selected file or folder/.test(helpText),
+            markerTexts: Array.from(help?.querySelectorAll('.session-yolo-marker') || []).map(node => node.textContent),
+            statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+            chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+            statsEnglishLeak: /Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|Graph bucket size|Graph time range/.test(statsText),
+          };
+          await selectLocale('he');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          done({
+            beforeHeading,
+            codeMirrorLocaleState,
+            baselineState,
+            surfaceMatrix,
+            zhHant,
+            hebrew: {
+              heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+              dir: document.documentElement.dir,
+            },
+          });
+        })().catch(error => done({error: String(error), stack: error?.stack || ''}));
+        """,
+        locale_catalogs,
+        selected_path,
+    )
+    assert "error" not in metrics, metrics
+    assert set(metrics["surfaceMatrix"]) == set(locale_catalogs), metrics
+    expected_editor_text = "\n".join(f"STATE_{index:02d}_{'X' * 160}" for index in range(1, 49))
+    expected_editor_anchor = expected_editor_text.index("STATE_24") + 5
+    assert metrics["baselineState"] == {
+        "finderConnected": True,
+        "finderRoot": "/home/test",
+        "finderExpanded": True,
+        "finderSelected": True,
+        "finderAnchor": selected_path,
+        "editorConnected": True,
+        "editorViewPreserved": True,
+        "editorText": expected_editor_text,
+        "editorAnchor": expected_editor_anchor,
+        "editorHead": expected_editor_anchor + 4,
+        "editorScrollTop": metrics["baselineState"]["editorScrollTop"],
+        "terminalConnected": True,
+        "terminalPreserved": True,
+        "terminalText": "TERM_STATE_137",
+    }, metrics["baselineState"]
+    assert metrics["baselineState"]["editorScrollTop"] > 0
+    assert metrics["codeMirrorLocaleState"]["before"]["scrollTop"] == 81, metrics["codeMirrorLocaleState"]
+    assert metrics["codeMirrorLocaleState"]["before"]["scrollLeft"] > 0, metrics["codeMirrorLocaleState"]
+    assert metrics["codeMirrorLocaleState"]["after"] == metrics["codeMirrorLocaleState"]["before"], metrics["codeMirrorLocaleState"]
+    for locale, surface in metrics["surfaceMatrix"].items():
+        assert surface["activeLocale"] == locale, (locale, surface)
+        assert surface["helpHeading"] == surface["expected"]["helpHeading"], (locale, surface)
+        assert surface["helpAria"] == surface["expected"]["helpHeading"], (locale, surface)
+        assert surface["statsTitle"] == surface["expected"]["statsTitle"], (locale, surface)
+        assert set(surface["expected"]["chartTitles"]).issubset(set(surface["chartTitles"])), (locale, surface)
+        assert surface["languageTitle"] == surface["expected"]["languageTitle"], (locale, surface)
+        assert surface["lang"] == locale, (locale, surface)
+        assert surface["dir"] == ("rtl" if locale in {"ar", "he"} else "ltr"), (locale, surface)
+        assert surface["helpConnected"] is True and surface["statsConnected"] is True, (locale, surface)
+        assert surface["state"] == metrics["baselineState"], (locale, surface["state"], metrics["baselineState"])
+        assert surface["englishLeaks"] == [], json.dumps({"locale": locale, "leaks": surface["englishLeaks"]}, indent=2)
+    assert metrics["beforeHeading"] == "Phím tắt", metrics
+    assert metrics["zhHant"]["heading"] == "鍵盤快速鍵", metrics
+    assert {"代理狀態圖示", "顏色含義", "圖示含義", "優按鈕含義"}.issubset(set(metrics["zhHant"]["sections"])), metrics
+    assert metrics["zhHant"]["englishLeak"] is False, metrics
+    assert metrics["zhHant"]["markerTexts"] and set(metrics["zhHant"]["markerTexts"]) == {"優"}, metrics
+    assert metrics["zhHant"]["statsTitle"] == "優!統計", metrics
+    assert {"用戶端延遲", "用戶端 API 與 SSE/秒", "用戶端頻寬/秒", "代理狀態", "代理權杖/分鐘"}.issubset(set(metrics["zhHant"]["chartTitles"])), metrics
+    assert metrics["zhHant"]["statsEnglishLeak"] is False, metrics
+    assert metrics["hebrew"]["heading"] == "קיצורי מקלדת", metrics
+    assert metrics["hebrew"]["statsTitle"] == "YO!stats", metrics
+    assert "זמן אחזור לקוח" in metrics["hebrew"]["chartTitles"], metrics
+    assert metrics["hebrew"]["dir"] == "rtl", metrics
 
 
 def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser, tmp_path):
@@ -3085,8 +3494,27 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 backend: 'claude',
                 phase: 'delta',
                 content: Array.from({length: 24}, (_, index) => `streamed line ${index + 1}: working through the activity context`).join('\\n'),
-                auxiliary_lines: ['thinking: scanning recent events', 'thinking: reading activity context', 'thinking: final synthesis', 'tool output: command: collected files'],
-                auxiliary_preview: 'thinking: reading activity context\\nthinking: final synthesis\\ntool output: command: collected files',
+                stream_items: [
+                  {
+                    kind: 'thinking',
+                    text: 'thinking: scanning recent events\\nthinking: reading activity context\\nthinking: final synthesis',
+                    eventKind: 'hidden_work_delta',
+                    labelKey: 'yoagent.stream.thinking',
+                    labelParams: {},
+                    fallback: 'thinking',
+                    sourceIndex: 0,
+                  },
+                  {
+                    kind: 'tool',
+                    text: 'tool output: command: collected files',
+                    eventKind: 'tool_output',
+                    labelKey: 'yoagent.stream.toolOutput',
+                    labelParams: {tool: 'command'},
+                    fallback: 'tool output: command',
+                    toolName: 'command',
+                    sourceIndex: 1,
+                  },
+                ],
                 hidden_work_active: true,
                 tool_active: true,
               });
@@ -3166,7 +3594,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
         assert metrics["inputDisabled"] is False, (label, metrics)
         assert metrics["thinkingDetailsOpen"] is False, (label, metrics)
         assert metrics["toolDetailsOpen"] is False, (label, metrics)
-        assert metrics["auxPreviewText"] == "thinking: reading activity context thinking: final synthesis", (label, metrics)
+        assert metrics["auxPreviewText"] == "thinking: scanning recent events thinking: reading activity context thinking: final synthesis", (label, metrics)
         assert metrics["toolPreviewText"] == "tool output: command: collected files", (label, metrics)
         assert "thinking: reading activity context" in metrics["auxStreamText"], (label, metrics)
         assert "tool output: command: collected files" not in metrics["auxStreamText"], (label, metrics)
@@ -3383,7 +3811,7 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         "attentionHasStop": True,
         "attentionControlsVisible": True,
         "attentionReasonWrapsAroundControls": True,
-        "terminalTitle": "terminal",
+        "terminalTitle": "Term",
         "testTitle": "notifications enabled",
     }, metrics
     navigation = browser.execute_async_script(
@@ -6136,7 +6564,7 @@ def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser
     assert after["head"] == setup["head"], after
     assert after["selectedChars"] > 100, after
     assert after["contextMenus"] == 1, after
-    assert f"{after['selectedChars']} chars" in after["status"], after
+    assert f"{after['selectedChars']} selected chars" in after["status"], after
 
 
 def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser, tmp_path):
@@ -8103,8 +8531,8 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["allWidth"] <= 38
     assert metrics["countText"] == "3/102"
     assert metrics["countColor"] != "rgb(0, 0, 0)"
-    assert metrics["nextTitle"] == "Next match (Enter)"
-    assert metrics["previousTitle"] == "Previous match (Shift+Enter)"
+    assert metrics["nextTitle"] == "下一项 (Enter)"
+    assert metrics["previousTitle"] == "上一项 (Shift+Enter)"
     assert 0 <= metrics["searchFirstToggleGap"] <= 8
     assert 0 <= metrics["toggleCountGap"] <= 10
     assert metrics["previousNextGap"] <= 6
@@ -8672,12 +9100,22 @@ def codemirror_search_panel_fixture_html():
         <script>
           (function() {{
             const CM = window.YOLOmuxCodeMirror;
-            const exts = CM.search ? [CM.search()] : [];
+            const phrases = {{
+              Find: '查找', Replace: '替换', next: '下一项', previous: '上一项', all: '全部',
+              'match case': '区分大小写', regexp: '正则表达式', 'by word': '全字匹配',
+              replace: '替换', 'replace all': '全部替换', close: '关闭',
+            }};
+            const exts = [CM.EditorState.phrases.of(phrases), ...(CM.search ? [CM.search()] : [])];
             const view = new CM.EditorView({{
               state: CM.EditorState.create({{doc: "hello world\\nfind me\\n", extensions: exts}}),
               parent: document.getElementById('cm-host'),
             }});
             CM.openSearchPanel(view);
+            const panel = document.querySelector('.cm-search');
+            for (const button of panel.querySelectorAll('.cm-button[name="select"], .cm-button[name="replaceAll"]')) {{
+              button.dataset.searchLabel = phrases.all;
+            }}
+            panel.querySelector('label:has(input[name="word"])').dataset.searchLabel = '全字';
           }})();
         </script>
       </body>
@@ -8716,6 +9154,43 @@ def test_codemirror_search_toggle_labels_collapse_to_glyph_not_overflow(browser,
     for lb in labels:
         assert lb["fontSize"] == "0px", f"toggle label native text must be hidden (font-size 0), got {lb['fontSize']}"
         assert lb["scrollWidth"] <= lb["boxWidth"] + 1, f"toggle label overflows its 24px box: {lb}"
+
+
+def test_codemirror_search_panel_uses_localized_phrases_and_generated_labels(browser, tmp_path):
+    load_codemirror_search_panel_fixture(browser, tmp_path)
+    labels = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.cm-search');
+            if (!panel) return false;
+            const select = panel.querySelector('.cm-button[name="select"]');
+            const replaceAll = panel.querySelector('.cm-button[name="replaceAll"]');
+            const word = panel.querySelector('label:has(input[name="word"])');
+            return {
+              find: panel.querySelector('input[name="search"]')?.placeholder,
+              replace: panel.querySelector('input[name="replace"]')?.placeholder,
+              select: select?.textContent,
+              replaceAll: replaceAll?.textContent,
+              matchCase: panel.querySelector('label:has(input[name="case"])')?.textContent,
+              regexp: panel.querySelector('label:has(input[name="re"])')?.textContent,
+              word: word?.textContent,
+              selectGenerated: getComputedStyle(select, '::before').content,
+              wordGenerated: getComputedStyle(word, '::after').content,
+            };
+            """
+        )
+    )
+    assert labels == {
+        "find": "查找",
+        "replace": "替换",
+        "select": "全部",
+        "replaceAll": "全部替换",
+        "matchCase": "区分大小写",
+        "regexp": "正则表达式",
+        "word": "全字匹配",
+        "selectGenerated": '"全部"',
+        "wordGenerated": '"全字"',
+    }
 
 
 def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp_path):

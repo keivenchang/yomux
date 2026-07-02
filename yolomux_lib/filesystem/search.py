@@ -209,9 +209,9 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
 def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
     root = paths._canonical_root(paths._validated_path(raw_root))
     if not root.exists():
-        raise paths.FilesystemError(f"path not found: {root}", status=404)
+        raise paths.FilesystemError.path_not_found(root)
     if not root.is_dir():
-        raise paths.FilesystemError(f"not a directory: {root}", status=400)
+        raise paths.FilesystemError.not_directory(root)
     max_results = _search_limit(limit)
     tokens = [token for token in str(query or "").split() if token]
     full_tree = bool(recursive) or bool(git_root_for_path(root))
@@ -373,9 +373,9 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     continue
                 results.append(entry)
     except PermissionError as exc:
-        raise paths.FilesystemError(str(exc), status=403) from exc
+        raise paths.FilesystemError.os_error(exc, status=403) from exc
     except OSError as exc:
-        raise paths.FilesystemError(str(exc), status=500) from exc
+        raise paths.FilesystemError.os_error(exc) from exc
     results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))
     if len(results) > max_results:
         truncated = True
@@ -396,7 +396,7 @@ def index_status(raw_root: str) -> dict[str, Any]:
     """Warm the persistent quick-open index for a root and report its build state."""
     root = paths._canonical_root(paths._validated_path(raw_root))
     if not root.is_dir():
-        raise paths.FilesystemError(f"not a directory: {root}", status=400)
+        raise paths.FilesystemError.not_directory(root)
     index = file_index.ensure_index(
         root,
         SEARCH_SKIP_DIRS,

@@ -450,13 +450,13 @@ async function runShareThemeSuite() {
     assert.equal(zeroAgentRow.includes('changes-file-agent'), false, 'C5: a file with no transcript attribution renders zero agent icons');
     const oneAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: ['codex'], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
     assert.ok(oneAgentRow.includes('agent-icon codex') && !oneAgentRow.includes('agent-icon claude'), 'C5: one agent renders exactly one icon');
-    assert.ok(/agent-icon codex"[^>]*aria-label="modified by Codex [^"]* ago"[^>]*title="modified by Codex [^"]* ago"/.test(oneAgentRow), 'C5: Codex icon hover names who modified the file and when');
+    assert.ok(/agent-icon codex"[^>]*aria-label="modified: Codex [^"]* ago"[^>]*title="modified: Codex [^"]* ago"/.test(oneAgentRow), 'C5: Codex icon hover names who modified the file and when');
     const twoAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: ['codex', 'claude'], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
     assert.ok(twoAgentRow.includes('agent-icon claude') && twoAgentRow.includes('agent-icon codex'), 'C5: a file touched by both agents renders both icons');
     assert.ok(twoAgentRow.indexOf('agent-icon claude') < twoAgentRow.indexOf('agent-icon codex'), 'C5: agent icons order Claude before Codex');
-    assert.ok(/changes-file-agent(?![^>]*title=)[^>]*aria-label="modified by Claude [^"]* ago, modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers without a generic native tooltip');
-    assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(twoAgentRow), 'C5: Claude icon hover names who modified the file and when');
-    assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: Codex icon hover stays contextual in multi-agent rows');
+    assert.ok(/changes-file-agent(?![^>]*title=)[^>]*aria-label="modified: Claude [^"]* ago, modified: Codex [^"]* ago"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers without a generic native tooltip');
+    assert.ok(/agent-icon claude"[^>]*title="modified: Claude [^"]* ago"/.test(twoAgentRow), 'C5: Claude icon hover names who modified the file and when');
+    assert.ok(/agent-icon codex"[^>]*title="modified: Codex [^"]* ago"/.test(twoAgentRow), 'C5: Codex icon hover stays contextual in multi-agent rows');
     const legacyAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
     assert.ok(legacyAgentRow.includes('agent-icon codex'), 'C5: legacy scalar agent payloads still render their icon');
     // C5: image rows carry size + relative path and DROP the native title (the rich hover preview replaces it);
@@ -476,20 +476,20 @@ async function runShareThemeSuite() {
     assert.ok(/selectFromClick\(row, id, event\)[\s\S]{0,180}updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)/.test(changedFilesSource), 'Differ shared controller selection routes through the Finder selection parent');
     assert.ok(/data-open-change-file[\s\S]{0,2200}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)[\s\S]*t\('contextmenu\.openInDiffer'\)[\s\S]*openChangedFileInDiff[\s\S]*\{userInitiated: true, openMode: 'diff'\}[\s\S]*t\('contextmenu\.openNewDiffEditor'\)[\s\S]*forceNewTab: true[\s\S]*openMode: 'diff'[\s\S]*t\('contextmenu\.openNewEditor'\)[\s\S]*openFileInAdditionalEditorTab/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu and orders Open in a Differ, Open in a new Differ, then Open in a new Editor');
     assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
-    assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| 'Open in new tab'[\s\S]*?appendContextMenuButton\(menu, multiple \? 'Copy relative paths' : 'Copy relative path'/.test(fileExplorerSource), 'Finder/Differ file context menu lists Open actions first and resolves dynamic Open labels before Copy actions');
+    assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
     assert.equal(changedFilesSource.includes('contextmenu.openDifferent'), false, 'Differ file context menu no longer uses dynamic different-editor labels');
     assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes session-files so Differ rows disappear immediately');
     assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
     const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
     const dirCtxBody = changedFilesSource.slice(dirCtxStart, changedFilesSource.indexOf('\nfunction ', dirCtxStart + 1));
-    for (const action of ['Copy relative path', 'Copy full path', 'Expand ']) {
-      assert.ok(dirCtxBody.includes(action), `C5: the changed-directory menu offers "${action}"`);
+    for (const action of ["t('contextmenu.copyRelativePath')", "t('contextmenu.copyFullPath')", "t('contextmenu.expandInFinder'"]) {
+      assert.ok(dirCtxBody.includes(action), `C5: the changed-directory menu routes ${action} through i18n`);
     }
     assert.ok(dirCtxBody.includes('copyChangedPath(rel || path'), 'C5: directory Copy relative path uses the folder-relative path when present');
     assert.ok(/function openChangedDirectoryInFinder\([\s\S]*?openFileExplorerPane\(\)[\s\S]*?setFileExplorerMode\('files'\)[\s\S]*?expandFileExplorerTreesToPath\(path\)[\s\S]*?selectFileTreePath\(path\)/.test(changedFilesSource), 'C5: Modified-files folder menu switches to Finder mode and expands the directory in-place');
     assert.equal(/'Open in new tab'|'Download'|'Rename'|'Delete'|"Open in new tab"|"Download"|"Rename"|"Delete"/.test(dirCtxBody), false, 'C5: the Modified-files folder menu stays directory-only and non-destructive');
     assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showFileTreeContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'right-click dispatches file rows through the shared Finder menu and folder rows through the directory menu');
-    assert.ok(changedFilesSource.includes("multiple ? 'Copy full paths' : 'Copy full path'"), 'Finder context menu uses Copy full path label');
+    assert.ok(fileExplorerSource.includes("multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'"), 'Finder context menu uses the localized Copy full path label');
     assert.equal(/Copy raw paths?/.test(fileExplorerSource), false, 'Finder context menu no longer exposes a duplicate raw path action');
     api.setSessionFilesPayloadForTest({
       session: '1',
@@ -1767,8 +1767,8 @@ async function runShareThemeSuite() {
     assert.equal(api.largestPaneSlotForFileEditor(['slot1']), 'slot2', 'file editor helpers choose the next biggest existing non-Finder pane');
 
     const delayHtml = api.preferencesPanelHtmlForTest('delay', ['Performance']);
-    assert.ok(delayHtml.includes('data-preference-section="Performance"'), 'delay search shows Performance');
-    assert.equal(/data-preference-section="Performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
+    assert.ok(delayHtml.includes('data-preference-section="performance"'), 'delay search shows Performance');
+    assert.equal(/data-preference-section="performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
     assert.ok(delayHtml.includes('Server SSE: editor file-change poll'), 'delay search surfaces server SSE timing settings');
     const preferencesCss = fs.readFileSync('static/yolomux.css', 'utf8');
     const preferencesJs = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2148,7 +2148,7 @@ async function runShareThemeSuite() {
     for (const group of ['tab', 'subwindow', 'acknowledgement']) {
       assert.equal((pulseExampleHtml.match(new RegExp(`data-status-pulse-example-group="${group}"`, 'g')) || []).length, 3, `Preferences ${group} example has working/play, cooldown/pause, and attention/stop states`);
     }
-    const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="YOLO"');
+    const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="yolo"');
     const yoloSectionEnd = preferencesHtml.indexOf('data-preference-section="', yoloSectionStart + 1);
     const yoloSectionHtml = preferencesHtml.slice(yoloSectionStart, yoloSectionEnd >= 0 ? yoloSectionEnd : undefined);
     assert.ok(yoloSectionHtml.includes('preferences-path-row preferences-path-row--section'), 'YOLO section contains the YOLO rules path row');
@@ -2189,8 +2189,8 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.tab_popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover timing remains in milliseconds');
     assert.ok(/data-setting-path="performance\.tab_popover_follow_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover follow timing remains in milliseconds');
     assert.ok(/data-setting-path="performance\.remote_resize_delay_ms"[\s\S]*?value="220"[\s\S]*?min="50"[\s\S]*?max="2000"[\s\S]*?step="10"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'remote resize client/server debounce displays milliseconds');
-    const performanceHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="Performance"'), preferencesHtml.indexOf('data-preference-section="GitHub"'));
-    const notificationsHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="Notifications"'), preferencesHtml.indexOf('data-preference-section="Finder"'));
+    const performanceHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="performance"'), preferencesHtml.indexOf('data-preference-section="github"'));
+    const notificationsHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="notifications"'), preferencesHtml.indexOf('data-preference-section="file_explorer"'));
     assert.ok(performanceHtml.includes('Server SSE: editor file-change poll'), 'Performance labels the server-side SSE editor file-change interval');
     assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
     assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
@@ -2322,7 +2322,7 @@ async function runShareThemeSuite() {
         assert.ok(new RegExp(`type="radio"[^>]*value="${value}"[^>]*data-setting-path="${pathPattern}"`).test(preferencesHtml), `${path} radio renders ${value}`);
       }
     }
-    assert.ok(preferencesHtml.includes('>Same Tab<'), 'string radio labels are humanized');
+    assert.ok(preferencesHtml.includes('>Same tab<'), 'string radio labels use their localized descriptor');
     assert.equal(/data-setting-path="appearance\.theme"[\s\S]{0,180}preferences-radio-swatches/.test(preferencesHtml), false, 'Global color theme radios do not show color swatches');
     assert.equal(/<select[^>]*data-setting-path="appearance\.active_color"/.test(preferencesHtml), false, 'Active color renders as radios, not a select');
     assert.equal(/<select[^>]*data-setting-path="appearance\.separator_color"/.test(preferencesHtml), false, 'Separator color renders as radios, not a select');
@@ -2344,7 +2344,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.panel-session-label \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'Info Bar YO buttons use the same square control radius');
     assert.ok(/\.pane-tab-core > \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'pane tab YO buttons keep the same square control radius');
     assert.equal(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-pill\)/.test(preferencesCss), false, 'YO button base chrome must not use the circular pill radius');
-    assert.ok(preferencesHtml.includes('>New Tab<'), 'hyphenated string radio labels are humanized');
+    assert.ok(preferencesHtml.includes('>New tab<'), 'hyphenated string radio labels use their localized descriptor');
     // "No agent" (deterministic) is no longer a selectable backend — Auto still falls back to it internally,
     // but it is never offered as a pick in Preferences or the composer pill.
     assert.equal(/data-setting-path="yoagent\.backend"[\s\S]*?value="deterministic"/.test(preferencesHtml), false, 'Preferences no longer offer No agent (deterministic) as a backend option');
@@ -2362,7 +2362,7 @@ async function runShareThemeSuite() {
     assert.ok(preferencesHtml.indexOf('YOLOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOLOmux light scheme remains ahead of GitHub Light');
     assert.equal(api.globalThemeModeForTest(), 'dark');
     assert.equal(api.globalThemeIsDark(), true, 'global theme defaults dark');
-    assert.equal(api.globalThemeLabel(), 'Dark');
+    assert.equal(api.globalThemeLabel(), 'Dark mode');
     assert.equal(api.nextGlobalThemeMode(), 'light');
     assert.equal(api.terminalThemeModeForTest(), 'follow-app', 'terminal theme defaults to follow-app (matches the global app theme)');
     assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app default gives a light terminal in light app mode');
@@ -2477,13 +2477,13 @@ async function runShareThemeSuite() {
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.ok(api.bodyClassListForTest().contains('theme-light'), 'global light theme marks the body');
     assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'global light theme tracks the resolved mode');
-    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Light', 'inherited editor theme follows global light (brand YOLOmux Light default)');
+    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Light Mode', 'inherited editor theme follows global light (brand YOLOmux Light default)');
     assert.equal(api.configuredEditorSchemeForMode(true), 'dark');
     assert.equal(api.configuredEditorSchemeForMode(false), 'yolomux-light');
     api.setGlobalThemeModeForTest('dark');
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.equal(api.fileEditorThemeModeForTest(), 'inherit');
-    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark');
+    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark mode');
     assert.equal(api.activeEditorSchemeForTest().activeLine, 'rgba(255, 255, 255, 0.04)');
     assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(96, 165, 250, 0.38)');
     assert.equal(api.activeEditorSchemeForTest().diff.addFg, '#56d364');
@@ -2861,7 +2861,7 @@ async function runShareThemeSuite() {
     const shellHtml = fs.readFileSync('yolomux_lib/web.py', 'utf8');
     assert.ok(shellHtml.includes('<section id="modal" class="modal app-modal-overlay">'), 'HTML shell routes About/share/transcript through the shared modal overlay parent');
     assert.ok(shellHtml.includes('<div class="modal-dialog">'), 'HTML shell gives the shared app modal a bounded dialog child');
-    assert.ok(shellHtml.includes('<button id="closeModal" title="Close" aria-label="Close">X</button>'), 'HTML shell renders the modal close button as X');
+    assert.ok(/<button id="closeModal"[^>]*>X<\/button>/.test(shellHtml) && shellHtml.includes('server_string(locale, "common.close")'), 'HTML shell renders the modal close button as X with localized title and aria-label');
     // File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
     const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
     api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
@@ -2984,7 +2984,7 @@ async function runShareThemeSuite() {
       assert.ok(/let activeShares = \[\]/.test(shareSource), 'YO!share tracks active shares as a list for concurrent shares');
       assert.ok(/function refreshActiveShare\(options = \{\}\)[\s\S]*setActiveShares\(normalizeShareListPayload[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'YO!share status refresh consumes the active share list and opens per-token host sockets');
       assert.ok(/function shareStatusSurfaceVisible\(\)[\s\S]*document\.visibilityState === 'hidden'[\s\S]*shareViewerBanner\?\.isConnected[\s\S]*shareStatusPill\?\.isConnected[\s\S]*shareModalIsVisible\(\)[\s\S]*data-share-viewer-duration/.test(shareSource), 'YO!share per-second status DOM updates are gated to visible share surfaces');
-      assert.ok(/function renderShareManageView\(errorText = ''\)[\s\S]*share-create-panel[\s\S]*shareCreateFormHtml[\s\S]*share-active-panel[\s\S]*share-entry-list/.test(shareSource), 'YO!share manage view sections New share before Active share URLs');
+      assert.ok(/function renderShareManageView\(\)[\s\S]*share-create-panel[\s\S]*shareCreateFormHtml[\s\S]*share-active-panel[\s\S]*share-entry-list/.test(shareSource), 'YO!share manage view sections New share before Active share URLs');
       assert.ok(/function shareEntryHtml\(share\)[\s\S]*share-url-primary[\s\S]*share-url-primary-head[\s\S]*<span class="share-url-control">[\s\S]*<input type="text" readonly value="\$\{esc\(share\.url\)\}" data-share-secret>[\s\S]*share-url-copy-button[\s\S]*data-share-copy[\s\S]*data-share-secret/.test(shareSource), 'YO!share manage rows make the active URL prominent while keeping the copy icon immediately beside a redacted URL input');
       const replayRegistrationFindings = source => {
         const checks = [
@@ -3111,12 +3111,13 @@ async function runShareThemeSuite() {
       assert.equal(shareSource.includes("scope: 'pane'"), false, 'M7: pane-relative pointer fallback is removed after mirror-frame geometry');
       assert.ok(/function shareScrollPayloadForElement\(element\)[\s\S]*target: descriptor\.target[\s\S]*anchor[\s\S]*head/.test(shareSource), 'M5: share scroll payloads carry editor scroll and selection state through one helper');
       assert.ok(/function shareScrollTargetForElement\(element\)[\s\S]*element\.closest\('#info-content'\)[\s\S]*target: 'info'/.test(shareSource), 'YO!info scroll is a mirrored share scroll target');
-      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*scrollTop = top[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
+      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
       assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
       assert.ok(/shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{/.test(shareSource), 'DOIT.67: share viewers remember the last host scroll frame and payload for local-scroll restoration');
-      assert.ok(/function restoreShareReadonlyScrollTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareLastAppliedScrollByTarget\.get\(descriptor\.target\)[\s\S]*descriptor\.element\.scrollTop = top/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target directly to the last host-authored value');
+      assert.ok(/function shareReadonlyScrollStateForTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareLastAppliedScrollByTarget\.get\(descriptor\.target\)[\s\S]*function restoreShareReadonlyScrollTarget\(target\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target through the shared host-scroll snapshot');
       assert.equal(shareSource.includes('shareLastAppliedScrollPayloadByTarget'), false, 'share scroll restore state uses one target-keyed map');
-      assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareLastAppliedScrollByTarget\.get\(cleanTarget\)[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*scrollTop = payload\.top/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
+      assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareLastAppliedScrollByTarget\.get\(cleanTarget\)[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, payload\.top, payload\.left\)/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
+      assert.ok(/function applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*scrollTop = top[\s\S]*scrollLeft = left[\s\S]*requestMeasure/.test(shareSource), 'host editor scroll uses one shared setter that refreshes virtualized CodeMirror rows');
       assert.ok(/function scheduleShareScrollRestoreByKey\(target, options = \{\}\)[\s\S]*shareScrollRestoreFrameTimers\.set\(cleanTarget, state\)[\s\S]*requestAnimationFrame\(run\)/.test(shareSource), 'readonly share scroll restore retries across render frames');
       assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'host scroll frames schedule replay even when the current DOM scroller is not ready');
       assert.ok(/function shareScrollStateSnapshot\(\)[\s\S]*shareScrollPayloadForElement\(element\)/.test(shareSource), 'full UI-state snapshots reuse the shared scroll payload helper instead of inventing a second scroll format');
@@ -3807,6 +3808,11 @@ async function runShareThemeSuite() {
       roApi.blockShareReadonlyInteraction(scroll);
       assert.equal(scroller.scrollTop, 123, 'read-only local scroll is restored to the last host scrollTop');
       assert.equal(scroller.scrollLeft, 4, 'read-only local scroll is restored to the last host scrollLeft');
+      assert.equal(scroll.immediateStopped, true, 'read-only local scroll is stopped before mirrored widgets consume it');
+      const hostScroll = eventFor('scroll');
+      hostScroll.target = scroller;
+      roApi.blockShareReadonlyInteraction(hostScroll);
+      assert.equal(hostScroll.immediateStopped, false, 'host-authored scroll at the mirrored position reaches virtualized widgets');
       assert.deepStrictEqual({...roApi.shareLastAppliedScrollPayloadForTest('editor:file:/tmp/a.md:editor')}, {
         kind: 'editor',
         path: '/tmp/a.md',
@@ -5004,7 +5010,17 @@ async function runShareThemeSuite() {
     assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools'), true, 'Finder indexed directories are tracked by exact path');
     assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools/src'), false, 'Finder compacts redundant child index marks under an indexed ancestor');
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/repo/workspace')), ['/repo/workspace', '/repo/other', '/repo/tools'], 'file quick-open adds indexed Finder directories and compacts nested search roots');
-    assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed', 'file quick-open placeholder summarizes indexed search scope');
+    assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed roots', 'file quick-open placeholder summarizes indexed search scope with the plural locale family');
+    const localizedScopeApi = loadYolomux('', ['1']);
+    localizedScopeApi.i18nSetCatalogForTest('fr', {
+      'palette.scope.indexedRoot.one': '{path} + {count} racine indexée',
+      'palette.scope.indexedRoot.other': '{path} + {count} racines indexées',
+    });
+    localizedScopeApi.setActiveLocaleForTest('fr');
+    localizedScopeApi.setFileExplorerIndexedDirsForTest(['/repo/tools']);
+    assert.equal(localizedScopeApi.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 1 racine indexée', 'quick-open scope selects the localized singular indexed-root form');
+    localizedScopeApi.setFileExplorerIndexedDirsForTest(['/repo/tools', '/repo/other']);
+    assert.equal(localizedScopeApi.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 racines indexées', 'quick-open scope selects the localized plural indexed-root form');
     api.setFileQuickOpenCandidatesForTest('/repo/workspace', [
       {name: 'target.md', path: '/home/test/dynamo/notes/target.md', relative_path: 'target.md', indexed_root: '/home/test/dynamo/notes'},
       {name: 'target.md', path: '/repo/workspace/docs/target.md', relative_path: 'docs/target.md', indexed_root: '/repo/workspace'},
@@ -5193,6 +5209,11 @@ async function runShareThemeSuite() {
         'pane.details.show': '顯示資訊列',
       },
     };
+    const sourcePaneInfoLabels = {
+      'menu.tmux.paneDetails': 'Info Bar',
+      'pane.details.hide': 'hide Info Bar',
+      'pane.details.show': 'show Info Bar',
+    };
     for (const localeFile of paneInfoLocaleFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${localeFile}`, 'utf8'));
       for (const key of ['menu.tmux.paneDetails', 'pane.details.hide', 'pane.details.show']) {
@@ -5200,10 +5221,12 @@ async function runShareThemeSuite() {
         if (localizedPaneInfoLabels[localeFile]) {
           assert.equal(value, localizedPaneInfoLabels[localeFile][key], `W5: ${localeFile} ${key} localizes the pane metadata bar label`);
           assert.equal(value.includes('Info Bar'), false, `W5: ${localeFile} ${key} does not leak English Info Bar`);
+        } else if (localeFile === 'en.json') {
+          assert.equal(value, sourcePaneInfoLabels[key], `W5: ${localeFile} ${key} keeps the source Info Bar label`);
         } else {
-          assert.ok(value.includes('Info Bar'), `W5: ${localeFile} ${key} names the pane metadata bar Info Bar`);
+          assert.notEqual(value, sourcePaneInfoLabels[key], `W5: ${localeFile} ${key} translates the pane metadata bar label`);
+          assert.equal(value.includes('Info Bar'), false, `W5: ${localeFile} ${key} does not leak English Info Bar`);
         }
-        assert.equal(/details/i.test(value), false, `W5: ${localeFile} ${key} no longer uses Details for the pane metadata bar`);
       }
     }
     const sourceEnCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
@@ -5322,7 +5345,7 @@ async function runShareThemeSuite() {
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.rootMode.fixed'], undefined, 'Finder toolbar no longer carries a Root mode title');
     const serverShell = fs.readFileSync('yolomux_lib/web.py', 'utf8');
     assert.ok(serverShell.includes('id="fileExplorerRootMode"'));
-    assert.ok(serverShell.includes('>Sync</button>'), 'Server-rendered Finder root toggle starts as Sync');
+    assert.ok(serverShell.includes('id="fileExplorerRootMode"') && serverShell.includes('server_string(locale, "finder.toolbar.syncLabel")'), 'Server-rendered Finder root toggle starts with the localized Sync label');
     assert.equal(serverShell.includes('>Root</button>'), false, 'Server-rendered Finder root toggle must not flash Root before JS runs');
     const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
     assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
@@ -5658,8 +5681,8 @@ async function runShareThemeSuite() {
     assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').textContent.includes('+13/-5'), false, 'Finder changed ancestors do not append combined numstat inline');
     assert.ok(/changes-diff-add[^>]*>\+13<\/span>[\s\S]*changes-diff-remove[^>]*>-5<\/span>/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-diff').innerHTML), 'Finder changed ancestors render aggregate numstat through the shared diff element with colored spans');
     assert.ok(/changes-diff-add[^>]*>\+8<\/span>/.test(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-diff').innerHTML), 'Finder changed ancestors omit zero remove counts through the shared file diff helper');
-    assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Claude marker hover names who modified it and when');
-    assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Codex marker hover names who modified it and when');
+    assert.ok(/agent-icon claude"[^>]*title="modified: Claude [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Claude marker hover names who modified it and when');
+    assert.ok(/agent-icon codex"[^>]*title="modified: Codex [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Codex marker hover names who modified it and when');
     assert.equal(
       ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').nextElementSibling,
       ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent'),
@@ -6528,7 +6551,7 @@ async function runShareThemeSuite() {
     assert.equal(boundaryIntent.zone, 'right');
     api.showDropPreview(boundaryIntent);
     assert.ok(api.gridForTest().classList.contains('drop-preview-root'), 'outer-edge session drags show a root full-span preview');
-    assert.equal(api.gridForTest().dataset.dropLabel, 'full right');
+    assert.equal(api.gridForTest().dataset.dropLabel, 'Full right');
     api.clearDropPreview();
     assert.equal(api.gridForTest().classList.contains('drop-preview-root'), false);
     assert.equal('dropLabel' in api.gridForTest().dataset, false);
@@ -6546,7 +6569,7 @@ async function runShareThemeSuite() {
     assert.equal(gutterIntent.splitPath, '');
     api.showDropPreview(gutterIntent);
     assert.ok(api.gridForTest().classList.contains('drop-preview-gutter'), 'split-bar session drags show a full-span gutter preview');
-    assert.equal(api.gridForTest().dataset.dropLabel, 'full span');
+    assert.equal(api.gridForTest().dataset.dropLabel, 'Full span');
     assert.ok(api.gridForTest().style.getPropertyValue('--drop-preview-width'), 'gutter preview geometry is explicit');
     api.clearDropPreview();
 

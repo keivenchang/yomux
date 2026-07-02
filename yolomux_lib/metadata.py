@@ -31,6 +31,7 @@ from .github_client import github_pull_request_url
 from .github_client import pull_request_status_label  # noqa: F401 - re-exported for existing metadata callers
 from .github_client import summarize_github_checks  # noqa: F401 - re-exported for existing metadata callers
 from .linear_client import linear_issue_metadata
+from .locales import message_fields
 from .session_files import session_touched_dirs
 from .settings import settings_payload
 from .workdir import numbered_session_workdir
@@ -1008,7 +1009,22 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_netw
         "session": info.session,
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
-        "agents": [asdict(agent) for agent in info.agents],
+        "agents": [
+            {
+                **asdict(agent),
+                **(
+                    message_fields(
+                        "error",
+                        "transcript.error.unavailable",
+                        agent.error,
+                        {"error": agent.error},
+                    )
+                    if agent.error
+                    else {}
+                ),
+            }
+            for agent in info.agents
+        ],
         "window_metadata": window_metadata(info, include_git=include_metadata),
         "transcript_mtime": transcript_mtime,
         "project": session_project_metadata(info, metadata_cache, allow_network=allow_network) if include_metadata else empty_project_metadata(loading=True),

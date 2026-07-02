@@ -181,8 +181,11 @@ def test_bash_prompt_handler_truncates_command_without_crashing(monkeypatch):
     assert worker.approved == 1
     assert worker.error is None
     assert worker.last_action.startswith("approved bash: curl -sk -u")
+    assert worker.status()["last_action_key"] == "yolo.status.approvedBash"
+    assert worker.status()["last_action_params"]["description"].startswith("curl -sk -u")
     assert events[0][1] == "approval_approved"
     assert events[0][3]["command"] == "curl -sk -u yolomux:yolomux https://localhost:19077/"
+    assert events[0][3]["message_key"] == "yolo.status.approvedBash"
 
 
 def test_bash_prompt_decline_sends_no_option(monkeypatch):
@@ -298,7 +301,11 @@ def test_process_once_self_stops_after_repeated_missing_capture():
         "6",
         "worker_stopped",
         "auto approve stopped because the tmux session vanished",
-        {"failures": auto_approve_worker.AUTO_APPROVE_MISSING_CAPTURE_LIMIT},
+        {
+            "failures": auto_approve_worker.AUTO_APPROVE_MISSING_CAPTURE_LIMIT,
+            "message_key": "events.message.yolo.sessionVanished",
+            "message_params": {},
+        },
     )]
 
 
@@ -410,7 +417,12 @@ def test_run_retries_expected_poll_error(monkeypatch):
 
     assert worker.error == "tmux vanished"
     assert worker.last_action == "auto approve error"
-    assert events == [("6", "worker_error", "auto approve error", {"error": "tmux vanished"})]
+    assert events == [(
+        "6",
+        "worker_error",
+        "auto approve error",
+        {"error": "tmux vanished", "message_key": "yolo.status.autoApproveError", "message_params": {}},
+    )]
 
 
 def test_run_does_not_swallow_programming_error(monkeypatch):

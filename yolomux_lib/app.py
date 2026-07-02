@@ -54,6 +54,7 @@ from .activity_summary import yoagent_context_lines
 from .activity_summary import yoagent_question_requests_work_next
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
+from .auto_approve_worker import auto_approve_lock_message_fields
 from .auto_approve_worker import auto_approve_lock_owner
 from .background_owner import BACKGROUND_ROLE_SEARCH_INDEX
 from .background_owner import BACKGROUND_ROLE_SESSION_FILES
@@ -88,6 +89,11 @@ from .common import WATCH_INDEX_PATH
 from .common import YOLOMUX_VERSION
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
+from .locales import LANGUAGE_PREFERENCES
+from .locales import message_descriptor
+from .locales import message_fields
+from .locales import normalize_locale
+from .locales import user_message_payload
 from .common import as_dict
 from .common import next_numbered_session_name
 from .common import project_git
@@ -181,11 +187,14 @@ from .yoagent.preferences import yoagent_operator_response
 from .yoagent.preferences import parse_settings_read
 from .yoagent.preferences import parse_settings_write
 from .yoagent.preferences import product_state_needs_activity
+from .yoagent.preferences import yoagent_user_message_text
 from .yoagent.skills import delete_user_skill_file
 from .yoagent.skills import list_user_skill_files
 from .yoagent.skills import load_yoagent_skills
 from .yoagent.skills import read_user_skill_file
+from .yoagent.skills import skill_validation_payload
 from .yoagent.skills import write_user_skill_file
+from .yoagent.skills import YoagentSkillValidationError
 from .yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
 from .yoagent.transports import CodexAppServerSession
 from .yoagent.transports import default_yoagent_transport_registry
@@ -202,7 +211,6 @@ from .yoagent.backends import yoagent_activity_payload_signature
 from .yoagent.backends import yoagent_cli_auth_failure
 from .yoagent.backends import yoagent_cli_fallback_reason
 from .yoagent.backends import yoagent_language_directive
-from .yoagent.backends import yoagent_response_details
 from .yoagent.controller import YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS
 from .yoagent.controller import YOAGENT_ACTION_AGENT_KINDS
 from .yoagent.controller import YOAGENT_ACTION_PREVIEW_TTL_SECONDS
@@ -670,6 +678,19 @@ class PendingInputHeartbeat:
 
 def session_files_batch_worker_count(count: int) -> int:
     return max(1, min(SESSION_FILES_BATCH_MAX_WORKERS, count))
+
+
+def tmux_command_failure_payload(session: str, diagnostic: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "session": session,
+        **fields,
+        "diagnostic": diagnostic,
+        **user_message_payload(
+            "terminal.window.failed",
+            diagnostic,
+            error=message_descriptor("common.requestFailed", "request failed"),
+        ),
+    }
 
 
 def add_phase_timing(timings: dict[str, float] | None, key: str, started: float) -> None:
@@ -1198,9 +1219,6 @@ class YoagentAppDeps:
     def strip_yoagent_stream_hidden_thinking(self, text: str) -> tuple[str, bool]:
         return strip_yoagent_stream_hidden_thinking(text)
 
-    def yoagent_response_details(self, response: dict[str, Any]) -> str:
-        return yoagent_response_details(response)
-
     def yoagent_cli_fallback_reason(self, backend: str, error: str) -> str:
         return yoagent_cli_fallback_reason(backend, error)
 
@@ -1343,7 +1361,7 @@ class TmuxWebtermApp:
         self.client_event_next_watched_pr_poll_at = 0.0
         self.client_event_next_yoagent_job_poll_at = 0.0
         self.activity_summary_lock = threading.RLock()
-        self.activity_summary_cache: dict[str, dict[str, Any]] = {}
+        self.activity_summary_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self.transcripts_payload_cache_lock = threading.RLock()
         self.transcripts_payload_cache: tuple[float, dict[str, Any]] | None = None
         self.transcripts_payload_refreshing = False
@@ -1397,7 +1415,8 @@ class TmuxWebtermApp:
         # The standard "unknown session -> 404" guard. Decorated handlers use requires_known_session();
         # payload-driven helpers and non-HTTP response shapes keep explicit checks.
         if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
         return None
 
     def stats_history_next_sequence_locked(self) -> int:
@@ -2299,16 +2318,22 @@ class TmuxWebtermApp:
 
     def record_stats_history_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         if not isinstance(payload, dict):
-            return {"error": "payload must be an object"}, HTTPStatus.BAD_REQUEST
+            return user_message_payload("request.error.object", "payload must be an object", field="payload"), HTTPStatus.BAD_REQUEST
         now = time.time()
         client_id = stats_history_client_id(payload.get("client_id", payload.get("client", "")))
         records = payload.get("records", [])
         if records is None:
             records = []
         if not isinstance(records, list):
-            return {"error": "records must be a list"}, HTTPStatus.BAD_REQUEST
+            return user_message_payload("request.error.list", "records must be a list", field="records"), HTTPStatus.BAD_REQUEST
         if len(records) > STATS_HISTORY_POST_MAX_RECORDS:
-            return {"error": f"records limit is {STATS_HISTORY_POST_MAX_RECORDS}"}, HTTPStatus.BAD_REQUEST
+            diagnostic = f"records limit is {STATS_HISTORY_POST_MAX_RECORDS}"
+            return user_message_payload(
+                "request.error.tooManyItems",
+                diagnostic,
+                field="records",
+                max=STATS_HISTORY_POST_MAX_RECORDS,
+            ), HTTPStatus.BAD_REQUEST
         try:
             since = int(payload.get("since") or 0)
         except (TypeError, ValueError):
@@ -2733,7 +2758,13 @@ class TmuxWebtermApp:
                     else:
                         self.record_stats_global_sample(trigger="sampler")
                 except (OSError, RuntimeError, ValueError) as exc:
-                    self.log_event(None, "stats_history_error", f"Stats history sample failed: {exc}", {})
+                    self.log_event(
+                        None,
+                        "stats_history_error",
+                        f"Stats history sample failed: {exc}",
+                        {"diagnostic": str(exc)},
+                        message_key="events.message.statsHistory.sampleFailed",
+                    )
                 elapsed = max(0.0, time.monotonic() - started)
                 if self.stats_history_sampler_stop_event.wait(max(0.1, STATS_HISTORY_SAMPLER_SECONDS - elapsed)):
                     return
@@ -2822,15 +2853,33 @@ class TmuxWebtermApp:
         acquired = self.background_owner.start()
         self.merge_shared_stats_history(max_age_seconds=None)
         if not acquired and self.background_owner.status == "blocked_by_unreachable_owner":
-            self.log_event(None, "background_owner_blocked", "Background owner takeover blocked", self.background_owner.status_payload())
+            self.log_event(
+                None,
+                "background_owner_blocked",
+                "Background owner takeover blocked",
+                self.background_owner.status_payload(),
+                message_key="events.message.backgroundOwner.blocked",
+            )
         return acquired
 
     def handle_background_owner_acquired(self, status: dict[str, Any]) -> None:
         transition = str(status.get("last_transition") or "acquired")
         if transition == "takeover":
-            self.log_event(None, "background_owner_takeover", "Background owner moved to this server", status.get("last_transition_details", {}))
+            self.log_event(
+                None,
+                "background_owner_takeover",
+                "Background owner moved to this server",
+                status.get("last_transition_details", {}),
+                message_key="events.message.backgroundOwner.takeover",
+            )
         else:
-            self.log_event(None, "background_owner_acquired", "Background owner acquired by this server", status.get("generation", {}))
+            self.log_event(
+                None,
+                "background_owner_acquired",
+                "Background owner acquired by this server",
+                status.get("generation", {}),
+                message_key="events.message.backgroundOwner.acquired",
+            )
         self.warm_start_session_files_payload_cache()
         self.warm_start_tabber_activity_cache()
         self.merge_shared_stats_history(max_age_seconds=None)
@@ -2855,7 +2904,9 @@ class TmuxWebtermApp:
             "status": status_payload,
         }
         if not ok:
-            payload["error"] = str(status_payload.get("last_error") or "background owner takeover failed")
+            diagnostic = str(status_payload.get("last_error") or "background owner takeover failed")
+            payload.update(user_message_payload("common.requestFailed", diagnostic))
+            payload["diagnostic"] = diagnostic
             return payload, HTTPStatus.CONFLICT
         return payload, HTTPStatus.OK
 
@@ -2872,7 +2923,13 @@ class TmuxWebtermApp:
         was_owner = self.background_owner.is_owner()
         self.background_owner.release_owner("control_release")
         if was_owner:
-            self.log_event(None, "background_owner_released", "Background owner released for another server", {"requester": requester})
+            self.log_event(
+                None,
+                "background_owner_released",
+                "Background owner released for another server",
+                {"requester": requester},
+                message_key="events.message.backgroundOwner.released",
+            )
         return {"ok": True, "owner": False, "status": self.background_owner.status_payload()}
 
     def background_refresh_should_fallback(self, result: dict[str, Any]) -> bool:
@@ -2904,7 +2961,13 @@ class TmuxWebtermApp:
         recorder = getattr(self.background_owner, "record_fallback", None)
         if callable(recorder):
             recorder(role)
-        self.log_event(None, "background_refresh_fallback", "Background owner refresh fallback engaged", {"role": role, "result": result, "payload": payload or {}})
+        self.log_event(
+            None,
+            "background_refresh_fallback",
+            "Background owner refresh fallback engaged",
+            {"role": role, "result": result, "payload": payload or {}},
+            message_key="events.message.backgroundOwner.refreshFallback",
+        )
 
     def request_background_refresh(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         started = time.perf_counter()
@@ -2940,6 +3003,7 @@ class TmuxWebtermApp:
                     role,
                     "Background refresh accepted by local owner",
                     self.background_refresh_event_details(role, request_payload, extra={"source": "owner-request"}),
+                    message_key="events.message.backgroundRefresh.accepted",
                 )
                 if role == BACKGROUND_ROLE_SESSION_FILES and ("session" in request_payload or "cache_key_data" in request_payload):
                     result["refreshing"] = self.start_requested_session_files_cache_refresh(request_payload)
@@ -3300,8 +3364,8 @@ class TmuxWebtermApp:
             "inactivePaneOpacity": (0, 100),
         }
         string_fields: dict[str, set[str]] = {
-            "locale": {"en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr", "en-XA"},
-            "languagePref": {"system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr", "en-XA"},
+            "locale": set(LANGUAGE_PREFERENCES - {"system"}),
+            "languagePref": set(LANGUAGE_PREFERENCES),
             "theme": {"dark", "light", "system"},
             "resolvedTheme": {"dark", "light"},
             "terminalTheme": {"dark", "light", "follow-app"},
@@ -3525,16 +3589,31 @@ class TmuxWebtermApp:
     ) -> tuple[dict[str, Any], HTTPStatus]:
         share_sessions, bad_session = self.normalize_share_session_list(session, sessions)
         if bad_session:
-            return {"session": bad_session, "error": f"unknown session: {bad_session}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {bad_session}"
+            return {
+                "session": bad_session,
+                **user_message_payload("share.error.unknownSession", diagnostic, session=bad_session),
+            }, HTTPStatus.NOT_FOUND
         if not share_sessions:
-            return {"session": "", "error": "at least one tmux session is required"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "at least one tmux session is required"
+            return {"session": "", **user_message_payload("share.error.sessionRequired", diagnostic)}, HTTPStatus.BAD_REQUEST
         primary_session = share_sessions[0]
         bounded_ttl = self.bounded_share_ttl_seconds(ttl_seconds)
         if bounded_ttl is None:
-            return {"session": primary_session, "sessions": share_sessions, "error": "ttl must be a positive number of seconds"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "ttl must be a positive number of seconds"
+            return {
+                "session": primary_session,
+                "sessions": share_sessions,
+                **user_message_payload("share.error.ttlPositive", diagnostic),
+            }, HTTPStatus.BAD_REQUEST
         bounded_viewers = self.bounded_share_max_viewers(max_viewers)
         if bounded_viewers is None:
-            return {"session": primary_session, "sessions": share_sessions, "error": "max_viewers must be a positive integer"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "max_viewers must be a positive integer"
+            return {
+                "session": primary_session,
+                "sessions": share_sessions,
+                **user_message_payload("share.error.maxViewersPositive", diagnostic),
+            }, HTTPStatus.BAD_REQUEST
         requested_mode = self.normalize_share_mode(mode, read_only=read_only)
         requested_scheme = self.normalize_share_scheme(scheme, base_url=base_url)
         if not tls_available:
@@ -3542,7 +3621,12 @@ class TmuxWebtermApp:
             share_scheme = "http"
         elif requested_mode == "rw":
             if requested_scheme != "https" or not request_is_https:
-                return {"session": primary_session, "sessions": share_sessions, "error": "write shares require https"}, HTTPStatus.BAD_REQUEST
+                diagnostic = "write shares require https"
+                return {
+                    "session": primary_session,
+                    "sessions": share_sessions,
+                    **user_message_payload("share.error.writeHttps", diagnostic),
+                }, HTTPStatus.BAD_REQUEST
             share_mode = "rw"
             share_scheme = "https"
         else:
@@ -3636,7 +3720,12 @@ class TmuxWebtermApp:
     def share_status_payload(self, token: str, *, base_url: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         record = self.verify_share_token(token)
         if record is None:
-            return {"ok": False, "active": False, "error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+            diagnostic = "share token expired or revoked"
+            return {
+                "ok": False,
+                "active": False,
+                **user_message_payload("share.error.tokenExpired", diagnostic),
+            }, HTTPStatus.UNAUTHORIZED
         clean_token = str(record.get("token") or token or "")
         return self.share_payload_for_record(clean_token, record, base_url) | {"shares": []}, HTTPStatus.OK
 
@@ -3671,9 +3760,11 @@ class TmuxWebtermApp:
     def record_share_debug_profile(self, token: str, payload: dict[str, Any], *, ip: str = "", user_agent: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         raw_token = str(token or "")
         if not raw_token:
-            return {"ok": False, "error": "share token required"}, HTTPStatus.UNAUTHORIZED
+            diagnostic = "share token required"
+            return {"ok": False, **user_message_payload("share.error.tokenRequired", diagnostic)}, HTTPStatus.UNAUTHORIZED
         if not isinstance(payload, dict):
-            return {"ok": False, "error": "debug profile payload must be an object"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "debug profile payload must be an object"
+            return {"ok": False, **user_message_payload("share.error.debugProfileObject", diagnostic)}, HTTPStatus.BAD_REQUEST
         now = time.time()
         clean_payload = self.redact_share_debug_profile_value(payload)
         event: dict[str, Any] | None = None
@@ -3683,9 +3774,11 @@ class TmuxWebtermApp:
                 if not hmac.compare_digest(stored_token, raw_token):
                     continue
                 if record.get("revoked") or not self.share_record_sessions_are_active(record):
-                    return {"ok": False, "error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+                    diagnostic = "share token expired or revoked"
+                    return {"ok": False, **user_message_payload("share.error.tokenExpired", diagnostic)}, HTTPStatus.UNAUTHORIZED
                 if not bool(record.get("debug_profile")):
-                    return {"ok": False, "error": "debug/profiling upload is not enabled for this share"}, HTTPStatus.FORBIDDEN
+                    diagnostic = "debug/profiling upload is not enabled for this share"
+                    return {"ok": False, **user_message_payload("share.error.debugProfileDisabled", diagnostic)}, HTTPStatus.FORBIDDEN
                 event = {
                     "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "share_id": str(record.get("short_id") or ""),
@@ -3703,7 +3796,8 @@ class TmuxWebtermApp:
                 del events[:-SHARE_DEBUG_PROFILE_EVENT_LIMIT]
                 break
         if event is None:
-            return {"ok": False, "error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+            diagnostic = "share token expired or revoked"
+            return {"ok": False, **user_message_payload("share.error.tokenExpired", diagnostic)}, HTTPStatus.UNAUTHORIZED
         logged, log_detail = self.append_share_debug_profile_event(event)
         result = {
             "ok": True,
@@ -3718,10 +3812,12 @@ class TmuxWebtermApp:
     def extend_share_token(self, token_or_short_id: str, add_seconds: Any = 600, *, base_url: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         target = str(token_or_short_id or "").strip()
         if not target:
-            return {"ok": False, "error": "share token or id required"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "share token or id required"
+            return {"ok": False, **user_message_payload("share.error.tokenOrIdRequired", diagnostic)}, HTTPStatus.BAD_REQUEST
         bounded_add = self.bounded_share_ttl_seconds(add_seconds)
         if bounded_add is None:
-            return {"ok": False, "error": "extension must be a positive number of seconds"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "extension must be a positive number of seconds"
+            return {"ok": False, **user_message_payload("share.error.extensionPositive", diagnostic)}, HTTPStatus.BAD_REQUEST
         now = time.time()
         with self.share_tokens_lock:
             for token, record in self.active_share_entries_locked(now):
@@ -3734,7 +3830,8 @@ class TmuxWebtermApp:
                 max_expires_at = now + SHARE_TOKEN_MAX_TTL_SECONDS
                 record["expires_at"] = min(max_expires_at, current_expires_at + bounded_add)
                 return self.share_payload_for_record(token, record, base_url) | {"extended": True}, HTTPStatus.OK
-        return {"ok": False, "error": "share token expired or revoked"}, HTTPStatus.NOT_FOUND
+        diagnostic = "share token expired or revoked"
+        return {"ok": False, **user_message_payload("share.error.tokenExpired", diagnostic)}, HTTPStatus.NOT_FOUND
 
     def http_allowed_share_is_active(self) -> bool:
         now = time.time()
@@ -3782,7 +3879,8 @@ class TmuxWebtermApp:
     def register_share_viewer(self, token: str, session: str = "", viewer_id: str = "", ip: str = "", user_agent: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         raw_token = str(token or "")
         if not raw_token:
-            return {"error": "share token required"}, HTTPStatus.UNAUTHORIZED
+            diagnostic = "share token required"
+            return user_message_payload("share.error.tokenRequired", diagnostic), HTTPStatus.UNAUTHORIZED
         requested_session = str(session or "").strip()
         clean_viewer_id = self.normalize_share_viewer_id(viewer_id)
         now = time.time()
@@ -3798,14 +3896,17 @@ class TmuxWebtermApp:
                     continue
                 share_sessions = self.share_record_sessions(record)
                 if requested_session and requested_session not in share_sessions:
-                    return {"error": "share token is scoped to a different session"}, HTTPStatus.FORBIDDEN
+                    diagnostic = "share token is scoped to a different session"
+                    return user_message_payload("share.error.differentSession", diagnostic), HTTPStatus.FORBIDDEN
                 if record.get("revoked") or not self.share_record_sessions_are_active(record):
-                    return {"error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+                    diagnostic = "share token expired or revoked"
+                    return user_message_payload("share.error.tokenExpired", diagnostic), HTTPStatus.UNAUTHORIZED
                 viewer_ids = self.share_record_viewer_ids(record)
                 viewers = len(viewer_ids)
                 max_viewers = int(record.get("max_viewers") or 0)
                 if clean_viewer_id not in viewer_ids and max_viewers > 0 and viewers >= max_viewers:
-                    return {"error": "share viewer limit reached"}, HTTPStatus.FORBIDDEN
+                    diagnostic = "share viewer limit reached"
+                    return user_message_payload("share.error.viewerLimitReached", diagnostic), HTTPStatus.FORBIDDEN
                 current = viewer_ids.get(clean_viewer_id)
                 if not current:
                     current = {
@@ -3830,7 +3931,8 @@ class TmuxWebtermApp:
                 result["viewers"] = record["viewers"]
                 result["viewer_details"] = self.share_record_viewer_details(record)
                 return result, HTTPStatus.OK
-        return {"error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+        diagnostic = "share token expired or revoked"
+        return user_message_payload("share.error.tokenExpired", diagnostic), HTTPStatus.UNAUTHORIZED
 
     def unregister_share_viewer(self, token: str, viewer_id: str = "") -> int:
         raw_token = str(token or "")
@@ -4402,28 +4504,49 @@ class TmuxWebtermApp:
         root = str(common.PROJECT_ROOT)
         plan = ["git pull --ff-only origin main", "install or download xterm assets", "python3 tools/static_build.py", "restart server"]
         if dryrun:
-            return {"ok": True, "dryrun": True, "restarting": False, "plan": plan,
-                    "message": "dryrun: nothing pulled, server not restarted"}
+            diagnostic = "dryrun: nothing pulled, server not restarted"
+            return {
+                "ok": True,
+                "dryrun": True,
+                "restarting": False,
+                "plan": plan,
+                **user_message_payload("update.result.dryRun", diagnostic),
+            }
         pull = common.git(["pull", "--ff-only", "origin", "main"], root)
         if pull.returncode != 0:
             # Never force: a dirty/diverged ("read-only") checkout must not be clobbered.
-            return {"ok": False, "dryrun": False, "restarting": False, "plan": plan,
-                    "error": (pull.stderr or "git pull --ff-only failed").strip()[:400],
-                    "message": "update blocked: checkout is not a clean fast-forward; sync it manually"}
+            diagnostic = (pull.stderr or "git pull --ff-only failed").strip()[:400]
+            return {
+                "ok": False,
+                "dryrun": False,
+                "restarting": False,
+                "plan": plan,
+                **user_message_payload("update.result.blocked", diagnostic),
+            }
         assets_ready, assets_error = ensure_xterm_runtime_assets(root)
         if not assets_ready:
-            return {"ok": False, "dryrun": False, "restarting": False, "plan": plan,
-                    "error": assets_error,
-                    "message": "updated, but xterm assets are unavailable; install dependencies before restarting"}
+            return {
+                "ok": False,
+                "dryrun": False,
+                "restarting": False,
+                "plan": plan,
+                **user_message_payload("update.result.assetsUnavailable", assets_error),
+            }
         try:
             subprocess.run(["python3", "tools/static_build.py"], cwd=root,
                            capture_output=True, text=True, timeout=120, check=False)
         except Exception:
             pass
         restarting = self._spawn_self_restart()
-        return {"ok": True, "dryrun": False, "restarting": restarting, "plan": plan,
-                "message": "updated; restarting now" if restarting
-                           else "updated; restart spawn failed; restart the server manually"}
+        diagnostic = "updated; restarting now" if restarting else "updated; restart spawn failed; restart the server manually"
+        key = "update.result.restarting" if restarting else "update.result.restartFailed"
+        return {
+            "ok": True,
+            "dryrun": False,
+            "restarting": restarting,
+            "plan": plan,
+            **user_message_payload(key, diagnostic),
+        }
 
     def _resolved_self_restart_argv(self, root: Path) -> list[str]:
         executable = sys.executable or "python3"
@@ -4678,7 +4801,7 @@ class TmuxWebtermApp:
     def normalized_client_activity_summary(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
             return {}
-        locale = str(value.get("locale") or "en").strip() or "en"
+        locale = normalize_locale(value.get("locale"))
         visible = value.get("visible") is True
         scope = self.normalized_activity_session_scope(value.get("scope"))
         hours = session_files.bounded_session_files_hours(self.float_value(value.get("hours"), 24.0))
@@ -5289,7 +5412,13 @@ class TmuxWebtermApp:
         self.client_watch_wake_event.set()
 
     def log_tmux_signal_event_error(self, message: str) -> None:
-        self.log_event(None, "tmux_signal_event_error", message, {})
+        self.log_event(
+            None,
+            "tmux_signal_event_error",
+            message,
+            {"diagnostic": message},
+            message_key="events.message.tmuxSignalEvent.watchFailed",
+        )
 
     def start_tmux_signal_event_watcher(self) -> bool:
         with self.client_watch_lock:
@@ -5373,7 +5502,13 @@ class TmuxWebtermApp:
         try:
             self.poll_client_events_once()
         except (OSError, RuntimeError, ValueError) as exc:
-            self.log_event(None, "client_event_watch_error", f"client directory event watch failed: {exc}", {})
+            self.log_event(
+                None,
+                "client_event_watch_error",
+                f"client directory event watch failed: {exc}",
+                {"diagnostic": str(exc)},
+                message_key="events.message.clientEvent.directoryWatchFailed",
+            )
         finally:
             with self.client_watch_lock:
                 self.client_directory_poll_running = False
@@ -5408,7 +5543,13 @@ class TmuxWebtermApp:
                         self.poll_yoagent_jobs_once()
                         self.client_event_next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
                 except (OSError, RuntimeError, ValueError) as exc:
-                    self.log_event(None, "client_event_watch_error", f"client event watch failed: {exc}", {})
+                    self.log_event(
+                        None,
+                        "client_event_watch_error",
+                        f"client event watch failed: {exc}",
+                        {"diagnostic": str(exc)},
+                        message_key="events.message.clientEvent.watchFailed",
+                    )
                 if self.client_watch_wake_event.wait(self.client_event_watch_sleep_seconds(time.monotonic())):
                     self.client_watch_wake_event.clear()
         finally:
@@ -5589,7 +5730,13 @@ class TmuxWebtermApp:
             self.session_files_disk_prune_last_result = result
             self.session_files_disk_prune_running = False
         if result.get("removed_entries"):
-            self.log_event(None, "session_files_cache_pruned", "Session-files disk cache pruned", result)
+            self.log_event(
+                None,
+                "session_files_cache_pruned",
+                "Session-files disk cache pruned",
+                result,
+                message_key="events.message.sessionFiles.cachePruned",
+            )
 
     def request_session_files_disk_cache_prune(self, reason: str = "") -> bool:
         now = time.monotonic()
@@ -5870,6 +6017,8 @@ class TmuxWebtermApp:
             BACKGROUND_ROLE_SESSION_FILES,
             "Session-files background refresh started",
             refresh_details,
+            message_key="events.message.backgroundRefresh.started",
+            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
         )
         try:
             self.compute_session_files_cache_entry(
@@ -5892,6 +6041,8 @@ class TmuxWebtermApp:
                 BACKGROUND_ROLE_SESSION_FILES,
                 "Session-files background refresh finished",
                 done_details,
+                message_key="events.message.backgroundRefresh.finished",
+                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
             )
             self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
         finally:
@@ -5914,6 +6065,8 @@ class TmuxWebtermApp:
             BACKGROUND_ROLE_SESSION_FILES,
             "Session-files background refresh started",
             refresh_details,
+            message_key="events.message.backgroundRefresh.started",
+            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
         )
         try:
             self.compute_session_files_cache_entry(
@@ -5928,6 +6081,8 @@ class TmuxWebtermApp:
                 BACKGROUND_ROLE_SESSION_FILES,
                 "Session-files background refresh finished",
                 done_details,
+                message_key="events.message.backgroundRefresh.finished",
+                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
             )
             self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
         finally:
@@ -6078,7 +6233,7 @@ class TmuxWebtermApp:
         to_ref: str | None = None,
         repo_refs: dict[str, dict[str, str]] | None = None,
         force: bool = False,
-        extra_errors: list[str] | None = None,
+        extra_errors: list[str | dict[str, Any]] | None = None,
     ) -> tuple[SessionFilesPayload, HTTPStatus]:
         started = time.perf_counter()
         cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
@@ -6194,7 +6349,11 @@ class TmuxWebtermApp:
                     "refreshing": False,
                 }
         payload = copy.deepcopy(payload)
-        payload["errors"] = [*(extra_errors or []), *payload.get("errors", [])]
+        structured_extra_errors = [
+            value if isinstance(value, dict) else message_descriptor("diff.warning.discovery", value, {"error": value})
+            for value in (extra_errors or [])
+        ]
+        payload["errors"] = [*structured_extra_errors, *payload.get("errors", [])]
         payload["cache"] = cache_meta
         self.record_performance_sample(
             BACKGROUND_ROLE_SESSION_FILES,
@@ -6277,6 +6436,8 @@ class TmuxWebtermApp:
                     "watched_pr_truncated",
                     f"watched PR list capped: {truncated} entries beyond the limit are not polled",
                     {"truncated": truncated},
+                    message_key="info.watched.truncated",
+                    message_params={"count": truncated},
                 )
         return {
             "watched_prs": result["watched_prs"],
@@ -6307,6 +6468,7 @@ class TmuxWebtermApp:
         files_payload: dict[str, Any],
         summary: dict[str, Any],
         recent_events: list[dict[str, Any]] | None = None,
+        locale: str = "en",
     ) -> dict[str, Any]:
         selected = info.selected_pane
         agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
@@ -6325,7 +6487,7 @@ class TmuxWebtermApp:
             "ci": pull_request.get("checks") if isinstance(pull_request, dict) and isinstance(pull_request.get("checks"), dict) else None,
             "linear": project.get("linear") if isinstance(project.get("linear"), list) else [],
             "files": summary.get("files") if isinstance(summary.get("files"), dict) else {},
-            "recent_paths": build_recent_agents_payload({session: info}, [session], session_files_by_session={session: files_payload}),
+            "recent_paths": build_recent_agents_payload({session: info}, [session], session_files_by_session={session: files_payload}, locale=locale),
             "latest_summary": truncate_text(latest_summary, 1200),
             "latest_summary_updated_ts": max(0.0, self.float_value(rolling.get("updated_ts"), 0.0)),
             "recent_events": recent_events if recent_events is not None else self.event_log.tail(session=session, limit=5),
@@ -6333,7 +6495,7 @@ class TmuxWebtermApp:
         }
 
     def activity_summary_payload(self, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
-        locale = str(locale or "en").strip() or "en"
+        locale = normalize_locale(locale)
         session_names, scope_errors, scope = self.activity_session_names(session_scope)
         bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
         sessions, errors = discover_sessions(session_names)
@@ -6358,12 +6520,13 @@ class TmuxWebtermApp:
                 files_payload = self.cached_session_files_payload_for_info(info, hours=bounded_hours)
                 session_files_by_session[session] = files_payload
                 signature = activity_signature(info, project, files_payload)
-                cached = self.activity_summary_cache.get(session)
+                cache_key = (locale, session)
+                cached = self.activity_summary_cache.get(cache_key)
                 if cached and cached.get("signature") == signature:
                     summary = dict(cached["summary"])
                 else:
-                    summary = build_session_activity_summary(info, project, files_payload)
-                    self.activity_summary_cache[session] = {"signature": signature, "summary": summary}
+                    summary = build_session_activity_summary(info, project, files_payload, locale=locale)
+                    self.activity_summary_cache[cache_key] = {"signature": signature, "summary": summary}
                     summary = dict(summary)
                 self.attach_yoagent_session_summary(session, summary)
                 summaries[session] = summary
@@ -6375,10 +6538,11 @@ class TmuxWebtermApp:
                     files_payload,
                     summary,
                     recent_events=recent_events_by_session.get(session, []),
+                    locale=locale,
                 )
-            for session in list(self.activity_summary_cache):
-                if session not in sessions:
-                    self.activity_summary_cache.pop(session, None)
+            for cache_key in list(self.activity_summary_cache):
+                if cache_key[1] not in sessions:
+                    self.activity_summary_cache.pop(cache_key, None)
         generated = datetime.now(timezone.utc)
         rolling_updated = self.latest_yoagent_session_summary_updated_ts()
         return {
@@ -6388,8 +6552,8 @@ class TmuxWebtermApp:
             "sessions": summaries,
             "session_info": session_info,
             "agents": self.tabber_activity_agents_snapshot(force=force),
-            "global": build_global_activity_summary(ordered_summaries, errors),
-            "capabilities": yoagent_capabilities_payload(),
+            "global": build_global_activity_summary(ordered_summaries, errors, locale=locale),
+            "capabilities": yoagent_capabilities_payload(locale),
             "errors": errors,
             "locale": locale,
             "session_scope": scope,
@@ -6475,12 +6639,28 @@ class TmuxWebtermApp:
             if name:
                 return {"ok": True, "file": read_user_skill_file(kind or "skill", name), "skills": self.yoagent_skills_payload()}, HTTPStatus.OK
             return list_user_skill_files(), HTTPStatus.OK
+        except YoagentSkillValidationError as exc:
+            return {"kind": kind, "name": name, **skill_validation_payload(exc)}, HTTPStatus.BAD_REQUEST
         except ValueError as exc:
-            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+            return {
+                "kind": kind,
+                "name": name,
+                "diagnostic": str(exc),
+                **user_message_payload("yoagent.skill.error.invalid", "Invalid skill file."),
+            }, HTTPStatus.BAD_REQUEST
         except FileNotFoundError:
-            return {"kind": kind, "name": name, "error": "skill file not found"}, HTTPStatus.NOT_FOUND
+            return {
+                "kind": kind,
+                "name": name,
+                **user_message_payload("yoagent.skill.error.notFound", f"Skill file `{name}` was not found.", name=name),
+            }, HTTPStatus.NOT_FOUND
         except OSError as exc:
-            return {"kind": kind, "name": name, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {
+                "kind": kind,
+                "name": name,
+                "diagnostic": str(exc),
+                **user_message_payload("yoagent.skill.error.readFailed", f"Could not read `{name}`: {exc}", source=name, error=str(exc)),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
 
     def upsert_yoagent_skill_file(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         kind = str(payload.get("kind") or "skill")
@@ -6488,15 +6668,34 @@ class TmuxWebtermApp:
         text = str(payload.get("text") or payload.get("content") or "")
         try:
             item = write_user_skill_file(kind, name, text)
+        except YoagentSkillValidationError as exc:
+            return {"kind": kind, "name": name, **skill_validation_payload(exc)}, HTTPStatus.BAD_REQUEST
         except ValueError as exc:
-            return {"kind": kind, "name": name, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+            return {
+                "kind": kind,
+                "name": name,
+                "diagnostic": str(exc),
+                **user_message_payload("yoagent.skill.error.invalid", "Invalid skill file."),
+            }, HTTPStatus.BAD_REQUEST
         except OSError as exc:
-            return {"kind": kind, "name": name, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR
-        self.log_event(None, "yoagent_skill_file_upserted", f"YO!agent skill file updated: {item.get('path')}", {
-            "kind": item.get("kind"),
-            "name": item.get("name"),
-            "path": item.get("path"),
-        })
+            return {
+                "kind": kind,
+                "name": name,
+                "diagnostic": str(exc),
+                **user_message_payload("yoagent.skill.error.writeFailed", f"Could not write skill file `{name}`.", name=name),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
+        self.log_event(
+            None,
+            "yoagent_skill_file_upserted",
+            f"YO!agent skill file updated: {item.get('path')}",
+            {
+                "kind": item.get("kind"),
+                "name": item.get("name"),
+                "path": item.get("path"),
+            },
+            message_key="yoagent.skill.reply.updated",
+            message_params={"kind": item.get("kind"), "name": item.get("name"), "path": item.get("path")},
+        )
         self.publish_client_event("yoagent_skills_changed", {"kind": item.get("kind"), "name": item.get("name"), "path": item.get("path")}, trigger="yoagent_skill_file", cache="ready")
         return {"ok": True, "file": item, "skills": self.yoagent_skills_payload()}, HTTPStatus.OK
 
@@ -6505,64 +6704,91 @@ class TmuxWebtermApp:
         name = str(payload.get("name") or payload.get("file") or "")
         try:
             item = delete_user_skill_file(kind, name)
+        except YoagentSkillValidationError as exc:
+            return {"kind": kind, "name": name, **skill_validation_payload(exc)}, HTTPStatus.BAD_REQUEST
         except ValueError as exc:
-            return {"kind": kind, "name": name, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+            return {
+                "kind": kind,
+                "name": name,
+                "diagnostic": str(exc),
+                **user_message_payload("yoagent.skill.error.invalid", "Invalid skill file."),
+            }, HTTPStatus.BAD_REQUEST
         except FileNotFoundError:
-            return {"kind": kind, "name": name, "error": "skill file not found"}, HTTPStatus.NOT_FOUND
+            return {
+                "kind": kind,
+                "name": name,
+                **user_message_payload("yoagent.skill.error.notFound", f"Skill file `{name}` was not found.", name=name),
+            }, HTTPStatus.NOT_FOUND
         except OSError as exc:
-            return {"kind": kind, "name": name, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR
-        self.log_event(None, "yoagent_skill_file_deleted", f"YO!agent skill file deleted: {item.get('path')}", {
-            "kind": item.get("kind"),
-            "name": item.get("name"),
-            "path": item.get("path"),
-        })
+            return {
+                "kind": kind,
+                "name": name,
+                "diagnostic": str(exc),
+                **user_message_payload("yoagent.skill.error.deleteFailed", f"Could not delete skill file `{name}`.", name=name),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
+        self.log_event(
+            None,
+            "yoagent_skill_file_deleted",
+            f"YO!agent skill file deleted: {item.get('path')}",
+            {
+                "kind": item.get("kind"),
+                "name": item.get("name"),
+                "path": item.get("path"),
+            },
+            message_key="yoagent.skill.reply.deleted",
+            message_params={"kind": item.get("kind"), "name": item.get("name"), "path": item.get("path")},
+        )
         self.publish_client_event("yoagent_skills_changed", {"kind": item.get("kind"), "name": item.get("name"), "path": item.get("path"), "deleted": True}, trigger="yoagent_skill_file", cache="ready")
         return {"ok": True, "file": item, "skills": self.yoagent_skills_payload()}, HTTPStatus.OK
 
-    def yoagent_skill_file_answer(self, intent: dict[str, Any]) -> str:
+    def yoagent_skill_file_answer(self, intent: dict[str, Any], locale: str = "en") -> str:
         operation = str(intent.get("operation") or "")
         kind = str(intent.get("kind") or "skill")
         name = str(intent.get("name") or "")
         if operation == "list":
             payload, status = self.yoagent_skill_files_payload()
             if status != HTTPStatus.OK:
-                return f"I could not list YO!skills: {payload.get('error') or status.phrase}."
+                error = yoagent_user_message_text(locale, payload, "common.requestFailed")
+                return server_string(locale, "yoagent.skill.reply.listFailed", error=error)
             dirs = payload.get("user_dirs") if isinstance(payload.get("user_dirs"), dict) else {}
             skills_payload = self.yoagent_skills_payload()
             builtin_dirs = skills_payload.get("builtin_dirs") if isinstance(skills_payload.get("builtin_dirs"), dict) else {}
             files = [item for item in payload.get("files", []) if isinstance(item, dict)]
-            rows = [f"- `{item.get('kind')}` `{item.get('name')}` at `{item.get('path')}`" for item in files[:20]]
-            body = "\n".join(rows) if rows else "- No user-local YO!skill or context files exist yet."
+            rows = [server_string(locale, "yoagent.skill.reply.listItem", kind=item.get("kind"), name=item.get("name"), path=item.get("path")) for item in files[:20]]
+            body = "\n".join(rows) if rows else server_string(locale, "yoagent.skill.reply.listEmpty")
             return "\n".join([
-                "User-local YO!skills and context files:",
+                server_string(locale, "yoagent.skill.reply.listHeading"),
                 "",
-                f"- built-in skills: `{builtin_dirs.get('skills') or ''}`",
-                f"- built-in context: `{builtin_dirs.get('context') or ''}`",
-                f"- skills: `{dirs.get('skills') or ''}`",
-                f"- context: `{dirs.get('context') or ''}`",
+                server_string(locale, "yoagent.skill.reply.directory", label=server_string(locale, "yoagent.skill.reply.builtinSkills"), path=builtin_dirs.get("skills") or ""),
+                server_string(locale, "yoagent.skill.reply.directory", label=server_string(locale, "yoagent.skill.reply.builtinContext"), path=builtin_dirs.get("context") or ""),
+                server_string(locale, "yoagent.skill.reply.directory", label=server_string(locale, "yoagent.skill.reply.userSkills"), path=dirs.get("skills") or ""),
+                server_string(locale, "yoagent.skill.reply.directory", label=server_string(locale, "yoagent.skill.reply.userContext"), path=dirs.get("context") or ""),
                 "",
                 body,
             ])
         if operation == "read":
             payload, status = self.yoagent_skill_files_payload(kind, name)
             if status != HTTPStatus.OK:
-                return f"I could not read `{name}`: {payload.get('error') or status.phrase}."
+                error = yoagent_user_message_text(locale, payload, "common.requestFailed")
+                return server_string(locale, "yoagent.skill.reply.readFailed", name=name, error=error)
             item = payload.get("file") if isinstance(payload.get("file"), dict) else {}
             text = truncate_text(str(item.get("text") or ""), 4000)
-            return f"Read `{item.get('path')}`:\n\n```text\n{text}\n```"
+            return server_string(locale, "yoagent.skill.reply.read", path=item.get("path"), text=text)
         if operation == "delete":
             payload, status = self.delete_yoagent_skill_file({"kind": kind, "name": name})
             if status != HTTPStatus.OK:
-                return f"I could not delete `{name}`: {payload.get('error') or status.phrase}."
+                error = yoagent_user_message_text(locale, payload, "common.requestFailed")
+                return server_string(locale, "yoagent.skill.reply.deleteFailed", name=name, error=error)
             item = payload.get("file") if isinstance(payload.get("file"), dict) else {}
-            return f"Deleted user-local `{item.get('kind')}` `{item.get('name')}` at `{item.get('path')}`."
+            return server_string(locale, "yoagent.skill.reply.deleted", kind=item.get("kind"), name=item.get("name"), path=item.get("path"))
         if operation == "upsert":
             payload, status = self.upsert_yoagent_skill_file({"kind": kind, "name": name, "text": intent.get("text") or ""})
             if status != HTTPStatus.OK:
-                return f"I could not update `{name}`: {payload.get('error') or status.phrase}."
+                error = yoagent_user_message_text(locale, payload, "common.requestFailed")
+                return server_string(locale, "yoagent.skill.reply.updateFailed", name=name, error=error)
             item = payload.get("file") if isinstance(payload.get("file"), dict) else {}
-            return f"Updated user-local `{item.get('kind')}` `{item.get('name')}` at `{item.get('path')}`."
-        return "I could not determine which YO!skill file operation to perform."
+            return server_string(locale, "yoagent.skill.reply.updated", kind=item.get("kind"), name=item.get("name"), path=item.get("path"))
+        return server_string(locale, "yoagent.skill.reply.unknownOperation")
 
     def yoagent_conversation_payload(self) -> dict[str, Any]:
         messages = yoagent_conversation.load_messages()
@@ -6583,7 +6809,11 @@ class TmuxWebtermApp:
                     and str(item.get("id")) not in active_action_ids
                 ):
                     item["status"] = "expired"
-                    item["status_text"] = "action expired; ask again to create a fresh send"
+                    item.update(message_fields(
+                        "status_text",
+                        "yoagent.action.status.expired",
+                        "action expired; ask again to create a fresh send",
+                    ))
                 next_actions.append(item)
             message["actions"] = next_actions
         return {
@@ -6605,10 +6835,11 @@ class TmuxWebtermApp:
         kind: str = "",
         session: str = "",
         details: str = "",
+        detail_rows: list[dict[str, Any]] | None = None,
         response_ms: float | None = None,
         auxiliary_lines: list[str] | None = None,
         auxiliary_preview: str = "",
-        stream_items: list[dict[str, str]] | None = None,
+        stream_items: list[dict[str, Any]] | None = None,
         auxiliary_done: bool = False,
         auxiliary_truncated: bool = False,
     ) -> dict[str, Any] | None:
@@ -6622,6 +6853,8 @@ class TmuxWebtermApp:
             message["session"] = session
         if details:
             message["details"] = redacted_action_text(str(details), 10_000)
+        if detail_rows:
+            message["detailRows"] = detail_rows
         if isinstance(response_ms, (int, float)) and float(response_ms) > 0:
             message["responseMs"] = round(float(response_ms), 3)
         clean_auxiliary_lines = [redacted_action_text(str(line or ""), None) for line in (auxiliary_lines or []) if str(line or "").strip()]
@@ -6653,7 +6886,7 @@ class TmuxWebtermApp:
         events: list[dict[str, Any]] | None = None,
         auxiliary_lines: list[str] | None = None,
         auxiliary_preview: str = "",
-        stream_items: list[dict[str, str]] | None = None,
+        stream_items: list[dict[str, Any]] | None = None,
         hidden_work_active: bool = False,
         tool_active: bool = False,
         auxiliary_done: bool = False,
@@ -6689,7 +6922,7 @@ class TmuxWebtermApp:
     def yoagent_stream_auxiliary_message_fields(self, stream_id: str) -> dict[str, Any]:
         return self.yoagent_streams.auxiliary_message_fields(stream_id)
 
-    def sanitized_yoagent_stream_items(self, value: Any) -> list[dict[str, str]]:
+    def sanitized_yoagent_stream_items(self, value: Any) -> list[dict[str, Any]]:
         return sanitized_yoagent_stream_items(value)
 
     def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
@@ -6967,14 +7200,46 @@ class TmuxWebtermApp:
 
     def set_notify(self, enabled: bool) -> dict[str, Any]:
         update_yolomux_state({"notify_enabled": enabled})
-        self.log_event(None, "notify_enabled" if enabled else "notify_disabled", "Notify enabled" if enabled else "Notify disabled", {})
+        self.log_event(
+            None,
+            "notify_enabled" if enabled else "notify_disabled",
+            "Notify enabled" if enabled else "Notify disabled",
+            {},
+            message_key="events.message.notify.enabled" if enabled else "events.message.notify.disabled",
+        )
         return {"enabled": enabled}
 
-    def log_event(self, session: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.event_log.append(session, event_type, message, details)
+    def log_event(
+        self,
+        session: str | None,
+        event_type: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+        *,
+        message_key: str = "",
+        message_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.event_log.append(
+            session,
+            event_type,
+            message,
+            details,
+            message_key=message_key,
+            message_params=message_params,
+        )
 
     def log_auto_event(self, session: str, event_type: str, message: str, details: dict[str, Any]) -> None:
-        self.log_event(session, event_type, message, details)
+        event_details = dict(details)
+        message_key = str(event_details.pop("message_key", "") or "")
+        message_params = event_details.pop("message_params", None)
+        self.log_event(
+            session,
+            event_type,
+            message,
+            event_details,
+            message_key=message_key,
+            message_params=message_params if isinstance(message_params, dict) else None,
+        )
 
     def background_cache_key_summary(self, cache_key: Any) -> dict[str, Any]:
         if cache_key in (None, ""):
@@ -7017,7 +7282,16 @@ class TmuxWebtermApp:
                     details[key] = value
         return details
 
-    def log_sampled_background_refresh_event(self, event_type: str, role: str, message: str, details: dict[str, Any]) -> dict[str, Any] | None:
+    def log_sampled_background_refresh_event(
+        self,
+        event_type: str,
+        role: str,
+        message: str,
+        details: dict[str, Any],
+        *,
+        message_key: str,
+        message_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         key = (event_type, role)
         with self.background_refresh_event_log_lock:
             count = self.background_refresh_event_log_counts.get(key, 0) + 1
@@ -7032,7 +7306,14 @@ class TmuxWebtermApp:
         suppressed = max(0, count - previous_emit_count - 1)
         if suppressed:
             event_details["suppressed_since_last"] = suppressed
-        return self.log_event(None, event_type, message, event_details)
+        return self.log_event(
+            None,
+            event_type,
+            message,
+            event_details,
+            message_key=message_key,
+            message_params=message_params,
+        )
 
     def performance_payload_bytes(self, payload: Any) -> int:
         try:
@@ -7339,7 +7620,8 @@ class TmuxWebtermApp:
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         if session and session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
         bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
         return {
             "events": self.event_log.tail(session=session, limit=bounded_limit),
@@ -7357,16 +7639,19 @@ class TmuxWebtermApp:
         source: str,
         timestamp: str = "",
         title: str = "",
+        title_key: str = "searchHistory.result.sessionSummary",
+        title_params: dict[str, Any] | None = None,
     ) -> SearchResult | None:
         if not str(query or "").strip() or str(query).strip().lower() not in str(text or "").lower():
             return None
         target_type = "activity-summary" if kind == "global_summary" else "summary"
+        fallback_title = title or (f"{session} summary" if session else "Global summary")
         return {
             "session": session,
             "timestamp": timestamp,
             "kind": kind,
             "source": source,
-            "title": title or (f"{session} summary" if session else "Global summary"),
+            **message_fields("title", title_key, fallback_title, title_params if title_params is not None else {"session": session}),
             "snippet": search_snippet(text, query),
             "target": {
                 "type": target_type,
@@ -7398,6 +7683,8 @@ class TmuxWebtermApp:
                     kind="summary",
                     source="session_summary",
                     title=f"{name} summary",
+                    title_key="searchHistory.result.sessionSummary",
+                    title_params={"session": name},
                 )
                 if result:
                     results.append(result)
@@ -7413,6 +7700,8 @@ class TmuxWebtermApp:
                     source="rolling_summary",
                     timestamp=utc_iso_from_ts(rolling.get("updated_ts") if isinstance(rolling, dict) else 0),
                     title=f"{name} rolling summary",
+                    title_key="searchHistory.result.rollingSummary",
+                    title_params={"session": name},
                 )
                 if result and len(results) < limit:
                     results.append(result)
@@ -7430,6 +7719,8 @@ class TmuxWebtermApp:
                 source="global_summary",
                 timestamp=str(activity_payload.get("generated_at") or ""),
                 title="Global activity summary",
+                title_key="searchHistory.result.globalSummary",
+                title_params={},
             )
             if result:
                 results.append(result)
@@ -7439,7 +7730,8 @@ class TmuxWebtermApp:
     def search_payload(self, query: str, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         if session and session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
         text = str(query or "").strip()
         bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
         event_matches = self.event_log.search(text, session=session, limit=bounded_limit)
@@ -7886,6 +8178,8 @@ class TmuxWebtermApp:
                 BACKGROUND_ROLE_TABBER_ACTIVITY,
                 "Tabber activity background refresh started",
                 refresh_details,
+                message_key="events.message.backgroundRefresh.started",
+                message_params={"target": message_descriptor("tabber.title", "Tabber")},
             )
             self.refresh_tabber_activity_cache()
             compute_ms = (time.perf_counter() - started) * 1000
@@ -7896,6 +8190,8 @@ class TmuxWebtermApp:
                 BACKGROUND_ROLE_TABBER_ACTIVITY,
                 "Tabber activity background refresh finished",
                 done_details,
+                message_key="events.message.backgroundRefresh.finished",
+                message_params={"target": message_descriptor("tabber.title", "Tabber")},
             )
             self.publish_background_refresh_done(BACKGROUND_ROLE_TABBER_ACTIVITY, {"compute_ms": compute_ms})
         finally:
@@ -7947,7 +8243,13 @@ class TmuxWebtermApp:
                             cache_status="skipped:no-consumer",
                         )
                 except (OSError, RuntimeError, ValueError) as exc:
-                    self.log_event(None, "client_event_watch_error", f"Tabber activity cache refresh failed: {exc}", {})
+                    self.log_event(
+                        None,
+                        "client_event_watch_error",
+                        f"Tabber activity cache refresh failed: {exc}",
+                        {"diagnostic": str(exc)},
+                        message_key="events.message.tabberActivity.refreshFailed",
+                    )
                 interval = self.tabber_activity_refresh_seconds() if refreshed else self.tabber_activity_idle_refresh_seconds()
                 elapsed = max(0.0, time.monotonic() - started)
                 time.sleep(max(0.1, interval - elapsed))
@@ -8166,7 +8468,8 @@ class TmuxWebtermApp:
         store = self.run_history_store_for_app()
         stored_before = store.load_rows(session=session)
         if session and session not in self.sessions and not stored_before:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
         scope = [session] if session and session in self.sessions else ([] if session else self.sessions)
         infos, errors = discover_sessions(scope)
         runs: list[RunHistoryEntry] = []
@@ -8178,7 +8481,8 @@ class TmuxWebtermApp:
         if runs:
             store.upsert_rows(runs)
         rows = store.load_rows(session=session)
-        return {"session": session or "", "runs": rows, "errors": [*refresh_errors, *errors]}, HTTPStatus.OK
+        issues = [message_fields("message", "searchHistory.error.discovery", error, {"error": error}) for error in [*refresh_errors, *errors]]
+        return {"session": session or "", "runs": rows, "errors": issues}, HTTPStatus.OK
 
     def session_files_payload(
         self,
@@ -8191,7 +8495,8 @@ class TmuxWebtermApp:
     ) -> tuple[SessionFilesPayload, HTTPStatus]:
         refresh_errors = self.refresh_sessions()
         if session and session not in self.sessions:
-            return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return {"session": session, **user_message_payload("status.sessionEnded", diagnostic, session=session)}, HTTPStatus.NOT_FOUND
         scope = [session] if session else self.sessions
         infos, errors = discover_sessions(scope)
         return self.session_files_payload_for_infos(
@@ -8231,12 +8536,14 @@ class TmuxWebtermApp:
         batch_infos: dict[str, SessionInfo] = {}
         for session in requested:
             if session in invalid:
-                payloads[session] = {"error": f"unknown session: {session}", "session": session, "errors": []}
+                diagnostic = f"unknown session: {session}"
+                payloads[session] = {"session": session, "errors": [], **user_message_payload("status.sessionEnded", diagnostic, session=session)}
                 statuses[session] = int(HTTPStatus.NOT_FOUND)
                 continue
             info = infos.get(session)
             if info is None:
-                payloads[session] = {"error": f"session unavailable: {session}", "session": session, "errors": []}
+                diagnostic = f"session unavailable: {session}"
+                payloads[session] = {"session": session, "errors": [], **user_message_payload("diff.error.sessionUnavailable", diagnostic, session=session)}
                 statuses[session] = int(HTTPStatus.NOT_FOUND)
                 continue
             batch_infos[session] = info
@@ -8274,13 +8581,14 @@ class TmuxWebtermApp:
     def client_event(self, event: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         session = event.get("session")
         if session is not None and session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return user_message_payload("yoagent.error.unknownSession", diagnostic, session=session), HTTPStatus.NOT_FOUND
         event_type = event.get("type")
         message = event.get("message")
         if not isinstance(event_type, str) or not event_type:
-            return {"error": "missing event type"}, HTTPStatus.BAD_REQUEST
+            return user_message_payload("common.requestFailed", "missing event type"), HTTPStatus.BAD_REQUEST
         if not isinstance(message, str) or not message:
-            return {"error": "missing event message"}, HTTPStatus.BAD_REQUEST
+            return user_message_payload("common.requestFailed", "missing event message"), HTTPStatus.BAD_REQUEST
         details = event.get("details")
         if not isinstance(details, dict):
             details = {}
@@ -8320,7 +8628,8 @@ class TmuxWebtermApp:
 
     def disable_auto_approve_for_takeover(self, session: Any, requester: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(session, str) or session not in self.sessions:
-            return {"ok": False, "error": f"unknown session: {session}"}
+            diagnostic = f"unknown session: {session}"
+            return {"ok": False, **user_message_payload("status.sessionEnded", diagnostic, session=session)}
         with self.auto_workers_lock:
             worker_sessions = self.auto_worker_session_map()
             workers = [
@@ -8329,7 +8638,13 @@ class TmuxWebtermApp:
                 if worker_sessions.get(key, key) == session
             ]
             if not workers:
-                return {"ok": True, "session": session, "enabled": False, "message": "YOLO was not enabled here"}
+                diagnostic = "YOLO was not enabled here"
+                return {
+                    "ok": True,
+                    "session": session,
+                    "enabled": False,
+                    **user_message_payload("status.yoloAlreadyDisabledFor", diagnostic, session=session),
+                }
             # confirm the worker thread actually exited (and released its flock) BEFORE
             # reporting released — otherwise the requester could re-acquire while this worker is still
             # alive and about to fire one more keystroke (two workers on one session).
@@ -8339,9 +8654,26 @@ class TmuxWebtermApp:
                 self.auto_workers.pop(key, None)
                 worker_sessions.pop(key, None)
         if not released:
-            self.log_event(session, "yolo_release_timeout", "YOLO worker did not stop in time", {"requester": requester})
-            return {"ok": False, "session": session, "error": "YOLO worker did not stop in time"}
-        self.log_event(session, "yolo_released", "YOLO released for another server", {"requester": requester})
+            diagnostic = "YOLO worker did not stop in time"
+            self.log_event(
+                session,
+                "yolo_release_timeout",
+                diagnostic,
+                {"requester": requester},
+                message_key="events.message.yolo.releaseTimeout",
+            )
+            return {
+                "ok": False,
+                "session": session,
+                **user_message_payload("status.yoloReleaseFailed", diagnostic, session=session),
+            }
+        self.log_event(
+            session,
+            "yolo_released",
+            "YOLO released for another server",
+            {"requester": requester},
+            message_key="events.message.yolo.released",
+        )
         return {"ok": True, "session": session, "enabled": False}
 
     def build_session_metadata_payload(self, lightweight: bool = False) -> dict[str, Any]:
@@ -8667,16 +8999,28 @@ class TmuxWebtermApp:
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         if not info or not info.agents:
-            return {"session": session, "errors": errors, "error": "no agent transcript found"}, HTTPStatus.NOT_FOUND
+            diagnostic = "no agent transcript found"
+            return {"session": session, "errors": errors, **user_message_payload("transcript.noAgentFound", diagnostic)}, HTTPStatus.NOT_FOUND
         agent = next((item for item in info.agents if item.transcript), info.agents[0])
         if not agent.transcript:
-            return {"session": session, "agent": asdict(agent), "errors": errors, "error": agent.error}, HTTPStatus.NOT_FOUND
+            diagnostic = str(agent.error or "no agent transcript found")
+            return {
+                "session": session,
+                "agent": asdict(agent),
+                "errors": errors,
+                **user_message_payload("transcript.error.unavailable", diagnostic, error=diagnostic),
+            }, HTTPStatus.NOT_FOUND
         path = Path(agent.transcript)
         safe_lines = min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES)
         try:
             stat_signature = file_stat_signature(path)
         except OSError as exc:
-            return {"session": session, "agent": asdict(agent), "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR
+            diagnostic = str(exc)
+            return {
+                "session": session,
+                "agent": asdict(agent),
+                **user_message_payload("transcript.error.readFailed", diagnostic, error=diagnostic),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
         cache_key = (
             session,
             safe_lines,
@@ -8692,7 +9036,12 @@ class TmuxWebtermApp:
             try:
                 text = tail_file_lines(path, safe_lines)
             except OSError as exc:
-                return {"session": session, "agent": asdict(agent), "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                diagnostic = str(exc)
+                return {
+                    "session": session,
+                    "agent": asdict(agent),
+                    **user_message_payload("transcript.error.readFailed", diagnostic, error=diagnostic),
+                }, HTTPStatus.INTERNAL_SERVER_ERROR
             with self.transcript_tail_cache_lock:
                 self.cache_set_limited(self.transcript_tail_cache, cache_key, (time.monotonic(), text), TRANSCRIPT_TAIL_CACHE_MAX_ITEMS)
         return {
@@ -8711,7 +9060,8 @@ class TmuxWebtermApp:
         path = payload.get("path")
         text = payload.get("text")
         if not isinstance(path, str) or not isinstance(text, str):
-            return {"session": session, "error": "missing transcript text"}, HTTPStatus.NOT_FOUND
+            diagnostic = "missing transcript text"
+            return {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)}, HTTPStatus.NOT_FOUND
         lines = compact_transcript_lines(text, max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS)))
         return {
             "session": session,
@@ -8729,7 +9079,8 @@ class TmuxWebtermApp:
         path = payload.get("path")
         text = payload.get("text")
         if not isinstance(path, str) or not isinstance(text, str):
-            return {"session": session, "error": "missing transcript text"}, HTTPStatus.NOT_FOUND
+            diagnostic = "missing transcript text"
+            return {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)}, HTTPStatus.NOT_FOUND
         safe_messages = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
         try:
             stat_signature = file_stat_signature(Path(path))
@@ -8764,7 +9115,8 @@ class TmuxWebtermApp:
         path = payload.get("path")
         text = payload.get("text")
         if not isinstance(path, str) or not isinstance(text, str):
-            return {"session": session, "error": "missing transcript text"}, HTTPStatus.NOT_FOUND
+            diagnostic = "missing transcript text"
+            return {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)}, HTTPStatus.NOT_FOUND
 
         bounded_lookback = max(60, min(lookback_seconds, 24 * 3600))
         since = datetime.now(timezone.utc) - timedelta(seconds=bounded_lookback)
@@ -8868,8 +9220,8 @@ class TmuxWebtermApp:
     def tmux_next_window(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         result = tmux(["next-window", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
-            error = cmd_error(result, "tmux next-window failed")
-            return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+            diagnostic = cmd_error(result, "tmux next-window failed")
+            return tmux_command_failure_payload(session, diagnostic), HTTPStatus.INTERNAL_SERVER_ERROR
         return {"session": session, "ok": True}, HTTPStatus.OK
 
     @requires_known_session()
@@ -8877,12 +9229,14 @@ class TmuxWebtermApp:
         target = tmux_session_target(session)
         status_result = tmux(["show-options", "-A", "-t", target, "-v", "status"], timeout=3.0)
         if status_result.returncode != 0:
-            return {"session": session, "error": cmd_error(status_result, "tmux status read failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
+            diagnostic = cmd_error(status_result, "tmux status read failed")
+            return tmux_command_failure_payload(session, diagnostic), HTTPStatus.INTERNAL_SERVER_ERROR
         if status_result.stdout.strip().lower() != "on":
             return {"session": session, "status": "none"}, HTTPStatus.OK
         position_result = tmux(["show-options", "-A", "-t", target, "-v", "status-position"], timeout=3.0)
         if position_result.returncode != 0:
-            return {"session": session, "error": cmd_error(position_result, "tmux status position read failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
+            diagnostic = cmd_error(position_result, "tmux status position read failed")
+            return tmux_command_failure_payload(session, diagnostic), HTTPStatus.INTERNAL_SERVER_ERROR
         position = position_result.stdout.strip().lower()
         return {"session": session, "status": position if position in {"top", "bottom"} else "bottom"}, HTTPStatus.OK
 
@@ -8900,19 +9254,24 @@ class TmuxWebtermApp:
         for command in commands:
             result = tmux(command, timeout=3.0)
             if result.returncode != 0:
-                return {"session": session, "error": cmd_error(result, "tmux status update failed")}, HTTPStatus.INTERNAL_SERVER_ERROR
+                diagnostic = cmd_error(result, "tmux status update failed")
+                return tmux_command_failure_payload(session, diagnostic), HTTPStatus.INTERNAL_SERVER_ERROR
         return {"session": session, "status": next_mode}, HTTPStatus.OK
 
     @requires_known_session()
     def tmux_select_window(self, session: str, window: str) -> tuple[dict[str, Any], HTTPStatus]:
         window_text = str(window or "").strip()
         if not window_text.isdigit():
-            return {"session": session, "error": "window must be a non-negative integer"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "window must be a non-negative integer"
+            return {
+                "session": session,
+                **user_message_payload("terminal.window.invalidNumber", diagnostic),
+            }, HTTPStatus.BAD_REQUEST
         target = f"{tmux_session_target(session)}{window_text}"
         result = tmux(["select-window", "-t", target], timeout=3.0)
         if result.returncode != 0:
-            error = (result.stderr or result.stdout or "tmux select-window failed").strip()
-            return {"session": session, "window": window_text, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+            diagnostic = (result.stderr or result.stdout or "tmux select-window failed").strip()
+            return tmux_command_failure_payload(session, diagnostic, window=window_text), HTTPStatus.INTERNAL_SERVER_ERROR
         self.switch_attached_tmux_clients(session, target)
         return {"session": session, "window": window_text, "ok": True}, HTTPStatus.OK
 
@@ -8949,21 +9308,46 @@ class TmuxWebtermApp:
         new_name = tmux_session_name_sanitize(new_name)
         name_error = tmux_session_name_error(new_name)
         if name_error:
-            return {"session": session, "new_name": new_name, "error": name_error}, HTTPStatus.BAD_REQUEST
+            error_key = {
+                "session name is required": "rename.error.required",
+                "session name must be 64 characters or fewer": "rename.error.tooLong",
+                "session name may contain only letters, numbers, spaces, dot, dash, and underscore": "rename.error.invalidChars",
+            }[name_error]
+            return {
+                "session": session,
+                "new_name": new_name,
+                **user_message_payload(error_key, name_error),
+            }, HTTPStatus.BAD_REQUEST
         if new_name != session and new_name in self.sessions:
-            return {"session": session, "new_name": new_name, "error": f"session already exists: {new_name}"}, HTTPStatus.CONFLICT
+            diagnostic = f"session already exists: {new_name}"
+            return {
+                "session": session,
+                "new_name": new_name,
+                **user_message_payload("rename.error.exists", diagnostic, name=new_name),
+            }, HTTPStatus.CONFLICT
         if new_name == session:
             return {"session": session, "new_session": new_name, "renamed": False, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
 
         result = tmux(["rename-session", "-t", tmux_session_target(session), new_name], timeout=3.0)
         if result.returncode != 0:
             error = cmd_error(result, "tmux rename-session failed")
-            return {"session": session, "new_name": new_name, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {
+                "session": session,
+                "new_name": new_name,
+                **user_message_payload("status.sessionRenameFailed", error, error=error),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
         self.revoke_share_tokens_for_session(session)
         self.refresh_sessions()
-        self.log_event(new_name, "session_renamed", f"renamed {session} to {new_name}", {"old_session": session, "new_session": new_name})
+        self.log_event(
+            new_name,
+            "session_renamed",
+            f"renamed {session} to {new_name}",
+            {"old_session": session, "new_session": new_name},
+            message_key="status.sessionRenamed",
+            message_params={"oldName": session, "newName": new_name},
+        )
         return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
 
     @requires_known_session(refresh=True)
@@ -8971,12 +9355,22 @@ class TmuxWebtermApp:
         result = tmux(["kill-session", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
             error = cmd_error(result, "tmux kill-session failed")
-            return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {
+                "session": session,
+                **user_message_payload("status.sessionKillFailed", error, error=error),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
         self.revoke_share_tokens_for_session(session)
         self.refresh_sessions()
-        self.log_event(None, "session_killed", f"killed {session}", {"session": session})
+        self.log_event(
+            None,
+            "session_killed",
+            f"killed {session}",
+            {"session": session},
+            message_key="status.sessionKilled",
+            message_params={"session": session},
+        )
         return {"session": session, "killed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
 
     def tmux_scroll(self, session: str, direction: str, lines: int) -> None:
@@ -9003,15 +9397,21 @@ class TmuxWebtermApp:
         mode = tmux(["display-message", "-p", "-t", target, "#{pane_in_mode}"], timeout=1.0)
         if mode.returncode != 0:
             error = cmd_error(mode, "tmux pane mode check failed")
-            return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {
+                "session": session,
+                "target": target,
+                "errors": errors,
+                **user_message_payload("status.copyFailed", error, error=error),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
         if mode.stdout.strip() != "1":
+            diagnostic = "tmux copy mode is not active"
             return {
                 "session": session,
                 "target": target,
                 "copied": False,
                 "text": "",
-                "error": "tmux copy mode is not active",
                 "errors": errors,
+                **user_message_payload("status.nothingSelected", diagnostic),
             }, HTTPStatus.OK
 
         before = tmux(["display-message", "-p", "-t", target, "#{buffer_created}:#{buffer_size}:#{buffer_sample}"], timeout=1.0)
@@ -9019,28 +9419,46 @@ class TmuxWebtermApp:
         copied = tmux(["send-keys", "-t", target, "-X", "copy-selection-no-clear"], timeout=1.0)
         if copied.returncode != 0:
             error = cmd_error(copied, "tmux copy selection failed")
-            return {"session": session, "target": target, "copied": False, "text": "", "error": error, "errors": errors}, HTTPStatus.OK
-
-        after = tmux(["display-message", "-p", "-t", target, "#{buffer_created}:#{buffer_size}:#{buffer_sample}"], timeout=1.0)
-        if after.returncode != 0:
-            error = cmd_error(after, "tmux buffer check failed")
-            return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
-        if after.stdout.strip() == before_signature:
-            cancel_copy_mode_selection()
             return {
                 "session": session,
                 "target": target,
                 "copied": False,
                 "text": "",
-                "error": "no tmux selection copied",
                 "errors": errors,
+                **user_message_payload("status.copyFailed", error, error=error),
+            }, HTTPStatus.OK
+
+        after = tmux(["display-message", "-p", "-t", target, "#{buffer_created}:#{buffer_size}:#{buffer_sample}"], timeout=1.0)
+        if after.returncode != 0:
+            error = cmd_error(after, "tmux buffer check failed")
+            return {
+                "session": session,
+                "target": target,
+                "errors": errors,
+                **user_message_payload("status.copyFailed", error, error=error),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
+        if after.stdout.strip() == before_signature:
+            cancel_copy_mode_selection()
+            diagnostic = "no tmux selection copied"
+            return {
+                "session": session,
+                "target": target,
+                "copied": False,
+                "text": "",
+                "errors": errors,
+                **user_message_payload("status.nothingSelected", diagnostic),
             }, HTTPStatus.OK
 
         buffer_result = tmux(["save-buffer", "-"], timeout=1.0)
         if buffer_result.returncode != 0:
             cancel_copy_mode_selection()
             error = cmd_error(buffer_result, "tmux save buffer failed")
-            return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {
+                "session": session,
+                "target": target,
+                "errors": errors,
+                **user_message_payload("status.copyFailed", error, error=error),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
 
         text = buffer_result.stdout
         cancel_copy_mode_selection()
@@ -9059,15 +9477,26 @@ class TmuxWebtermApp:
             return {"session": session, "created": False, "ok": True}, HTTPStatus.OK
 
         self.sessions = [item for item in self.sessions if item != session]
-        return {"error": f"session no longer exists: {session}"}, HTTPStatus.NOT_FOUND
+        diagnostic = f"session no longer exists: {session}"
+        return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
 
     def tmux_session_exists_payload(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         clean_session = str(session or "").strip()
         if not clean_session:
-            return {"error": "session is required", "exists": False}, HTTPStatus.BAD_REQUEST
+            diagnostic = "session is required"
+            return {"exists": False, **user_message_payload("session.error.required", diagnostic)}, HTTPStatus.BAD_REQUEST
         sessions, error = list_tmux_session_names()
         if error is not None:
-            return {"session": clean_session, "exists": None, "error": error}, HTTPStatus.SERVICE_UNAVAILABLE
+            return {
+                "session": clean_session,
+                "exists": None,
+                "diagnostic": error,
+                **user_message_payload(
+                    "status.sessionCheckFailed",
+                    error,
+                    error=message_descriptor("common.requestFailed", "request failed"),
+                ),
+            }, HTTPStatus.SERVICE_UNAVAILABLE
         self.sessions = sessions
         return {"session": clean_session, "exists": clean_session in sessions, "ok": True}, HTTPStatus.OK
 
@@ -9076,22 +9505,25 @@ class TmuxWebtermApp:
         agent = agent if agent in AGENT_COMMANDS else "claude"
         available_agents = available_agent_commands()
         if agent not in available_agents:
+            diagnostic = f"{agent} is not available on this server PATH"
             return {
-                "error": f"{agent} is not available on this server PATH",
                 "agent": agent,
                 "available_agents": available_agents,
                 "sessions": self.sessions,
+                **user_message_payload("session.error.agentUnavailablePath", diagnostic, agent=agent),
             }, HTTPStatus.NOT_FOUND
         if len(self.sessions) >= MAX_YOLOMUX_SESSION_TABS:
+            diagnostic = f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}"
             return {
-                "error": f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}",
                 "sessions": self.sessions,
+                **user_message_payload("session.error.maximumTabs", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS),
             }, HTTPStatus.CONFLICT
         session = next_numbered_session_name(self.sessions)
         if session is None:
+            diagnostic = f"no available numbered session names from 1 to {MAX_YOLOMUX_SESSION_TABS}"
             return {
-                "error": f"no available numbered session names from 1 to {MAX_YOLOMUX_SESSION_TABS}",
                 "sessions": self.sessions,
+                **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS),
             }, HTTPStatus.CONFLICT
         cwd = session_workdir(session)
         command = agent_command(agent, self.dangerously_yolo)
@@ -9109,7 +9541,11 @@ class TmuxWebtermApp:
         )
         if result.returncode != 0:
             error = cmd_error(result, "tmux new-session failed")
-            return {"session": session, "created": False, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {
+                "session": session,
+                "created": False,
+                **user_message_payload("status.sessionCreateFailed", error, error=error),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
         settings = settings_payload().get("settings", {})
         status_mode = str(settings.get("appearance", {}).get("tmux_status_bar", "off"))
         status_commands = [["set-option", "-t", tmux_session_target(session), "status", "off"]] if status_mode == "off" else [
@@ -9129,6 +9565,8 @@ class TmuxWebtermApp:
             "session_started",
             f"created {session} with {agent}",
             {"agent": agent, "cwd": str(cwd), "command": command, "dangerously_yolo": self.dangerously_yolo},
+            message_key="status.sessionCreatedWithAgent",
+            message_params={"session": session, "agent": agent},
         )
         return {
             "session": session,
@@ -9150,9 +9588,10 @@ class TmuxWebtermApp:
             try:
                 path.write_bytes(upload.content)
             except OSError as exc:
+                diagnostic = f"failed to save {safe_name}: {exc}"
                 return [], {
-                    "error": f"failed to save {safe_name}: {exc}",
                     "target_dir": str(target_dir),
+                    **user_message_payload("status.uploadFailed", diagnostic, error=diagnostic),
                 }, HTTPStatus.INTERNAL_SERVER_ERROR
             saved.append(
                 {
@@ -9167,22 +9606,32 @@ class TmuxWebtermApp:
     @requires_known_session()
     def upload_files(self, session: str, files: list[UploadedFile]) -> tuple[dict[str, Any], HTTPStatus]:
         if not files:
-            return {"session": session, "error": "no files supplied"}, HTTPStatus.BAD_REQUEST
-        if len(files) > UPLOAD_MAX_FILES:
+            diagnostic = "no files supplied"
             return {
                 "session": session,
-                "error": f"too many files; limit is {UPLOAD_MAX_FILES}",
+                **user_message_payload("upload.error.noFiles", diagnostic),
+            }, HTTPStatus.BAD_REQUEST
+        if len(files) > UPLOAD_MAX_FILES:
+            diagnostic = f"too many files; limit is {UPLOAD_MAX_FILES}"
+            return {
+                "session": session,
+                **user_message_payload("upload.error.tooManyFiles", diagnostic, limit=UPLOAD_MAX_FILES),
             }, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
 
         target_dir, target_source = self.upload_target_dir(session)
         if target_dir is None:
+            diagnostic = f"upload target not found for {session}"
             return {
                 "session": session,
-                "error": f"upload target not found for {session}",
                 "target_source": target_source,
+                **user_message_payload("upload.error.targetNotFound", diagnostic, session=session),
             }, HTTPStatus.NOT_FOUND
         if not target_dir.is_dir():
-            return {"session": session, "error": f"upload target is not a directory: {target_dir}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"upload target is not a directory: {target_dir}"
+            return {
+                "session": session,
+                **user_message_payload("upload.error.targetNotDirectory", diagnostic, path=str(target_dir)),
+            }, HTTPStatus.NOT_FOUND
 
         saved, error, status = self._save_uploaded_files(target_dir, files)
         if error is not None:
@@ -9198,6 +9647,8 @@ class TmuxWebtermApp:
                 "files": [item["path"] for item in saved],
                 "sizes": [item["size"] for item in saved],
             },
+            message_key="events.message.upload.files",
+            message_params={"count": len(saved)},
         )
         return {
             "session": session,
@@ -9208,9 +9659,11 @@ class TmuxWebtermApp:
 
     def upload_editor_files(self, files: list[UploadedFile], *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         if not files:
-            return {"error": "no files supplied"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "no files supplied"
+            return user_message_payload("upload.error.noFiles", diagnostic), HTTPStatus.BAD_REQUEST
         if len(files) > UPLOAD_MAX_FILES:
-            return {"error": f"too many files; limit is {UPLOAD_MAX_FILES}"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+            diagnostic = f"too many files; limit is {UPLOAD_MAX_FILES}"
+            return user_message_payload("upload.error.tooManyFiles", diagnostic, limit=UPLOAD_MAX_FILES), HTTPStatus.REQUEST_ENTITY_TOO_LARGE
         raw_base = str(base_dir or "").strip()
         raw_editor_path = str(editor_path or "").strip()
         if raw_base:
@@ -9220,12 +9673,21 @@ class TmuxWebtermApp:
             base = Path(raw_editor_path).expanduser().parent
             target_source = "editor_path"
         else:
-            return {"error": "missing editor_path or base_dir"}, HTTPStatus.BAD_REQUEST
+            diagnostic = "missing editor_path or base_dir"
+            return user_message_payload("upload.error.editorTargetRequired", diagnostic), HTTPStatus.BAD_REQUEST
         if not base.is_dir():
-            return {"error": f"editor upload base is not a directory: {base}", "base_dir": str(base)}, HTTPStatus.NOT_FOUND
+            diagnostic = f"editor upload base is not a directory: {base}"
+            return {
+                "base_dir": str(base),
+                **user_message_payload("upload.error.targetNotDirectory", diagnostic, path=str(base)),
+            }, HTTPStatus.NOT_FOUND
         target_dir = self._apply_upload_subdir(base)
         if not target_dir.is_dir():
-            return {"error": f"upload target is not a directory: {target_dir}", "base_dir": str(base)}, HTTPStatus.NOT_FOUND
+            diagnostic = f"upload target is not a directory: {target_dir}"
+            return {
+                "base_dir": str(base),
+                **user_message_payload("upload.error.targetNotDirectory", diagnostic, path=str(target_dir)),
+            }, HTTPStatus.NOT_FOUND
         saved, error, status = self._save_uploaded_files(target_dir, files)
         if error is not None:
             error["base_dir"] = str(base)
@@ -9246,6 +9708,8 @@ class TmuxWebtermApp:
                 "files": [item["path"] for item in saved],
                 "sizes": [item["size"] for item in saved],
             },
+            message_key="events.message.upload.editorFiles",
+            message_params={"count": len(saved)},
         )
         return {
             "target_dir": str(target_dir),
@@ -9327,13 +9791,24 @@ class TmuxWebtermApp:
                     self.ensure_auto_approve_agent_workers_locked(session, takeover=takeover)
                     return self.auto_approve_session_status(session), HTTPStatus.OK
                 if not tmux_has_exact_session(session):
-                    return {"session": session, "enabled": False, "error": f"tmux session not found: {session}"}, HTTPStatus.NOT_FOUND
+                    diagnostic = f"tmux session not found: {session}"
+                    return {
+                        "session": session,
+                        "enabled": False,
+                        **user_message_payload("status.sessionEnded", diagnostic, session=session),
+                    }, HTTPStatus.NOT_FOUND
                 started, status = self.ensure_auto_approve_agent_workers_locked(session, takeover=takeover)
                 if not started:
                     return status, HTTPStatus.CONFLICT
                 if persist:
                     self.set_persisted_auto_session(session, True)
-                self.log_event(session, "yolo_enabled", "YOLO enabled", {"persist": persist})
+                self.log_event(
+                    session,
+                    "yolo_enabled",
+                    "YOLO enabled",
+                    {"persist": persist},
+                    message_key="events.message.yolo.enabled",
+                )
                 return self.auto_approve_session_status(session), HTTPStatus.OK
 
             keys = self.auto_approve_worker_keys_for_session_locked(session)
@@ -9346,7 +9821,13 @@ class TmuxWebtermApp:
             if keys:
                 if persist:
                     self.set_persisted_auto_session(session, False)
-                self.log_event(session, "yolo_disabled", "YOLO disabled", {"persist": persist})
+                self.log_event(
+                    session,
+                    "yolo_disabled",
+                    "YOLO disabled",
+                    {"persist": persist},
+                    message_key="events.message.yolo.disabled",
+                )
         return self.auto_approve_session_status(session), HTTPStatus.OK
 
     def auto_worker_session_map(self) -> dict[str, str]:
@@ -9522,7 +10003,13 @@ class TmuxWebtermApp:
                 )
                 started, owner = worker.start()
                 if started:
-                    self.log_event(session, "yolo_takeover", "YOLO moved from another server", {"owner": locked_owner or {}})
+                    self.log_event(
+                        session,
+                        "yolo_takeover",
+                        "YOLO moved from another server",
+                        {"owner": locked_owner or {}},
+                        message_key="events.message.yolo.takeover",
+                    )
                     status = worker.status()
                     status["session"] = session
                     return worker, status
@@ -9538,7 +10025,13 @@ class TmuxWebtermApp:
             "lock_owner": owner,
             "error": auto_approve_lock_message(owner),
         })
-        self.log_event(session, "yolo_locked", "YOLO already owned by another server", {"owner": owner or {}})
+        self.log_event(
+            session,
+            "yolo_locked",
+            "YOLO already owned by another server",
+            {"owner": owner or {}},
+            message_key="events.message.yolo.locked",
+        )
         return None, payload
 
     def request_auto_approve_release(self, session: str, owner: dict[str, Any] | None) -> bool:
@@ -9554,7 +10047,13 @@ class TmuxWebtermApp:
         }
         response = send_yolomux_control_request(owner, request)
         if response.get("ok") is not True:
-            self.log_event(session, "yolo_takeover_failed", "YOLO owner did not release", {"owner": owner or {}, "response": response})
+            self.log_event(
+                session,
+                "yolo_takeover_failed",
+                "YOLO owner did not release",
+                {"owner": owner or {}, "response": response},
+                message_key="events.message.yolo.takeoverFailed",
+            )
             return False
         # the owner stopped its worker and released the flock before replying ok (it joins the
         # thread first, #70). Do NOT probe-and-poll the lock to "infer" we may take it — that LOCK_EX
@@ -10093,7 +10592,7 @@ class TmuxWebtermApp:
                 continue
             keys.append(key)
         if not keys:
-            return {"error": "attention acknowledgement keys required"}, HTTPStatus.BAD_REQUEST
+            return user_message_payload("common.requestFailed", "attention acknowledgement keys required"), HTTPStatus.BAD_REQUEST
         now = time.time()
         rev, newly_acknowledged = self.write_shared_attention_acks_union({key: now for key in keys})
         with self.attention_ack_lock:
@@ -10378,7 +10877,7 @@ class TmuxWebtermApp:
                 "locked": False,
                 "approved": 0,
                 "blocked": 0,
-                "last_action": "off",
+                **message_fields("last_action", "yolo.status.off", "off"),
             }
             owner = self.auto_approve_session_lock_owner(session, discovered_sessions=discovered_sessions)
             if owner:
@@ -10386,8 +10885,8 @@ class TmuxWebtermApp:
                     "enabled_elsewhere": True,
                     "locked": True,
                     "lock_owner": owner,
-                    "last_action": auto_approve_lock_message(owner),
                     "error": auto_approve_lock_message(owner),
+                    **auto_approve_lock_message_fields("last_action", owner),
                 })
         capture_target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
         prompt_started = time.perf_counter()
@@ -10430,7 +10929,8 @@ class TmuxWebtermApp:
         refresh_errors = self.refresh_sessions(maintenance=False)
         add_phase_timing(timings, "refresh_sessions", refresh_started)
         if session is not None and session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return user_message_payload("yoagent.error.unknownSession", diagnostic, session=session), HTTPStatus.NOT_FOUND
         removed = False
         worker_started = time.perf_counter()
         with self.auto_workers_lock:
@@ -10438,7 +10938,13 @@ class TmuxWebtermApp:
             for name, worker in list(self.auto_workers.items()):
                 if not worker.alive():
                     worker_session = worker_sessions.get(name, name)
-                    self.log_event(worker_session, "worker_stopped", "YOLO worker stopped", worker.status())
+                    self.log_event(
+                        worker_session,
+                        "worker_stopped",
+                        "YOLO worker stopped",
+                        worker.status(),
+                        message_key="events.message.yolo.workerStopped",
+                    )
                     self.auto_workers.pop(name, None)
                     worker_sessions.pop(name, None)
                     removed = True

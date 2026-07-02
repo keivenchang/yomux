@@ -208,7 +208,7 @@ YOLOmux serves xterm.js from a local install when available. It checks `YOLOMUX_
 
 The UI ships in 19 user-facing languages. Locale files are in `static_src/` and generated `static/` locale outputs. When adding a new user-facing string, add the key to all locale files: English, Traditional and Simplified Chinese, Japanese, Korean, Spanish, German, French, Italian, Brazilian Portuguese, Polish, Dutch, Hebrew, Arabic, Russian, Hindi, Vietnamese, Thai, and Turkish, plus `en-XA` pseudo-locale for QA.
 
-Do not seed new locale keys with the English value and leave them there. Preserve interpolation tokens such as `{path}`, `{qpath}`, `{paths}`, `{qpaths}`, `{name}`, `{count}`, `{category}`, `{session}`, and `{command}` exactly, but translate the surrounding prose. `python3 tools/static_build.py --check` prints a warning report for non-allowlisted locale values that still equal `en.json` and fails only if a locale regresses above its recorded baseline; `python3 tools/static_build.py --i18n-untranslated-report` prints the full key list for backfill work.
+Do not seed new locale keys with the English value and leave them there. Preserve interpolation tokens such as `{path}`, `{qpath}`, `{paths}`, `{qpaths}`, `{name}`, `{count}`, `{category}`, `{session}`, and `{command}` exactly, but translate the surrounding prose. `python3 tools/static_build.py --check` fails on catalog/key drift, blank translations, placeholder or protected-token drift, untranslated non-allowlisted English values, invalid Chinese `YO` branding, missing literal runtime keys, and direct English literals at common visible DOM/status sinks. `python3 tools/static_build.py --i18n-untranslated-report` prints the full source-identical key list.
 
 ## How The Webterm Works
 

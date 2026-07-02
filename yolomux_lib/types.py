@@ -40,6 +40,7 @@ class RepoPayload(TypedDict, total=False):
     from_ref: str
     to_ref: str
     error: str
+    error_message: dict[str, Any]
     ahead: int
     behind: int
 
@@ -49,8 +50,8 @@ class SessionFilesPayload(TypedDict, total=False):
     hours: float
     files: list[SessionFileEntry]
     repos: list[RepoPayload]
-    errors: list[str]
-    warnings: list[str]
+    errors: list[str | dict[str, Any]]
+    warnings: list[str | dict[str, Any]]
     from_ref: str
     to_ref: str
     refs_by_repo: dict[str, list[dict[str, Any]]]
@@ -68,6 +69,8 @@ class AutoApproveState(TypedDict, total=False):
     approved: int
     blocked: int
     last_action: str
+    last_action_key: str
+    last_action_params: dict[str, Any]
     error: str | None
     started_at: float
     lock_owner: dict[str, Any] | None
@@ -100,7 +103,11 @@ class SearchResult(TypedDict, total=False):
     kind: str
     source: str
     title: str
+    title_key: str
+    title_params: dict[str, Any]
     snippet: str
+    snippet_key: str
+    snippet_params: dict[str, Any]
     target: SearchResultTarget
 
 
@@ -129,5 +136,5 @@ class RunHistoryEntry(TypedDict, total=False):
 class RunHistoryPayload(TypedDict, total=False):
     session: str
     runs: list[RunHistoryEntry]
-    errors: list[str]
+    errors: list[str | dict[str, Any]]
     error: str

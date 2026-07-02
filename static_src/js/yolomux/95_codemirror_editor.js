@@ -27,6 +27,8 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmEditorOptionCompartment = null;
     panel._cmEditorOptionViews = [];
     panel._cmEditorOptionConfig = null;
+    panel._cmLocaleCompartment = null;
+    panel._cmLocaleViews = [];
     panel._cmPath = '';
     panel._cmSignature = '';
     panel._cmMode = '';
@@ -76,6 +78,7 @@ function codeMirrorDiffLayout(_container) {
 
 function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
   return [
+    codeMirrorLocaleExtensions(api, panel),
     api.drawSelection(),
     codeMirrorContextMenuSelectionExtension(api),
     api.highlightActiveLine(),
@@ -139,22 +142,18 @@ function codeMirrorContextMenuSelectionExtension(api) {
   });
 }
 
-function syncCodeMirrorDocument(view, text, options = {}) {
-  if (!view) return;
-  const next = String(text || '');
-  if (view.state.doc.toString() === next) return;
-  if (options.cleanOnly && openFiles.get(options.path)?.dirty) return;
+function updateCodeMirrorViewPreservingState(view, update, options = {}) {
+  if (!view || typeof update !== 'function') return false;
   const scrollDOM = view.scrollDOM;
   const scrollTop = scrollDOM?.scrollTop || 0;
   const scrollLeft = scrollDOM?.scrollLeft || 0;
-  const selection = view.state.selection;
-  const selectionFits = selection?.ranges?.every(range => (
-    range.anchor <= next.length && range.head <= next.length
-  ));
-  view.dispatch({
-    changes: {from: 0, to: view.state.doc.length, insert: next},
-    ...(selectionFits ? {selection} : {}),
-  });
+  const selection = options.preserveSelection === false ? null : view.state.selection;
+  update(selection);
+  const currentSelection = view.state.selection;
+  const selectionPreserved = !selection || currentSelection === selection || currentSelection?.eq?.(selection) === true;
+  if (!selectionPreserved) {
+    try { view.dispatch({selection}); } catch (_) {}
+  }
   const restoreScroll = () => {
     if (!scrollDOM) return;
     scrollDOM.scrollTop = scrollTop;
@@ -165,7 +164,28 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   } else {
     requestAnimationFrame(restoreScroll);
   }
-  requestAnimationFrame(restoreScroll);
+  requestAnimationFrame(() => {
+    restoreScroll();
+    requestAnimationFrame(restoreScroll);
+  });
+  return true;
+}
+
+function syncCodeMirrorDocument(view, text, options = {}) {
+  if (!view) return;
+  const next = String(text || '');
+  if (view.state.doc.toString() === next) return;
+  if (options.cleanOnly && openFiles.get(options.path)?.dirty) return;
+  const selection = view.state.selection;
+  const selectionFits = selection?.ranges?.every(range => (
+    range.anchor <= next.length && range.head <= next.length
+  ));
+  updateCodeMirrorViewPreservingState(view, preservedSelection => {
+    view.dispatch({
+      changes: {from: 0, to: view.state.doc.length, insert: next},
+      ...(preservedSelection ? {selection: preservedSelection} : {}),
+    });
+  }, {preserveSelection: selectionFits});
 }
 
 function codeMirrorThemeExtensions(api, path) {
@@ -214,6 +234,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     ...(Array.isArray(api.searchKeymap) ? api.searchKeymap : []),
   ].filter(Boolean)));
   return [
+    codeMirrorLocaleExtensions(api, panel),
     safeCodeMirrorExtension('history', () => api.history?.()),
     safeCodeMirrorExtension('selection drawing', () => api.drawSelection()),
     codeMirrorContextMenuSelectionExtension(api),
@@ -301,6 +322,21 @@ function trackCodeMirrorThemeViews(panel, api, views) {
   const liveViews = views.filter(Boolean);
   panel._cmThemeViews = liveViews;
   panel._cmEditorOptionViews = liveViews;
+  panel._cmLocaleViews = liveViews;
+}
+
+function reconfigureCodeMirrorPanelLocale(panel) {
+  const api = panel?._cmApi;
+  const compartment = panel?._cmLocaleCompartment;
+  const views = Array.isArray(panel?._cmLocaleViews) ? panel._cmLocaleViews : [];
+  if (!api || !compartment || !views.length) return false;
+  const effect = compartment.reconfigure(codeMirrorLocaleExtensions(api, null));
+  for (const view of views) {
+    try {
+      updateCodeMirrorViewPreservingState(view, selection => view.dispatch({effects: effect, selection}));
+    } catch (_) {}
+  }
+  return true;
 }
 
 function reconfigureCodeMirrorPanelTheme(panel) {
@@ -939,6 +975,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         console.warn('CodeMirror diff language parser failed; retrying plain diff editor', error);
         panel._cmThemeCompartment = null;
         panel._cmEditorOptionCompartment = null;
+        panel._cmLocaleCompartment = null;
         cmState = api.EditorState.create({
           doc: currentText,
           extensions: unifiedDiffExtensions(true),
@@ -1167,7 +1204,7 @@ function destroyEditorAndShowStatus(panel, parts, message, level = '') {
 }
 
 function renderClosedEditor(panel, parts) {
-  destroyEditorAndShowStatus(panel, parts, 'file closed', '');
+  destroyEditorAndShowStatus(panel, parts, t('editor.fileClosed'), '');
 }
 
 function renderLoadingEditor(panel, item, path, parts) {
@@ -1189,13 +1226,13 @@ function renderErrorEditor(panel, path, state, parts) {
     const size = formatFileSize(state.size);
     const title = state.kind === 'too-large' ? t('editor.fileTooLargeTitle') : t('editor.fileOpenFailedTitle');
     const detail = state.kind === 'too-large'
-      ? (state.error || t('editor.fileTooLargeDetail', {size: size || '', limit}))
-      : String(state.error || t('editor.fileLoadFailed'));
+      ? fileErrorText(state.error, 'editor.fileTooLargeDetail', {size: size || '', limit})
+      : fileErrorText(state.error, 'editor.fileLoadFailed');
     parts.imagePane.replaceChildren(fileEditorEmptyState(title, detail));
   }
   const status = state.kind === 'too-large'
     ? t('editor.fileTooLargeStatus', {limit: formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)})
-    : state.error || t('editor.fileLoadFailed');
+    : fileErrorText(state.error, 'editor.fileLoadFailed');
   setFileEditorPanelStatus(panel, status, 'error');
 }
 
@@ -1398,7 +1435,7 @@ function loadFileEditorState(path, panel, item) {
       const entry = fetched.entry;
       if (!entry) {
         if (fetched.missing) markOpenFileMissing(path);
-        else setFileState(path, fileErrorState(fetched.error || 'failed to inspect preview file'));
+        else setFileState(path, fileErrorState(fetched.error));
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -1430,13 +1467,12 @@ function loadFileEditorState(path, panel, item) {
     } catch (err) {
       const status = Number(err?.status) || 0;
       if (status) {
-        const message = String(err?.payload?.error || status);
         const sniffed = status === 415 ? await sniffedRawPreviewFileState(path) : null;
         setFileState(path, sniffed || (status === 413
-          ? tooLargeFileState(null, message)
+          ? tooLargeFileState(null, err)
           : status === 404
-            ? missingFileState(message)
-            : fileErrorState(message)));
+            ? missingFileState(err)
+            : fileErrorState(err)));
       } else {
         setFileState(path, fileErrorState(err));
       }
@@ -2185,7 +2221,7 @@ async function saveFileEditor(path, panel, options = {}) {
   }
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
-  setFileEditorPanelStatus(panel, options.autosave ? 'auto-saving...' : 'saving...', '');
+  setFileEditorPanelStatus(panel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
   try {
     const body = {
       path,
@@ -2199,11 +2235,12 @@ async function saveFileEditor(path, panel, options = {}) {
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
+      const errorText = userMessageText(payload, response.statusText || String(response.status));
       if (response.status === 409) {
-        setFileEditorPanelStatus(panel, 'save conflict: file changed on disk', 'warn');
-        return showFileSaveConflictDialog(path, panel, {message: payload.error || ''});
+        setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
+        return showFileSaveConflictDialog(path, panel, {message: errorText});
       }
-      setFileEditorPanelStatus(panel, `save failed: ${payload.error || response.status}`, 'error');
+      setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: errorText}), 'error');
       return false;
     }
     const payload = await response.json();
@@ -2222,14 +2259,14 @@ async function saveFileEditor(path, panel, options = {}) {
     }
     for (const openPanel of fileEditorPanelsForPath(path)) {
       updateFileEditorPanelChrome(openPanel, path);
-      setFileEditorPanelStatus(openPanel, `${options.autosave ? 'auto-saved' : 'saved'} (${payload.size} bytes)`, 'ok');
+      setFileEditorPanelStatus(openPanel, t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), 'ok');
     }
     renderSessionButtons();
     renderPaneTabStrips();
     sharePublishFileVersion(path, {mtime: state.mtime, size: state.size});
     return true;
   } catch (err) {
-    setFileEditorPanelStatus(panel, `save failed: ${err}`, 'error');
+    setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: err}), 'error');
     return false;
   }
 }

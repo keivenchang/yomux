@@ -18,7 +18,7 @@ function infoGroupingControlsHtml() {
   const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
   const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
   const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];
-  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'}];
+  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: t('changes.sort.recent')}];
   const dimensionsForLevel = level => typeof infoGroupDimensionsForLevel === 'function'
     ? infoGroupDimensionsForLevel(level, grouping)
     : (typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : []);
@@ -95,7 +95,7 @@ function bindInfoPanel(panel) {
     const windowIndex = button.dataset.infoOpenAiWindow || '';
     if (!session) return;
     if (windowIndex !== '' && typeof tmuxWindow === 'function') {
-      tmuxWindow(session, {windowIndex}, button.textContent || `tmux sub-window ${windowIndex}`);
+      tmuxWindow(session, {windowIndex}, button.textContent || t('terminal.window.title', {name: windowIndex}));
     }
     selectSession(session, {userInitiated: true});
   });
@@ -280,23 +280,14 @@ function bindYoagentPanel(panel) {
     const path = yoagentSetting.dataset.yoagentSettingPath || '';
     saveSettingsPatch(settingPatchForPath(path, yoagentSetting.value))
       .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(yoagentComposerBackendKey())}); renderYoagentPanel(); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
   });
 }
 
 // Persistent virtual panels keep their chrome mounted between language changes. Re-label those controls in place.
 function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
-  const minimizeLabel = t('pane.minimize');
-  const expandLabel = t('pane.expand');
-  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
-    button.title = minimizeLabel;
-    button.setAttribute('aria-label', minimizeLabel);
-  });
-  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
-    button.title = expandLabel;
-    button.setAttribute('aria-label', expandLabel);
-  });
+  relocalizeVirtualPanelChrome(panel, infoTabLabel());
   const refresh = panel.querySelector('[data-info-refresh]');
   if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
@@ -317,16 +308,7 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
 
 function relocalizeYoagentPanelChrome(panel = document.getElementById(panelDomId(yoagentItemId))) {
   if (!panel) return;
-  const minimizeLabel = t('pane.minimize');
-  const expandLabel = t('pane.expand');
-  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
-    button.title = minimizeLabel;
-    button.setAttribute('aria-label', minimizeLabel);
-  });
-  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
-    button.title = expandLabel;
-    button.setAttribute('aria-label', expandLabel);
-  });
+  relocalizeVirtualPanelChrome(panel, yoagentTabLabel());
   const agentRefresh = panel.querySelector('[data-yoagent-refresh]');
   if (agentRefresh) {
     agentRefresh.textContent = t('yoagent.refresh');

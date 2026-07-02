@@ -252,7 +252,6 @@ async function renderedPreviewSnapshotAsync(path, text) {
 function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
   const doc = previewWindow?.document;
   if (!doc) return false;
-  const title = `${basenameOf(path)} preview`;
   const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
   doc.open();
   doc.write(`<!doctype html>
@@ -260,7 +259,7 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${esc(title)}</title>
+  <title></title>
   <link rel="stylesheet" href="${esc(cssHref)}">
   <style>
     html {
@@ -674,6 +673,7 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
 </body>
 </html>`);
   doc.close();
+  doc.title = t('preview.popout.title', {name: basenameOf(path)});
   doc._yolomuxPreviewControlsBound = false;
   bindFilePreviewPopoutControls(path, previewWindow);
   return true;
@@ -752,7 +752,7 @@ function updateFilePreviewPopout(path, text) {
     applyPreviewSnapshotRoot(root, snapshot);
     doc.body.className = previewPopoutBodyClassName();
     updateFilePreviewPopoutControls(path, previewWindow);
-    doc.title = `${basenameOf(path)} preview`;
+    doc.title = t('preview.popout.title', {name: basenameOf(path)});
     restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
     renderedPreviewSnapshotAsync(path, text).then(asyncSnapshot => {
       if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;

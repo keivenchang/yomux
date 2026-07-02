@@ -29,7 +29,9 @@ YOAGENT_MESSAGE_DETAILS_LIMIT = 4_000
 YOAGENT_AUXILIARY_LINE_LIMIT = 4_000
 YOAGENT_AUXILIARY_TOTAL_LIMIT = 120_000
 YOAGENT_STREAM_ITEM_TEXT_LIMIT = 8_000
+YOAGENT_STREAM_ITEMS_LIMIT = 1_000
 YOAGENT_STREAM_ITEMS_TOTAL_LIMIT = 120_000
+YOAGENT_DETAIL_ROWS_LIMIT = 24
 YOAGENT_ACTIONS_LIMIT = 8
 YOAGENT_BACKENDS = {"claude", "codex"}
 YOAGENT_MESSAGE_KINDS = {"agent_result"}
@@ -66,6 +68,25 @@ def sanitized_actions(value: Any) -> list[dict[str, Any]]:
         if isinstance(decoded, dict):
             clean.append(decoded)
     return clean
+
+
+def sanitized_detail_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[:YOAGENT_DETAIL_ROWS_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        key = truncate_text(str(item.get("key") or "").strip(), 160)
+        fallback = truncate_text(redacted_auxiliary_text(str(item.get("fallback") or "").strip()), YOAGENT_MESSAGE_DETAILS_LIMIT)
+        params = item.get("params") if isinstance(item.get("params"), dict) else {}
+        try:
+            clean_params = json.loads(json.dumps(params, ensure_ascii=False))
+        except (TypeError, ValueError):
+            clean_params = {}
+        if key or fallback:
+            rows.append({"key": key, "params": clean_params, "fallback": fallback})
+    return rows
 
 
 def bounded_auxiliary_lines(value: Any) -> tuple[list[str], bool]:
@@ -124,23 +145,46 @@ def redacted_auxiliary_text(text: str) -> str:
     return re.sub(r"(?i)\b(token|secret|password|api[_-]?key)\s*=\s*\S+", r"\1=<redacted>", str(text or ""))
 
 
-def bounded_stream_items(value: Any) -> tuple[list[dict[str, str]], bool]:
+def bounded_stream_items(value: Any) -> tuple[list[dict[str, Any]], bool]:
     if not isinstance(value, list):
         return [], False
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     truncated = False
     for item in value:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("kind") or "").strip().lower()
-        if kind not in {"assistant", "thinking", "tool"}:
+        if kind not in {"assistant", "thinking", "tool", "diagnostic"}:
             continue
         text = redacted_auxiliary_text(str(item.get("text") or ""))
         bounded = truncate_text(text, YOAGENT_STREAM_ITEM_TEXT_LIMIT)
         truncated = truncated or bounded != text
-        if bounded.strip():
-            result.append({"kind": kind, "text": bounded})
-    selected: list[dict[str, str]] = []
+        label_key = truncate_text(str(item.get("labelKey") or item.get("label_key") or "").strip(), 160)
+        fallback = truncate_text(redacted_auxiliary_text(str(item.get("fallback") or "").strip()), 240)
+        label_params = item.get("labelParams", item.get("label_params"))
+        try:
+            clean_params = json.loads(json.dumps(label_params, ensure_ascii=False)) if isinstance(label_params, dict) else {}
+        except (TypeError, ValueError):
+            clean_params = {}
+        clean_item: dict[str, Any] = {"kind": kind, "text": bounded}
+        for field in ("eventKind", "toolName", "command", "path"):
+            field_value = truncate_text(redacted_auxiliary_text(str(item.get(field) or "").strip()), YOAGENT_STREAM_ITEM_TEXT_LIMIT)
+            if field_value:
+                clean_item[field] = field_value
+        token_count = item.get("tokenCount")
+        if isinstance(token_count, (int, float)) and token_count > 0:
+            clean_item["tokenCount"] = int(token_count)
+        if label_key:
+            clean_item["labelKey"] = label_key
+            clean_item["labelParams"] = clean_params
+        if fallback:
+            clean_item["fallback"] = fallback
+        if bounded.strip() or label_key or fallback:
+            result.append(clean_item)
+    if len(result) > YOAGENT_STREAM_ITEMS_LIMIT:
+        result = result[-YOAGENT_STREAM_ITEMS_LIMIT:]
+        truncated = True
+    selected: list[dict[str, Any]] = []
     total = 0
     for item in reversed(result):
         text = item["text"]
@@ -160,7 +204,7 @@ def bounded_stream_items(value: Any) -> tuple[list[dict[str, str]], bool]:
     return selected, truncated
 
 
-def sanitized_stream_items(value: Any) -> list[dict[str, str]]:
+def sanitized_stream_items(value: Any) -> list[dict[str, Any]]:
     items, _truncated = bounded_stream_items(value)
     return items
 
@@ -187,6 +231,9 @@ def sanitize_message(value: Any, *, role: str | None = None, content: str | None
     details = truncate_text(str(raw.get("details") or "").strip(), YOAGENT_MESSAGE_DETAILS_LIMIT)
     if details and message_role == "assistant":
         message["details"] = details
+    detail_rows = sanitized_detail_rows(raw.get("detailRows"))
+    if detail_rows and message_role == "assistant":
+        message["detailRows"] = detail_rows
     raw_response_ms = raw.get("responseMs", raw.get("response_ms"))
     response_ms = float_value(raw_response_ms, 0.0)
     if message_role == "assistant" and response_ms > 0:

@@ -17,6 +17,8 @@ from ..atomic_file import atomic_write_text
 from ..atomic_file import file_lock
 from ..common import CONFIG_DIR
 from ..common import truncate_text
+from ..locales import message_fields
+from ..locales import user_message_payload
 
 
 YOAGENT_PACKAGE = "yolomux_lib.yoagent"
@@ -45,6 +47,29 @@ YOAGENT_SKILL_TOOLS = frozenset({
     "execute_confirmed_send",
     "summarize_sessions",
 })
+
+
+class YoagentSkillValidationError(ValueError):
+    def __init__(self, errors: list[dict[str, Any]]):
+        self.errors = errors
+        super().__init__("; ".join(str(item.get("error") or "") for item in errors if item.get("error")))
+
+
+def skill_error(source: str, key: str, fallback: str, params: dict[str, Any] | None = None, *, diagnostic: str = "") -> dict[str, Any]:
+    return {
+        "source": source,
+        "diagnostic": diagnostic,
+        **message_fields("error", key, fallback, params),
+    }
+
+
+def skill_validation_payload(error: YoagentSkillValidationError) -> dict[str, Any]:
+    primary = error.errors[0] if error.errors else skill_error("", "yoagent.skill.error.invalid", "Invalid skill file.")
+    params = primary.get("error_params") if isinstance(primary.get("error_params"), dict) else {}
+    return {
+        "validation_errors": error.errors,
+        **user_message_payload(str(primary.get("error_key") or "yoagent.skill.error.invalid"), str(primary.get("error") or error), **params),
+    }
 
 
 @dataclass(frozen=True)
@@ -105,19 +130,19 @@ def normalize_user_file_kind(kind: str) -> str:
         return "skill"
     if value in {"context", "contexts", "md", "markdown"}:
         return "context"
-    raise ValueError("kind must be one of: skill, context")
+    raise YoagentSkillValidationError([skill_error("", "yoagent.skill.error.kind", "File type must be one of: skill, context.")])
 
 
 def clean_user_file_name(name: str, suffix: str) -> str:
     raw = str(name or "").strip()
     if not raw:
-        raise ValueError("name is required")
+        raise YoagentSkillValidationError([skill_error("", "yoagent.skill.error.nameRequired", "A file name is required.")])
     if "/" in raw or "\\" in raw or raw != Path(raw).name:
-        raise ValueError("name must be a file name, not a path")
+        raise YoagentSkillValidationError([skill_error("", "yoagent.skill.error.nameFileOnly", "The name must be a file name, not a path.")])
     if raw.endswith(suffix):
         raw = raw[: -len(suffix)]
     if not YOAGENT_SKILL_NAME_RE.fullmatch(raw):
-        raise ValueError("name must match [a-z][a-z0-9-]{1,63}")
+        raise YoagentSkillValidationError([skill_error("", "yoagent.skill.error.namePattern", "The name must match `[a-z][a-z0-9-]{1,63}`.")])
     return raw
 
 
@@ -160,33 +185,35 @@ def read_user_skill_file(kind: str, name: str, config_dir: Path | None = None) -
 def list_user_skill_files(config_dir: Path | None = None) -> dict[str, Any]:
     dirs = user_skill_dirs(config_dir)
     files: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     for child in path_skill_files(Path(dirs["skills"])):
         try:
             files.append(skill_file_payload("skill", child, child.read_text(encoding="utf-8")))
         except OSError as exc:
-            errors.append(skill_error(str(child), str(exc)))
+            diagnostic = str(exc)
+            errors.append(skill_error(str(child), "yoagent.skill.error.readFailed", f"Could not read `{child}`: {diagnostic}", {"source": str(child), "error": diagnostic}, diagnostic=diagnostic))
     for child in path_markdown_files(Path(dirs["context"])):
         try:
             files.append(skill_file_payload("context", child, child.read_text(encoding="utf-8")))
         except OSError as exc:
-            errors.append(skill_error(str(child), str(exc)))
+            diagnostic = str(exc)
+            errors.append(skill_error(str(child), "yoagent.skill.error.readFailed", f"Could not read `{child}`: {diagnostic}", {"source": str(child), "error": diagnostic}, diagnostic=diagnostic))
     return {"ok": not errors, "user_dirs": dirs, "files": files, "errors": errors}
 
 
 def validate_user_skill_file_text(kind: str, path: Path, text: str) -> None:
     if len(text) > YOAGENT_USER_FILE_TEXT_LIMIT:
-        raise ValueError(f"text must be at most {YOAGENT_USER_FILE_TEXT_LIMIT} characters")
+        raise YoagentSkillValidationError([skill_error(str(path), "yoagent.skill.error.textTooLarge", f"Text must be at most {YOAGENT_USER_FILE_TEXT_LIMIT} characters.", {"limit": YOAGENT_USER_FILE_TEXT_LIMIT})])
     if kind == "skill":
         skill, errors = parse_skill_text(text, str(path), False, path.stem)
         if errors:
-            raise ValueError("; ".join(item["error"] for item in errors))
+            raise YoagentSkillValidationError(errors)
         if skill is None:
-            raise ValueError("invalid skill file")
+            raise YoagentSkillValidationError([skill_error(str(path), "yoagent.skill.error.invalid", "Invalid skill file.")])
         if skill.name != path.stem:
-            raise ValueError("skill name must match the file name")
+            raise YoagentSkillValidationError([skill_error(str(path), "yoagent.skill.error.nameMismatch", "The skill name must match the file name.")])
     elif not text.strip():
-        raise ValueError("context text is required")
+        raise YoagentSkillValidationError([skill_error(str(path), "yoagent.skill.error.contextRequired", "Context text is required.")])
 
 
 def write_user_skill_file(kind: str, name: str, text: str, config_dir: Path | None = None) -> dict[str, Any]:
@@ -235,19 +262,15 @@ def path_markdown_files(path: Path) -> list[Path]:
         return []
 
 
-def skill_error(source: str, message: str) -> dict[str, str]:
-    return {"source": source, "error": message}
-
-
 def clean_string(value: Any, limit: int = YOAGENT_SKILL_TEXT_LIMIT) -> str:
     return truncate_text(str(value or "").strip(), limit)
 
 
-def clean_string_list(value: Any, field: str, errors: list[str]) -> tuple[str, ...]:
+def clean_string_list(value: Any, field: str, errors: list[dict[str, Any]], source: str) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list):
-        errors.append(f"{field} must be a list of strings")
+        errors.append(skill_error(source, "yoagent.skill.error.listOfStrings", f"{field} must be a list of strings.", {"field": field}))
         return ()
     result: list[str] = []
     for item in value:
@@ -259,53 +282,54 @@ def clean_string_list(value: Any, field: str, errors: list[str]) -> tuple[str, .
     return tuple(result)
 
 
-def clean_timeout_minutes(value: Any, errors: list[str]) -> int | None:
+def clean_timeout_minutes(value: Any, errors: list[dict[str, Any]], source: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool):
-        errors.append("default_timeout_minutes must be an integer")
+        errors.append(skill_error(source, "yoagent.skill.error.timeoutInteger", "default_timeout_minutes must be an integer."))
         return None
     try:
         minutes = int(value)
     except (TypeError, ValueError):
-        errors.append("default_timeout_minutes must be an integer")
+        errors.append(skill_error(source, "yoagent.skill.error.timeoutInteger", "default_timeout_minutes must be an integer."))
         return None
     if minutes < 1 or minutes > 24 * 60:
-        errors.append("default_timeout_minutes must be between 1 and 1440")
+        errors.append(skill_error(source, "yoagent.skill.error.timeoutRange", "default_timeout_minutes must be between 1 and 1440.", {"min": 1, "max": 1440}))
         return None
     return minutes
 
 
-def parse_skill_mapping(raw: Any, source: str, builtin: bool, fallback_name: str) -> tuple[YoagentSkill | None, list[dict[str, str]]]:
+def parse_skill_mapping(raw: Any, source: str, builtin: bool, fallback_name: str) -> tuple[YoagentSkill | None, list[dict[str, Any]]]:
     if not isinstance(raw, dict):
-        return None, [skill_error(source, "skill file must contain a YAML mapping")]
-    errors: list[str] = []
+        return None, [skill_error(source, "yoagent.skill.error.mappingRequired", "The skill file must contain a YAML mapping.")]
+    errors: list[dict[str, Any]] = []
     name = clean_string(raw.get("name") or fallback_name, 80)
     if not YOAGENT_SKILL_NAME_RE.fullmatch(name):
-        errors.append("name must match [a-z][a-z0-9-]{1,63}")
+        errors.append(skill_error(source, "yoagent.skill.error.namePattern", "The name must match `[a-z][a-z0-9-]{1,63}`."))
     enabled_value = raw.get("enabled", True)
     if not isinstance(enabled_value, bool):
-        errors.append("enabled must be true or false")
+        errors.append(skill_error(source, "yoagent.skill.error.enabledBoolean", "enabled must be true or false."))
         enabled = True
     else:
         enabled = enabled_value
     kind = clean_string(raw.get("kind") or "workflow", 80)
     if not YOAGENT_SKILL_NAME_RE.fullmatch(kind):
-        errors.append("kind must match [a-z][a-z0-9-]{1,63}")
+        errors.append(skill_error(source, "yoagent.skill.error.kindPattern", "kind must match `[a-z][a-z0-9-]{1,63}`."))
     description = clean_string(raw.get("description"), YOAGENT_SKILL_TEXT_LIMIT)
     if enabled and not description:
-        errors.append("description is required when enabled is true")
-    tools = clean_string_list(raw.get("tools"), "tools", errors)
+        errors.append(skill_error(source, "yoagent.skill.error.descriptionRequired", "A description is required when enabled is true."))
+    tools = clean_string_list(raw.get("tools"), "tools", errors, source)
     unknown_tools = [tool for tool in tools if tool not in YOAGENT_SKILL_TOOLS]
     if unknown_tools:
-        errors.append("unknown tools: " + ", ".join(unknown_tools))
-    triggers = clean_string_list(raw.get("triggers"), "triggers", errors)
+        tools_text = ", ".join(unknown_tools)
+        errors.append(skill_error(source, "yoagent.skill.error.unknownTools", f"Unknown tools: {tools_text}.", {"tools": tools_text}))
+    triggers = clean_string_list(raw.get("triggers"), "triggers", errors, source)
     confirmation = clean_string(raw.get("confirmation") or "none", 80)
     if confirmation not in {"none", "required", "template"}:
-        errors.append("confirmation must be one of: none, required, template")
-    timeout = clean_timeout_minutes(raw.get("default_timeout_minutes"), errors)
+        errors.append(skill_error(source, "yoagent.skill.error.confirmation", "confirmation must be one of: none, required, template."))
+    timeout = clean_timeout_minutes(raw.get("default_timeout_minutes"), errors, source)
     if errors:
-        return None, [skill_error(source, error) for error in errors]
+        return None, errors
     return YoagentSkill(
         name=name,
         kind=kind,
@@ -320,17 +344,18 @@ def parse_skill_mapping(raw: Any, source: str, builtin: bool, fallback_name: str
     ), []
 
 
-def parse_skill_text(text: str, source: str, builtin: bool, fallback_name: str) -> tuple[YoagentSkill | None, list[dict[str, str]]]:
+def parse_skill_text(text: str, source: str, builtin: bool, fallback_name: str) -> tuple[YoagentSkill | None, list[dict[str, Any]]]:
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        return None, [skill_error(source, f"invalid YAML: {exc}")]
+        diagnostic = str(exc)
+        return None, [skill_error(source, "yoagent.skill.error.invalidYaml", f"Invalid YAML: {diagnostic}", {"error": diagnostic}, diagnostic=diagnostic)]
     return parse_skill_mapping(raw, source, builtin, fallback_name)
 
 
-def load_builtin_skills() -> tuple[list[YoagentSkill], list[dict[str, str]]]:
+def load_builtin_skills() -> tuple[list[YoagentSkill], list[dict[str, Any]]]:
     skills: list[YoagentSkill] = []
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     for child in yaml_resource_children(BUILTIN_SKILLS_DIR):
         source = builtin_resource_label(BUILTIN_SKILLS_DIR, child.name)
         skill, item_errors = parse_skill_text(child.read_text(encoding="utf-8"), source, True, Path(child.name).stem)
@@ -340,15 +365,16 @@ def load_builtin_skills() -> tuple[list[YoagentSkill], list[dict[str, str]]]:
     return skills, errors
 
 
-def load_user_skills(path: Path | None = None) -> tuple[list[YoagentSkill], list[dict[str, str]]]:
+def load_user_skills(path: Path | None = None) -> tuple[list[YoagentSkill], list[dict[str, Any]]]:
     skills: list[YoagentSkill] = []
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     for child in path_skill_files(path or USER_SKILLS_DIR):
         source = str(child)
         try:
             text = child.read_text(encoding="utf-8")
         except OSError as exc:
-            errors.append(skill_error(source, str(exc)))
+            diagnostic = str(exc)
+            errors.append(skill_error(source, "yoagent.skill.error.readFailed", f"Could not read `{source}`: {diagnostic}", {"source": source, "error": diagnostic}, diagnostic=diagnostic))
             continue
         skill, item_errors = parse_skill_text(text, source, False, child.stem)
         errors.extend(item_errors)
@@ -357,9 +383,9 @@ def load_user_skills(path: Path | None = None) -> tuple[list[YoagentSkill], list
     return skills, errors
 
 
-def load_context_texts(user_context_dir: Path | None = None) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+def load_context_texts(user_context_dir: Path | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contexts: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     for child in markdown_resource_children(BUILTIN_CONTEXT_DIR):
         source = builtin_resource_label(BUILTIN_CONTEXT_DIR, child.name)
         text = clean_string(child.read_text(encoding="utf-8"), YOAGENT_CONTEXT_TEXT_LIMIT)
@@ -370,7 +396,8 @@ def load_context_texts(user_context_dir: Path | None = None) -> tuple[list[dict[
         try:
             text = clean_string(child.read_text(encoding="utf-8"), YOAGENT_CONTEXT_TEXT_LIMIT)
         except OSError as exc:
-            errors.append(skill_error(source, str(exc)))
+            diagnostic = str(exc)
+            errors.append(skill_error(source, "yoagent.skill.error.readFailed", f"Could not read `{source}`: {diagnostic}", {"source": source, "error": diagnostic}, diagnostic=diagnostic))
             continue
         if text:
             contexts.append({"name": child.stem, "source": source, "builtin": False, "text": text})

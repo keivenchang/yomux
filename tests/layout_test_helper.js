@@ -431,6 +431,15 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     repoRoot: '/home/test/yolomux.dev',
     maxSessionTabs: 99,
     serverHostname: 'test-host',
+    localeRegistry: {
+      fallback: 'en',
+      pseudo: 'en-XA',
+      systemPreference: 'system',
+      systemLocale: 'en',
+      locales: [
+        ['en', 'English', 'ltr'], ['zh-Hant', '繁體中文', 'ltr'], ['zh-Hans', '简体中文', 'ltr'], ['ja', '日本語', 'ltr'], ['ko', '한국어', 'ltr'], ['es', 'Español', 'ltr'], ['de', 'Deutsch', 'ltr'], ['fr', 'Français', 'ltr'], ['it', 'Italiano', 'ltr'], ['pt-BR', 'Português (BR)', 'ltr'], ['pl', 'Polski', 'ltr'], ['nl', 'Nederlands', 'ltr'], ['he', 'עברית', 'rtl'], ['ar', 'العربية', 'rtl'], ['ru', 'Русский', 'ltr'], ['hi', 'हिन्दी', 'ltr'], ['vi', 'Tiếng Việt', 'ltr'], ['th', 'ไทย', 'ltr'], ['tr', 'Türkçe', 'ltr'],
+      ].map(([id, endonym, direction]) => ({id, endonym, direction})),
+    },
     // Seed the en catalog the way production inlines bootstrap.strings, so localized labels (the brand
     // tab labels infoTabLabel()/yoagentTabLabel() etc.) resolve synchronously at first render under en.
     strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))},
@@ -470,6 +479,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const testClearTimeout = options.clearTimeout || (() => {});
   const testSetInterval = options.setInterval || (() => {});
   const testClearInterval = options.clearInterval || (() => {});
+  const notification = {permission: 'denied'};
   const element = id => {
     if (!elements.has(id)) elements.set(id, new TestElement(id));
     const node = elements.get(id);
@@ -539,7 +549,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
         },
       },
     },
-    Notification: {permission: 'denied'},
+    Notification: notification,
     performance: {now: () => 0},
     requestAnimationFrame(callback) { return callback(); },
     setInterval: testSetInterval,
@@ -554,6 +564,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setTimeout: testSetTimeout,
     window: {
       __listeners: windowListeners,
+      Notification: notification,
       addEventListener(type, listener) {
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(listener);
@@ -629,6 +640,7 @@ globalThis.__layoutTestApi = {
   yoagentInlineMarkdown,
   yoagentTightMarkdown,
   joinAndNormalize,
+  i18nNormalizeLocale,
   resolveLocalePref,
   i18nLocaleChoices,
   i18nIsRtl,
@@ -656,6 +668,12 @@ globalThis.__layoutTestApi = {
   },
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
+  transcriptItemHtmlForTest: transcriptItemHtml,
+  transcriptAgentErrorTextForTest: transcriptAgentErrorText,
+  transcriptContextLoadErrorTextForTest: transcriptContextLoadErrorText,
+  transcriptMetadataLoadErrorTextForTest: transcriptMetadataLoadErrorText,
+  setTranscriptMetadataLoadErrorForTest(value) { transcriptMetaLoadError = value; },
+  repoComparisonErrorHtmlForTest: repoComparisonErrorHtml,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
   updateNotificationAllowsVersionForTest: updateNotificationAllowsVersion,
   normalizeUpdateNotificationLevelForTest: normalizeUpdateNotificationLevel,
@@ -676,6 +694,7 @@ globalThis.__layoutTestApi = {
   updateCodeMirrorCursorStatusForTest: updateCodeMirrorCursorStatus,
   codeMirrorSearchMatches,
   codeMirrorSearchMatchSummary,
+  codeMirrorPhraseValues,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
   editorNav,
@@ -766,10 +785,11 @@ globalThis.__layoutTestApi = {
   cancelQueuedYoagentChatMessageForTest: cancelQueuedYoagentChatMessage,
   cancelActiveYoagentChatRequestForTest: cancelActiveYoagentChatRequest,
   sendYoagentChatMessageForTest: sendYoagentChatMessage,
-  setYoagentErrorForTest(value) { yoagentError = String(value || ''); },
+  setYoagentErrorForTest(value) { yoagentError = value && typeof value === 'object' ? value : String(value || ''); },
   setYoagentNoticeForTest(value) { yoagentNotice = value; },
   setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
   applyYoagentStreamPayloadForTest: applyYoagentStreamPayload,
+  refreshActivitySummaryForTest: refreshActivitySummary,
   showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
   showYoagentStartupInfoForLatestActivityForTest: showYoagentStartupInfoForLatestActivity,
   hideYoagentStartupInfoForTest: hideYoagentStartupInfo,
@@ -886,6 +906,7 @@ globalThis.__layoutTestApi = {
   infoItemId,
   infoRelationshipRecords,
   infoGroupTree,
+  infoDimensionCountTextForTest: infoDimensionCountText,
   infoGroupDimensions,
   infoGroupDimensionsForLevel,
   infoGroupingControlsHtmlForTest: infoGroupingControlsHtml,
@@ -997,9 +1018,20 @@ globalThis.__layoutTestApi = {
   clearTerminalVisibleSelectionForTest: clearTerminalVisibleSelection,
   apiFetchJsonQuietForTest: apiFetchJsonQuiet,
   setFetchForTest(fn) { globalThis.fetch = fn; },
+  setClipboardForTest(clipboard, ClipboardItemType = class {}) {
+    navigator.clipboard = clipboard;
+    globalThis.ClipboardItem = ClipboardItemType;
+  },
+  setSaveBlobDownloadForTest(fn) { saveBlobDownload = fn; },
   setConfirmForTest(fn) { window.confirm = fn; },
   setShowToastForTest(fn) { showToast = fn; },
+  copyImageFileToClipboardForTest: copyImageFileToClipboard,
+  triggerFileDownloadForTest: triggerFileDownload,
+  triggerFolderZipDownloadForTest: triggerFolderZipDownload,
+  applyAndSaveGlobalThemeForTest: applyAndSaveGlobalTheme,
   reloadCountForTest() { return globalThis.__reloadCount || 0; },
+  yoagentJobNotificationTitleForTest: yoagentJobNotificationTitle,
+  yoagentJobNotificationBodyForTest: yoagentJobNotificationBody,
   applyUpdateAvailableForTest: applyUpdateAvailable,
   triggerSelfUpdateForTest: triggerSelfUpdate,
   maybeHandleServerVersionChangeForTest: maybeHandleServerVersionChange,
@@ -1117,6 +1149,7 @@ globalThis.__layoutTestApi = {
   dropActionDisplayLabel,
   composeDropSuggestion,
   insertedDropActionText,
+  runDropActionForTest: runDropAction,
   customDropActionFromLine,
   commandPaletteDropActionItems,
   normalizeLayoutSlots,
@@ -1302,6 +1335,11 @@ globalThis.__layoutTestApi = {
   openFileEditorItems,
   pullRequestStatusLabel,
   pullRequestStatusDisplay,
+  pullRequestStatusClass,
+  pullRequestInlineStatusDisplay,
+  pullRequestCiState,
+  pullRequestCiStatus,
+  pullRequestChecksHtml,
   pullRequestLinkLabel,
   pullRequestApprovalIndicatorHtml,
   pullRequestCompactBadgesHtml,
@@ -1309,6 +1347,10 @@ globalThis.__layoutTestApi = {
   pullRequestReviewInlineHtml,
   sessionStateHtml,
   openFileStatus,
+  fileErrorStateForTest: fileErrorState,
+  missingFileStateForTest: missingFileState,
+  tooLargeFileStateForTest: tooLargeFileState,
+  fileErrorTextForTest: fileErrorText,
   fileInspectionErrorMessageForTest: fileInspectionErrorMessage,
   setOpenFileOwner,
   renderTransportWarning,
@@ -1331,6 +1373,8 @@ globalThis.__layoutTestApi = {
   terminalTabLabel,
   terminalTabTitle,
   terminalTabDisplayLabel,
+  terminalTmuxPrefixWindowShortcutForTest: terminalTmuxPrefixWindowShortcut,
+  terminalTmuxAltWindowShortcutForTest: terminalTmuxAltWindowShortcut,
   tmuxWindowForTest: tmuxWindow,
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { setFileState(path, state); },
@@ -1433,6 +1477,12 @@ globalThis.__layoutTestApi = {
   setFileQuickOpenLoadingForTest(loading) {
     fileQuickOpenLoading = Boolean(loading);
     fileQuickOpenError = '';
+    commandPaletteMode = 'files';
+  },
+  setFileQuickOpenErrorForTest(error) {
+    fileQuickOpenCandidates = [];
+    fileQuickOpenLoading = false;
+    fileQuickOpenError = error;
     commandPaletteMode = 'files';
   },
   setCommandPaletteQueryForTest(value) {

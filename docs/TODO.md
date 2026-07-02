@@ -77,7 +77,8 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Internationalization
 
-- [ ] [M] Backfill low-coverage locale catalogs one locale at a time using `python3 tools/static_build.py --i18n-untranslated-report` as the source list, starting with `nl`, `it`, `pl`, `tr`, `th`, and `vi`; keep `{tokens}` unchanged, lower each locale's untranslated baseline after each pass, and run `python3 tools/check.py` after each locale batch.
+- [ ] [M] Finish structured localization for the auxiliary tmux-wall shell and remaining browser-visible share/upload/filesystem/search/run-history/transcript/API errors while retaining raw OS/git/tmux/model text only as diagnostic detail.
+- [ ] [L] Collapse duplicate catalog concepts through neutral `common.*`, `brand.*`, and `state.*` parents; the audit found 77 same-semantic groups containing 97 excess keys, including 60 groups whose translations have already drifted across locales.
 
 ## Product Guardrails
 

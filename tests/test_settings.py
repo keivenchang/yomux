@@ -323,8 +323,12 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["summary.timeout_seconds"]["limits"] == {"min": 30, "max": 3600}
     assert catalog["yoagent.system_prompt"]["requires_confirmation"] is True
     assert catalog["yoagent.system_prompt"]["sensitivity"] == "prompt"
-    assert catalog["appearance.theme"]["gui"] == {"section": "Appearance", "visible": True}
-    assert catalog["share.view_fit"]["gui"] == {"section": "", "visible": False}
+    assert catalog["appearance.theme"]["gui"] == {
+        "section": "Appearance",
+        "section_locale_key": "pref.section.appearance",
+        "visible": True,
+    }
+    assert catalog["share.view_fit"]["gui"] == {"section": "", "section_locale_key": "", "visible": False}
 
 
 def test_stale_yoagent_model_settings_revert_to_valid_defaults():
@@ -556,8 +560,7 @@ def test_login_locale_picker_writes_general_language():
 
 
 def test_deterministic_yoagent_reply_localizes_framing():
-    # Phase 3: the no-agent fallback localizes its fixed framing (prefix + no-activity headline)
-    # via the saved/active locale. The generated per-session prose stays English (LLM backends localize).
+    # The no-agent fallback resolves both framing and per-session facts through the active locale.
     from yolomux_lib.activity_summary import deterministic_yoagent_reply
 
     en_reply = deterministic_yoagent_reply("status?", {}, {}, "en")

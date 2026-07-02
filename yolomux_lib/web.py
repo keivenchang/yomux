@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from .common import AUTH_CONFIG_DISPLAY_PATH
@@ -19,6 +20,14 @@ from .common import yolomux_commit_count
 from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .common import yolomux_dev_bundle_revision
+from .locales import LANGUAGE_PREFERENCES
+from .locales import LOCALE_ENDONYMS
+from .locales import SHIPPED_LOCALES
+from .locales import locale_direction
+from .locales import locale_registry_payload
+from .locales import normalize_locale
+from .locales import plural_category
+from .locales import resolve_locale_preference
 from .settings import save_settings
 from .settings import settings_payload
 from .workdir import AGENT_LOGIN_COMMANDS
@@ -33,6 +42,7 @@ STATIC_CONTENT_TYPES = {
     "login.css": "text/css; charset=utf-8",
     "setup-auth.css": "text/css; charset=utf-8",
     "setup-auth.js": "application/javascript; charset=utf-8",
+    "preauth-locale.js": "application/javascript; charset=utf-8",
     "codemirror.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
@@ -68,13 +78,14 @@ def static_asset_path(asset: str) -> Path | None:
     return None
 
 
-def bootstrap_locale(settings_data: dict) -> str:
-    """Resolve the active UI locale for first paint. 'system' (or unknown) falls back to 'en'."""
+def bootstrap_locale(settings_data: dict, accept_language: str = "") -> str:
+    """Resolve and validate the active UI locale for first paint."""
     settings = settings_data.get("settings", {}) if isinstance(settings_data, dict) else {}
     language = (settings.get("general") or {}).get("language", "system")
-    return language if isinstance(language, str) and language and language != "system" else "en"
+    return resolve_locale_preference(language, accept_language)
 
 
+@lru_cache(maxsize=len(SHIPPED_LOCALES) + 1)
 def bootstrap_locale_catalogs(locale: str) -> dict:
     """Inline the active locale's catalog (+ the en fallback) so t() resolves on the first render.
 
@@ -83,7 +94,8 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
     are still fetched from /static/locales on a language switch.
     """
     catalogs: dict = {}
-    for code in dict.fromkeys(["en", str(locale or "en")]):
+    normalized = normalize_locale(locale)
+    for code in dict.fromkeys(["en", normalized]):
         path = STATIC_DIR / "locales" / f"{code}.json"
         try:
             data = json.loads(path.read_text())
@@ -97,9 +109,8 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
 def html_lang_dir_attrs(locale: str) -> str:
     """`lang="…" dir="…"` for the <html> shell. Phase 2: RTL locales (ar) get dir="rtl" so the
     server-rendered first paint already mirrors before the JS i18n runtime sets it."""
-    code = str(locale or "en")
-    base = code.lower().split("-")[0]
-    direction = "rtl" if base in {"ar", "he", "fa", "ur"} else "ltr"
+    code = normalize_locale(locale)
+    direction = locale_direction(code)
     return f'lang="{html.escape(code, quote=True)}" dir="{direction}"'
 
 
@@ -109,9 +120,29 @@ def server_string(locale: str, key: str, **params: str) -> str:
     The login/setup screens are rendered server-side (not by the localized JS), so they look up strings
     directly from the same /static/locales catalogs the client uses, keyed by the saved general.language.
     """
-    catalogs = bootstrap_locale_catalogs(locale)
-    value = catalogs.get(str(locale or ""), {}).get(key) or catalogs.get("en", {}).get(key) or key
+    code = normalize_locale(locale)
+    catalogs = bootstrap_locale_catalogs(code)
+    value = catalogs.get(code, {}).get(key) or catalogs.get("en", {}).get(key) or key
     for name, replacement in params.items():
+        value = value.replace("{" + name + "}", str(replacement))
+    return value
+
+
+def server_plural(locale: str, key: str, count: object, **params: object) -> str:
+    """Resolve one plural family with the same active/English fallback order as the browser."""
+    code = normalize_locale(locale)
+    catalogs = bootstrap_locale_catalogs(code)
+    category = plural_category(code, count)
+    active = catalogs.get(code, {})
+    fallback = catalogs.get("en", {})
+    value = (
+        active.get(f"{key}.{category}")
+        or active.get(f"{key}.other")
+        or fallback.get(f"{key}.{category}")
+        or fallback.get(f"{key}.other")
+        or key
+    )
+    for name, replacement in {**params, "count": count}.items():
         value = value.replace("{" + name + "}", str(replacement))
     return value
 
@@ -131,17 +162,26 @@ def static_asset_url(asset: str) -> str:
 
 
 def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
+    active_locale = normalize_locale(locale)
     commit_count = yolomux_commit_count()
-    commit_count_line = f"\nCommits: {commit_count}" if commit_count > 0 else ""
-    version_title = html.escape(f"SHA: {yolomux_commit_sha()}\nLast commit: {yolomux_commit_time_pt()}{commit_count_line}", quote=True)
+    commit_count_line = f"\n{server_string(active_locale, 'menu.help.about.commits', count=commit_count)}" if commit_count > 0 else ""
+    version_title = html.escape(
+        f"{server_string(active_locale, 'menu.help.about.sha', sha=yolomux_commit_sha())}\n"
+        f"{server_string(active_locale, 'menu.help.lastCommit', time=yolomux_commit_time_pt())}{commit_count_line}",
+        quote=True,
+    )
     # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
     # the JS renderBrandWordmark(), so localize the YO/LO glyphs here too — otherwise a Chinese locale
     # showed "YO/LOmux" instead of 優樂mux / 优乐mux. Pass a locale on those pages; the main app leaves it
     # None (English) and re-localizes client-side after bootstrap.
-    yo = html.escape(server_string(locale, "brand.wordmark.yo")) if locale else "YO"
-    lo = html.escape(server_string(locale, "brand.wordmark.lo")) if locale else "LO"
+    yo = html.escape(server_string(active_locale, "brand.wordmark.yo"))
+    lo = html.escape(server_string(active_locale, "brand.wordmark.lo"))
+    brand_aria = html.escape(server_string(active_locale, "brand.aria", version=YOLOMUX_VERSION), quote=True)
+    update_title = html.escape(server_string(active_locale, "update.badgeTitle"), quote=True)
+    update_aria = html.escape(server_string(active_locale, "update.badgeAria"), quote=True)
+    update_label = html.escape(server_string(active_locale, "update.badgeLabel"))
     return (
-        f'<{tag} class="{html.escape(class_name, quote=True)}" aria-label="YOLOmux {html.escape(YOLOMUX_VERSION, quote=True)}">'
+        f'<{tag} class="{html.escape(class_name, quote=True)}" aria-label="{brand_aria}">'
         f'<span class="brand-yolo brand-green">{yo}</span>'
         f'<span class="brand-lo brand-green">{lo}</span>'
         '<span class="brand-blue">m</span>'
@@ -149,7 +189,7 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
         '<span class="brand-yellow">x</span>'
         f'<span class="brand-version" title="{version_title}">{html.escape(YOLOMUX_VERSION)}</span>'
         '<button type="button" class="brand-update-badge" data-update-badge hidden '
-        'title="Update available — click to update and restart" aria-label="Update available">update</button>'
+        f'title="{update_title}" aria-label="{update_aria}">{update_label}</button>'
         f"</{tag}>"
     )
 
@@ -177,8 +217,10 @@ def html_page(
     dev: bool = False,
     dangerously_yolo: bool = False,
     share: dict | None = None,
+    accept_language: str = "",
 ) -> str:
     settings_data = settings_payload()
+    locale = bootstrap_locale(settings_data, accept_language)
     bootstrap = {
         "sessions": sessions,
         # Dev-velocity #1b: when true the page subscribes to /api/dev-reload and reloads on bundle change.
@@ -205,12 +247,13 @@ def html_page(
         "versionCommitTime": yolomux_commit_time_pt(),
         "versionCommitCount": yolomux_commit_count(),
         "settingsPayload": bootstrap_settings_payload(settings_data),
-        # i18n: resolved active locale for first paint ("system" -> en server-side; the client
-        # may refine via navigator.language). The active locale's catalog (+ the en fallback) is INLINED
+        # i18n: resolved active locale for first paint plus the canonical registry that every client
+        # uses for normalization, system resolution, endonyms, and direction. The active locale's catalog (+ the en fallback) is INLINED
         # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at
         # boot before any fetch could complete. Other locales are still fetched on a language switch.
-        "locale": bootstrap_locale(settings_data),
-        "strings": bootstrap_locale_catalogs(bootstrap_locale(settings_data)),
+        "locale": locale,
+        "localeRegistry": locale_registry_payload(accept_language),
+        "strings": bootstrap_locale_catalogs(locale),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
         "share": share or None,
@@ -230,7 +273,7 @@ def html_page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YOLOmux</title>
+<title>{html.escape(server_string(locale, "app.documentTitle"))}</title>
 <link rel="stylesheet" href="{static_asset_url("xterm.css")}" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("vendor/dockview.css")}">
@@ -245,37 +288,37 @@ def html_page(
 <div id="appRoot" class="app-root">
 <header class="topbar">
   <div class="brand-cell">
-    {brand_html("brand brand-title title", "div")}
-    <span id="httpsWarning" class="transport-warning" hidden aria-label="No HTTPS"></span>
+    {brand_html("brand brand-title title", "div", locale=locale)}
+    <span id="httpsWarning" class="transport-warning" hidden aria-label="{html.escape(server_string(locale, "app.noHttps"), quote=True)}"></span>
   </div>
-  <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
+  <div id="sessionButtons" class="app-menu-area" aria-label="{html.escape(server_string(locale, "app.menusAria"), quote=True)}"></div>
   <div class="actions">
-    <div id="latencyMeter" class="latency-meter topbar-status-surface" title="Browser to YOLOmux latency">
+    <div id="latencyMeter" class="latency-meter topbar-status-surface" title="{html.escape(server_string(locale, "app.latencyTitle"), quote=True)}">
       <svg class="latency-graph" viewBox="0 0 44 18" aria-hidden="true">
         <polyline id="latencyLine" class="latency-line" points=""></polyline>
       </svg>
       <span id="latencyNumber" class="latency-number">-- ms</span>
     </div>
-    <button id="notifyToggle" class="notify-toggle" title="notify when a session needs attention">Notify</button>
-    <button id="refreshMeta">Refresh</button>
-    <button id="logoutButton" title="Log out" aria-label="Log out">Log out</button>
-    <span id="status" class="sub">starting</span>
+    <button id="notifyToggle" class="notify-toggle" title="{html.escape(server_string(locale, "notify.toggleTitle", state=server_string(locale, "notify.state.off")), quote=True)}">{html.escape(server_string(locale, "pref.section.notifications"))}</button>
+    <button id="refreshMeta">{html.escape(server_string(locale, "finder.toolbar.refresh"))}</button>
+    <button id="logoutButton" title="{html.escape(server_string(locale, "menu.file.logout"), quote=True)}" aria-label="{html.escape(server_string(locale, "menu.file.logout"), quote=True)}">{html.escape(server_string(locale, "menu.file.logout"))}</button>
+    <span id="status" class="sub">{html.escape(server_string(locale, "app.starting"))}</span>
   </div>
 </header>
 <div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
-<aside id="fileExplorer" class="file-explorer" hidden aria-label="File Explorer">
+<aside id="fileExplorer" class="file-explorer" hidden aria-label="{html.escape(server_string(locale, "finder.label.explorer"), quote=True)}">
   <div class="file-explorer-tree-col">
     <div class="file-explorer-head">
-      <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="File Explorer root path">
-      <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="Copy current path" aria-label="Copy current path"></button>
-      <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
-      <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
-      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" title="Sync: follow active session" aria-pressed="true">Sync</button>
-      <div id="fileExplorerQuickAccess" class="file-explorer-quick-access" aria-label="Quick paths"></div>
-      <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="New file" aria-label="New file">+</button>
-      <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="New folder" aria-label="New folder">▣</button>
-      <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
-      <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>
+      <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="{html.escape(server_string(locale, "finder.toolbar.rootPath", name=server_string(locale, "finder.label.explorer")), quote=True)}">
+      <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="{html.escape(server_string(locale, "finder.toolbar.copyPath"), quote=True)}" aria-label="{html.escape(server_string(locale, "finder.toolbar.copyPath"), quote=True)}"></button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="{html.escape(server_string(locale, "finder.toolbar.collapseAll"), quote=True)}" aria-label="{html.escape(server_string(locale, "finder.toolbar.collapseAll"), quote=True)}">▤</button>
+      <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="{html.escape(server_string(locale, "finder.toolbar.hidden"), quote=True)}" aria-pressed="false">.*</button>
+      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" title="{html.escape(server_string(locale, "finder.toolbar.syncTitle"), quote=True)}" aria-pressed="true">{html.escape(server_string(locale, "finder.toolbar.syncLabel"))}</button>
+      <div id="fileExplorerQuickAccess" class="file-explorer-quick-access" aria-label="{html.escape(server_string(locale, "finder.toolbar.quickPaths"), quote=True)}"></div>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="{html.escape(server_string(locale, "finder.toolbar.newFile"), quote=True)}" aria-label="{html.escape(server_string(locale, "finder.toolbar.newFile"), quote=True)}">+</button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="{html.escape(server_string(locale, "finder.toolbar.newFolder"), quote=True)}" aria-label="{html.escape(server_string(locale, "finder.toolbar.newFolder"), quote=True)}">▣</button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="{html.escape(server_string(locale, "finder.toolbar.refresh"), quote=True)}" aria-label="{html.escape(server_string(locale, "finder.toolbar.refresh"), quote=True)}">↻</button>
+      <button type="button" id="fileExplorerClose" class="file-explorer-close" title="{html.escape(server_string(locale, "finder.close", name=server_string(locale, "finder.label.explorer")), quote=True)}" aria-label="{html.escape(server_string(locale, "common.close"), quote=True)}"></button>
     </div>
     <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
   </div>
@@ -285,8 +328,8 @@ def html_page(
 <section id="modal" class="modal app-modal-overlay">
   <div class="modal-dialog">
     <div class="modal-head">
-      <div id="modalTitle">Transcript</div>
-      <button id="closeModal" title="Close" aria-label="Close">X</button>
+      <div id="modalTitle">{html.escape(server_string(locale, "tab.transcript"))}</div>
+      <button id="closeModal" title="{html.escape(server_string(locale, "common.close"), quote=True)}" aria-label="{html.escape(server_string(locale, "common.close"), quote=True)}">X</button>
     </div>
     <pre id="modalBody"></pre>
   </div>
@@ -300,7 +343,7 @@ def html_page(
     """
 
 
-def agent_login_notice_html(css_class: str = "login-warning") -> str:
+def agent_login_notice_html(css_class: str = "login-warning", locale: str = "en") -> str:
     # if an installed agent (claude/codex) is not logged in, tell the user the exact login
     # command on the login + auth-setup screens. If NEITHER installed agent is logged in, lead with a
     # stronger "Please login to Claude or Codex". Returns '' when every installed agent is logged in
@@ -313,50 +356,32 @@ def agent_login_notice_html(css_class: str = "login-warning") -> str:
     commands = " ".join(f"<code>{html.escape(AGENT_LOGIN_COMMANDS[agent])}</code>" for agent in logged_out)
     if not any(status[agent]["logged_in"] for agent in installed):
         names = " or ".join(agent.capitalize() for agent in logged_out)
-        lead = f"Please login to {html.escape(names)}"
+        lead = server_string(locale, "login.agent.loginTo", names=names)
     else:
-        lead = f"Please login ({html.escape(', '.join(logged_out))})"
-    return f'<div class="{html.escape(css_class)}">{lead} — run {commands}</div>'
+        lead = server_string(locale, "login.agent.login", names=", ".join(logged_out))
+    notice = server_string(locale, "login.agent.run", lead=html.escape(lead), commands=commands)
+    return f'<div class="{html.escape(css_class)}">{notice}</div>'
 
 
 # Phase 1: the login-screen language picker (entry point #1). Endonym-labeled in the same
 # product-priority order as the client switchers. 'system' = follow the browser. A choice here is saved
 # to general.language after a successful sign-in, so all three entry points write the SAME setting.
-LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [
-    ("system", "System"),
-    ("en", "English"),
-    ("zh-Hant", "繁體中文"),
-    ("zh-Hans", "简体中文"),
-    ("ja", "日本語"),
-    ("ko", "한국어"),
-    ("es", "Español"),
-    ("de", "Deutsch"),
-    ("fr", "Français"),
-    ("it", "Italiano"),
-    ("pt-BR", "Português (BR)"),
-    ("pl", "Polski"),
-    ("nl", "Nederlands"),
-    ("he", "עברית"),
-    ("ar", "العربية"),
-    ("ru", "Русский"),
-    ("hi", "हिन्दी"),
-    ("vi", "Tiếng Việt"),
-    ("th", "ไทย"),
-    ("tr", "Türkçe"),
-]
-_LOGIN_LOCALE_VALUES = {value for value, _ in LOGIN_LOCALE_CHOICES}
+LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [("system", "System"), *LOCALE_ENDONYMS]
+_LOGIN_LOCALE_VALUES = set(LANGUAGE_PREFERENCES - {"en-XA"})
 
 
 def current_language_pref() -> str:
     settings = (settings_payload().get("settings") or {})
     language = (settings.get("general") or {}).get("language", "system")
-    return language if isinstance(language, str) and language in _LOGIN_LOCALE_VALUES else "system"
+    return normalize_locale(language, default="system", allow_system=True)
 
 
-def locale_field_html(current: str = "system", css_class: str = "login-locale") -> str:
+def locale_field_html(current: str = "system", css_class: str = "login-locale", display_locale: str | None = None) -> str:
     """The endonym-labeled language picker, shared by the login and setup screens."""
+    locale = display_locale or current
+
     def option_label(value: str, label: str) -> str:
-        return server_string(current, "pref.general.language.system") if value == "system" else label
+        return server_string(locale, "pref.general.language.system") if value == "system" else label
 
     selected_value = current if current in _LOGIN_LOCALE_VALUES else "system"
     selected_label = option_label(selected_value, dict(LOGIN_LOCALE_CHOICES).get(selected_value, "System"))
@@ -368,7 +393,7 @@ def locale_field_html(current: str = "system", css_class: str = "login-locale") 
         )
         for value, label in LOGIN_LOCALE_CHOICES
     )
-    language_label = html.escape(server_string(current, "login.language"))
+    language_label = html.escape(server_string(locale, "login.language"))
     return (
         f'<label class="{html.escape(css_class, quote=True)}">'
         f"<span>{language_label}</span>"
@@ -381,8 +406,8 @@ def locale_field_html(current: str = "system", css_class: str = "login-locale") 
     )
 
 
-def login_locale_field_html(current: str = "system") -> str:
-    return locale_field_html(current, "login-locale")
+def login_locale_field_html(current: str = "system", display_locale: str | None = None) -> str:
+    return locale_field_html(current, "login-locale", display_locale)
 
 
 def save_login_locale(value: str) -> None:
@@ -392,37 +417,41 @@ def save_login_locale(value: str) -> None:
         save_settings({"general": {"language": locale}})
 
 
-def login_html(next_path: str = "/", error: str = "", secure: bool = True, current_locale: str = "system") -> str:
+def login_html(next_path: str = "/", error: str = "", secure: bool = True, current_locale: str = "system", accept_language: str = "") -> str:
+    locale = resolve_locale_preference(current_locale, accept_language)
     safe_next = html.escape(next_path if next_path.startswith("/") else "/", quote=True)
     # Phase 1: localize the pre-auth login chrome via the SAVED locale (the JS i18n runtime is not
     # loaded here). The HTTPS warning + agent-login notice carry shell commands, so they stay English.
-    sign_in = html.escape(server_string(current_locale, "login.signIn"))
-    username_label = html.escape(server_string(current_locale, "login.username"))
-    password_label = html.escape(server_string(current_locale, "login.password"))
-    show_label = server_string(current_locale, "login.show")
-    show_aria = server_string(current_locale, "login.showPassword")
+    sign_in = html.escape(server_string(locale, "login.signIn"))
+    username_label = html.escape(server_string(locale, "login.username"))
+    password_label = html.escape(server_string(locale, "login.password"))
+    show_label = server_string(locale, "login.show")
+    show_aria = server_string(locale, "login.showPassword")
     error_html = f'<div class="login-error" role="alert">{html.escape(error)}</div>' if error else ""
-    security_html = "" if secure else '<div class="login-warning">No HTTPS. Highly recommend that you restart with <code>python3 yolomux.py --port 9998 --self-signed</code>.</div>'
-    agent_notice_html = agent_login_notice_html()
+    command = "python3 yolomux.py --port 9998 --self-signed"
+    security_html = "" if secure else (
+        f'<div class="login-warning">{server_string(locale, "login.noHttps", command=f"<code>{command}</code>")}</div>'
+    )
+    agent_notice_html = agent_login_notice_html(locale=locale)
     toggle_labels = json.dumps({
         "show": show_label,
-        "hide": server_string(current_locale, "login.hide"),
+        "hide": server_string(locale, "login.hide"),
         "showAria": show_aria,
-        "hideAria": server_string(current_locale, "login.hidePassword"),
+        "hideAria": server_string(locale, "login.hidePassword"),
     })
     return f"""<!doctype html>
-<html {html_lang_dir_attrs(current_locale)}>
+<html {html_lang_dir_attrs(locale)}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YOLOmux login</title>
+<title>{html.escape(server_string(locale, "login.documentTitle"))}</title>
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("login.css")}">
 </head>
 <body>
 <main class="login-shell">
   <section class="login-panel">
-    <div class="login-brand">{brand_html("brand-title login-brand-title", "div", locale=current_locale)}</div>
+    <div class="login-brand">{brand_html("brand-title login-brand-title", "div", locale=locale)}</div>
     {security_html}
     {agent_notice_html}
     {error_html}
@@ -439,57 +468,13 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
           <button id="togglePassword" class="password-toggle" type="button" aria-label="{html.escape(show_aria, quote=True)}" aria-pressed="false">{html.escape(show_label)}</button>
         </span>
       </label>
-      {login_locale_field_html(current_locale)}
+      {login_locale_field_html(current_locale, locale)}
       <button type="submit">{sign_in}</button>
     </form>
   </section>
 </main>
 <script>
 (() => {{
-  document.querySelectorAll('[data-locale-picker]').forEach(picker => {{
-    const toggle = picker.querySelector('[data-locale-toggle]');
-    const input = picker.querySelector('[data-locale-input]');
-    const options = picker.querySelector('.locale-options');
-    if (!toggle || !input || !options) return;
-    const close = () => {{
-      options.hidden = true;
-      toggle.setAttribute('aria-expanded', 'false');
-    }};
-    toggle.addEventListener('click', event => {{
-      event.preventDefault();
-      event.stopPropagation();
-      const open = options.hidden;
-      document.querySelectorAll('.locale-options').forEach(node => {{
-        if (node !== options) node.hidden = true;
-      }});
-      options.hidden = !open;
-      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    }});
-    options.addEventListener('click', event => {{
-      const option = event.target.closest('[data-locale-value]');
-      if (!option) return;
-      event.preventDefault();
-      input.value = option.dataset.localeValue || 'system';
-      toggle.textContent = option.textContent || input.value;
-      options.querySelectorAll('[data-locale-value]').forEach(node => node.setAttribute('aria-selected', node === option ? 'true' : 'false'));
-      close();
-    }});
-    picker.addEventListener('keydown', event => {{
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      close();
-      toggle.focus();
-    }});
-  }});
-  document.addEventListener('click', event => {{
-    document.querySelectorAll('[data-locale-picker]').forEach(picker => {{
-      if (picker.contains(event.target)) return;
-      const options = picker.querySelector('.locale-options');
-      const toggle = picker.querySelector('[data-locale-toggle]');
-      if (options) options.hidden = true;
-      if (toggle) toggle.setAttribute('aria-expanded', 'false');
-    }});
-  }});
   const labels = {toggle_labels};
   const password = document.getElementById('loginPassword');
   const toggle = document.getElementById('togglePassword');
@@ -504,26 +489,27 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
   }});
 }})();
 </script>
+<script src="{static_asset_url("preauth-locale.js")}"></script>
 </body>
 </html>
 """
 
 
-def setup_auth_html(current_locale: str = "system") -> str:
+def setup_auth_html(current_locale: str = "system", accept_language: str = "") -> str:
     # Localize the pre-auth setup chrome via the resolved locale (the JS i18n runtime is not loaded
-    # here), the same way login_html() does. The HTTPS recommendation + agent-login notice carry shell
-    # commands, so — matching login_html — they stay English. The auth.yaml example block is literal
-    # config, not UI. The locale is carried pre-auth by request_locale_pref (query/cookie), so the
+    # here), the same way login_html() does. The auth.yaml example block is literal config, not UI.
+    # The locale is carried pre-auth by request_locale_pref (query/cookie), so the
     # setup-screen picker can switch language WITHOUT writing settings.
-    locale = current_locale if current_locale in _LOGIN_LOCALE_VALUES else "system"
-    locale_picker = locale_field_html(locale, "setup-locale")
+    preference = normalize_locale(current_locale, default="system", allow_system=True)
+    locale = resolve_locale_preference(preference, accept_language)
+    locale_picker = locale_field_html(preference, "setup-locale", locale)
     auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)
     login = html.escape(login_username())
-    agent_notice_html = agent_login_notice_html("setup-login-notice")
+    agent_notice_html = agent_login_notice_html("setup-login-notice", locale)
     set_up = html.escape(server_string(locale, "setup.setUp"))
     edit_label = html.escape(server_string(locale, "setup.edit"))
     # The status line is also rewritten client-side on each poll, so the same localized strings are
-    # handed to setup-auth.js via window.__setupStrings (with English fallbacks baked into the script).
+    # handed to setup-auth.js via window.__setupStrings.
     setup_strings = json.dumps({
         "waiting": server_string(locale, "setup.waiting"),
         "waitingServer": server_string(locale, "setup.waitingServer"),
@@ -535,7 +521,7 @@ def setup_auth_html(current_locale: str = "system") -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YOLOmux auth setup</title>
+<title>{html.escape(server_string(locale, "setup.documentTitle"))}</title>
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("setup-auth.css")}">
 </head>
@@ -543,7 +529,7 @@ def setup_auth_html(current_locale: str = "system") -> str:
 <main>
   {locale_picker}
   <h1>{set_up} {brand_html("brand-title setup-brand setup-brand-waiting", locale=locale)}</h1>
-  <p id="setupSecurity" class="setup-security">Highly recommend that you restart with HTTPS: <code>python3 yolomux.py --port 9998 --self-signed</code></p>
+  <p id="setupSecurity" class="setup-security">{server_string(locale, "setup.httpsRecommended", command="<code>python3 yolomux.py --port 9998 --self-signed</code>")}</p>
   <p>{edit_label} <code>{auth_path}</code></p>
   <pre>users:
   - username: "{login}"
@@ -556,6 +542,7 @@ def setup_auth_html(current_locale: str = "system") -> str:
   <p id="setupStatus" class="setup-status">{waiting}<span class="setup-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
 </main>
 <script>window.__setupStrings = {setup_strings};</script>
+<script src="{static_asset_url("preauth-locale.js")}"></script>
 <script src="{static_asset_url("setup-auth.js")}"></script>
 </body>
 </html>

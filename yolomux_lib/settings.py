@@ -19,6 +19,7 @@ from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from .common import DEFAULT_UPLOAD_SUBDIR
 from .common import UPDATE_NOTIFY_LEVELS
 from .common import UPLOAD_MAX_BYTES
+from .locales import LANGUAGE_PREFERENCES
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
@@ -402,7 +403,7 @@ SETTING_LIST_LIMITS: dict[tuple[str, str], int] = {
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "split", "grid"},
     # i18n: only locales that ship a catalog are accepted; "system" matches the browser/OS.
-    ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr", "en-XA"},
+    ("general", "language"): set(LANGUAGE_PREFERENCES),
     ("appearance", "theme"): {"system", "dark", "light"},
     ("appearance", "active_color"): set(UI_COLOR_CHOICES),
     ("appearance", "separator_color"): set(SEPARATOR_COLOR_CHOICES),
@@ -670,6 +671,20 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("yoagent", "system_prompt"): "YO!agent",
     ("yoagent", "intro"): "YO!agent",
     ("yoagent", "format"): "YO!agent",
+}
+
+SETTING_GUI_SECTION_LOCALE_KEYS = {
+    "Appearance": "pref.section.appearance",
+    "Finder": "finder.label.finder",
+    "General": "pref.section.general",
+    "GitHub": "pref.section.github",
+    "Notifications": "pref.section.notifications",
+    "Performance": "pref.section.performance",
+    "Terminal and Editor": "pref.section.terminal_editor",
+    "Uploads/Downloads": "pref.section.uploads",
+    "YO!agent": "pref.section.yoagent",
+    "YO!share": "brand.share",
+    "YOLO": "pref.section.yolo",
 }
 
 SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
@@ -1118,6 +1133,10 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
                 "section": section,
                 "key": key,
                 "label": setting_catalog_label(section, key),
+                "locale_keys": {
+                    "description": f"pref.{path}.help",
+                    "label": f"pref.{path}.label",
+                },
                 "current": current.get(section, {}).get(key, default),
                 "default": default,
                 "type": setting_value_type(default),
@@ -1139,6 +1158,7 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
                 "live_apply": "next-use" if section == "yoagent" and key in {"system_prompt", "intro", "format"} else "live",
                 "gui": {
                     "section": SETTING_GUI_SECTIONS.get((section, key), ""),
+                    "section_locale_key": SETTING_GUI_SECTION_LOCALE_KEYS.get(SETTING_GUI_SECTIONS.get((section, key), ""), ""),
                     "visible": (section, key) in SETTING_GUI_SECTIONS,
                 },
             }

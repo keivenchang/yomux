@@ -464,7 +464,7 @@ function updateEditorFindButton(button, state, host = null) {
   const visible = state?.kind === 'text';
   button.hidden = !visible;
   button.disabled = false;
-  const label = `Find in file (${appShortcutText('F')})`;
+  const label = t('editor.findInFile', {shortcut: appShortcutText('F')});
   button.title = label;
   button.setAttribute('aria-label', label);
   const previewMode = fileEditorPanelMode(host) === 'preview';
@@ -511,7 +511,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   button.disabled = !visible || (!active && loading);
   const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
-  button.textContent = 'Differ';
+  button.textContent = t('changes.title');
 }
 
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
@@ -556,7 +556,7 @@ async function closeEditorFind(host = null) {
     syncCodeMirrorFindButtonForView(view);
     return true;
   } catch (error) {
-    setFileEditorPanelStatus(host, `Find unavailable: ${error}`, 'error');
+    setFileEditorPanelStatus(host, t('editor.findUnavailable', {error}), 'error');
   }
   return false;
 }
@@ -1044,10 +1044,15 @@ function refreshActiveTerminalCursor() {
   }
 }
 
-function refreshMetaButtonTitle() {
+function refreshMetaButtonChrome() {
   if (!refreshMeta) return;
+  const loading = transcriptMetaLoading === true;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.title = t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
+  refreshMeta.textContent = t('meta.refresh');
+  refreshMeta.title = loading
+    ? t('info.loadingRepo')
+    : t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
+  refreshMeta.setAttribute('aria-label', loading ? t('info.loadingRepo') : t('meta.refreshAria'));
 }
 
 function applySettingsPayload(payload, options = {}) {
@@ -1126,7 +1131,7 @@ function applySettingsPayload(payload, options = {}) {
   applyTerminalRuntimeSettings();
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
-  refreshMetaButtonTitle();
+  refreshMetaButtonChrome();
   renderPreferencesPanels();
   renderSessionButtons();
   renderPaneTabStrips();
@@ -1169,14 +1174,16 @@ function scheduleDeferredSettingsMetadataRefresh() {
 
 async function refreshSettings(options = {}) {
   try {
-    const response = await apiFetch('/api/settings', {cache: 'no-store'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/settings', {cache: 'no-store'});
     const changed = applySettingsPayload(payload, {force: options.force === true});
     if (changed) refreshYoloRulesStatus({silent: true});
     if (changed && !options.silent) statusEl.textContent = t('status.settingsReloaded');
   } catch (error) {
-    if (!options.silent) statusErr(localizedHtml('status.settingsReloadFailed', {error}));
+    if (!options.silent) {
+      statusErr(localizedHtml('status.settingsReloadFailed', {
+        error: userMessageText(error, t('common.requestFailed')),
+      }));
+    }
   }
 }
 

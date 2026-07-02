@@ -203,6 +203,29 @@ def test_session_to_json_loading_project_uses_empty_metadata_shape():
     assert payload["metadata_loading"] is True
 
 
+def test_session_to_json_keeps_agent_transcript_error_structured():
+    diagnostic = "transcript file disappeared"
+    agent = AgentInfo(
+        session="broken",
+        kind="codex",
+        pid=17,
+        pane_target="broken:0.0",
+        command="codex",
+        cwd=None,
+        status=None,
+        session_id=None,
+        transcript=None,
+        error=diagnostic,
+    )
+    info = SessionInfo(session="broken", panes=[], selected_pane=None, agents=[agent])
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False, include_metadata=False)
+
+    assert payload["agents"][0]["error"] == diagnostic
+    assert payload["agents"][0]["error_key"] == "transcript.error.unavailable"
+    assert payload["agents"][0]["error_params"] == {"error": diagnostic}
+
+
 def test_session_to_json_includes_window_metadata(tmp_path):
     repo_a = tmp_path / "repo-a"
     repo_b = tmp_path / "repo-b"

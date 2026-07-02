@@ -47,6 +47,14 @@ function panePopoutDocument(popoutWindow) {
   try { return popoutWindow?.document || null; } catch (_) { return null; }
 }
 
+function panePopoutDefaultLabel() {
+  return t('app.documentTitle');
+}
+
+function panePopoutDefaultTitle() {
+  return t('pane.popout.title', {name: panePopoutDefaultLabel()});
+}
+
 function currentStylesheetHref(match = 'yolomux.css') {
   const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
     .find(item => String(item.getAttribute('href') || '').includes(match));
@@ -86,7 +94,7 @@ function panePopoutVariableStyle() {
 function writePanePopoutDocument(popoutWindow, options = {}) {
   const doc = panePopoutDocument(popoutWindow);
   if (!doc) return false;
-  const title = options.title || 'YOLOmux popout';
+  const title = options.title || panePopoutDefaultTitle();
   const cssHref = options.cssHref || currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
   const bodyClass = options.bodyClass || panePopoutBodyClassName();
   const bodyStyle = options.bodyStyle || panePopoutVariableStyle();
@@ -138,12 +146,12 @@ function paneCanPopout(item) {
 }
 
 function panePopoutDisabledReason(item) {
-  if (isTmuxSession(item)) return 'live terminal/transcript popout is disabled in phase 1';
+  if (isTmuxSession(item)) return t('pane.popout.disabledTerminal');
   const type = tabTypeForItem(item);
   const reason = type?.popoutDisabledReason;
-  if (typeof reason === 'function') return String(reason(item) || 'pane popout disabled for this tab');
+  if (typeof reason === 'function') return String(reason(item) || t('pane.popout.disabled'));
   if (reason) return String(reason);
-  return 'pane popout disabled for this tab';
+  return t('pane.popout.disabled');
 }
 
 function panePopoutPanelSnapshot(item, options = {}) {
@@ -161,7 +169,7 @@ function panePopoutPanelSnapshot(item, options = {}) {
   });
   const label = itemLabel(item);
   return {
-    title: `${label} popout`,
+    title: t('pane.popout.title', {name: label}),
     label,
     className: `pane-popout-snapshot ${clone.className || ''}`.trim(),
     html: clone.innerHTML,
@@ -258,12 +266,12 @@ function panePopoutDocumentStyle() {
 function writePaneItemPopoutDocument(record, snapshot) {
   if (!record?.window || !snapshot) return false;
   return writePanePopoutDocument(record.window, {
-    title: snapshot.title || 'YOLOmux popout',
+    title: snapshot.title || panePopoutDefaultTitle(),
     bodyClass: panePopoutBodyClassName('pane-popout-item-window'),
     bodyStyle: panePopoutVariableStyle(),
     style: panePopoutDocumentStyle(),
     bodyHtml: `<main class="pane-popout-shell">
-  <header class="pane-popout-title">${esc(snapshot.label || snapshot.title || 'YOLOmux')}</header>
+  <header class="pane-popout-title">${esc(snapshot.label || snapshot.title || panePopoutDefaultLabel())}</header>
   <section data-pane-popout-root class="pane-popout-root ${esc(snapshot.className || '')}">${snapshot.html || ''}</section>
 </main>`,
   });
@@ -283,11 +291,11 @@ function updatePanePopout(item) {
     const doc = popoutWindow.document;
     const root = doc?.querySelector?.('[data-pane-popout-root]');
     if (!root) return writePaneItemPopoutDocument(record, snapshot);
-    doc.title = snapshot.title || 'YOLOmux popout';
+    doc.title = snapshot.title || panePopoutDefaultTitle();
     doc.body.className = panePopoutBodyClassName('pane-popout-item-window');
     doc.body.setAttribute('style', panePopoutVariableStyle());
     const title = doc.querySelector('.pane-popout-title');
-    if (title) title.textContent = snapshot.label || snapshot.title || 'YOLOmux';
+    if (title) title.textContent = snapshot.label || snapshot.title || panePopoutDefaultLabel();
     root.className = `pane-popout-root ${snapshot.className || ''}`.trim();
     root.innerHTML = snapshot.html || '';
     return true;
@@ -341,7 +349,7 @@ function openPanePopout(item) {
   }
   const popoutWindow = window.open(`/pane-popout?item=${encodeURIComponent(item)}`, `yolomux-pane-${encodeURIComponent(item)}`, 'popup,width=980,height=900');
   if (!popoutWindow) {
-    statusErr('pane pop-out was blocked by the browser');
+    statusErr(localizedHtml('status.panePopoutBlocked'));
     return false;
   }
   try {
@@ -352,7 +360,7 @@ function openPanePopout(item) {
   } catch (error) {
     paneItemPopouts.delete(item);
     try { popoutWindow.close(); } catch (_) {}
-    statusErr(`pane pop-out failed: ${error}`);
+    statusErr(localizedHtml('status.panePopoutFailed', {error}));
     return false;
   }
 }

@@ -313,6 +313,13 @@ def test_list_directory_missing(tmp_path):
     with pytest.raises(FilesystemError) as info:
         filesystem.list_directory(str(tmp_path / "does-not-exist"))
     assert info.value.status == 404
+    assert info.value.message_key == "common.pathNotFound"
+    assert info.value.message_params == {"path": str(tmp_path / "does-not-exist")}
+    assert info.value.payload(path=str(tmp_path / "does-not-exist"))["user_message"] == {
+        "key": "common.pathNotFound",
+        "params": {"path": str(tmp_path / "does-not-exist")},
+        "fallback": f"path not found: {tmp_path / 'does-not-exist'}",
+    }
 
 
 def test_list_directory_not_a_dir(tmp_path):
@@ -554,6 +561,7 @@ def test_read_file_rejects_binary(tmp_path):
     with pytest.raises(FilesystemError) as info:
         filesystem.read_file(str(file_path))
     assert info.value.status == 415
+    assert info.value.message_key == "fs.error.binary"
 
 
 def test_read_file_too_large(tmp_path, monkeypatch):

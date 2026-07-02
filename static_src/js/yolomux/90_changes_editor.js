@@ -1,3 +1,5 @@
+const changesOutsideRepoKey = 'Outside repo';
+
 function sessionForFileRepo(path) {
   const normalized = String(path || '');
   if (!normalized) return '';
@@ -211,11 +213,22 @@ function diffRefRepoRefs(refsByRepo, repo) {
   return null;
 }
 
-function diffRefSuggestions(repo) {
-  const suggestions = [
-    {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
-    {ref: 'current', short: 'current', subject: 'working tree'},
+function localizedDiffRefSubject(ref, subject = '') {
+  const value = String(subject || '');
+  if (ref === 'HEAD' && (!value || value === 'base commit')) return t('diff.ref.base');
+  if (ref === 'current' && (!value || value === 'working tree')) return t('diff.ref.workingTree');
+  return value;
+}
+
+function defaultDiffRefSuggestions() {
+  return [
+    {ref: 'HEAD', short: 'HEAD', subject: localizedDiffRefSubject('HEAD')},
+    {ref: 'current', short: 'current', subject: localizedDiffRefSubject('current')},
   ];
+}
+
+function diffRefSuggestions(repo) {
+  const suggestions = defaultDiffRefSuggestions();
   const seen = new Set(suggestions.map(item => item.ref));
   const addRefs = refs => {
     if (!Array.isArray(refs)) return;
@@ -226,7 +239,7 @@ function diffRefSuggestions(repo) {
         const existing = suggestions.find(candidate => candidate.ref === ref);
         if (existing) {
           if (item?.short) existing.short = item.short;
-          if (item?.subject) existing.subject = item.subject;
+          if (item?.subject) existing.subject = localizedDiffRefSubject(ref, item.subject);
           if (item?.date) existing.date = item.date;
           if (item?.author) existing.author = item.author;
           if (item?.commit) existing.commit = item.commit;
@@ -234,7 +247,7 @@ function diffRefSuggestions(repo) {
         }
         continue;
       }
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: localizedDiffRefSubject(ref, item?.subject), date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
       seen.add(ref);
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
@@ -253,10 +266,7 @@ function diffRefSuggestions(repo) {
 function fileDiffRefHistoryItems(path) {
   const state = openFiles.get(path);
   if (!path || !fileStateHasUsefulGitHistory(state)) return [];
-  const suggestions = [
-    {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
-    {ref: 'current', short: 'current', subject: 'working tree'},
-  ];
+  const suggestions = defaultDiffRefSuggestions();
   const seen = new Set(suggestions.map(item => item.ref));
   for (const item of state.gitHistory) {
     const ref = cleanDiffRef(item?.ref || '', '');
@@ -265,7 +275,7 @@ function fileDiffRefHistoryItems(path) {
       const existing = suggestions.find(candidate => candidate.ref === ref);
       if (existing) {
         if (item?.short) existing.short = item.short;
-        if (item?.subject) existing.subject = item.subject;
+        if (item?.subject) existing.subject = localizedDiffRefSubject(ref, item.subject);
         if (item?.date) existing.date = item.date;
         if (item?.author) existing.author = item.author;
         if (item?.commit) existing.commit = item.commit;
@@ -273,7 +283,7 @@ function fileDiffRefHistoryItems(path) {
       }
       continue;
     }
-    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
+    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: localizedDiffRefSubject(ref, item?.subject), date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
     seen.add(ref);
     if (suggestions.length >= diffRefSuggestionLimit) break;
   }
@@ -370,7 +380,9 @@ function mergeDiffRefSameCommitAlias(primary, duplicate) {
   if (primary.ref === 'HEAD' && duplicateShort && !primaryShort.includes('/HEAD')) {
     primary.short = `${duplicateShort}/HEAD`;
   }
-  if ((!primary.subject || primary.subject === 'base commit') && duplicate?.subject) primary.subject = duplicate.subject;
+  const defaultSubject = localizedDiffRefSubject(primary.ref);
+  const duplicateSubject = localizedDiffRefSubject(duplicate?.ref, duplicate?.subject);
+  if ((!primary.subject || primary.subject === defaultSubject) && duplicateSubject) primary.subject = duplicateSubject;
   if (!primary.date && duplicate?.date) primary.date = duplicate.date;
   if (!primary.author && duplicate?.author) primary.author = duplicate.author;
   if (!primary.commit) primary.commit = diffRefItemCommitId(primary) || diffRefItemCommitId(duplicate);
@@ -435,7 +447,7 @@ function diffRefOptionItems(value, options = {}) {
   const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
   const items = suggestions.slice(0, maxItems);
   if (value && !items.some(item => diffRefOptionMatches(value, item))) {
-    items.unshift({ref: value, short: value.slice(0, 9), subject: 'selected ref'});
+    items.unshift({ref: value, short: value.slice(0, 9), subject: t('diff.ref.selected')});
   }
   return items;
 }
@@ -470,7 +482,7 @@ function diffRefFromSuggestions(repo, path = '') {
 
 function diffRefToSuggestions(fromRef = diffRefFrom, repo, path = '') {
   const suggestions = scopedDiffRefSuggestions(repo, path);
-  const current = suggestions.find(item => item.ref === 'current') || {ref: 'current', short: 'current', subject: 'working tree'};
+  const current = suggestions.find(item => item.ref === 'current') || defaultDiffRefSuggestions()[1];
   const ordered = [current, ...suggestions.filter(item => item.ref !== 'current')];
   const from = cleanDiffRef(fromRef, '');
   const fromIndex = ordered.findIndex(item => diffRefOptionMatches(from, item));
@@ -1024,9 +1036,7 @@ async function fetchSessionFiles(options = {}) {
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
-    const response = await apiFetch(`/api/session-files?${params.toString()}`);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
+    const payload = await apiFetchJson(`/api/session-files?${params.toString()}`);
     const nextPayload = normalizedSessionFilesPayload(payload, {session});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
@@ -1039,14 +1049,15 @@ async function fetchSessionFiles(options = {}) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
-    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
+    const issue = err?.payload?.user_message || {key: '', params: {}, fallback: String(err?.message || err)};
+    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
-    if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: err}));
+    if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
   } finally {
     const current = requestIsCurrent();
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
@@ -1116,8 +1127,7 @@ function compactElapsedDurationText(seconds) {
 }
 
 function compactRelativeFileTimeText(unit, countText) {
-  const category = countText === '1' ? 'one' : 'other';
-  return t(`relative.compact.${unit}.${category}`, {count: countText});
+  return tPlural(`relative.compact.${unit}`, Number(countText));
 }
 
 function sessionFileRelativeTimeText(mtime, nowSeconds = fileTreeRecencyNowMs() / 1000) {
@@ -1187,7 +1197,7 @@ function sessionFileStatusCountParts(counts = {}) {
     Number.isFinite(added) && added > 0 ? {kind: 'add', text: `+${added}`} : null,
     Number.isFinite(deleted) && deleted > 0 ? {kind: 'remove', text: `-${deleted}`} : null,
   ].filter(Boolean);
-  if (parts.length) parts.push({kind: 'file-label', text: 'files'});
+  if (parts.length) parts.push({kind: 'file-label', text: t('common.files')});
   return parts;
 }
 
@@ -1214,7 +1224,7 @@ function sortedSessionFiles(files) {
 function groupedSessionFiles(files) {
   const groups = new Map();
   for (const item of files) {
-    const repo = item.repo || 'Outside repo';
+    const repo = item.repo || changesOutsideRepoKey;
     if (!groups.has(repo)) groups.set(repo, []);
     groups.get(repo).push(item);
   }
@@ -1242,7 +1252,7 @@ function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) 
 function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload) {
   const folders = new Set();
   for (const item of fileExplorerDifferFiles(payload)) {
-    const repoRoot = item?.repo && item.repo !== 'Outside repo' ? normalizeDirectoryPath(item.repo) : '/';
+    const repoRoot = item?.repo && item.repo !== changesOutsideRepoKey ? normalizeDirectoryPath(item.repo) : '/';
     const absPath = item?.abs_path || (item?.repo && item?.path ? `${item.repo}/${item.path}` : item?.path || '');
     if (!absPath) continue;
     let directory = normalizeDirectoryPath(dirnameOf(absPath));
@@ -1387,12 +1397,14 @@ function repoComparisonTitleHtml(repoInfo) {
   const from = diffRefDisplayText(repoInfo?.from_ref || diffRefFrom);
   const to = diffRefDisplayText(repoInfo?.to_ref || diffRefTo);
   const title = `<span class="changes-repo-compare-title">${t('diff.comparing', {from: esc(from), to: esc(to)})}</span>`;
-  const error = repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
+  const errorText = messageDescriptorText(repoInfo?.error_message, repoInfo?.error || '');
+  const error = errorText ? `<span class="changes-repo-refs-error">${esc(errorText)}</span>` : '';
   return `${title}${error}`;
 }
 
 function repoComparisonErrorHtml(repoInfo) {
-  return repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
+  const error = messageDescriptorText(repoInfo?.error_message, repoInfo?.error || '');
+  return error ? `<span class="changes-repo-refs-error">${esc(error)}</span>` : '';
 }
 
 function changesRepoCount(payload, files) {
@@ -1450,7 +1462,7 @@ function changesRepoMetaHtml(repoInfo, options = {}) {
 
 function repoPayloadByPath(payload) {
   const map = new Map();
-  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) map.set(repo.repo || 'Outside repo', repo);
+  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) map.set(repo.repo || changesOutsideRepoKey, repo);
   return map;
 }
 
@@ -1462,7 +1474,7 @@ function repoHasExplicitComparison(repoInfo) {
 
 function repoPayloadHasRenderableSection(repoInfo) {
   const repo = normalizeDirectoryPath(repoInfo?.repo || '');
-  return Boolean(repo && repo !== 'Outside repo');
+  return Boolean(repo && repo !== changesOutsideRepoKey);
 }
 
 function payloadHasRenderableRepoSections(payload) {
@@ -1561,7 +1573,7 @@ function initializeDefaultCollapsedChangesFolders(entriesByDir) {
 
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
-  const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
+  const treeRoot = repoPath === changesOutsideRepoKey ? '/' : repoPath;
   const {entries, entriesByDir, sessionFilesMap, directoryStatusCounts} = buildSessionFileTree(treeRoot, sessionFiles);
   const renderedRows = entries.length + Array.from(entriesByDir.values()).reduce((total, childEntries) => total + (Array.isArray(childEntries) ? childEntries.length : 0), 0);
   recordClientPerfCounter('sessionFilesRender', 0, {nodes: entriesByDir.size, rows: renderedRows});
@@ -1585,7 +1597,8 @@ function changedFileAgentTitle(kind, item) {
   const name = agentLabel(kind);
   if (!name) return '';
   const timeText = sessionFileRelativeTimeText(item?.mtime);
-  return timeText ? `modified by ${name} ${timeText}` : `modified by ${name}`;
+  const prefix = t('filetab.modified');
+  return timeText ? `${prefix}: ${name} ${timeText}` : `${prefix}: ${name}`;
 }
 
 function changeFileAgentsHtml(item) {
@@ -1609,7 +1622,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
   const groups = new Map(groupedSessionFiles(regular));
   if (options.includeEmptyRepoSections === true) {
     for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
-      const repo = repoInfo?.repo || 'Outside repo';
+      const repo = repoInfo?.repo || changesOutsideRepoKey;
       if (repoPayloadHasRenderableSection(repoInfo) && !groups.has(repo)) {
         groups.set(repo, []);
       }
@@ -1633,8 +1646,8 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     const collapsed = changesRepoCollapsed.has(repo);
     section.classList.toggle(CLS.collapsed, collapsed);
     const repoInfo = repoMap.get(repo) || {};
-    const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
-    const hasGit = repo && repo !== 'Outside repo';
+    const repoLabel = repo === changesOutsideRepoKey ? t('changes.outsideRepo') : compactHomePath(repo);
+    const hasGit = repo && repo !== changesOutsideRepoKey;
     // Update repo header button (small HTML string — not performance sensitive)
     let head = section.querySelector(':scope > .changes-repo-head');
     if (!head) {
@@ -1762,8 +1775,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const loading = sessionFilesPanelIsLoading(payload, files);
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
-  const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
-  const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(warning)}</div>`).join('');
+  const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(messageDescriptorText(error, String(error || '')))}</div>`).join('');
+  const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(messageDescriptorText(warning, String(warning || '')))}</div>`).join('');
   const full = options.full === true || fileExplorerMode === 'diff';
   const showEmptyRepoSections = full && !loading && !files.length && payloadHasRenderableRepoSections(payload);
   const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
@@ -1870,17 +1883,13 @@ function fileExplorerModeTitle() {
 }
 
 function fileExplorerModeButtonTitle(mode) {
-  // 'Tabber' tooltip is a brand-literal for now (no locale key) to avoid a 14-catalog change while the
-  // co-agent is editing locales; the localized title lands with the B6 docs pass.
-  if (mode === 'tabber') return 'Tabber: open tabs, tmux sub-windows, and the paths each agent touched';
+  if (mode === 'tabber') return t('tabber.description');
   return mode === 'diff' ? t('changes.show') : t('changes.hide');
 }
 
 function fileExplorerModeButtonLabel(mode) {
-  // 'Differ' and 'Tabber' are brand-literal UI labels (like 'Differ' has always been); only 'Finder'
-  // is localized because it predates the brand naming.
-  if (mode === 'diff') return 'Differ';
-  if (mode === 'tabber') return 'Tabber';
+  if (mode === 'diff') return t('changes.title');
+  if (mode === 'tabber') return t('tabber.title');
   return t('finder.label.finder');
 }
 
@@ -2028,7 +2037,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   }
   renderOpenFilePath(path);
   if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
-    const reason = current?.diffError || (current?.kind !== 'text' ? 'not a text file' : 'no git diff or useful history for this file');
+    const reason = current?.diffError || t(current?.kind !== 'text' ? 'editor.notTextFile' : 'editor.noGitDiffHistory');
     const panel = panelNodes.get(item);
     if (panel) setFileEditorPanelStatus(panel, t('editor.diffUnavailable', {error: reason}), 'warn');
   }
@@ -2347,16 +2356,16 @@ function showChangedDirectoryContextMenu(row, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
-  appendContextMenuButton(menu, `Expand ${displayName} in ${fileExplorerLabel()}`, () => openChangedDirectoryInFinder(path), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyRelativePath'), () => copyChangedPath(rel || path, 'status.copiedRelativePath'), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyFullPath'), () => copyChangedPath(path, 'status.copiedPath'), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.expandInFinder', {name: displayName, finder: fileExplorerLabel()}), () => openChangedDirectoryInFinder(path), closeFileContextMenu);
   fileContextMenu.open(menu, x, y);
 }
 
-async function copyChangedPath(path, label) {
+async function copyChangedPath(path, statusKey) {
   try {
     await copyTextToClipboard(path);
-    statusEl.textContent = `copied ${label}`;
+    statusEl.textContent = t(statusKey);
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
   }
@@ -2371,14 +2380,14 @@ async function openChangedDirectoryInFinder(path) {
       const expanded = await expandFileExplorerTreesToPath(path);
       if (expanded) {
         selectFileTreePath(path);
-        statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+        statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
         return;
       }
     }
     const opened = await openFileExplorerAt(path);
     if (!opened) return;
     selectFileTreePath(path);
-    statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+    statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
   } catch (error) {
     statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
   }
@@ -2568,9 +2577,9 @@ function savePreferenceControl(control) {
       if (path === 'uploads.max_bytes' && Number(value) > uploadRsyncRecommendationBytes && Number(previousValue) <= uploadRsyncRecommendationBytes) {
         showUploadRsyncRecommendation({sizeBytes: Number(value)});
       }
-      statusEl.textContent = `saved ${path}`;
+      statusEl.textContent = t('status.settingSaved', {path});
     })
-    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }
 
 function resetPreference(path) {
@@ -2579,8 +2588,8 @@ function resetPreference(path) {
   saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
-    .then(() => { statusEl.textContent = `reset ${path}`; })
-    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
+    .then(() => { statusEl.textContent = t('status.settingReset', {path}); })
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error: userMessageText(error, t('common.requestFailed'))})); });
 }
 
 function resetAllPreferences() {
@@ -2595,7 +2604,7 @@ function resetAllPreferences() {
       renderPreferencesPanels({force: true});
       statusEl.textContent = t('status.preferencesResetAll');
     })
-    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error: userMessageText(error, t('common.requestFailed'))})); });
 }
 
 function clampEditorPreviewFontSize(value) {
@@ -2630,7 +2639,7 @@ function setEditorPreviewFontSize(value) {
   scheduleShareUiStatePublish();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = t('status.previewFontSizeSaved'); })
-    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }
 
 // File Explorer pane content is self-contained so layout panes do not depend on
@@ -2944,7 +2953,7 @@ function fileEditorToolbarHtml(item) {
             {
               className: 'file-editor-diff-panel',
               action: 'editor-diff',
-              label: 'Differ',
+              label: t('changes.title'),
               title: t('editor.diff'),
               ariaLabel: t('editor.diff'),
               hidden: true,
@@ -3110,6 +3119,51 @@ function fileEditorToolbarHtml(item) {
       </div>`;
 }
 
+function setFileEditorLocalizedLabel(panel, selector, key, options = {}) {
+  const node = panel?.querySelector?.(selector);
+  if (!node) return;
+  const label = t(key);
+  if (options.text === true) node.textContent = label;
+  if (options.title !== false) node.title = label;
+  if (options.aria !== false) node.setAttribute('aria-label', label);
+}
+
+function relocalizeFileEditorPanel(panel, item) {
+  if (!panel) return false;
+  const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
+  if (diffRefPanel) {
+    delete diffRefPanel.dataset.diffRefRepoRendered;
+    delete diffRefPanel.dataset.diffRefPathRendered;
+    delete diffRefPanel.dataset.diffRefHistoryRendered;
+  }
+  renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
+  reconfigureCodeMirrorPanelLocale(panel);
+  relocalizeVirtualPanelChrome(panel);
+  setFileEditorLocalizedLabel(panel, '.file-editor-panel-close', 'editor.closePane');
+  setFileEditorLocalizedLabel(panel, '.file-editor-toolbar', 'editor.toolbar.aria', {title: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-mode-control-panel', 'editor.mode.aria', {title: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'editor.previewFont.aria', {title: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-popout-preview-panel', 'editor.popoutPreview');
+  setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reloadFromDisk');
+  setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reload', {text: true, title: false, aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-diff-expand-panel', 'editor.diffExpand');
+  setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.save', {aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.saveFile', {text: false, title: false});
+  const findPanel = panel.querySelector('.file-editor-preview-find-panel');
+  if (findPanel) {
+    findPanel.setAttribute('aria-label', t('preview.find'));
+    const input = findPanel.querySelector('input');
+    if (input) {
+      input.placeholder = t('preview.find');
+      input.setAttribute('aria-label', t('preview.find'));
+    }
+    findPanel.querySelector('[data-preview-find-move="-1"]')?.setAttribute('aria-label', t('preview.find.previous'));
+    findPanel.querySelector('[data-preview-find-move="1"]')?.setAttribute('aria-label', t('preview.find.next'));
+    findPanel.querySelector('[data-preview-find-close]')?.setAttribute('aria-label', t('preview.find.close'));
+  }
+  return true;
+}
+
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
   const panel = document.createElement('article');
@@ -3140,12 +3194,12 @@ function createFileEditorPanel(item) {
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
           <div class="file-editor-find-overview" hidden aria-hidden="true"></div>
-          <form class="file-editor-preview-find-panel" hidden role="search" aria-label="Find in preview">
-            <input type="search" placeholder="Find in preview" aria-label="Find in preview" autocomplete="off">
+          <form class="file-editor-preview-find-panel" hidden role="search" aria-label="${esc(t('preview.find'))}">
+            <input type="search" placeholder="${esc(t('preview.find'))}" aria-label="${esc(t('preview.find'))}" autocomplete="off">
             <span class="file-editor-preview-find-count" aria-live="polite"></span>
-            <button type="button" data-preview-find-move="-1" aria-label="Previous match">↑</button>
-            <button type="button" data-preview-find-move="1" aria-label="Next match">↓</button>
-            <button type="button" data-preview-find-close aria-label="Close find">×</button>
+            <button type="button" data-preview-find-move="-1" aria-label="${esc(t('preview.find.previous'))}">↑</button>
+            <button type="button" data-preview-find-move="1" aria-label="${esc(t('preview.find.next'))}">↓</button>
+            <button type="button" data-preview-find-close aria-label="${esc(t('preview.find.close'))}">×</button>
           </form>
           <div class="file-editor-image-panel" hidden></div>
         </div>
@@ -3361,8 +3415,11 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     };
     img.onerror = () => {
       disconnectFileEditorImageObserver(imagePane);
-      imagePane.replaceChildren(fileEditorEmptyState('Image could not be loaded', `The file may be unreadable, unsupported, or over ${formatFileSize(MAX_FILE_PREVIEW_BYTES)}.`));
-      status('failed to load image', 'error');
+      imagePane.replaceChildren(fileEditorEmptyState(
+        t('preview.image.loadFailed'),
+        t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
+      ));
+      status(t('preview.image.loadFailedStatus'), 'error');
     };
     img.src = rawFileUrl(path, {v: version});
     imagePane.dataset.imagePath = path;

@@ -113,7 +113,7 @@
   --js-debug-agent-area-opacity: 0.7;
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
-  --js-debug-api-sse-total-series: var(--accent-lime);
+  --js-debug-client-comparison-opacity: 0.68;
   --js-debug-bad-connection-rgb: 220 38 38;
   --js-debug-agent-token-cyan: #00b7ff;
   --js-debug-agent-token-orange: #ff7a00;
@@ -501,7 +501,7 @@ body.theme-light .js-debug-graph-view {
   stroke: var(--js-debug-sse-series);
 }
 .js-debug-line--apiSseTotal {
-  stroke: var(--js-debug-series-color, var(--js-debug-api-sse-total-series));
+  stroke: var(--js-debug-series-color, var(--bad));
 }
 .js-debug-line--latency {
   stroke: var(--accent-gold);
@@ -572,8 +572,10 @@ body.theme-light .js-debug-graph-view {
 .js-debug-line--client-dot {
   --js-debug-line-dash: 1 3;
 }
-.js-debug-line--pattern-dash,
-.js-debug-line--client-dash {
+.js-debug-line--client-dot {
+  opacity: var(--js-debug-client-comparison-opacity);
+}
+.js-debug-line--pattern-dash {
   --js-debug-line-dash: 6 4;
 }
 .js-debug-line--agentTokenTotal.js-debug-line--moving-average {
@@ -617,7 +619,7 @@ body.theme-light .js-debug-graph-view {
   color: var(--js-debug-sse-series);
 }
 .js-debug-legend-swatch--apiSseTotal {
-  color: var(--js-debug-api-sse-total-series);
+  color: var(--bad);
 }
 .js-debug-legend-swatch--latency {
   color: var(--accent-gold);

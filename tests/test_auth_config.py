@@ -1,8 +1,14 @@
 import json
 import re
+from pathlib import Path
 
 from yolomux_lib import common
 from yolomux_lib import web
+from yolomux_lib.locales import locale_registry_payload
+from yolomux_lib.locales import normalize_locale
+from yolomux_lib.locales import resolve_locale_preference
+
+SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
 
 def active_auth_yaml() -> str:
@@ -159,6 +165,7 @@ def test_commit_count_display_uses_git_head(monkeypatch):
 
 
 def test_main_page_bootstrap_includes_version_commit(monkeypatch):
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     monkeypatch.setattr(web, "available_agent_commands", lambda: [])
     monkeypatch.setattr(web, "agent_auth_status", lambda: {})
     monkeypatch.setattr(web, "rules_status", lambda: {})
@@ -180,23 +187,31 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     assert payload["devBundleRevision"] == "bundle-rev-test"
     assert payload["serverStartedAt"] == 1234.5
     assert payload["serverStartedAtMs"] == 1234500
-    assert "SHA: abcdef123456" in page
-    assert "Commits: 1234" in page
+    assert web.server_string("en", "menu.help.about.sha", sha="abcdef123456") in page
+    assert web.server_string("en", "menu.help.about.commits", count="1234") in page
 
 
 def test_setup_auth_page_recommends_https(monkeypatch):
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     monkeypatch.setattr(web, "login_username", lambda: "keivenc")
 
     setup_html = web.setup_auth_html()
 
-    assert "Highly recommend that you restart with HTTPS" in setup_html
+    recommendation = web.server_string(
+        "en",
+        "setup.httpsRecommended",
+        command="<code>python3 yolomux.py --port 9998 --self-signed</code>",
+    )
+    assert recommendation in setup_html
     assert "--self-signed" in setup_html
     assert "--host 0.0.0.0" not in setup_html
-    assert setup_html.index("Highly recommend that you restart with HTTPS") < setup_html.index("Edit <code>")
+    edit_label = web.server_string("en", "setup.edit")
+    assert setup_html.index(recommendation) < setup_html.index(f"{edit_label} <code>")
 
 
 def test_login_and_setup_screens_show_please_login_for_logged_out_agent(monkeypatch):
     # #39: codex installed but not logged in -> both screens name the exact login command.
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     monkeypatch.setattr(web, "login_username", lambda: "keivenc")
     monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
         "claude": {"installed": True, "logged_in": True},
@@ -204,31 +219,37 @@ def test_login_and_setup_screens_show_please_login_for_logged_out_agent(monkeypa
     })
     login = web.login_html()
     setup = web.setup_auth_html()
-    assert "Please login (codex)" in login
+    lead = web.server_string("en", "login.agent.login", names="codex")
+    notice = web.server_string("en", "login.agent.run", lead=lead, commands="<code>codex login</code>")
+    assert notice in login
     assert "codex login" in login
     assert "setup-login-notice" in setup
-    assert "codex login" in setup
+    assert notice in setup
 
 
 def test_login_screen_strong_message_when_no_agent_logged_in(monkeypatch):
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
         "claude": {"installed": True, "logged_in": False},
         "codex": {"installed": True, "logged_in": False},
     })
     login = web.login_html()
-    assert "Please login to Claude or Codex" in login
-    assert "claude auth login" in login
-    assert "codex login" in login
+    lead = web.server_string("en", "login.agent.loginTo", names="Claude or Codex")
+    commands = "<code>claude auth login</code> <code>codex login</code>"
+    assert web.server_string("en", "login.agent.run", lead=lead, commands=commands) in login
 
 
 def test_login_screen_has_no_notice_when_agents_logged_in(monkeypatch):
     # All installed agents logged in (codex not installed) -> no login nag.
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     monkeypatch.setattr(web, "login_username", lambda: "keivenc")
     monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
         "claude": {"installed": True, "logged_in": True},
         "codex": {"installed": False, "logged_in": False},
     })
-    assert "Please login" not in web.login_html()
+    login = web.login_html()
+    assert web.server_string("en", "login.agent.login", names="codex") not in login
+    assert web.server_string("en", "login.agent.loginTo", names="Claude or Codex") not in login
     assert "setup-login-notice" not in web.setup_auth_html()
 
 
@@ -281,6 +302,15 @@ def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():
         assert "優" in zh_hant and "樂" in zh_hant, f"{name} zh-Hant wordmark"
         assert "优" in zh_hans and "乐" in zh_hans, f"{name} zh-Hans wordmark"
         assert ">YO<" in render("en"), f"{name} en wordmark stays YO/LO"
+
+
+def test_setup_auth_script_has_no_parallel_english_status_fallbacks():
+    source = (Path(__file__).resolve().parents[1] / "static" / "setup-auth.js").read_text(encoding="utf-8")
+
+    for leaked in ("Waiting for auth.yaml changes", "Waiting for server", "Auth updated. Reloading"):
+        assert leaked not in source
+    assert "setupInitialStatus" in source
+    assert "window.__setupStrings" in source
 
 
 def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
@@ -359,3 +389,78 @@ def test_main_page_has_logout_button():
     assert 'id="fileExplorerTree"' in page
     assert 'id="panelPool"' in page
     assert 'id="fileEditor"' not in page
+
+
+def test_locale_registry_normalizes_untrusted_values_and_browser_languages():
+    assert normalize_locale("pt-br") == "pt-BR"
+    assert normalize_locale("ZH-hant") == "zh-Hant"
+    assert normalize_locale("../../outside") == "en"
+    assert normalize_locale("/tmp/ar") == "en"
+    assert normalize_locale("bogus") == "en"
+    assert web.bootstrap_locale_catalogs("../../outside").keys() == {"en"}
+    assert web.static_asset_path("locales/../settings.yaml") is None
+    assert web.static_asset_path("locales/%2e%2e%2fsettings.yaml") is None
+    assert resolve_locale_preference("system", "zh-TW,zh;q=0.9,en;q=0.8") == "zh-Hant"
+    assert resolve_locale_preference("system", "zh-CN,zh;q=0.9") == "zh-Hans"
+    assert resolve_locale_preference("system", "fr-CA;q=0.8,de;q=0.9") == "de"
+    assert resolve_locale_preference("system", "de;q=0,fr;q=0.8,*;q=1") == "fr"
+
+    registry = locale_registry_payload("fr-CA;q=0.8,de;q=0.9")
+    assert registry["fallback"] == "en"
+    assert registry["pseudo"] == "en-XA"
+    assert registry["systemPreference"] == "system"
+    assert registry["systemLocale"] == "de"
+    assert [item["id"] for item in registry["locales"]] == [value for value, _label in web.LOCALE_ENDONYMS]
+    assert next(item for item in registry["locales"] if item["id"] == "he")["direction"] == "rtl"
+    assert next(item for item in registry["locales"] if item["id"] == "de")["direction"] == "ltr"
+
+
+def test_html_page_system_language_uses_accept_language_for_first_paint(monkeypatch):
+    payload = web.settings_payload()
+    payload.setdefault("settings", {}).setdefault("general", {})["language"] = "system"
+    monkeypatch.setattr(web, "settings_payload", lambda: payload)
+    page = web.html_page([], accept_language="he-IL, en;q=0.5")
+    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    bootstrap = json.loads(match.group(1))
+
+    assert bootstrap["locale"] == "he"
+    assert 'lang="he" dir="rtl"' in page
+    assert bootstrap["localeRegistry"] == locale_registry_payload("he-IL, en;q=0.5")
+    assert "supportedLocales" not in bootstrap
+    assert "localeChoices" not in bootstrap
+
+
+def test_pre_auth_pages_share_reload_picker_and_localize_first_paint(monkeypatch):
+    # Read the source catalogs so this focused pre-build test does not depend on generated locale
+    # assets being refreshed by another parallel translation lane.
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
+    monkeypatch.setattr(web, "agent_auth_status", lambda *args, **kwargs: {
+        "claude": {"installed": True, "logged_in": True},
+        "codex": {"installed": True, "logged_in": False},
+    })
+
+    login = web.login_html(current_locale="system", accept_language="he-IL", secure=False)
+    setup = web.setup_auth_html("system", "he-IL")
+    for page in (login, setup):
+        assert '<html lang="he" dir="rtl">' in page
+        assert page.count("preauth-locale.js") == 1
+        assert 'name="locale" value="system"' in page
+
+    assert web.server_string("he", "login.documentTitle") in login
+    assert web.server_string("he", "login.signIn") in login
+    assert web.server_string("he", "login.username") in login
+    assert web.server_string("he", "login.password") in login
+    assert web.server_string("en", "login.signIn") not in login
+    assert web.server_string("he", "setup.documentTitle") in setup
+    assert web.server_string("he", "setup.setUp") in setup
+    assert web.server_string("en", "setup.setUp") not in setup
+    localized_agent_notice = web.server_string("he", "login.agent.login", names="codex")
+    assert localized_agent_notice in login and localized_agent_notice in setup
+    assert web.server_string("en", "login.agent.login", names="codex") not in login
+    assert web.server_string("en", "login.agent.login", names="codex") not in setup
+    assert "Highly recommend that you restart with HTTPS" not in login
+    assert "Highly recommend that you restart with HTTPS" not in setup
+
+    picker_source = (Path(__file__).resolve().parents[1] / "static" / "preauth-locale.js").read_text(encoding="utf-8")
+    assert "document.cookie = `yolomux_locale=${encodeURIComponent(input.value)}" in picker_source
+    assert picker_source.index("document.cookie =") < picker_source.index("location.reload()")

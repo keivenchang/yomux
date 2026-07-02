@@ -4,7 +4,10 @@ const {spawn} = require('node:child_process');
 // documented entry point, but let the independent processes use the available cores instead of making
 // the gate wait for five serial harness loads.
 const suiteFiles = [
+  'tests/i18n_structured_message.test.js',
+  'tests/tmux_wall.test.js',
   'tests/layout_restore.test.js',
+  'tests/drop_action_result.test.js',
   'tests/share_theme.test.js',
   'tests/editor_preview.test.js',
   'tests/tabber.test.js',

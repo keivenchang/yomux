@@ -22,7 +22,10 @@ from .common import auth_cookie_value
 from .common import auth_identity_for_credentials
 from .common import auth_setup_required
 from .common import current_auth_users
+from .common import error_payload
 from .common import test_auth_bypass_enabled
+from .locales import normalize_locale
+from .locales import resolve_locale_preference
 from .web import _LOGIN_LOCALE_VALUES
 from .web import current_language_pref
 from .web import login_html
@@ -190,13 +193,25 @@ class AuthMixin:
     def reject_share_forbidden(self) -> None:
         self.close_after_unread_body()
         self.write_json(
-            {"error": "share token is limited to the shared page and websocket", "role": "readonly"},
+            error_payload(
+                "share token is limited to the shared page and websocket",
+                message_key="share.error.pageScope",
+                role="readonly",
+            ),
             status=HTTPStatus.FORBIDDEN,
         )
 
     def reject_forbidden(self, identity: AuthIdentity, required_role: str) -> None:
         self.close_after_unread_body()
-        self.write_json({"error": f"{required_role} access required", "role": identity.role}, status=HTTPStatus.FORBIDDEN)
+        self.write_json(
+            error_payload(
+                f"{required_role} access required",
+                message_key="auth.error.accessRequired",
+                message_params={"role": required_role},
+                role=identity.role,
+            ),
+            status=HTTPStatus.FORBIDDEN,
+        )
 
     def safe_next_path(self, value: str | None) -> str:
         text = str(value or "/").strip()
@@ -234,7 +249,11 @@ class AuthMixin:
             self.write_redirect(self.login_url(), status=HTTPStatus.SEE_OTHER)
             return
         self.write_json(
-            {"error": "authentication required", "login_url": self.login_url("/")},
+            error_payload(
+                "authentication required",
+                message_key="auth.error.authenticationRequired",
+                login_url=self.login_url("/"),
+            ),
             status=HTTPStatus.UNAUTHORIZED,
         )
 
@@ -247,7 +266,7 @@ class AuthMixin:
         self._share_mode = "ro"
         bypass_auth = test_auth_bypass_enabled()
         if auth_setup_required() and not bypass_auth:
-            self.write_html(setup_auth_html(self.request_locale_pref()))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
             return False
         share_token = self.share_token_text()
         if share_token:
@@ -347,12 +366,17 @@ class AuthMixin:
             self.write_redirect(self.login_success_path(next_path))
             return
         if auth_setup_required():
-            self.write_html(setup_auth_html(self.request_locale_pref()))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
             return
         if not self.has_logout_marker() and self.cookie_auth_identity() is not None:
             self.write_redirect(self.login_success_path(next_path))
             return
-        self.write_html(login_html(next_path=next_path, secure=self.request_is_https(), current_locale=self.request_locale_pref()))
+        self.write_html(login_html(
+            next_path=next_path,
+            secure=self.request_is_https(),
+            current_locale=self.request_locale_pref(),
+            accept_language=self.headers.get("Accept-Language", ""),
+        ))
 
     def handle_login_submit(self, parsed: Any) -> None:
         form = self.read_urlencoded_form()
@@ -361,20 +385,26 @@ class AuthMixin:
             self.write_redirect(self.login_success_path(next_path))
             return
         if auth_setup_required():
-            self.write_html(setup_auth_html(self.request_locale_pref()))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
             return
         username = form.get("username", [""])[0]
         password = form.get("password", [""])[0]
         identity = auth_identity_for_credentials(username, password)
         if identity is None:
             self.close_after_unread_body()
-            locale = self.request_locale_pref()
+            locale = normalize_locale(
+                form.get("locale", [""])[0],
+                default=self.request_locale_pref(),
+                allow_system=True,
+            )
+            display_locale = resolve_locale_preference(locale, self.headers.get("Accept-Language", ""))
             self.write_html(
                 login_html(
                     next_path=next_path,
-                    error=server_string(locale, "login.error.invalid"),
+                    error=server_string(display_locale, "login.error.invalid"),
                     secure=self.request_is_https(),
                     current_locale=locale,
+                    accept_language=self.headers.get("Accept-Language", ""),
                 ),
                 status=HTTPStatus.UNAUTHORIZED,
             )

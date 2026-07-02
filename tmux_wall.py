@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import html
 import ipaddress
 import json
 import os
@@ -31,11 +32,17 @@ from urllib.parse import urlparse
 from yolomux_lib.agent_tui import capture_agent_pane
 from yolomux_lib.agent_tui import classify_agent_pane
 from yolomux_lib.common import split_csv
+from yolomux_lib.locales import message_fields
+from yolomux_lib.locales import resolve_locale_preference
+from yolomux_lib.locales import user_message_payload
 from yolomux_lib.tmux_utils import cmd_error
 from yolomux_lib.tmux_utils import run_cmd
 from yolomux_lib.tmux_utils import tmux
 from yolomux_lib.tmux_utils import tmux_capture_pane
 from yolomux_lib.tmux_utils import tmux_capture_pane_styled
+from yolomux_lib.web import current_language_pref
+from yolomux_lib.web import html_lang_dir_attrs
+from yolomux_lib.web import server_string
 
 
 DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
@@ -52,6 +59,64 @@ UNAUTHENTICATED_REMOTE_BIND_ERROR = (
     "tmux_wall.py has no authentication. Bind to 127.0.0.1/localhost, or pass "
     "--allow-unauthenticated-non-loopback if you intentionally want to expose tmux snapshots."
 )
+TMUX_WALL_CATALOG_KEYS = (
+    "common.unknown",
+    "state.blocked",
+    "state.disconnected",
+    "state.done",
+    "state.idle",
+    "state.needs-approval",
+    "state.needs-input",
+    "state.short.yolo-approval",
+    "state.working",
+    "tmuxWall.action.openSummary",
+    "tmuxWall.action.pause",
+    "tmuxWall.action.refresh",
+    "tmuxWall.action.resume",
+    "tmuxWall.column.backend",
+    "tmuxWall.column.branch",
+    "tmuxWall.column.container",
+    "tmuxWall.column.gitHead",
+    "tmuxWall.column.path",
+    "tmuxWall.column.projectSha",
+    "tmuxWall.column.repo",
+    "tmuxWall.column.user",
+    "tmuxWall.containers.none",
+    "tmuxWall.error.assetReadFailed",
+    "tmuxWall.error.captureFailed",
+    "tmuxWall.error.containerMetadataFailed",
+    "tmuxWall.error.emptySlot",
+    "tmuxWall.error.linesInteger",
+    "tmuxWall.error.notFound",
+    "tmuxWall.error.staticAssetMissing",
+    "tmuxWall.error.targetRequired",
+    "tmuxWall.error.tmuxDiscoveryFailed",
+    "tmuxWall.pane.empty",
+    "tmuxWall.status.connected",
+    "tmuxWall.status.connecting",
+    "tmuxWall.status.disconnectedRetrying",
+    "tmuxWall.status.live",
+    "tmuxWall.subtitle",
+    "tmuxWall.title",
+)
+TMUX_WALL_STATE_KEY_BY_CODE = {
+    "approval": "state.needs-approval",
+    "busy": "state.working",
+    "disconnected": "state.disconnected",
+    "done": "state.done",
+    "error": "state.blocked",
+    "idle": "state.idle",
+    "needs-approval": "state.needs-approval",
+    "needs-input": "state.needs-input",
+    "question": "state.needs-input",
+    "unknown": "common.unknown",
+    "working": "state.working",
+}
+TMUX_WALL_ATTENTION_KEY_BY_KIND = {
+    "approval": "state.short.yolo-approval",
+    "question": "state.needs-input",
+    "working": "state.working",
+}
 
 
 @dataclass(frozen=True)
@@ -69,6 +134,52 @@ class PaneInfo:
     def is_agent(self) -> bool:
         title = self.title.lower()
         return self.command in AGENT_COMMANDS or "claude" in title or "codex" in title
+
+
+def tmux_wall_locale(accept_language: str = "", preference: str | None = None) -> str:
+    """Resolve the wall locale through the same preference and browser-language path as YOLOmux."""
+    selected = current_language_pref() if preference is None else preference
+    return resolve_locale_preference(selected, accept_language)
+
+
+def tmux_wall_catalog(locale: str) -> dict[str, str]:
+    return {key: server_string(locale, key) for key in TMUX_WALL_CATALOG_KEYS}
+
+
+def tmux_wall_bootstrap_json(locale: str) -> str:
+    payload = {"locale": locale, "catalog": tmux_wall_catalog(locale)}
+    return (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def tmux_wall_html_string(locale: str, key: str) -> str:
+    return html.escape(server_string(locale, key))
+
+
+def state_message_fields(state: dict[str, Any]) -> dict[str, Any]:
+    """Attach localizable labels to stable agent-state facts without changing their raw diagnostics."""
+    result = dict(state)
+    display = dict(result.get("display") or {})
+    attention_kind = str(display.get("attention_kind") or result.get("attention_kind") or "")
+    attention_label = str(display.get("attention_label") or result.get("attention_label") or "")
+    attention_key = TMUX_WALL_ATTENTION_KEY_BY_KIND.get(attention_kind, "")
+    attention_fields = message_fields("attention_label", attention_key, attention_label)
+    result.update(attention_fields)
+    display.update(attention_fields)
+
+    reason_code = str(result.get("reason_code") or "")
+    reason_key = TMUX_WALL_STATE_KEY_BY_CODE.get(reason_code, "common.unknown" if reason_code else "")
+    result.update(message_fields("reason_label", reason_key, reason_code))
+    result["display"] = display
+    return result
+
+
+def wall_error_fields(key: str, fallback: object, **params: Any) -> dict[str, Any]:
+    return message_fields("error", key, fallback, params)
 
 
 def static_asset_path(asset: str) -> Path | None:
@@ -261,7 +372,7 @@ def capture_pane_state(target: str, lines: int) -> tuple[str, str | None, dict[s
         capture_func=capture_func,
         capture_styled_func=capture_styled_func,
     )
-    state_payload = state.as_dict()
+    state_payload = state_message_fields(state.as_dict())
     text = capture.visible_text.rstrip("\n") if capture.ok else ""
     error = capture.error or None
     return text, error, state_payload
@@ -338,21 +449,31 @@ class TmuxWallApp:
                 target = discovered["targets"][index]
                 pane = discovered["pane_by_target"].get(target)
                 text, error, state = capture_pane_state(target, capture_lines)
+                state = state_message_fields(state)
                 slots.append(
                     {
                         "index": index,
                         "target": target,
                         "pane": asdict(pane) if pane else None,
                         "text": text,
-                        "error": error,
+                        **(
+                            wall_error_fields("tmuxWall.error.captureFailed", error, target=target)
+                            if error
+                            else message_fields("error", "", "")
+                        ),
                         "state": state,
                         "screen": state.get("screen") or {},
                         "display": state.get("display") or {},
                         "approval": state.get("approval") or {},
                         "attention_kind": state.get("attention_kind") or "",
                         "attention_label": state.get("attention_label") or "",
+                        "attention_label_key": state.get("attention_label_key") or "",
+                        "attention_label_params": state.get("attention_label_params") or {},
                         "agent_kind": state.get("agent_kind") or "",
                         "reason_code": state.get("reason_code") or "",
+                        "reason_label": state.get("reason_label") or "",
+                        "reason_label_key": state.get("reason_label_key") or "",
+                        "reason_label_params": state.get("reason_label_params") or {},
                     }
                 )
             else:
@@ -362,15 +483,27 @@ class TmuxWallApp:
                         "target": "",
                         "pane": None,
                         "text": "",
-                        "error": "empty slot",
+                        **wall_error_fields("tmuxWall.error.emptySlot", "empty slot"),
                     }
                 )
         return {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "slots": slots,
             "containers": discovered["containers"],
-            "container_error": discovered["container_error"],
-            "tmux_error": discovered["tmux_error"],
+            **(
+                message_fields(
+                    "container_error",
+                    "tmuxWall.error.containerMetadataFailed" if discovered["container_error"] else "",
+                    discovered["container_error"] or "",
+                )
+            ),
+            **(
+                message_fields(
+                    "tmux_error",
+                    "tmuxWall.error.tmuxDiscoveryFailed" if discovered["tmux_error"] else "",
+                    discovered["tmux_error"] or "",
+                )
+            ),
             "interval": self.interval,
         }
 
@@ -378,56 +511,70 @@ class TmuxWallApp:
         panes, tmux_error = list_panes()
         pane_by_target = {pane.target: pane for pane in panes}
         text, error, state = capture_pane_state(target, lines)
+        state = state_message_fields(state)
         return {
             "target": target,
             "pane": asdict(pane_by_target[target]) if target in pane_by_target else None,
             "lines": lines,
             "text": text,
-            "error": error or tmux_error,
+            **(
+                wall_error_fields("tmuxWall.error.captureFailed", error, target=target)
+                if error
+                else wall_error_fields("tmuxWall.error.tmuxDiscoveryFailed", tmux_error)
+                if tmux_error
+                else message_fields("error", "", "")
+            ),
             "state": state,
             "screen": state.get("screen") or {},
             "display": state.get("display") or {},
             "approval": state.get("approval") or {},
             "attention_kind": state.get("attention_kind") or "",
             "attention_label": state.get("attention_label") or "",
+            "attention_label_key": state.get("attention_label_key") or "",
+            "attention_label_params": state.get("attention_label_params") or {},
             "agent_kind": state.get("agent_kind") or "",
             "reason_code": state.get("reason_code") or "",
+            "reason_label": state.get("reason_label") or "",
+            "reason_label_key": state.get("reason_label_key") or "",
+            "reason_label_params": state.get("reason_label_params") or {},
         }
 
 
-def html_page() -> str:
+def html_page(locale: str = "en") -> str:
     css_version = static_asset_version("tmux-wall.css")
     js_version = static_asset_version("tmux-wall.js")
+    bootstrap_json = tmux_wall_bootstrap_json(locale)
     return f"""<!doctype html>
-<html lang="en">
+<html {html_lang_dir_attrs(locale)}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YOLOmux tmux wall</title>
+<title>{tmux_wall_html_string(locale, "tmuxWall.title")}</title>
 <link rel="stylesheet" href="/static/tmux-wall.css?v={css_version}">
 </head>
 <body>
 <header class="topbar">
   <div>
-    <div class="title">YOLOmux tmux wall</div>
-    <div class="sub">Six live tmux snapshots, container metadata, and AI-readable transcript endpoints.</div>
+    <div class="title">{tmux_wall_html_string(locale, "tmuxWall.title")}</div>
+    <div class="sub">{tmux_wall_html_string(locale, "tmuxWall.subtitle")}</div>
   </div>
   <div class="actions">
-    <button id="pauseBtn">Pause</button>
-    <button id="refreshBtn">Refresh</button>
-    <button id="summaryBtn">Open summary JSON</button>
-    <div id="status" class="status">connecting...</div>
+    <button id="pauseBtn">{tmux_wall_html_string(locale, "tmuxWall.action.pause")}</button>
+    <button id="refreshBtn">{tmux_wall_html_string(locale, "tmuxWall.action.refresh")}</button>
+    <button id="summaryBtn">{tmux_wall_html_string(locale, "tmuxWall.action.openSummary")}</button>
+    <div id="status" class="status">{tmux_wall_html_string(locale, "tmuxWall.status.connecting")}</div>
   </div>
 </header>
 <main class="wrap">
   <section id="grid" class="grid"></section>
   <section class="containers">
     <table>
-      <thead><tr><th>Repo</th><th>Backend</th><th>User</th><th>Container</th><th>Git HEAD</th><th>Project SHA</th><th>Branch</th><th>Path</th></tr></thead>
+      <thead><tr><th>{tmux_wall_html_string(locale, "tmuxWall.column.repo")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.backend")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.user")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.container")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.gitHead")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.projectSha")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.branch")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.path")}</th></tr></thead>
       <tbody id="containers"></tbody>
     </table>
   </section>
 </main>
+<script id="tmux-wall-bootstrap" type="application/json">{bootstrap_json}</script>
 <script src="/static/tmux-wall.js?v={js_version}"></script>
 </body>
 </html>
@@ -436,6 +583,21 @@ def html_page() -> str:
 
 class Handler(BaseHTTPRequestHandler):
     server: "TmuxWallHTTPServer"
+
+    def request_locale(self) -> str:
+        return tmux_wall_locale(self.headers.get("Accept-Language", ""))
+
+    def query_lines(self, query: dict[str, list[str]], default: int) -> int | None:
+        raw_value = query.get("lines", [str(default)])[0]
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            self.write_json(
+                user_message_payload("tmuxWall.error.linesInteger", f"lines must be an integer: {raw_value}"),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return None
+        return max(1, min(value, 20000))
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
@@ -449,7 +611,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.write_static_asset(asset, content_type)
                 return
         if parsed.path == "/":
-            self.write_html(html_page())
+            self.write_html(html_page(self.request_locale()))
             return
         if parsed.path == "/api/snapshot":
             self.write_json(self.server.app.snapshot())
@@ -457,21 +619,31 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/transcript":
             qs = parse_qs(parsed.query)
             target = qs.get("target", [""])[0]
-            lines = int(qs.get("lines", ["2000"])[0])
             if not target:
-                self.write_json({"error": "missing target"}, status=HTTPStatus.BAD_REQUEST)
+                self.write_json(
+                    user_message_payload("tmuxWall.error.targetRequired", "missing target"),
+                    status=HTTPStatus.BAD_REQUEST,
+                )
                 return
-            self.write_json(self.server.app.transcript(target, max(1, min(lines, 20000))))
+            lines = self.query_lines(qs, 2000)
+            if lines is None:
+                return
+            self.write_json(self.server.app.transcript(target, lines))
             return
         if parsed.path == "/api/summary-input":
             qs = parse_qs(parsed.query)
-            lines = int(qs.get("lines", ["1200"])[0])
-            self.write_json(self.server.app.snapshot(lines=max(1, min(lines, 20000))))
+            lines = self.query_lines(qs, 1200)
+            if lines is None:
+                return
+            self.write_json(self.server.app.snapshot(lines=lines))
             return
         if parsed.path == "/events":
             self.stream_events()
             return
-        self.write_text("not found\n", status=HTTPStatus.NOT_FOUND)
+        self.write_text(
+            server_string(self.request_locale(), "tmuxWall.error.notFound") + "\n",
+            status=HTTPStatus.NOT_FOUND,
+        )
 
     def write_html(self, body: str) -> None:
         data = body.encode("utf-8")
@@ -492,12 +664,18 @@ class Handler(BaseHTTPRequestHandler):
     def write_static_asset(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
         if path is None:
-            self.write_text(f"missing static asset: {asset}\n", status=HTTPStatus.NOT_FOUND)
+            self.write_text(
+                server_string(self.request_locale(), "tmuxWall.error.staticAssetMissing", asset=asset) + "\n",
+                status=HTTPStatus.NOT_FOUND,
+            )
             return
         try:
             data = path.read_bytes()
-        except OSError as exc:
-            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        except OSError:
+            self.write_text(
+                server_string(self.request_locale(), "tmuxWall.error.assetReadFailed", asset=asset) + "\n",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)

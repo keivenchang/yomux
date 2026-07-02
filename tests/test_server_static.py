@@ -1,10 +1,15 @@
 import gzip
 import io
 from http import HTTPStatus
+from pathlib import Path
 from types import SimpleNamespace
 
 from yolomux_lib import server as server_module
+from yolomux_lib import web
 from yolomux_lib.server import Handler
+
+
+SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
 
 def static_handler(path: str, accept_encoding: str | None = None, app=None, command: str = "GET") -> Handler:
@@ -13,6 +18,7 @@ def static_handler(path: str, accept_encoding: str | None = None, app=None, comm
     handler.command = command
     handler.server = SimpleNamespace(app=app) if app is not None else SimpleNamespace(app=SimpleNamespace())
     handler.headers = {}
+    handler.request_locale_pref = lambda: "system"
     if accept_encoding is not None:
         handler.headers["Accept-Encoding"] = accept_encoding
     handler.close_connection = False
@@ -30,6 +36,56 @@ def static_handler(path: str, accept_encoding: str | None = None, app=None, comm
 
 def response_headers(handler: Handler) -> dict[str, str]:
     return {name.lower(): value for name, value in handler.sent_headers}
+
+
+def test_static_asset_errors_localize_without_exposing_read_failure(monkeypatch, caplog):
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
+    web.bootstrap_locale_catalogs.cache_clear()
+    missing = static_handler("/static/missing.js")
+    missing.headers["Accept-Language"] = "zh-CN"
+    monkeypatch.setattr(server_module, "static_asset_path", lambda _asset: None)
+
+    try:
+        missing.write_static_asset("missing.js", "application/javascript; charset=utf-8")
+        assert missing.sent_status == HTTPStatus.NOT_FOUND
+        assert missing.wfile.getvalue().decode("utf-8") == web.server_string(
+            "zh-Hans",
+            "request.error.staticAssetMissing",
+            asset="missing.js",
+        ) + "\n"
+
+        class UnreadableAsset:
+            def read_bytes(self):
+                raise OSError("private filesystem detail")
+
+        monkeypatch.setattr(server_module, "static_asset_path", lambda _asset: UnreadableAsset())
+        failed = static_handler("/static/broken.js")
+        failed.headers["Accept-Language"] = "zh-CN"
+        caplog.set_level("WARNING", logger="yolomux_lib.server")
+
+        failed.write_static_asset("broken.js", "application/javascript; charset=utf-8")
+
+        response = failed.wfile.getvalue().decode("utf-8")
+        assert failed.sent_status == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response == web.server_string(
+            "zh-Hans",
+            "request.error.staticAssetReadFailed",
+            asset="broken.js",
+        ) + "\n"
+        assert "private filesystem detail" not in response
+        assert "private filesystem detail" in caplog.text
+
+        failed_head = static_handler("/static/broken.js", command="HEAD")
+        failed_head.headers["Accept-Language"] = "zh-CN"
+        failed_head.write_static_head("broken.js", "application/javascript; charset=utf-8")
+        assert failed_head.sent_status == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert failed_head.wfile.getvalue().decode("utf-8") == web.server_string(
+            "zh-Hans",
+            "request.error.staticAssetReadFailed",
+            asset="broken.js",
+        ) + "\n"
+    finally:
+        web.bootstrap_locale_catalogs.cache_clear()
 
 
 def test_write_static_asset_gzips_and_caches_versioned_assets(monkeypatch, tmp_path):

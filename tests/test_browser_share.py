@@ -622,10 +622,15 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
               applyShareScrollState({{target: `editor:${{item}}:editor`, kind: 'editor', path, item, source: 'editor', top: 2320, left: 0, anchor: 0, head: 0}});
               await frame();
               await frame();
-              const diffRowsVisible = await waitFor(() => panel.querySelectorAll('.cm-insertedLine, .cm-deletedLine').length > 0);
+              const diffRowsVisible = await waitFor(() => (
+                panel.querySelectorAll('.cm-changedLine').length > 0
+                && panel.querySelectorAll('.cm-deletedLine, .cm-deletedChunk').length > 0
+              ));
               const hostTop = Math.round(scroller?.scrollTop || 0);
-              const insertedRows = panel.querySelectorAll('.cm-insertedLine').length;
-              const deletedRows = panel.querySelectorAll('.cm-deletedLine').length;
+              // The product disables intra-line token highlights, so assert the stable full-line/chunk
+              // classes rather than the transient cm-insertedLine token mark.
+              const insertedRows = panel.querySelectorAll('.cm-changedLine').length;
+              const deletedRows = panel.querySelectorAll('.cm-deletedLine, .cm-deletedChunk').length;
               if (scroller) {{
                 scroller.scrollTop = 0;
                 scroller.dispatchEvent(new Event('scroll', {{bubbles: true}}));
@@ -3490,7 +3495,7 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
     assert metrics["mounted"] is True, metrics
     assert metrics["status"] == "mirrored", metrics
-    assert metrics["statusText"] == "mirrored", metrics
+    assert metrics["statusText"] == "mirror synced", metrics
     assert metrics["requestDelta"] == 1, metrics
     assert metrics["dropped"] == 1, metrics
     assert metrics["writes"] == ["terminal keeps streaming"], metrics
@@ -3999,8 +4004,8 @@ def test_share_replay_debug_copy_exports_sanitized_health(browser, tmp_path):
     assert metrics["kind"] == "share-replay-health", metrics
     assert metrics["match"] is True, metrics
     assert metrics["status"] == "mirrored", metrics
-    assert metrics["userStatus"] == "mirrored", metrics
-    assert metrics["mirrorStatusText"] == "mirrored", metrics
+    assert metrics["userStatus"] == "mirror synced", metrics
+    assert metrics["mirrorStatusText"] == "mirror synced", metrics
     assert metrics["epoch"] == 13, metrics
     assert metrics["sequence"] == 31, metrics
     assert metrics["keyframeBytes"] > 0, metrics
@@ -4219,8 +4224,8 @@ def test_share_replay_health_ignores_legacy_geometry_drift_frames(browser, tmp_p
     assert metrics["after"]["kind"] == "share-replay-health", metrics
     assert metrics["after"]["match"] is True, metrics
     assert metrics["after"]["status"] == "mirrored", metrics
-    assert metrics["after"]["userStatus"] == "mirrored", metrics
-    assert metrics["statusText"] == "mirrored", metrics
+    assert metrics["after"]["userStatus"] == "mirror synced", metrics
+    assert metrics["statusText"] == "mirror synced", metrics
     assert metrics["after"]["epoch"] == metrics["before"]["epoch"] == 23, metrics
     assert metrics["after"]["sequence"] == metrics["before"]["sequence"] == 40, metrics
     assert metrics["after"]["domDigest"] == metrics["before"]["domDigest"], metrics

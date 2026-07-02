@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import time
 from datetime import datetime
 from datetime import timezone
@@ -13,13 +14,18 @@ from yolomux_lib.activity_summary import build_session_activity_summary
 from yolomux_lib.activity_summary import build_yoagent_chat_prompt
 from yolomux_lib.activity_summary import build_yoagent_resume_prompt
 from yolomux_lib.activity_summary import deterministic_yoagent_reply
+from yolomux_lib.activity_summary import relative_age_text
 from yolomux_lib.activity_summary import transcript_file_signature
 from yolomux_lib.activity_summary import yolomux_help_primer
 from yolomux_lib.activity_summary import yoagent_context_lines
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
+from yolomux_lib.locales import PLURAL_CATEGORIES_BY_LOCALE
+from yolomux_lib.locales import SHIPPED_LOCALES
+from yolomux_lib.locales import plural_category
 from yolomux_lib.session_files import session_files_payload_for_info
+from yolomux_lib.web import server_plural
 
 from _git_helpers import git, init_repo
 
@@ -84,6 +90,8 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     project = {"git": {"root": str(repo), "branch": "main", "dirty_count": 1}, "pull_request": {"checks": {"state": "failing", "summary": "CI failing"}}, "linear": []}
 
     summary = build_session_activity_summary(info, project, files)
+    spanish_summary = build_session_activity_summary(info, project, files, locale="es")
+    chinese_summary = build_session_activity_summary(info, project, files, locale="zh-Hant")
 
     assert summary["session"] == "5"
     assert summary["agent"] == "codex"
@@ -100,6 +108,12 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     assert "Status check: CI failing; 1 dirty file." in summary["local"]
     assert "CI failing" in summary["lines"]
     assert any("app.py" in line for line in summary["file_lines"])
+    assert spanish_summary["locale"] == "es"
+    assert spanish_summary["activity_label"] == "activo recientemente"
+    assert "1 archivo cambiado (+1/-1)" in spanish_summary["local"]
+    assert chinese_summary["locale"] == "zh-Hant"
+    assert chinese_summary["activity_label"] == "最近有活動"
+    assert "1 個檔案已變更（+1/-1）" in chinese_summary["local"]
     signature = activity_signature(info, project, files)
     assert signature["summary_format"] >= 2
     assert signature["files"][0][2] == "app.py"
@@ -143,6 +157,142 @@ def test_global_activity_summary_rolls_up_sessions():
     assert "Recommendation: keep tmux session `1` focused on fix A" in global_summary["lines"][1]
     assert "You have not touched tmux session `2`" in global_summary["lines"][2]
     assert "ask it to summarize before resuming" in global_summary["lines"][2]
+    assert global_summary["detail_lines"] == global_summary["lines"][1:3]
+    assert len(global_summary["session_lines"]) == 2
+    assert global_summary["lines"][3:] == global_summary["session_lines"]
+
+
+def test_python_plural_selector_matches_intl_for_every_shipped_locale():
+    counts = [
+        -2,
+        -1,
+        -0.1,
+        0,
+        0.000001,
+        0.0001,
+        0.0004,
+        0.0005,
+        0.0009,
+        0.001,
+        0.1,
+        0.5,
+        1,
+        1.0001,
+        1.0004,
+        1.0005,
+        1.001,
+        1.1,
+        1.2,
+        1.5,
+        2,
+        2.0001,
+        2.1,
+        3,
+        5,
+        10,
+        11,
+        12,
+        14,
+        20,
+        21,
+        22,
+        25,
+        100,
+        101,
+        1000,
+        1_000_000,
+        2_000_000,
+    ]
+    script = """
+const input = JSON.parse(process.argv[1]);
+const output = {};
+for (const locale of input.locales) {
+  const rules = new Intl.PluralRules(locale);
+  output[locale] = {
+    categories: rules.resolvedOptions().pluralCategories,
+    selected: input.counts.map(count => rules.select(count)),
+  };
+}
+process.stdout.write(JSON.stringify(output));
+"""
+    completed = subprocess.run(
+        ["node", "-e", script, json.dumps({"locales": SHIPPED_LOCALES, "counts": counts})],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    browser = json.loads(completed.stdout)
+    for locale in SHIPPED_LOCALES:
+        assert set(browser[locale]["categories"]) == PLURAL_CATEGORIES_BY_LOCALE[locale]
+        assert [plural_category(locale, count) for count in counts] == browser[locale]["selected"]
+
+
+def test_server_plural_uses_cldr_category_and_active_other_before_english(monkeypatch):
+    catalogs = {
+        "en": {
+            "item.one": "English one {count}",
+            "item.other": "English other {count}",
+            "fallback.other": "English fallback other {count}",
+        },
+        "ar": {
+            "item.zero": "Arabic zero {count}",
+            "item.one": "Arabic one {count}",
+            "item.two": "Arabic two {count}",
+            "item.few": "Arabic few {count}",
+            "item.many": "Arabic many {count}",
+            "item.other": "Arabic other {count}",
+        },
+        "de": {},
+        "fr": {"item.other": "Français autre {count}"},
+    }
+    monkeypatch.setattr("yolomux_lib.web.bootstrap_locale_catalogs", lambda locale: {"en": catalogs["en"], locale: catalogs[locale]})
+
+    assert [server_plural("ar", "item", count) for count in (0, 1, 2, 3, 11, 100)] == [
+        "Arabic zero 0",
+        "Arabic one 1",
+        "Arabic two 2",
+        "Arabic few 3",
+        "Arabic many 11",
+        "Arabic other 100",
+    ]
+    assert server_plural("fr", "item", 1) == "Français autre 1"
+    assert server_plural("de", "item", 1) == "English one 1"
+    assert server_plural("de", "fallback", 1) == "English fallback other 1"
+
+
+def test_localized_activity_relative_time_and_deterministic_session_table():
+    now = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
+    timestamp = now.timestamp() - 120
+
+    assert relative_age_text(timestamp, now=now, locale="es") == "hace 2 minutos"
+    assert relative_age_text(timestamp, now=now, locale="zh-Hant") == "2 分鐘前"
+
+    activity = {
+        "global": {"headline": "Actividad reciente", "lines": []},
+        "sessions": {
+            "5": {
+                "session": "5",
+                "agent": "codex",
+                "agent_label": "Codex",
+                "active": True,
+                "activity_label": "Activo",
+                "repos": ["/repo/yolomux"],
+                "files": {"count": 2, "added": 3, "removed": 1},
+                "work": "corregir el editor",
+                "last_activity_text": "hace 2 min",
+                "last_activity_ts": timestamp,
+            },
+        },
+        "errors": [],
+    }
+    reply = deterministic_yoagent_reply("list all sessions", activity, {}, locale="es")
+
+    assert reply.startswith("Ningún backend de IA está respondiendo")
+    assert "| sesión tmux | ruta completa | último trabajo | detalles |" in reply
+    assert "2 archivos cambiados (+3/-1)" in reply
+    assert "**Abierto / pendiente:**" in reply
+    for english in ("No AI backend", "tmux session", "full path", "last worked", "details", "**Priority:**", "Recommendation:"):
+        assert english not in reply
 
 
 def test_transcript_file_signature_uses_nanosecond_mtime(tmp_path):
@@ -331,6 +481,7 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
             {"role": "user", "content": "status?"},
         ],
     )
+    spanish_prompt = build_yoagent_chat_prompt("¿qué cambió?", activity, settings, locale="es")
     changed_resume = build_yoagent_resume_prompt("what now?", activity, settings, True)
     unchanged_resume = build_yoagent_resume_prompt("what now?", activity, settings, False)
     reply = deterministic_yoagent_reply("session 5", activity, settings)
@@ -348,6 +499,9 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert any("transcript summary (working): The transcript says this session is wiring clickable session links" in line for line in lines)
     assert any("last worked: 2 hours ago" in line for line in lines)
     assert "Use facts only." in prompt
+    assert "Answer in English." in prompt
+    assert "Responde en español." in spanish_prompt
+    assert "Answer in English." not in spanish_prompt
     assert "YO!agent can execute server-verified sends" in prompt
     assert "You may run tools" not in prompt
     assert "YOLOmux concepts:" in prompt
@@ -360,10 +514,12 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "old1" not in prompt
     assert "status?" in prompt
     assert "Activity summary changed" in changed_resume
+    assert "Answer in English." in changed_resume
     assert "YOLOmux concepts:" in changed_resume
     assert "YO!agent can execute server-verified sends" in changed_resume
     assert "M static/yolomux.js" in changed_resume
     assert "Activity summary is unchanged" in unchanged_resume
+    assert "Answer in English." in unchanged_resume
     assert "M static/yolomux.js" not in unchanged_resume
     assert "No AI backend is answering" in reply
     assert "Set or log in a Claude/Codex backend" in reply

@@ -1,11 +1,16 @@
 from yolomux_lib.agent_tui import AgentTuiCapture
 
 from tmux_wall import PaneInfo
+from tmux_wall import Handler
 from tmux_wall import TmuxWallApp
 from tmux_wall import capture_pane_state
 from tmux_wall import container_helper_path
+from tmux_wall import html_page
 from tmux_wall import is_loopback_bind_host
 from tmux_wall import remote_bind_error
+from tmux_wall import state_message_fields
+from tmux_wall import tmux_wall_catalog
+from tmux_wall import tmux_wall_locale
 
 
 class FakeAgentPaneState:
@@ -125,5 +130,100 @@ def test_snapshot_includes_shared_agent_state(monkeypatch):
     assert slot["text"] == "raw text"
     assert slot["screen"]["key"] == "needs-input"
     assert slot["display"]["attention_label"] == "Question"
+    assert slot["display"]["attention_label_key"] == "state.needs-input"
     assert slot["attention_kind"] == "question"
+    assert slot["attention_label_key"] == "state.needs-input"
     assert slot["reason_code"] == "needs-input"
+    assert slot["reason_label_key"] == "state.needs-input"
+
+
+def test_tmux_wall_locale_reuses_canonical_system_language_resolution():
+    assert tmux_wall_locale("zh-TW,zh;q=0.9", preference="system") == "zh-Hant"
+    assert tmux_wall_locale("en-US", preference="ar") == "ar"
+    assert tmux_wall_locale("xx-unknown", preference="system") == "en"
+
+
+def test_tmux_wall_catalog_and_html_use_server_locale_parent(monkeypatch):
+    translations = {
+        "tmuxWall.title": "لوحة <YOLOmux>",
+        "tmuxWall.subtitle": "لقطات حية",
+        "tmuxWall.action.pause": "إيقاف مؤقت",
+        "tmuxWall.action.refresh": "تحديث",
+        "tmuxWall.action.openSummary": "فتح JSON",
+        "tmuxWall.status.connecting": "جارٍ الاتصال...",
+        "tmuxWall.column.repo": "المستودع",
+    }
+
+    def fake_server_string(locale, key, **params):
+        assert locale == "ar"
+        value = translations.get(key, key)
+        for name, replacement in params.items():
+            value = value.replace("{" + name + "}", str(replacement))
+        return value
+
+    monkeypatch.setattr("tmux_wall.server_string", fake_server_string)
+
+    catalog = tmux_wall_catalog("ar")
+    body = html_page("ar")
+
+    assert catalog["tmuxWall.action.pause"] == "إيقاف مؤقت"
+    assert '<html lang="ar" dir="rtl">' in body
+    assert "لوحة &lt;YOLOmux&gt;" in body
+    assert "إيقاف مؤقت" in body
+    assert 'id="tmux-wall-bootstrap"' in body
+    assert "\\u003cYOLOmux\\u003e" in body
+
+
+def test_state_message_fields_localize_stable_facts_and_keep_raw_diagnostics():
+    payload = state_message_fields({
+        "display": {"attention_kind": "approval", "attention_label": "YOLO?"},
+        "attention_kind": "approval",
+        "attention_label": "YOLO?",
+        "reason_code": "approval",
+    })
+
+    assert payload["attention_label"] == "YOLO?"
+    assert payload["attention_label_key"] == "state.short.yolo-approval"
+    assert payload["display"]["attention_label_key"] == "state.short.yolo-approval"
+    assert payload["reason_label"] == "approval"
+    assert payload["reason_label_key"] == "state.needs-approval"
+
+
+def test_snapshot_structures_empty_and_backend_errors(monkeypatch):
+    def fake_discover(_app):
+        return {
+            "panes": [],
+            "targets": [],
+            "pane_by_target": {},
+            "tmux_error": "tmux socket unavailable",
+            "containers": [],
+            "container_error": "helper missing",
+        }
+
+    monkeypatch.setattr(TmuxWallApp, "discover", fake_discover)
+    payload = TmuxWallApp([], slots=1, lines=25, interval=1.0).snapshot()
+
+    assert payload["slots"][0]["error"] == "empty slot"
+    assert payload["slots"][0]["error_key"] == "tmuxWall.error.emptySlot"
+    assert payload["tmux_error"] == "tmux socket unavailable"
+    assert payload["tmux_error_key"] == "tmuxWall.error.tmuxDiscoveryFailed"
+    assert payload["container_error"] == "helper missing"
+    assert payload["container_error_key"] == "tmuxWall.error.containerMetadataFailed"
+
+
+def test_tmux_wall_query_lines_returns_structured_error():
+    class FakeRequest:
+        def __init__(self):
+            self.response = None
+
+        def write_json(self, payload, status):
+            self.response = (payload, status)
+
+    request = FakeRequest()
+    result = Handler.query_lines(request, {"lines": ["many"]}, 1200)
+
+    assert result is None
+    payload, status = request.response
+    assert int(status) == 400
+    assert payload["error"] == "lines must be an integer: many"
+    assert payload["user_message"]["key"] == "tmuxWall.error.linesInteger"

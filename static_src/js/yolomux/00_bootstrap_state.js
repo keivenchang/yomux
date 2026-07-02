@@ -150,6 +150,7 @@ if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.
 }
 let activeShare = null;
 let activeShares = [];
+let shareCreateErrorPayload = null;
 let shareHostSockets = new Map();
 let shareHostQueues = new Map();
 let shareMirrorEpoch = 1;
@@ -236,8 +237,6 @@ const tabMetaToggle = (() => {
   button.className = 'tab-meta-toggle';
   button.type = 'button';
   button.textContent = '#';
-  button.title = 'Hide tab metadata';
-  button.setAttribute('aria-label', 'Hide tab metadata');
   button.setAttribute('aria-pressed', 'true');
   return button;
 })();
@@ -332,9 +331,13 @@ const TERMINAL_THEMES = {
     brightWhite: '#ffffff',
   },
 };
+function yolomuxEditorSchemeLabel(mode) {
+  return `${t('app.documentTitle')} ${t(`pref.appearance.theme.${mode}`)}`;
+}
+
 const EDITOR_SCHEMES = {
   dark: {
-    id: 'dark', label: 'YOLOmux Dark', dark: true,
+    id: 'dark', get label() { return yolomuxEditorSchemeLabel('dark'); }, dark: true,
     bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(96, 165, 250, 0.38)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
     syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ffffff', emphasis: '#ffffff', invalid: '#ff6673'},
@@ -383,7 +386,7 @@ const EDITOR_SCHEMES = {
     diff: {addFg: '#116329', removeFg: '#82071e'},
   },
   'yolomux-light': {
-    id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
+    id: 'yolomux-light', get label() { return yolomuxEditorSchemeLabel('light'); }, dark: false,
     bg: '#ffffff', fg: '#000000', cursor: '#000000', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f7fb',
     gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
     syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#0451a5', number: '#098658', function: '#267f2e', type: '#008080', variable: '#5f3b00', tag: '#800000', heading: '#000000', headingBg: '#ffffff', link: '#0451a5', inlineCode: '#a31515', inlineCodeBg: '#f3f3f3', inlineCodeBorder: '#d4d4d4', atom: '#0000ff', property: '#5f3b00', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
@@ -488,13 +491,13 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.srt': 'text',
     '.vtt': 'text',
   }},
-  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Image format is recognized but not previewable in this browser', mimeByExtension: {
+  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
     '.tif': 'image/tiff',
     '.tiff': 'image/tiff',
     '.heic': 'image/heic',
     '.heif': 'image/heif',
   }},
-  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Document format is recognized but not safely previewable', mimeByExtension: {
+  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
     '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.ppt': 'application/vnd.ms-powerpoint',
@@ -502,7 +505,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.xls': 'application/vnd.ms-excel',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   }},
-  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Data format is recognized but needs an external viewer', mimeByExtension: {
+  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
     '.sqlite': 'application/vnd.sqlite3',
     '.sqlite3': 'application/vnd.sqlite3',
     '.db': 'application/vnd.sqlite3',
@@ -510,7 +513,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.arrow': 'application/vnd.apache.arrow.file',
     '.feather': 'application/vnd.apache.arrow.file',
   }},
-  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Archive preview is not expanded in YOLOmux', mimeByExtension: {
+  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
     '.zip': 'application/zip',
     '.tar': 'application/x-tar',
     '.gz': 'application/gzip',
@@ -614,6 +617,42 @@ let preferencesResetConfirmVisible = false;
 const preferencesScrollRenderDeferMs = 200;
 let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
+const PREFERENCE_SECTION_IDS = Object.freeze({
+  general: 'general',
+  appearance: 'appearance',
+  terminalEditor: 'terminal_editor',
+  notifications: 'notifications',
+  fileExplorer: 'file_explorer',
+  uploads: 'uploads',
+  performance: 'performance',
+  github: 'github',
+  yoagent: 'yoagent',
+  share: 'share',
+  yolo: 'yolo',
+});
+const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
+  PREFERENCE_SECTION_IDS.general,
+  PREFERENCE_SECTION_IDS.appearance,
+  PREFERENCE_SECTION_IDS.performance,
+  PREFERENCE_SECTION_IDS.notifications,
+  PREFERENCE_SECTION_IDS.terminalEditor,
+  PREFERENCE_SECTION_IDS.fileExplorer,
+  PREFERENCE_SECTION_IDS.uploads,
+]);
+const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
+  General: PREFERENCE_SECTION_IDS.general,
+  Appearance: PREFERENCE_SECTION_IDS.appearance,
+  Performance: PREFERENCE_SECTION_IDS.performance,
+  Notifications: PREFERENCE_SECTION_IDS.notifications,
+  'Terminal / Editor': PREFERENCE_SECTION_IDS.terminalEditor,
+  'File Explorer': PREFERENCE_SECTION_IDS.fileExplorer,
+  Finder: PREFERENCE_SECTION_IDS.fileExplorer,
+  'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
+  GitHub: PREFERENCE_SECTION_IDS.github,
+  'YO!agent': PREFERENCE_SECTION_IDS.yoagent,
+  'YO!share': PREFERENCE_SECTION_IDS.share,
+  YOLO: PREFERENCE_SECTION_IDS.yolo,
+});
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 const changesFolderAutoCollapsed = new Set();
@@ -977,13 +1016,14 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
       const path = fileItemPath(item);
       return Boolean(path && editorPreviewModeAvailable(path, openFiles.get(path)));
     },
-    popoutDisabledReason: item => fileItemPath(item)
-      ? 'file editor popout needs a preview-capable file'
-      : 'file editor popout needs a file path',
+    popoutDisabledReason: item => t(fileItemPath(item)
+      ? 'pane.popout.filePreviewRequired'
+      : 'pane.popout.filePathRequired'),
     openPopout: item => {
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
@@ -1015,6 +1055,10 @@ const TAB_TYPES = [
     renderAttached: () => {
       renderInfoPanel();
     },
+    relocalize: (_item, panel) => {
+      renderInfoPanel({force: true});
+      relocalizeInfoPanelChrome(panel);
+    },
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1040,9 +1084,13 @@ const TAB_TYPES = [
       loadYoagentJobs({silent: true, scrollBottom: true});
       prewarmYoagent({scrollBottom: true});
     },
+    relocalize: (_item, panel, options = {}) => {
+      renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
+      relocalizeYoagentPanelChrome(panel);
+    },
     className: () => 'yoagent',
     icon: 'yoagent',
-    popoutDisabledReason: 'interactive YO!agent popout is disabled in phase 1',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: yoagentTabLabel()}),
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1059,9 +1107,10 @@ const TAB_TYPES = [
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
     rowHtml: (item, options) => fileExplorerPaneTabHtml(item, options),
     createPanel: () => createFileExplorerPanel(),
+    relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer',
     icon: 'finder',
-    popoutDisabledReason: 'interactive Finder/Tabber popout is disabled in phase 1',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: fileExplorerLabel()}),
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1079,9 +1128,10 @@ const TAB_TYPES = [
     rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
     createPanel: () => createSearchHistoryPanel(),
     renderAttached: () => loadSearchHistoryPanelData({silent: true}),
+    relocalize: (_item, panel) => renderSearchHistoryPanel(panel),
     className: () => 'search-history-item',
     icon: 'document',
-    popoutDisabledReason: 'interactive Search & Runs popout is disabled in phase 1',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: searchHistoryTabLabel()}),
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1098,7 +1148,8 @@ const TAB_TYPES = [
     detail: () => compactHomePath(settingsConfigPath()),
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
-    popoutDisabledReason: 'interactive Preferences popout is disabled in phase 1',
+    relocalize: () => renderPreferencesPanels({force: true}),
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('tab.preferences')}),
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1122,6 +1173,10 @@ const TAB_TYPES = [
     renderAttached: () => {
       enableDebugMode();
       renderDebugPanels();
+    },
+    relocalize: (_item, panel) => {
+      renderDebugPanels({force: true});
+      relocalizeDebugPanelChrome(panel);
     },
     className: () => 'debug-item',
     icon: 'tab-meta',
@@ -1276,7 +1331,7 @@ let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
 let transcriptMetaLoading = false;
 let transcriptMetaLoaded = false;
-let transcriptMetaLoadError = '';
+let transcriptMetaLoadError = null;
 let transcriptMetaRefreshPromise = null;
 let infoPanelRenderPending = false;
 let infoPanelLastRenderSignature = '';
@@ -1314,7 +1369,7 @@ let yoagentStreamingMessages = new Map();
 let yoagentActiveChatRequest = null;
 let yoagentChatQueue = [];
 let yoagentChatQueueSerial = 0;
-let yoagentError = '';
+let yoagentError = null;
 let yoagentDraft = '';
 let yoagentHistoryCursor = null;
 let yoagentHistoryDraft = '';
@@ -1325,10 +1380,10 @@ let yoagentStartupInfoVisible = false;
 let searchHistoryQuery = '';
 let searchHistoryPayload = {query: '', results: []};
 let searchHistoryLoading = false;
-let searchHistoryError = '';
+let searchHistoryError = null;
 let runHistoryPayload = {runs: []};
 let runHistoryLoading = false;
-let runHistoryError = '';
+let runHistoryError = null;
 const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
 const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
 let notificationDelivery = {...notificationDeliveryDefaults};

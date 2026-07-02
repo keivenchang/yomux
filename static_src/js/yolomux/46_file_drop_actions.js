@@ -339,8 +339,9 @@ async function runDropAction(action, context) {
   const shellActionActsAsAgentPrompt = action.kind === 'shell' && context.pathInserted && (context.agentKind === 'claude' || context.agentKind === 'codex');
   const autoEnter = action.kind === 'shell' && action.readOnly === true && !shellActionActsAsAgentPrompt && boolSetting('uploads.suggestion_autorun', false);
   const inserted = insertIntoTerminal(context.session, `${suffix}${autoEnter ? '\r' : ''}`);
+  const displayLabel = dropActionDisplayLabel(action);
   statusEl.innerHTML = inserted
-    ? `<span class="ok">${localizedHtml(autoEnter ? 'status.ranDropAction' : 'status.insertedDropAction', {name: action.label || action.id})}</span>`
+    ? `<span class="ok">${localizedHtml(autoEnter ? 'status.ranDropAction' : 'status.insertedDropAction', {name: displayLabel})}</span>`
     : `<span class="err">${terminalNotConnectedHtml(context.session)}</span>`;
 }
 
@@ -353,17 +354,43 @@ async function runServerDropAction(action, paths) {
     });
     showDropActionResult(payload);
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error: error?.payload?.error || error}));
+    statusErr(localizedHtml('status.copyFailed', {error: userMessageText(error, error)}));
   }
 }
 
 function showDropActionResult(payload) {
+  const presentation = dropActionResultPresentation(payload);
   showFileEditorDecisionDialog({
-    title: payload?.title || t('upload.dropActionResultTitle'),
-    bodyHtml: `<div class="drop-action-result"><pre>${esc(payload?.body || payload?.error || '')}</pre></div>`,
+    title: presentation.title,
+    bodyHtml: `<div class="drop-action-result"><pre>${esc(presentation.body)}</pre></div>`,
     actions: [{id: 'close', label: t('common.close')}],
     className: 'drop-action-result-dialog',
   });
+}
+
+function dropActionResultPresentation(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const result = source.result && typeof source.result === 'object' ? source.result : {};
+  const title = structuredMessageText({...result, title: source.title}, 'title', t('upload.dropActionResultTitle'));
+  const blocks = Array.isArray(result.blocks) ? result.blocks : [];
+  const renderedBlocks = blocks.map(block => {
+    const sections = Array.isArray(block?.sections) ? block.sections : [];
+    const renderedSections = sections.map(section => (Array.isArray(section) ? section : [])
+      .map(item => messageDescriptorText({
+        key: item?.key,
+        params: item?.params,
+        fallback: Object.prototype.hasOwnProperty.call(item || {}, 'raw') ? String(item.raw ?? '') : '',
+      }))
+      .filter(Boolean)
+      .join('\n'))
+      .filter(Boolean);
+    const heading = block?.path ? `## ${String(block.path)}` : '';
+    return [heading, ...renderedSections].filter(Boolean).join('\n\n');
+  }).filter(Boolean);
+  return {
+    title,
+    body: renderedBlocks.join('\n\n') || source.body || userMessageText(source),
+  };
 }
 
 let terminalDropSuggestionState = null;

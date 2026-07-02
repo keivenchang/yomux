@@ -35,28 +35,28 @@ const previewZoomActions = Object.freeze([
   Object.freeze({
     id: 'out',
     label: '-',
-    title: 'Zoom out',
+    titleKey: 'preview.zoom.out',
     zoomState: current => ({mode: 'manual', scale: current / previewZoomPolicy.step}),
     disabled: scale => scale <= previewZoomPolicy.minScale + previewZoomPolicy.disabledEpsilon,
   }),
   Object.freeze({
     id: 'fit',
-    label: 'Fit',
-    title: 'Fit to view',
+    labelKey: 'preview.zoom.fit.label',
+    titleKey: 'preview.zoom.fit.title',
     zoomState: current => ({mode: 'fit', scale: current}),
     pressed: state => state.mode === 'fit',
   }),
   Object.freeze({
     id: 'actual',
     label: '1:1',
-    title: 'Actual size',
+    titleKey: 'preview.zoom.actual',
     zoomState: () => ({mode: 'actual', scale: 1}),
     pressed: (state, scale) => state.mode !== 'fit' && Math.abs(scale - 1) < previewZoomPolicy.actualPressedEpsilon,
   }),
   Object.freeze({
     id: 'in',
     label: '+',
-    title: 'Zoom in',
+    titleKey: 'preview.zoom.in',
     zoomState: current => ({mode: 'manual', scale: current * previewZoomPolicy.step}),
     disabled: scale => scale >= previewZoomPolicy.maxScale - previewZoomPolicy.disabledEpsilon,
   }),
@@ -209,9 +209,10 @@ function previewZoomButton(action) {
   const button = document.createElement('button');
   button.type = 'button';
   button.dataset.previewZoomAction = action.id;
-  button.textContent = action.label;
-  button.title = action.title;
-  button.setAttribute('aria-label', action.title);
+  button.textContent = action.labelKey ? t(action.labelKey) : action.label;
+  const title = action.titleKey ? t(action.titleKey) : action.title;
+  button.title = title;
+  button.setAttribute('aria-label', title);
   return button;
 }
 
@@ -440,10 +441,10 @@ function mermaidErrorNode(source, error) {
   node.className = 'mermaid-preview-error';
   const title = document.createElement('div');
   title.className = 'file-editor-empty-title';
-  title.textContent = 'Mermaid diagram could not be rendered';
+  title.textContent = t('preview.mermaid.renderFailed');
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
-  detail.textContent = String(error || 'invalid Mermaid source');
+  detail.textContent = String(error || t('preview.mermaid.invalidSource'));
   const pre = document.createElement('pre');
   const code = document.createElement('code');
   code.className = 'language-mermaid';
@@ -463,7 +464,7 @@ function mermaidLoadingNode() {
   node.setAttribute('aria-busy', 'true');
   const title = document.createElement('div');
   title.className = 'file-editor-empty-title';
-  title.innerHTML = textWithMovingEllipsisHtml('Rendering Mermaid diagram', 'mermaid-preview-loading-dots');
+  title.innerHTML = textWithMovingEllipsisHtml(t('preview.mermaid.rendering'), 'mermaid-preview-loading-dots');
   node.appendChild(title);
   return node;
 }
@@ -472,7 +473,7 @@ async function renderMermaidSourceInto(container, source, options = {}) {
   const text = String(source || '').trim();
   disconnectPreviewZoomSurface(container, {resetClasses: true});
   if (!text) {
-    container.replaceChildren(fileEditorEmptyState('Mermaid diagram is empty'));
+    container.replaceChildren(fileEditorEmptyState(t('preview.mermaid.empty')));
     return false;
   }
   const seq = ++mermaidPreviewRenderSeq;
@@ -487,10 +488,10 @@ async function renderMermaidSourceInto(container, source, options = {}) {
     if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
     const rawSvg = typeof result === 'string' ? result : result?.svg;
     const svg = sanitizeStandaloneSvg(rawSvg);
-    if (!svg) throw new Error('Mermaid produced no SVG');
+    if (!svg) throw new Error(t('preview.mermaid.noSvg'));
     const img = document.createElement('img');
     img.className = 'mermaid-preview-image';
-    img.alt = 'Mermaid diagram';
+    img.alt = t('preview.mermaid.alt');
     img.src = svgImageUrl(svg);
     const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
       ? options.full !== false
@@ -674,7 +675,7 @@ function previewRendererLanguageForPath(path) {
   return renderer?.languageByExtension?.[ext] || renderer?.language || syntaxLanguageForPath(path) || 'text';
 }
 
-function jsonStructuredPreview(label, source, errorLabel = `${label} parse error`) {
+function jsonStructuredPreview(label, source, errorLabel = t('preview.structured.parseError', {format: label})) {
   try {
     return {label, text: JSON.stringify(JSON.parse(source), null, 2), language: 'json', error: ''};
   } catch (error) {
@@ -692,19 +693,19 @@ function jsonLinesStructuredPreview(path, source) {
     try {
       records.push(JSON.parse(line));
     } catch (error) {
-      errors.push(`line ${index + 1}: ${String(error?.message || error)}`);
+      errors.push(t('preview.parse.lineError', {line: index + 1, error: String(error?.message || error)}));
     }
   });
   if (errors.length) {
     return {
-      label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} parse error`,
+      label: t('preview.structured.parseError', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL'}),
       text: source,
       language: 'json',
       error: errors.slice(0, 5).join('\n'),
     };
   }
   return {
-    label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} preview · ${records.length} records`,
+    label: t('preview.structured.records', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL', count: records.length}),
     text: records.map(record => JSON.stringify(record)).join('\n'),
     language: 'json',
     error: '',
@@ -716,32 +717,33 @@ function notebookStructuredPreview(source) {
   try {
     notebook = JSON.parse(String(source ?? ''));
   } catch (error) {
-    return {label: 'Notebook parse error', text: source, language: 'json', error: String(error?.message || error)};
+    return {label: t('preview.structured.parseError', {format: t('preview.format.notebook')}), text: source, language: 'json', error: String(error?.message || error)};
   }
   const cells = Array.isArray(notebook?.cells) ? notebook.cells : [];
-  const out = [`Notebook preview · ${cells.length} cells · outputs not rendered`];
+  const out = [t('preview.notebook.summary', {count: cells.length})];
   cells.slice(0, 80).forEach((cell, index) => {
     const type = String(cell?.cell_type || 'cell');
     const sourceText = Array.isArray(cell?.source) ? cell.source.join('') : String(cell?.source || '');
     const outputCount = Array.isArray(cell?.outputs) ? cell.outputs.length : 0;
-    out.push('', `## ${index + 1}. ${type}${outputCount ? ` · ${outputCount} outputs hidden` : ''}`, sourceText.trimEnd());
+    const outputs = outputCount ? t('preview.notebook.outputsHidden', {count: outputCount}) : '';
+    out.push('', `## ${index + 1}. ${type}${outputs}`, sourceText.trimEnd());
   });
-  if (cells.length > 80) out.push('', `... ${cells.length - 80} more cells truncated ...`);
-  return {label: 'Notebook preview', text: out.join('\n'), language: 'markdown', error: ''};
+  if (cells.length > 80) out.push('', t('preview.notebook.moreCells', {count: cells.length - 80}));
+  return {label: t('preview.notebook.title'), text: out.join('\n'), language: 'markdown', error: ''};
 }
 
 function structuredPreviewValue(path, text) {
   const ext = fileExtensionOf(path);
   const source = String(text ?? '');
-  if (ext === '.json') return jsonStructuredPreview('JSON preview', source, 'JSON parse error');
-  if (ext === '.geojson') return jsonStructuredPreview('GeoJSON preview', source, 'GeoJSON parse error');
-  if (ext === '.excalidraw') return jsonStructuredPreview('Excalidraw JSON preview', source, 'Excalidraw parse error');
+  if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
+  if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
+  if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
   if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
   if (ext === '.ipynb') return notebookStructuredPreview(source);
-  if (ext === '.toml') return {label: 'TOML preview', text: source, language: 'ini', error: ''};
-  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: ext === '.xml' ? 'XML preview' : 'Draw.io XML preview', text: source, language: 'xml', error: ''};
-  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: 'Config preview', text: source, language: 'ini', error: ''};
-  return {label: 'YAML preview', text: source, language: 'yaml', error: ''};
+  if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
+  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
+  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: t('preview.structured.title', {format: t('preview.format.config')}), text: source, language: 'ini', error: ''};
+  return {label: t('preview.structured.title', {format: 'YAML'}), text: source, language: 'yaml', error: ''};
 }
 
 function renderStructuredPreviewInto(container, path, text) {
@@ -751,7 +753,7 @@ function renderStructuredPreviewInto(container, path, text) {
   wrapper.className = 'file-editor-data-preview';
   const header = document.createElement('div');
   header.className = 'file-editor-data-preview-header';
-  header.textContent = `${value.label}${bounded.truncated ? ' · truncated' : ''}`;
+  header.textContent = bounded.truncated ? t('preview.truncated', {label: value.label}) : value.label;
   wrapper.appendChild(header);
   if (value.error) {
     const error = document.createElement('div');
@@ -814,7 +816,12 @@ function renderTablePreviewInto(container, path, text) {
   wrapper.className = 'file-editor-table-preview';
   const header = document.createElement('div');
   header.className = 'file-editor-data-preview-header';
-  header.textContent = `${delimiter === '\t' ? 'TSV' : 'CSV'} preview · ${Math.min(lines.length, maxRows)} of ${lines.length} rows${lines.length > maxRows || truncatedColumns ? ' · truncated' : ''}`;
+  header.textContent = t('preview.table.summary', {
+    format: delimiter === '\t' ? 'TSV' : 'CSV',
+    shown: Math.min(lines.length, maxRows),
+    total: lines.length,
+    truncated: lines.length > maxRows || truncatedColumns ? t('preview.table.truncatedSuffix') : '',
+  });
   wrapper.appendChild(header);
   const table = document.createElement('table');
   const body = document.createElement('tbody');
@@ -850,7 +857,7 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   img.loading = 'eager';
   img.decoding = 'async';
   img.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode('Image could not be loaded', `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+    container.replaceChildren(previewActionFallbackNode(t('preview.image.loadFailed'), `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
   }, {once: true});
   container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
     path,
@@ -862,23 +869,23 @@ function renderPdfPreviewInto(container, path) {
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-pdf-preview';
   frame.setAttribute('sandbox', '');
-  frame.setAttribute('title', `${basenameOf(path)} PDF preview`);
+  frame.setAttribute('title', t('preview.pdf.frameTitle', {name: basenameOf(path)}));
   frame.src = rawFileUrl(path);
   const fallback = document.createElement('div');
   fallback.className = 'file-editor-preview-fallback';
   const title = document.createElement('div');
   title.className = 'file-editor-empty-title';
-  title.textContent = 'PDF preview';
+  title.textContent = t('preview.pdf.title');
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
   const open = document.createElement('a');
   open.href = rawFileUrl(path);
   open.target = '_blank';
   open.rel = 'noopener noreferrer';
-  open.textContent = 'Open';
+  open.textContent = t('preview.action.open');
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
-  download.textContent = 'Download';
+  download.textContent = t('preview.action.download');
   detail.append(open, document.createTextNode(' · '), download);
   fallback.append(title, detail);
   container.replaceChildren(frame, fallback);
@@ -898,10 +905,10 @@ function previewActionFallbackNode(titleText, detailText, path) {
     open.href = rawFileUrl(path);
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
-    open.textContent = 'Open';
+    open.textContent = t('preview.action.open');
     const download = document.createElement('a');
     download.href = rawFileDownloadUrl(path);
-    download.textContent = 'Download';
+    download.textContent = t('preview.action.download');
     detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
   }
   fallback.append(title, detail);
@@ -915,15 +922,15 @@ function renderNativeMediaPreviewInto(container, path, state = null, kind = 'aud
   media.preload = 'metadata';
   media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
   media.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} could not be loaded`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+    container.replaceChildren(previewActionFallbackNode(t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
   }, {once: true});
-  container.replaceChildren(media, previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} preview`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
 }
 
 function renderUnsupportedPreviewInto(container, path, state = null) {
   const renderer = previewRendererForPath(path, state);
-  const title = renderer?.fallbackTitle || 'Preview is not available';
-  const label = state?.mime || previewMimeForPath(path) || state?.kind || 'unsupported file';
+  const title = renderer?.fallbackTitleKey ? t(renderer.fallbackTitleKey) : t('preview.unsupported.default');
+  const label = state?.mime || previewMimeForPath(path) || state?.kind || t('preview.unsupported.file');
   container.replaceChildren(previewActionFallbackNode(title, `${label}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
 }
 

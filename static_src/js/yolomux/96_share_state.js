@@ -183,7 +183,7 @@ function shareDefaultSchemeForForm(readOnly = shareDefaultReadOnly) {
 }
 
 function shareModeLabel(share) {
-  return share?.mode === 'rw' ? t('share.mode.write') : t('share.mode.readOnly');
+  return share?.mode === 'rw' ? t('share.mode.write') : t('common.readOnly');
 }
 
 function shareTotalViewers() {
@@ -295,12 +295,16 @@ function shareReplayShellEnabled() {
   return shareReplayViewerModeEnabled();
 }
 
+function shareReplayMirrorLabel() {
+  return t('share.replay.mirrorAria');
+}
+
 function shareReplayUserStatusText(status = '') {
   const cleanStatus = String(status || '').trim();
-  if (cleanStatus === 'mirrored') return 'mirrored';
-  if (cleanStatus === 'host-disconnected') return 'host disconnected';
-  if (cleanStatus === 'viewer-behind') return 'viewer behind';
-  return 'resyncing';
+  if (cleanStatus === 'mirrored') return t('share.mirror.synced');
+  if (cleanStatus === 'host-disconnected') return t('share.mirror.hostDisconnected');
+  if (cleanStatus === 'viewer-behind') return t('share.mirror.viewerBehind');
+  return t('share.mirror.checking');
 }
 
 function setShareReplayShellStatus(status = 'waiting', detail = {}) {
@@ -339,7 +343,7 @@ function prepareShareReplayMirrorRoot() {
   root.dataset.shareReplayInert = 'true';
   root.dataset.shareReplayStatus = 'waiting';
   root.setAttribute('role', 'presentation');
-  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('aria-label', shareReplayMirrorLabel());
   root.setAttribute('tabindex', '-1');
   return root;
 }

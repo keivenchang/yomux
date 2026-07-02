@@ -11,6 +11,8 @@ from yolomux_lib.common import SessionInfo
 from yolomux_lib.events import EventLog
 from yolomux_lib.events import RunHistoryStore
 from yolomux_lib.metadata import MetadataCache
+from yolomux_lib.transcripts import format_transcript_item
+from yolomux_lib.transcripts import transcript_items_from_raw_line
 
 
 def write_event_lines(path, events):
@@ -45,6 +47,100 @@ def test_event_log_search_filters_session_and_details(tmp_path):
     assert matches[0]["session"] == "s1"
     assert matches[0]["details"]["prompt"] == "run tests"
     assert log.search("deploy", session="s1") == []
+
+
+def test_event_log_persists_structured_message_with_raw_fallback(tmp_path):
+    log = EventLog(tmp_path / "events.jsonl")
+
+    event = log.append(
+        "s1",
+        "yolo_enabled",
+        "YOLO enabled",
+        {"persist": True},
+        message_key="events.message.yolo.enabled",
+        message_params={"unused": "safe"},
+    )
+
+    assert event["message"] == "YOLO enabled"
+    assert event["message_key"] == "events.message.yolo.enabled"
+    assert event["message_params"] == {"unused": "safe"}
+    assert log.tail(session="s1") == [event]
+
+
+def test_event_search_result_preserves_structured_title_and_snippet(tmp_path):
+    log = EventLog(tmp_path / "events.jsonl")
+    log.append(
+        "s1",
+        "yolo_enabled",
+        "YOLO enabled",
+        {"persist": True},
+        message_key="events.message.yolo.enabled",
+    )
+
+    result = log.search_results("enabled", session="s1")[0]
+
+    assert result["title"] == "YOLO enabled"
+    assert result["title_key"] == "events.message.yolo.enabled"
+    assert result["title_params"] == {}
+    assert result["snippet_key"] == "events.message.yolo.enabled"
+    assert result["snippet_params"] == {}
+
+
+def test_persisted_event_keeps_nested_chrome_descriptor_and_raw_diagnostic(tmp_path):
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    reason = {
+        "key": "yoagent.error.targetSessionMissing",
+        "params": {"session": "s9"},
+        "fallback": "target session s9 is missing",
+    }
+    log.append(
+        "s9",
+        "yoagent_job_failed",
+        "YO!agent job failed: target session s9 is missing",
+        {"diagnostic": "tmux target s9 disappeared"},
+        message_key="yoagent.job.notification.failed",
+        message_params={"id": "yj_9", "reason": reason},
+    )
+
+    persisted = EventLog(path).tail(session="s9")[0]
+    result = EventLog(path).search_results("disappeared", session="s9")[0]
+
+    assert persisted["details"]["diagnostic"] == "tmux target s9 disappeared"
+    assert persisted["message_params"]["reason"] == reason
+    assert result["title"] == "YO!agent job failed: target session s9 is missing"
+    assert result["title_key"] == "yoagent.job.notification.failed"
+    assert result["title_params"] == {"id": "yj_9", "reason": reason}
+
+
+def test_event_log_legacy_message_keeps_compatible_raw_payload(tmp_path):
+    log = EventLog(tmp_path / "events.jsonl")
+
+    event = log.append("s1", "legacy", "legacy raw message", {})
+
+    assert event["message"] == "legacy raw message"
+    assert event["message_key"] == ""
+    assert event["message_params"] == {}
+
+
+def test_auto_event_descriptor_is_promoted_out_of_diagnostic_details(tmp_path):
+    app = make_app(tmp_path)
+
+    app.log_auto_event(
+        "s1",
+        "approval_approved",
+        "approved bash: make test",
+        {
+            "message_key": "yolo.status.approvedBash",
+            "message_params": {"description": "make test"},
+            "prompt_type": "bash",
+        },
+    )
+
+    event = app.event_log.tail(session="s1")[0]
+    assert event["message_key"] == "yolo.status.approvedBash"
+    assert event["message_params"] == {"description": "make test"}
+    assert event["details"] == {"prompt_type": "bash"}
 
 
 def test_event_log_append_uses_process_lock(monkeypatch, tmp_path):
@@ -156,7 +252,26 @@ def test_search_payload_combines_events_and_current_summaries(tmp_path):
         "tab": "events",
     }
     assert summary_result["snippet"] == "s1 beta summary"
+    assert summary_result["title_key"] == "searchHistory.result.sessionSummary"
+    assert summary_result["title_params"] == {"session": "s1"}
     assert summary_result["target"]["tab"] == "summary"
+
+
+def test_transcript_items_keep_structured_role_timestamp_and_cwd():
+    raw = json.dumps({
+        "timestamp": "2026-07-02T01:02:03Z",
+        "cwd": "/repo/demo",
+        "message": {"role": "assistant", "content": "done"},
+    })
+
+    item = transcript_items_from_raw_line(raw)[0]
+
+    assert item["role"] == "assistant"
+    assert item["timestamp"] == "2026-07-02T01:02:03Z"
+    assert item["cwd"] == "/repo/demo"
+    assert item["text"] == "done"
+    assert "header" not in item
+    assert format_transcript_item(item) == "assistant (2026-07-02T01:02:03Z, /repo/demo)\ndone"
 
 
 def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, tmp_path):
@@ -206,7 +321,7 @@ def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, t
         error=None,
     )
     info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[agent])
-    monkeypatch.setattr("yolomux_lib.app.discover_sessions", lambda _sessions: ({"s1": info}, []))
+    monkeypatch.setattr("yolomux_lib.app.discover_sessions", lambda _sessions: ({"s1": info}, ["tmux discovery diagnostic"]))
     monkeypatch.setattr(
         "yolomux_lib.app.session_project_metadata",
         lambda _info, _cache, allow_network=False: {
@@ -253,6 +368,11 @@ def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, t
     assert row["latest_summary"] == "beta rollout finished"
     assert row["latest_summary_updated_ts"] == 1760000000
     assert row["recent_events"][0]["message"] == "ready"
+    assert payload["errors"] == [{
+        "message": "tmux discovery diagnostic",
+        "message_key": "searchHistory.error.discovery",
+        "message_params": {"error": "tmux discovery diagnostic"},
+    }]
     assert (tmp_path / "run-history.json").exists()
 
     app.sessions = []

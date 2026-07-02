@@ -5,23 +5,29 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+import ast
+from collections import Counter, defaultdict
 import json
 import re
 import sys
 import time
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.locales import FALLBACK_LOCALE
+from yolomux_lib.locales import PLURAL_CATEGORIES_BY_LOCALE
+from yolomux_lib.locales import PSEUDO_LOCALE
+from yolomux_lib.locales import SHIPPED_LOCALES
 
 # i18n: source catalogs live in static_src/locales/<locale>.json; en.json is the source of truth.
 # The build copies them to static/locales/ (all-static-fetch delivery), validates key parity, and
 # generates the en-XA pseudo-locale (accented + padded) to surface unextracted strings + overflow.
 LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
 LOCALES_OUT = REPO_ROOT / "static" / "locales"
-SOURCE_LOCALE = "en"
-PSEUDO_LOCALE = "en-XA"
+SOURCE_LOCALE = FALLBACK_LOCALE
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 RAW_TOKEN_LITERAL_IGNORED_VALUES = {"#ffffff"}
 RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {
@@ -67,36 +73,72 @@ RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {
 }
 I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT = 10
 I18N_ALLOWED_IDENTICAL_TERMS = {
-    "apache", "api", "ci", "claude", "cli", "codex", "css", "git", "github", "gitlab", "head", "html", "http",
-    "graph", "id", "ip", "javascript", "json", "linkedin", "markdown", "mit", "ok", "openai",
-    "polyform", "pr", "readme", "sse", "ssh", "tmux", "url", "websocket", "worktree", "yaml", "yo!agent",
+    "aa", "ai", "apache", "api", "ci", "claude", "cli", "codex", "cpu", "css", "csv", "geojson", "git", "github", "gitlab", "head", "html", "http",
+    "graph", "id", "ip", "javascript", "json", "jsonl", "linear", "linkedin", "markdown", "mermaid", "mit", "ndjson", "ok", "openai", "pdf",
+    "polyform", "pr", "readme", "rss", "sse", "ssh", "tmux", "toml", "tsv", "url", "websocket", "worktree", "xml", "yaml", "yo!agent",
     "yo!info", "yo!share", "yo!stats", "yolo", "yolomux",
 }
-I18N_IDENTICAL_KEY_PATTERNS = (
-    re.compile(r"^brand\."),
-    re.compile(r"^pref\.yoagent\.(?:claude|codex)_model\."),
-    re.compile(r"^state\.short\."),
-)
-I18N_UNTRANSLATED_BASELINE: dict[str, int] = {
-    "ar": 464,
-    "de": 412,
-    "es": 398,
-    "fr": 418,
-    "he": 464,
-    "hi": 532,
-    "it": 910,
-    "ja": 380,
-    "ko": 464,
-    "nl": 921,
-    "pl": 910,
-    "pt-BR": 479,
-    "ru": 464,
-    "th": 899,
-    "tr": 903,
-    "vi": 823,
-    "zh-Hans": 71,
-    "zh-Hant": 71,
+I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
+    "brand.marker",
+    "brand.tab.agent",
+    "brand.tab.info",
+    "brand.tab.summary",
+    "brand.wordmark.lo",
+    "brand.wordmark.yo",
+    "changes.title",
+    "changes.titleForSession",
+    "debug.graph.chart.cpu",
+    "debug.graph.meta.rss",
+    "debug.graph.series.defaultProcessCpu",
+    "debug.graph.series.processCpu",
+    "finder.label.finder",
+    "shortcuts.keys.pinTab",
+    "shortcuts.section.finderDiffer",
+    "tab.changes",
+})
+I18N_ALLOWED_IDENTICAL_LOCALE_KEYS: dict[str, frozenset[str]] = {
+    "de": frozenset({"transcript.role.system"}),
+    "fr": frozenset({"transcript.role.message"}),
+    "it": frozenset({"menu.file"}),
+    "pl": frozenset({"transcript.role.system"}),
 }
+I18N_PLACEHOLDER_PATTERN = r"\{[A-Za-z_][A-Za-z0-9_.-]*\}"
+I18N_FORMAT_TOKEN_PATTERN = r"\{[A-Za-z_][A-Za-z0-9_.-]*:[^{}\s]+\}"
+I18N_PLACEHOLDER_RE = re.compile(I18N_PLACEHOLDER_PATTERN)
+I18N_PROTECTED_TOKEN_RE = re.compile(
+    I18N_FORMAT_TOKEN_PATTERN
+    + r"|`[^`\n]+`"
+    r"|https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+"
+    r"|/(?:static|assets?)/[A-Za-z0-9._~@+%/-]+"
+    r"|</?[A-Za-z][^>]*>"
+    r"|~/(?:[A-Za-z0-9_.{}@+-]+/)*[A-Za-z0-9_.{}@+-]*"
+    r"|\b(?:Ctrl|Cmd)(?:[-+][A-Za-z0-9_.]+)+\b"
+)
+I18N_PSEUDO_TOKEN_RE = re.compile(f"({I18N_PLACEHOLDER_PATTERN}|{I18N_PROTECTED_TOKEN_RE.pattern})")
+I18N_TRANSLATABLE_CODE_KEYS = frozenset({"yoagent.prompt.format"})
+I18N_REQUIRED_YO_MARKERS = {"zh-Hans": "优", "zh-Hant": "優"}
+I18N_LITERAL_CALL_RE = re.compile(
+    r"\b(?P<function>t|localizedHtml|tPlural)\(\s*(?P<quote>['\"])(?P<key>[A-Za-z0-9_.-]+)(?P=quote)"
+)
+I18N_COMPLETE_LITERAL_KEY_RE = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
+I18N_VISIBLE_LITERAL_SINK_PATTERNS = (
+    re.compile(r"\.(?:textContent|innerText|title|placeholder)\s*=\s*(?P<quote>['\"])(?P<value>[^'\"\n]+)(?P=quote)"),
+    re.compile(r"\.setAttribute\(\s*['\"](?:aria-label|title|placeholder)['\"]\s*,\s*(?P<quote>['\"])(?P<value>[^'\"\n]+)(?P=quote)"),
+    re.compile(r"\b(?:statusErr|statusOk|showToast|confirm|prompt)\(\s*(?P<quote>['\"])(?P<value>[^'\"\n]+)(?P=quote)"),
+)
+I18N_VISIBLE_TEMPLATE_SINK_PATTERNS = (
+    re.compile(r"\.(?:textContent|innerText|title|placeholder)\s*=\s*`(?P<value>[^`\n]+)`"),
+    re.compile(r"\.setAttribute\(\s*['\"](?:aria-label|title|placeholder)['\"]\s*,\s*`(?P<value>[^`\n]+)`"),
+    re.compile(r"\b(?:statusErr|statusOk|showToast|confirm|prompt)\(\s*`(?P<value>[^`\n]+)`"),
+)
+I18N_VISIBLE_RAW_FIELD_RE = re.compile(r"\b(?P<value>(?:action\.label|checks?\.summary|payload\.error|data\.error))\b")
+I18N_VISIBLE_SINK_RE = re.compile(
+    r"\.(?:textContent|innerText|innerHTML|title|placeholder)\s*=|"
+    r"\.setAttribute\(\s*['\"](?:aria-label|title|placeholder)['\"]|"
+    r"\b(?:statusErr|statusOk|showToast|confirm|prompt)\("
+)
+I18N_CSS_CONTENT_RE = re.compile(r"\bcontent\s*:\s*(?P<quote>['\"])(?P<value>[^'\"\n]+)(?P=quote)")
+I18N_VISIBLE_LITERAL_UNITS = frozenset({"b", "gb", "kb", "mb", "ms", "px", "s"})
 _PSEUDO_ACCENTS = str.maketrans({
     "a": "á", "b": "ƀ", "c": "ç", "d": "đ", "e": "é", "f": "ƒ", "g": "ǧ", "h": "ĥ", "i": "í",
     "j": "ĵ", "k": "ķ", "l": "ł", "m": "ɱ", "n": "ñ", "o": "ó", "p": "ƥ", "q": "ɋ", "r": "ř",
@@ -438,16 +480,57 @@ def source_catalogs() -> dict[str, dict]:
     return catalogs
 
 
+def plural_family_bases(source: dict[str, object]) -> set[str]:
+    """Catalog bases whose source locale defines the required one/other fallback pair."""
+    return {
+        key[:-4]
+        for key in source
+        if key.endswith(".one") and f"{key[:-4]}.other" in source
+    }
+
+
+def locale_expected_keys(source: dict[str, object], locale: str) -> set[str]:
+    """Ordinary source keys plus exactly the CLDR forms required by one shipped locale."""
+    expected = set(source)
+    categories = PLURAL_CATEGORIES_BY_LOCALE.get(locale, PLURAL_CATEGORIES_BY_LOCALE[SOURCE_LOCALE])
+    for base in plural_family_bases(source):
+        expected.update(f"{base}.{category}" for category in categories)
+    return expected
+
+
+def locale_source_key(source: dict[str, object], key: str) -> str:
+    """Return the source-locale key whose token contract a locale-only plural form inherits."""
+    if key in source:
+        return key
+    base, _separator, _category = key.rpartition(".")
+    other = f"{base}.other"
+    return other if other in source else key
+
+
+def locale_registry_errors(catalogs: dict[str, dict]) -> list[str]:
+    """Source catalog stems must exactly match the canonical shipped-locale registry."""
+    errors: list[str] = []
+    registered = set(SHIPPED_LOCALES)
+    discovered = set(catalogs)
+    missing_catalogs = sorted(registered - discovered)
+    extra_catalogs = sorted(discovered - registered)
+    if missing_catalogs:
+        errors.append(f"missing registered locale catalogs: {', '.join(missing_catalogs)}")
+    if extra_catalogs:
+        errors.append(f"unregistered source locale catalogs: {', '.join(extra_catalogs)}")
+    return errors
+
+
 def locale_key_errors(catalogs: dict[str, dict]) -> list[str]:
-    """Every non-source catalog must have EXACTLY the en.json key set (no missing, no extra)."""
+    """Every catalog must have exactly its source keys plus locale-required plural forms."""
     errors: list[str] = []
     source = catalogs.get(SOURCE_LOCALE)
     if source is None:
         return errors
-    source_keys = set(source)
     for locale, catalog in catalogs.items():
         if locale == SOURCE_LOCALE:
             continue
+        source_keys = locale_expected_keys(source, locale)
         keys = set(catalog)
         missing = sorted(source_keys - keys)
         extra = sorted(keys - source_keys)
@@ -458,7 +541,150 @@ def locale_key_errors(catalogs: dict[str, dict]) -> list[str]:
     return errors
 
 
-def i18n_value_intentionally_identical(key: str, value: str) -> bool:
+PYTHON_I18N_KEY_ARGUMENTS = {
+    "RequestValidationError": 1,
+    "message_descriptor": 0,
+    "message_fields": 1,
+    "rule_name_fields": 1,
+    "server_string": 1,
+    "update_last_action": 0,
+    "user_message_payload": 0,
+    "yoagent_text": 1,
+}
+PYTHON_I18N_PLURAL_KEY_ARGUMENTS = {
+    "server_plural": 1,
+}
+
+
+def i18n_literal_key_errors(source: dict[str, object], paths: list[Path] | None = None) -> list[str]:
+    """Every complete literal runtime key must resolve in the English catalog."""
+    errors: list[str] = []
+    source_paths = paths if paths is not None else [
+        *(REPO_ROOT / path for path in ASSETS["yolomux.js"]),
+        *sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")),
+    ]
+    for path in source_paths:
+        text = read_text(path)
+        display_path = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path.name
+        if path.suffix == ".py":
+            calls: list[tuple[int, str, bool]] = []
+            tree = ast.parse(text, filename=str(path))
+            for node in ast.walk(tree):
+                target = node.target if isinstance(node, ast.AnnAssign) else node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
+                value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+                if isinstance(target, ast.Name) and target.id.endswith("_I18N_KEY_MAP") and isinstance(value, ast.Dict):
+                    calls.extend(
+                        (item.lineno, item.value, False)
+                        for item in value.values
+                        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                    )
+                if not isinstance(node, ast.Call):
+                    continue
+                function_name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                plural = function_name in PYTHON_I18N_PLURAL_KEY_ARGUMENTS
+                key_index = (
+                    PYTHON_I18N_PLURAL_KEY_ARGUMENTS.get(function_name)
+                    if plural
+                    else PYTHON_I18N_KEY_ARGUMENTS.get(function_name)
+                )
+                key_nodes = []
+                if key_index is not None and len(node.args) > key_index:
+                    key_nodes.append(node.args[key_index])
+                key_nodes.extend(keyword.value for keyword in node.keywords if keyword.arg == "message_key")
+                calls.extend(
+                    (node.lineno, key_node.value, plural)
+                    for key_node in key_nodes
+                    if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
+                )
+            for line, key, plural in sorted(calls):
+                if not I18N_COMPLETE_LITERAL_KEY_RE.fullmatch(key):
+                    continue
+                expected = [f"{key}.one", f"{key}.other"] if plural else [key]
+                missing = [candidate for candidate in expected if candidate not in source]
+                if missing:
+                    errors.append(f"{display_path}:{line} missing i18n key(s): {', '.join(missing)}")
+            continue
+        for match in I18N_LITERAL_CALL_RE.finditer(text):
+            key = match.group("key")
+            if not I18N_COMPLETE_LITERAL_KEY_RE.fullmatch(key):
+                continue
+            expected = [f"{key}.one", f"{key}.other"] if match.group("function") == "tPlural" else [key]
+            missing = [candidate for candidate in expected if candidate not in source]
+            if not missing:
+                continue
+            line = text.count("\n", 0, match.start()) + 1
+            errors.append(f"{display_path}:{line} missing i18n key(s): {', '.join(missing)}")
+    return errors
+
+
+def i18n_template_literal_text(value: str) -> str:
+    """Return only the user-visible literal chunks from a JavaScript template body."""
+    output: list[str] = []
+    index = 0
+    depth = 0
+    while index < len(value):
+        if depth == 0 and value.startswith("${", index):
+            depth = 1
+            index += 2
+            continue
+        char = value[index]
+        if depth:
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            index += 1
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def i18n_visible_literal_sink_errors(paths: list[Path] | None = None) -> list[str]:
+    """Reject direct English literals at common user-visible DOM/status sinks."""
+    errors: list[str] = []
+    source_paths = paths if paths is not None else [
+        *(REPO_ROOT / path for path in ASSETS["yolomux.js"]),
+        *(REPO_ROOT / path for path in ASSETS["yolomux.css"]),
+    ]
+    for path in source_paths:
+        text = read_text(path)
+        display_path = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path.name
+        patterns = I18N_VISIBLE_LITERAL_SINK_PATTERNS
+        if path.suffix == ".js":
+            patterns += I18N_VISIBLE_TEMPLATE_SINK_PATTERNS
+        elif path.suffix == ".css":
+            patterns = (I18N_CSS_CONTENT_RE,)
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                value = match.group("value").strip()
+                literal_value = i18n_template_literal_text(value) if pattern in I18N_VISIBLE_TEMPLATE_SINK_PATTERNS else value
+                literal_value = re.sub(r"\\[nrt]", "", literal_value)
+                words = [word.lower() for word in re.findall(r"[A-Za-z]+", literal_value)]
+                if not words or (len(words) == 1 and len(words[0]) == 1) or all(word in I18N_VISIBLE_LITERAL_UNITS for word in words):
+                    continue
+                if i18n_value_intentionally_identical("", literal_value):
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                errors.append(f"{display_path}:{line} visible literal bypasses i18n: {value!r}")
+        if path.suffix == ".js":
+            lines = text.splitlines()
+            for line_number, line_text in enumerate(lines, start=1):
+                if not I18N_VISIBLE_SINK_RE.search(line_text):
+                    continue
+                if any(parent in line_text for parent in ("dropActionDisplayLabel", "messageDescriptorText", "pullRequestCiStatusDisplay", "userMessageText")):
+                    continue
+                for match in I18N_VISIBLE_RAW_FIELD_RE.finditer(line_text):
+                    next_line = lines[line_number].lstrip() if line_number < len(lines) else ""
+                    if line_text.rstrip().endswith(match.group("value")) and next_line.startswith("?"):
+                        continue
+                    if "? t(" in line_text or "? localizedHtml(" in line_text:
+                        continue
+                    errors.append(f"{display_path}:{line_number} raw user-visible field bypasses i18n: {match.group('value')!r}")
+    return sorted(errors)
+
+
+def i18n_value_intentionally_identical(key: str, value: str, locale: str = "") -> bool:
     """Return true for strings that should stay identical across locales."""
     text = str(value or "").strip()
     if not text:
@@ -477,7 +703,9 @@ def i18n_value_intentionally_identical(key: str, value: str) -> bool:
         return True
     if normalized == "keiven chang":
         return True
-    if any(pattern.search(key) for pattern in I18N_IDENTICAL_KEY_PATTERNS):
+    if key in I18N_ALLOWED_IDENTICAL_KEYS:
+        return True
+    if key in I18N_ALLOWED_IDENTICAL_LOCALE_KEYS.get(locale, frozenset()):
         return True
     # Brand/legal strings are intentionally stable but may contain version numbers or spaces.
     if re.fullmatch(r"(?:polyform noncommercial license|apache license|mit license)(?: [0-9.]+)?", normalized):
@@ -495,11 +723,13 @@ def i18n_untranslated_entries(catalogs: dict[str, dict]) -> dict[str, list[str]]
         if locale == SOURCE_LOCALE:
             continue
         entries: list[str] = []
-        for key, english_value in sorted(source.items()):
+        for key in sorted(locale_expected_keys(source, locale)):
+            source_key = locale_source_key(source, key)
+            english_value = source.get(source_key)
             value = catalog.get(key)
             if value != english_value:
                 continue
-            if i18n_value_intentionally_identical(key, str(english_value)):
+            if i18n_value_intentionally_identical(key, str(english_value), locale):
                 continue
             entries.append(key)
         result[locale] = entries
@@ -507,27 +737,76 @@ def i18n_untranslated_entries(catalogs: dict[str, dict]) -> dict[str, list[str]]
 
 
 def i18n_untranslated_report(catalogs: dict[str, dict] | None = None, sample_limit: int | None = I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT) -> tuple[list[str], list[str]]:
-    """Return warning lines plus baseline-regression errors for untranslated values."""
+    """Return warning lines plus errors for every unintended source-equal value."""
     entries = i18n_untranslated_entries(catalogs or source_catalogs())
     warnings: list[str] = []
     errors: list[str] = []
     for locale, keys in entries.items():
         count = len(keys)
-        baseline = I18N_UNTRANSLATED_BASELINE.get(locale)
         if count:
             shown = keys if sample_limit is None else keys[:max(0, sample_limit)]
             suffix = "" if sample_limit is None or len(keys) <= sample_limit else f" (+{len(keys) - sample_limit} more)"
             warnings.append(f"WARNING: i18n untranslated values in {locale}.json: {count}; keys: {', '.join(shown)}{suffix}")
-        if baseline is not None and count > baseline:
-            errors.append(f"{locale}.json untranslated-value count regressed: {count} > baseline {baseline}")
+            errors.append(f"{locale}.json has {count} unintended English fallback value(s)")
     return warnings, errors
 
 
+def i18n_placeholder_tokens(value: object) -> Counter[str]:
+    """Interpolation placeholders are an exact multiset contract with the source locale."""
+    return Counter(I18N_PLACEHOLDER_RE.findall(str(value or "")))
+
+
+def i18n_protected_tokens(value: object, key: str = "") -> Counter[str]:
+    """Return URL, code, path, tag, and shortcut tokens that must stay byte-for-byte."""
+    tokens = []
+    for match in I18N_PROTECTED_TOKEN_RE.finditer(str(value or "")):
+        token = match.group(0).rstrip(".,;:")
+        if key in I18N_TRANSLATABLE_CODE_KEYS and token.startswith("`"):
+            continue
+        tokens.append(token)
+    return Counter(tokens)
+
+
+def locale_semantic_errors(catalogs: dict[str, dict]) -> list[str]:
+    """Validate one shared semantic contract for every translated catalog."""
+    errors = [*locale_registry_errors(catalogs), *locale_key_errors(catalogs)]
+    source = catalogs.get(SOURCE_LOCALE) or {}
+    for locale, catalog in sorted(catalogs.items()):
+        if locale == SOURCE_LOCALE:
+            continue
+        required_yo_marker = I18N_REQUIRED_YO_MARKERS.get(locale, "")
+        for key in sorted(locale_expected_keys(source, locale)):
+            if key not in catalog:
+                continue
+            source_key = locale_source_key(source, key)
+            english_value = source.get(source_key)
+            value = catalog[key]
+            if str(english_value or "").strip() and not str(value or "").strip():
+                errors.append(f"{locale}.json blank translation at {key}")
+            expected_placeholders = i18n_placeholder_tokens(english_value)
+            actual_placeholders = i18n_placeholder_tokens(value)
+            if actual_placeholders != expected_placeholders:
+                errors.append(
+                    f"{locale}.json placeholder drift at {key}: expected {dict(expected_placeholders)}, got {dict(actual_placeholders)}"
+                )
+            expected_protected = i18n_protected_tokens(english_value, key)
+            actual_protected = i18n_protected_tokens(value, key)
+            if actual_protected != expected_protected:
+                errors.append(
+                    f"{locale}.json protected-token drift at {key}: expected {dict(expected_protected)}, got {dict(actual_protected)}"
+                )
+            if required_yo_marker and "YO" in str(english_value) and ("YO" in str(value) or required_yo_marker not in str(value)):
+                errors.append(f"{locale}.json must localize YO as {required_yo_marker} at {key}")
+    _warnings, untranslated_errors = i18n_untranslated_report(catalogs, sample_limit=None)
+    errors.extend(untranslated_errors)
+    return errors
+
+
 def pseudo_value(value: str) -> str:
-    """Accent the letters (keep {tokens} intact) and pad ~40% to surface overflow / missed strings."""
-    segments = re.split(r"(\{\w+\})", str(value))
-    accented = "".join(seg if (seg.startswith("{") and seg.endswith("}")) else seg.translate(_PSEUDO_ACCENTS) for seg in segments)
-    visible = re.sub(r"\{\w+\}", "", str(value))
+    """Accent prose while keeping placeholders, code, URLs, paths, tags, and shortcuts byte-exact."""
+    segments = I18N_PSEUDO_TOKEN_RE.split(str(value))
+    accented = "".join(seg if I18N_PSEUDO_TOKEN_RE.fullmatch(seg) else seg.translate(_PSEUDO_ACCENTS) for seg in segments)
+    visible = I18N_PSEUDO_TOKEN_RE.sub("", str(value))
     pad = "·" * max(1, round(len(visible) * 0.4))
     return f"⟦{accented}{pad}⟧"
 
@@ -539,9 +818,11 @@ def build_pseudo_catalog(source: dict) -> dict:
 def expected_locale_outputs() -> dict[str, str]:
     """Map of static/locales/<locale>.json -> JSON text the build should produce."""
     catalogs = source_catalogs()
-    errors = locale_key_errors(catalogs)
+    errors = locale_semantic_errors(catalogs)
+    errors.extend(i18n_literal_key_errors(catalogs.get(SOURCE_LOCALE) or {}))
+    errors.extend(i18n_visible_literal_sink_errors())
     if errors:
-        raise BuildError("i18n key-parity check failed:\n  " + "\n  ".join(errors))
+        raise BuildError("i18n semantic check failed:\n  " + "\n  ".join(errors))
     outputs: dict[str, str] = {}
     for locale, catalog in catalogs.items():
         outputs[locale] = json.dumps(catalog, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

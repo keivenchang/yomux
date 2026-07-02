@@ -571,7 +571,7 @@ function defaultBranchHeadPullRequestForGit(info, git) {
     checks: existing.checks || {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
     // (it is in main's history) — so label it MERGED even though we only inferred it from the subject.
-    status_label: existing.status_label || 'merged',
+    status_label: existing.status_label || t('pr.status.merged'),
     source_only: true,
   };
 }
@@ -695,7 +695,7 @@ function projectDirName(session, info) {
   const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
   const repo = selectedSessionRepo(session, info);
   const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath;
-  return pathBasename(path) || 'no path';
+  return pathBasename(path) || t('info.missing.path');
 }
 
 function pathBasename(path) {
@@ -734,14 +734,15 @@ function filePopoverRows(path, state = {}) {
 function pathCopyButtonHtml(path, options = {}) {
   const className = ['path-copy-button', options.className || ''].filter(Boolean).join(' ');
   const dataAttr = options.dataAttr || 'data-copy-path';
-  const title = options.title || 'Copy path';
+  const title = options.title || t('contextmenu.copyPath');
   return `<button type="button" class="${esc(className)}" ${dataAttr}="${esc(path)}" title="${esc(title)}" aria-label="${esc(options.ariaLabel || title)}"></button>`;
 }
 
 function popoverCopyValueHtml(value, options = {}) {
   const text = String(value || '').trim();
   if (!text) return '';
-  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: options.title || 'Copy', ariaLabel: options.ariaLabel || options.title || 'Copy'})}`;
+  const copyLabel = options.title || t('debug.copy');
+  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: copyLabel, ariaLabel: options.ariaLabel || copyLabel})}`;
 }
 
 function filePopoverPathHtml(path) {
@@ -818,11 +819,13 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
   const state = String(agent?.state || STATE_KEY.idle);
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
-    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
+    return Number.isFinite(elapsed) && elapsed >= 0
+      ? t('state.workingFor', {duration: compactElapsedDurationText(elapsed)})
+      : stateDef(STATE_KEY.working).label;
   }
   if (agentWindowIsAttentionState(state)) return sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true});
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
-  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
+  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : stateDef(STATE_KEY.idle).label;
 }
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
@@ -834,7 +837,7 @@ function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, cl
 function tmuxSessionDescriptorLabel(label) {
   const text = String(label || '').trim();
   if (/^tmux\s+session\b/i.test(text)) return text;
-  return t('popover.tmuxSession', {label: text});
+  return t('common.tmuxSession', {label: text});
 }
 
 function tmuxWindowDescriptorLabel(label) {
@@ -932,7 +935,7 @@ function sessionPopoverWindowMetadataItems(session, info, agentRows) {
 function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null, metadataItems = null) {
   const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
   if (!agents.length) {
-    return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
+    return `<div class="session-agent-list empty"><div class="session-agent-empty">${esc(t('yoagent.emptyPerSession'))}</div></div>`;
   }
   const nowSeconds = Date.now() / 1000;
   const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(session, info, agents);
@@ -962,6 +965,13 @@ function windowMetadataBranchHtml(git) {
   return `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
 }
 
+function worktreePopoverValueHtml(worktree) {
+  return esc(t('popover.worktreeOf', {
+    name: worktree?.name || worktree?.path || '',
+    root: worktree?.parent_root || '',
+  }));
+}
+
 function windowMetadataRowsHtml(row) {
   if (!row) return '';
   const git = row.git || {};
@@ -971,7 +981,7 @@ function windowMetadataRowsHtml(row) {
   for (const path of displayPaths) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(path)));
   if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
   if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), git.root));
-  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return rows.join('');
@@ -990,8 +1000,8 @@ function agentTranscriptRowsHtml(agent) {
   if (!transcript) return '';
   const transcriptId = agentTranscriptId(agent);
   const rows = [];
-  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: 'Copy session ID'})));
-  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: 'Copy transcript path'})));
+  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: t('popover.copySessionId')})));
+  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: t('transcript.copyPath')})));
   return rows.join('');
 }
 
@@ -1010,7 +1020,9 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const autoPayload = autoApproveStates.get(session);
   const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
   const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
-  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
+  const agentValue = agentKind
+    ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}`
+    : (autoText || `<span data-locale-text-key="agent.notDetected">${esc(t('agent.notDetected'))}</span>`);
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
   const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
@@ -1028,17 +1040,17 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   if (linear.length) {
     linearValue = linearInlineHtml(linear);
     linearDesc = linearDescriptionsInlineHtml(linear);
-    if (linearValue) rows.push(popoverRow('Linear', linearValue));
+    if (linearValue) rows.push(popoverRow(t('info.field.linear'), linearValue));
     if (linearDesc) rows.push(popoverRow(t('popover.details'), linearDesc));
   }
   if (pr?.number) {
-    rows.push(popoverRow('PR', pullRequestPopoverRowHtml(session, pr)));
+    rows.push(popoverRow(t('searchHistory.pr'), pullRequestPopoverRowHtml(session, pr)));
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (!perWindowMetadata && gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
@@ -1305,7 +1317,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       showFileOpenError(path, error);
     }
   }
-  if (opened) statusOk(`opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}`);
+  if (opened) statusOk(esc(tPlural('status.openedFiles', opened, {name: basenameOf(paths[0])})));
 }
 
 function terminalCurrentPath(session) {
@@ -1425,7 +1437,7 @@ function paneDragPreviewHtml(slot) {
   return `
     <div class="pane-drag-image-frame">
       <div class="pane-drag-image-title">${esc(title)}</div>
-      <div class="pane-drag-image-meta">${esc(count === 1 ? '1 tab' : `${count} tabs`)}</div>
+      <div class="pane-drag-image-meta">${esc(tPlural('common.tabs', count))}</div>
       ${extra ? `<div class="pane-drag-image-tabs">${extra}</div>` : ''}
     </div>`;
 }
@@ -1461,11 +1473,11 @@ function startFileDragPreview(event, paths, entry) {
   const firstPath = normalizedPaths[0] || '';
   const preview = document.createElement('div');
   preview.className = 'file-drag-image drag-image';
-  const title = normalizedPaths.length === 1 ? basenameOf(firstPath) : `${normalizedPaths.length} items`;
+  const title = normalizedPaths.length === 1 ? basenameOf(firstPath) : t('common.items', {count: normalizedPaths.length});
   const pathRows = normalizedPaths.slice(0, 4)
     .map(path => `<div class="file-drag-path">${esc(path)}</div>`)
     .join('');
-  const more = normalizedPaths.length > 4 ? `<div class="file-drag-more">+ ${normalizedPaths.length - 4} more</div>` : '';
+  const more = normalizedPaths.length > 4 ? `<div class="file-drag-more">${esc(t('common.more', {count: normalizedPaths.length - 4}))}</div>` : '';
   preview.innerHTML = `
     <div class="file-drag-main">
       ${fileDragPreviewMedia(firstPath, entry)}
@@ -1539,7 +1551,7 @@ function showDragTimingOverlay(rows) {
     el = document.createElement('pre');
     el.id = 'drag-timing-overlay';
     el.className = 'drag-timing-overlay';
-    el.title = 'drag timing (flag: yolomux.debugDragTiming) — click to select, then copy';
+    el.title = t('debug.dragTimingTitle');
     el.addEventListener('click', () => {
       const range = document.createRange();
       range.selectNodeContents(el);

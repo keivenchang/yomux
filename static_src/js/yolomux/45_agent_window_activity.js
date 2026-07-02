@@ -786,6 +786,20 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
   return acknowledgeStoppedTransition();
 }
 
+function agentWindowActivityLabel(agentKey, state, acknowledged = false) {
+  const kind = agentWindowKind(agentKey);
+  const stateKey = agentWindowStateKey(state);
+  const status = stateKey === 'cooldown'
+    ? t('state.cooldown')
+    : stateKey === 'active'
+      ? t('state.active')
+      : stateDef(stateKey).label;
+  return t('state.agentStatus', {
+    agent: agentLabel(kind),
+    status: acknowledged ? t('state.statusAcknowledged', {status}) : status,
+  });
+}
+
 function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return null;
@@ -808,7 +822,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: acknowledgementVisualTone,
       icon: '●',
-      label: `${agentLabel(kind)} acknowledged`,
+      label: agentWindowActivityLabel(kind, acknowledgementVisualTone === 'attention' ? STATE_KEY.needsInput : 'cooldown', true),
       pulseActive: false,
       transitionPulseActive: false,
       acknowledged: false,
@@ -839,7 +853,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: 'attention',
       icon: '●',
-      label: `${agentLabel(kind)} ${acknowledged ? 'acknowledged' : t('state.needs-input')}`,
+      label: agentWindowActivityLabel(kind, STATE_KEY.needsInput, acknowledged),
       pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
@@ -858,7 +872,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: STATE_KEY.working,
       icon: '●',
-      label: `${agentLabel(kind)} ${t('state.working')}`,
+      label: agentWindowActivityLabel(kind, STATE_KEY.working),
       pulseActive: true,
       transitionPulseActive: true,
     };
@@ -883,7 +897,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: 'cooldown',
       icon: '●',
-      label: `${agentLabel(kind)} stopped${acknowledged ? ' acknowledged' : ''}`,
+      label: agentWindowActivityLabel(kind, 'cooldown', acknowledged),
       pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(cooldownTransitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(cooldownTransitionStartedAt, nowSeconds),
       acknowledged,
@@ -891,7 +905,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       ...(acknowledging ? acknowledgementTiming : {}),
     };
   }
-  if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
+  if (current) return {state: 'active', icon: '', label: agentWindowActivityLabel(kind, 'active')};
   return null;
 }
 

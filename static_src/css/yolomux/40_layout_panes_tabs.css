@@ -775,7 +775,7 @@ body.theme-light .drop-slot.drag-over {
     rgba(255, 255, 255, 0.012);
 }
 .panel.file-drag-over::before {
-  content: "Drop files to upload";
+  content: attr(data-file-drop-label);
   position: absolute;
   inset: 36px 10px 10px 10px;
   z-index: var(--z-pane-tab-strip);

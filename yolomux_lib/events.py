@@ -19,6 +19,8 @@ from .common import MAX_EVENT_TAIL_LINES
 from .common import RUN_HISTORY_PATH
 from .common import STATE_PATH
 from .common import truncate_text
+from .locales import message_descriptor
+from .locales import message_fields
 from .types import RunHistoryEntry
 from .types import SearchResult
 
@@ -103,13 +105,16 @@ def event_search_result(event: dict[str, Any], query: str) -> SearchResult:
     timestamp = str(event.get("time") or "")
     kind = str(event.get("type") or "event")
     message = str(event.get("message") or kind)
+    message_key = str(event.get("message_key") or "")
+    message_params = event.get("message_params") if isinstance(event.get("message_params"), dict) else {}
+    snippet = search_snippet(event_search_text(event), query)
     return {
         "session": session,
         "timestamp": timestamp,
         "kind": kind,
         "source": "event",
-        "title": message,
-        "snippet": search_snippet(event_search_text(event), query),
+        **message_fields("title", message_key, message, message_params),
+        **message_fields("snippet", message_key, snippet, message_params),
         "target": {
             "type": "events",
             "session": session,
@@ -141,19 +146,52 @@ def safe_event_details(details: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def safe_message_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Bound persisted interpolation data while retaining nested message descriptors."""
+    safe: dict[str, Any] = {}
+    for name, value in list(params.items())[:20]:
+        key = str(name)
+        if isinstance(value, str):
+            safe[key] = truncate_text(value, 1000)
+        elif isinstance(value, (int, float, bool)):
+            safe[key] = value
+        elif isinstance(value, dict) and ("key" in value or "fallback" in value):
+            nested_params = value.get("params") if isinstance(value.get("params"), dict) else {}
+            safe[key] = message_descriptor(
+                truncate_text(str(value.get("key") or ""), 200),
+                truncate_text(str(value.get("fallback") or ""), 1000),
+                safe_message_params(nested_params),
+            )
+    return safe
+
+
 class EventLog:
     def __init__(self, path: Path):
         self.path = path
         self.lock_path = path.with_name(f".{path.name}.lock")
         self.lock = threading.Lock()
 
-    def append(self, session: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    def append(
+        self,
+        session: str | None,
+        event_type: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+        *,
+        message_key: str = "",
+        message_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         event = {
             "time": utc_event_time(),
             "session": session or "",
             "type": event_type,
-            "message": truncate_text(message, 2000),
             "details": safe_event_details(details or {}),
+            **message_fields(
+                "message",
+                message_key,
+                truncate_text(message, 2000),
+                safe_message_params(message_params or {}),
+            ),
         }
         line = json.dumps(event, sort_keys=True, ensure_ascii=False)
         with self.lock:

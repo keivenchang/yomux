@@ -78,22 +78,22 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
     : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
   const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
     ? options.openInNewTabActions
-    : [{label: options.openInNewTabLabel || 'Open in new tab', action: openInNewTab}];
+    : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
   const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
   for (const action of openInNewTabActions) {
     const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
-    appendContextMenuButton(menu, label || 'Open in new tab', action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
   }
-  appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
-  appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
-  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyImage'), () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
+  appendContextMenuButton(menu, t('contextmenu.download'), () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   if (entry?.kind === 'dir') {
-    appendContextMenuButton(menu, 'Zip & download', () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
+    appendContextMenuButton(menu, t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
   }
-  appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
-  appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
-  appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
+  appendContextMenuButton(menu, t(fileExplorerDirectoryIsIndexed(fullPath) ? 'contextmenu.disallowIndex' : 'contextmenu.allowIndex'), () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
+  appendContextMenuButton(menu, t('contextmenu.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
   fileContextMenu.open(menu, x, y);
 }
 
@@ -122,7 +122,7 @@ async function copyFilePath(path, label) {
   const text = String(path || '');
   try {
     await copyTextToClipboard(text);
-    statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
+    statusEl.textContent = t(label === 'relative' ? 'status.copiedRelativePath' : 'status.copiedPath');
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
   }
@@ -131,17 +131,21 @@ async function copyFilePath(path, label) {
 async function copyImageFileToClipboard(path) {
   if (!globalThis.ClipboardItem || !navigator?.clipboard?.write) {
     await copyFilePath(path, 'path');
-    statusEl.textContent = 'image clipboard unavailable; copied path';
+    statusEl.textContent = t('status.imageClipboardUnavailable');
     return;
   }
   try {
     const response = await apiFetch(rawFileUrl(path), {cache: 'no-store'});
+    if (!response.ok) {
+      await showFileTransferResponseError(response, t('status.copyFailed', {error: t('common.requestFailed')}));
+      return;
+    }
     const blob = await response.blob();
     const type = blob.type || 'image/png';
     await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
-    statusEl.textContent = `copied image ${basenameOf(path)}`;
+    statusEl.textContent = t('status.copiedImage', {name: basenameOf(path)});
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    showFileTransferError(error, {fallback: t('status.copyFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -181,8 +185,9 @@ function fileTransferToastContainer(options = {}) {
   return displayToastContainer(options.session || options.item || focusedPanelItem || fileExplorerItemId);
 }
 
-function showFileTransferError(message, options = {}) {
-  const text = String(message || t('fileTransfer.failed')).trim();
+function showFileTransferError(error, options = {}) {
+  const primitiveFallback = typeof error === 'string' || typeof error === 'number' ? String(error) : '';
+  const text = userMessageText(error, primitiveFallback || options.fallback || t('fileTransfer.failed')).trim();
   statusErr(esc(text));
   showToast(t('fileTransfer.failedTitle'), [text], {
     container: fileTransferToastContainer(options),
@@ -190,52 +195,48 @@ function showFileTransferError(message, options = {}) {
   });
 }
 
-async function transferErrorMessageFromResponse(response, fallback = '') {
+async function showFileTransferResponseError(response, fallback = '', options = {}) {
   const payload = await response.json().catch(() => ({}));
-  return payload?.error || response.statusText || fallback || `HTTP ${response.status}`;
+  showFileTransferError(payload, {...options, fallback: fallback || response.statusText || `HTTP ${response.status}`});
 }
 
 async function triggerFileDownload(path) {
   if (!path) return;
   const label = basenameOf(path) || path;
-  statusEl.textContent = `downloading ${label}...`;
-  let response;
+  statusEl.textContent = t('fileTransfer.downloading', {name: label});
   try {
-    response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+    const response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+    if (!response.ok) {
+      await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
+      return;
+    }
+    const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
+    const blob = await response.blob();
+    saveBlobDownload(blob, filename);
+    statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
   } catch (error) {
-    showFileTransferError(error?.message || String(error));
-    return;
+    showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
   }
-  if (!response.ok) {
-    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
-    return;
-  }
-  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
-  const blob = await response.blob();
-  saveBlobDownload(blob, filename);
-  statusEl.textContent = `download started: ${filename}`;
 }
 
 async function triggerFolderZipDownload(path) {
   if (!path) return;
   const label = basenameOf(path) || path;
-  statusEl.textContent = `zipping ${label}...`;
-  let response;
+  statusEl.textContent = t('fileTransfer.zipping', {name: label});
   try {
-    response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+    const response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+    if (!response.ok) {
+      await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
+      return;
+    }
+    const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
+    const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
+    const blob = await response.blob();
+    saveBlobDownload(blob, filename);
+    statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
   } catch (error) {
-    showFileTransferError(error?.message || String(error));
-    return;
+    showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
   }
-  if (!response.ok) {
-    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
-    return;
-  }
-  const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
-  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
-  const blob = await response.blob();
-  saveBlobDownload(blob, filename);
-  statusEl.textContent = `download started: ${filename}`;
 }
 
 function copyCurrentFileExplorerPath() {
@@ -253,7 +254,7 @@ async function createFileExplorerFile() {
     statusErr(localizedHtml('status.readOnlyCreateFiles'));
     return;
   }
-  const name = window.prompt('New file name');
+  const name = window.prompt(t('dialog.newFileName'));
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
@@ -262,7 +263,7 @@ async function createFileExplorerFile() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path, content: ''}),
     });
-    statusEl.textContent = `created ${basenameOf(path)}`;
+    statusEl.textContent = t('status.created', {name: basenameOf(path)});
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
@@ -275,7 +276,7 @@ async function createFileExplorerFolder() {
     statusErr(localizedHtml('status.readOnlyCreateFolders'));
     return;
   }
-  const name = window.prompt('New folder name');
+  const name = window.prompt(t('dialog.newFolderName'));
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
@@ -284,7 +285,7 @@ async function createFileExplorerFolder() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path}),
     });
-    statusEl.textContent = `created ${basenameOf(path)}`;
+    statusEl.textContent = t('status.created', {name: basenameOf(path)});
     await refreshFileExplorerTrees();
   } catch (error) {
     statusErr(localizedHtml('status.newFolderFailed', {error}));
@@ -467,10 +468,12 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     return;
   }
   const deletePaths = compactNestedPaths(paths || fileTreeActionPaths(fullPath));
-  const kind = entry.kind === 'dir' ? 'directory and all contents' : 'file';
-  const confirmText = deletePaths.length === 1
-    ? `Delete ${kind}?\n${deletePaths[0]}`
-    : `Delete ${deletePaths.length} selected items?\n${deletePaths.join('\n')}`;
+  const kind = t(entry.kind === 'dir' ? 'dialog.delete.kindDirectory' : 'dialog.delete.kindFile');
+  const confirmText = tPlural('dialog.delete', deletePaths.length, {
+    kind,
+    path: deletePaths[0],
+    paths: deletePaths.join('\n'),
+  });
   if (!window.confirm(confirmText)) return;
   if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
   try {
@@ -488,7 +491,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     }
     for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
-    statusEl.textContent = deletePaths.length === 1 ? `deleted ${basenameOf(deletePaths[0])}` : `deleted ${deletePaths.length} items`;
+    statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
     await refreshFileExplorerTrees();
     if (typeof fetchSessionFiles === 'function') {
       await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -532,11 +535,11 @@ async function confirmLargeDirectoryDeletes(deletePaths, primaryPath, primaryEnt
       count = Number(payload?.files);
     } catch (error) {
       console.warn('directory delete count failed', path, error);
-      if (!window.confirm(`Could not count files in this directory, CONFIRM delete?\n${path}`)) return false;
+      if (!window.confirm(t('dialog.delete.countFailed', {path}))) return false;
       continue;
     }
     if (!Number.isFinite(count) || count <= 5) continue;
-    if (!window.confirm(`You have ${Math.round(count)} files in this directory, CONFIRM?\n${path}`)) return false;
+    if (!window.confirm(t('dialog.delete.largeDirectory', {count: Math.round(count), path}))) return false;
   }
   return true;
 }
@@ -774,7 +777,7 @@ function beginFileTreeRename(row, fullPath, entry) {
   const input = document.createElement('input');
   input.className = 'file-tree-rename-input';
   input.value = currentName;
-  input.setAttribute('aria-label', `Rename ${currentName}`);
+  input.setAttribute('aria-label', t('contextmenu.renameNamed', {name: currentName}));
   nameNode.replaceChildren(input);
   let finished = false;
   let commitInFlight = false;
@@ -844,7 +847,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       if (path === fullPath) renameOpenFilePath(path, newPath);
       else if (path.startsWith(`${fullPath}/`)) renameOpenFilePath(path, `${newPath}${path.slice(fullPath.length)}`);
     }
-    statusEl.textContent = `renamed ${currentName} to ${trimmed}`;
+    statusEl.textContent = t('status.renamed', {oldName: currentName, newName: trimmed});
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
@@ -1013,22 +1016,8 @@ function joinAndNormalize(base, rel) {
   return (isAbs ? '/' : '') + out.join('/');
 }
 
-function apiErrorMessage(error, fallback) {
-  const status = Number(error?.status || error?.payload?.status) || 0;
-  const message = String(
-    error?.payload?.error
-    || error?.error
-    || error?.message
-    || (typeof error === 'string' ? error : '')
-    || fallback
-    || 'request failed'
-  );
-  if (!status || /\bHTTP\b|\bstatus\b/i.test(message) || message.includes(String(status))) return message;
-  return `${message} (HTTP ${status})`;
-}
-
 function fileInspectionErrorMessage(error, path) {
-  return apiErrorMessage(error, `Cannot inspect ${path}`);
+  return userMessageText(error, t('preview.openFailed', {path}));
 }
 
 async function fetchFileEntry(path) {
@@ -1043,20 +1032,20 @@ async function fetchFileEntryStatus(path) {
     return {
       entry: null,
       missing: error?.status === 404,
-      error: fileInspectionErrorMessage(error, path),
+      error: fileErrorMessageSnapshot(error?.source || error, 'preview.openFailed', {path}),
       network: error?.network === true,
     };
   }
   const name = basenameOf(path);
   const entry = entries.find(entry => entry.name === name) || null;
-  return {entry, missing: !entry, error: entry ? '' : `path not found: ${path}`, network: false};
+  return {entry, missing: !entry, error: entry ? null : fileErrorMessageSnapshot(null, 'common.pathNotFound', {path}), network: false};
 }
 
 async function fetchFileInfoStatus(path) {
   try {
-    return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: ''};
+    return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: null};
   } catch (error) {
-    return {info: null, error: apiErrorMessage(error, 'failed to inspect file')};
+    return {info: null, error: fileErrorMessageSnapshot(error, 'editor.fileLoadFailed')};
   }
 }
 
@@ -1236,7 +1225,7 @@ function syncFileLayoutItems() {
 }
 
 function showFileOpenError(path, message) {
-  showToast('File open failed', `${path}\n${message}`, {
+  showToast(t('editor.fileOpenFailedTitle'), `${path}\n${message}`, {
     container: displayToastContainer(fileExplorerItemId),
     className: 'attention-alert toast',
   });
@@ -1256,7 +1245,18 @@ function formatFileSize(bytes) {
   return `${amount.toFixed(decimals)} ${units[index]}`;
 }
 
-function tooLargeFileState(size = null, message = '') {
+function fileErrorMessageSnapshot(message, fallbackKey, fallbackParams = {}) {
+  const source = message && typeof message === 'object' ? message : null;
+  const fallback = source ? '' : String(message || '');
+  return userMessageSnapshot(source, {key: fallbackKey, params: {...fallbackParams}, fallback});
+}
+
+function fileErrorText(error, fallbackKey, fallbackParams = {}) {
+  const fallback = t(fallbackKey, fallbackParams);
+  return error && typeof error === 'object' ? userMessageText(error, fallback) : String(error || fallback);
+}
+
+function tooLargeFileState(size = null, message = null) {
   return {
     mtime: 0,
     kind: 'too-large',
@@ -1265,7 +1265,7 @@ function tooLargeFileState(size = null, message = '') {
     dirty: false,
     size,
     maxBytes: MAX_FILE_PREVIEW_BYTES,
-    error: message,
+    error: message ? fileErrorMessageSnapshot(message, 'editor.fileTooLargeDetail') : null,
   };
 }
 
@@ -1303,19 +1303,19 @@ async function sniffedRawPreviewFileState(path, entry = null) {
   return state;
 }
 
-function fileErrorState(message) {
+function fileErrorState(message = null, fallbackKey = 'editor.fileLoadFailed', fallbackParams = {}) {
   return {
     mtime: 0,
     kind: 'error',
     original: '',
     content: '',
     dirty: false,
-    error: String(message || t('editor.fileLoadFailed')),
+    error: fileErrorMessageSnapshot(message, fallbackKey, fallbackParams),
   };
 }
 
-function missingFileState(message = 'file deleted or moved on disk') {
-  const state = fileErrorState(message);
+function missingFileState(message = null) {
+  const state = fileErrorState(message, 'dialog.missingOnDisk');
   state.externalMissing = true;
   return state;
 }
@@ -1336,11 +1336,14 @@ function clearOpenFileExternalState(state) {
 
 function openFileStatus(state) {
   if (!state) return {message: '', level: ''};
-  if (state.externalMissing) return {message: 'deleted on disk; unsaved edits kept', level: 'warn'};
-  if (state.externalError) return {message: `refresh failed; file state unknown: ${state.externalError}`, level: 'warn'};
-  if (state.externalChanged) return {message: state.dirty ? 'changed on disk; unsaved edits kept' : 'changed on disk; reload available', level: 'warn'};
+  if (state.externalMissing) return {message: state.dirty ? `${t('dialog.missingOnDisk')} · ${t('dialog.unsavedChanges')}` : t('dialog.missingOnDisk'), level: 'warn'};
+  if (state.externalError) return {message: `${t('dialog.unableLoadDisk')}: ${fileErrorText(state.externalError, 'editor.refreshFailed')}`, level: 'warn'};
+  if (state.externalChanged) return {message: state.dirty ? t('dialog.staleStatus') : t('dialog.externalTitle'), level: 'warn'};
   if (state.dirty) return {message: t('filetab.modified'), level: ''};
-  if (state.kind === 'text') return {message: `${String(state.original ?? '').length} chars`, level: ''};
+  if (state.kind === 'text') {
+    const count = String(state.original ?? '').length;
+    return {message: tPlural('editor.status.characters', count), level: ''};
+  }
   if (state.kind === 'image') return {message: state.size ? formatFileSize(state.size) : '', level: ''};
   if (state.kind === 'media') return {message: [state.mime || state.mediaKind, state.size ? formatFileSize(state.size) : ''].filter(Boolean).join(' · '), level: ''};
   return {message: '', level: ''};
@@ -1426,7 +1429,7 @@ async function autoSaveFileEditor(path) {
 function truncateDialogText(text, maxChars = 20000) {
   const value = String(text || '');
   if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n\n... truncated ${value.length - maxChars} chars ...`;
+  return `${value.slice(0, maxChars)}\n\n${t('fileCompare.truncated', {count: value.length - maxChars})}`;
 }
 
 function diffDialogLines(text) {
@@ -1565,7 +1568,7 @@ async function showFileConflictCompareDialog(path, panel = null) {
   const state = openFiles.get(path);
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
-  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? t('dialog.missingOnDisk') : String(diskState?.error || t('dialog.unableLoadDisk'));
+  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? t('dialog.missingOnDisk') : fileErrorText(diskState?.error, 'dialog.unableLoadDisk');
   const action = await showFileEditorDecisionDialog({
     title: t('dialog.compareTitle', {name: basenameOf(path)}),
     bodyHtml: fileConflictCompareHtml(state?.content || '', diskText),
@@ -1750,7 +1753,7 @@ async function focusExistingPhysicalFileEditor(requestedPath, existingPath, opti
   renderOpenFilePath(existingPath);
   const panel = panelNodes.get(item);
   if (panel && requestedPath !== existingPath) {
-    setFileEditorPanelStatus(panel, `already open as ${basenameOf(existingPath)}`, 'ok');
+    setFileEditorPanelStatus(panel, t('editor.alreadyOpenAs', {name: basenameOf(existingPath)}), 'ok');
   }
   return item;
 }
@@ -1792,7 +1795,7 @@ function markOpenFileDiffUnavailable(state, error) {
   state.diffWorking = '';
   state.diffLoaded = true;
   state.diffUnavailable = true;
-  state.diffError = String(error || 'diff unavailable');
+  state.diffError = String(error || t('common.notAvailable'));
 }
 
 async function refreshOpenFileDiff(path, options = {}) {
@@ -1946,14 +1949,13 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   } catch (err) {
     const status = Number(err?.status) || 0;
     if (status) {
-      const message = err?.payload?.error || status;
       let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;
       if (!state) {
         state = status === 413
-          ? tooLargeFileState(entry?.size ?? null, String(message))
+          ? tooLargeFileState(entry?.size ?? null, err)
           : status === 404
-            ? missingFileState(String(message))
-            : fileErrorState(message);
+            ? missingFileState(err)
+            : fileErrorState(err);
       }
       await openFilesSetAndShow(fullPath, state, openOptions);
       return item;
@@ -1975,7 +1977,7 @@ async function openFileStateFromDisk(path, entry = null) {
   const fileEntry = fetched.entry;
   if (!fileEntry) {
     if (fetched.missing) return {missing: true};
-    return {state: fileErrorState(fetched.error || 'failed to inspect file')};
+    return {state: fileErrorState(fetched.error)};
   }
   if (Number(fileEntry.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(fileEntry.size));
@@ -2009,14 +2011,13 @@ async function openFileStateFromDisk(path, entry = null) {
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status) {
-      const message = String(error?.payload?.error || status);
       let state = status === 415 ? await sniffedRawPreviewFileState(path, fileEntry) : null;
       if (!state) {
         state = status === 413
-          ? tooLargeFileState(fileEntry.size ?? null, message)
+          ? tooLargeFileState(fileEntry.size ?? null, error)
           : status === 404
-            ? missingFileState(message)
-            : fileErrorState(message);
+            ? missingFileState(error)
+            : fileErrorState(error);
       }
       state.mtime = fileEntryMtime(fileEntry);
       state.size = fileEntry.size ?? null;
@@ -2043,7 +2044,7 @@ function markOpenFileExternalError(path, error) {
   const state = openFiles.get(path);
   if (!state) return;
   clearFileAutosaveTimer(path);
-  state.externalError = String(error || 'refresh failed');
+  state.externalError = fileErrorMessageSnapshot(error, 'editor.refreshFailed');
   renderOpenFilePath(path);
 }
 
@@ -2111,7 +2112,7 @@ async function reloadOpenFileFromDisk(path, options = {}) {
   const state = openFiles.get(path);
   if (!state) return false;
   if (state.dirty && options.force !== true) {
-    const confirmed = window.confirm(`Reload ${basenameOf(path)} from disk and discard unsaved changes?`);
+    const confirmed = window.confirm(t('dialog.externalMessage', {name: basenameOf(path)}));
     if (!confirmed) return false;
   }
   return replaceOpenFileStateFromDisk(path);
@@ -2487,7 +2488,7 @@ function loadCodeMirrorBundleScript(options = {}) {
       script.src = options.force ? `${assetUrl}${separator}retry=${Date.now()}` : assetUrl;
       script.async = true;
       script.onload = () => resolve(window.YOLOmuxCodeMirror || null);
-      script.onerror = () => reject(new Error(`CodeMirror bundle failed to load: ${script.src}`));
+      script.onerror = () => reject(new Error(t('editor.codemirrorBundleLoadFailed', {url: script.src})));
       document.head.appendChild(script);
     });
   }
@@ -2504,12 +2505,12 @@ async function loadCodeMirrorApi() {
         if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
         bundledApi = await loadCodeMirrorBundleScript({force: true});
         if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
-        bundleError = new Error('CodeMirror bundle missing critical exports');
+        bundleError = new Error(t('editor.codemirrorBundleMissingExports'));
       } catch (err) {
         bundleError = err;
       }
-      const suffix = bundleError ? `: ${bundleError}` : '';
-      throw new Error(`CodeMirror local bundle is unavailable or incomplete${suffix}. Check /static/codemirror.js.`);
+      const detail = bundleError?.message || t('common.notAvailable');
+      throw new Error(t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'}));
     })();
   }
   try {
@@ -3110,6 +3111,30 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
 }
 
+function codeMirrorPhraseValues() {
+  return {
+    Find: t('editor.search.find'),
+    Replace: t('editor.search.replace'),
+    next: t('preview.find.next'),
+    previous: t('preview.find.previous'),
+    all: t('editor.search.all'),
+    'match case': t('editor.search.matchCase'),
+    regexp: t('editor.search.regexp'),
+    'by word': t('editor.search.wholeWord'),
+    'whole word short': t('editor.search.wholeWordShort'),
+    replace: t('editor.search.replace'),
+    'replace all': t('editor.search.replaceAll'),
+    close: t('preview.find.close'),
+  };
+}
+
+function codeMirrorLocaleExtensions(api, panel) {
+  const extension = safeCodeMirrorExtension('localized phrases', () => api.EditorState.phrases.of(codeMirrorPhraseValues()));
+  if (!panel || !api.Compartment) return extension;
+  panel._cmLocaleCompartment = panel._cmLocaleCompartment || new api.Compartment();
+  return panel._cmLocaleCompartment.of(extension);
+}
+
 // When you navigate search matches, CodeMirror's default scrollIntoView lands on a far-right horizontal
 // position if the document has any long line (e.g. a padded locale JSON, 276-char line): a match on a
 // SHORT line then sits off-screen left and the editor looks "scrolled all the way to the right" (blank).
@@ -3173,16 +3198,24 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       syncCodeMirrorFindButtonForView(this.view);
       refreshCodeMirrorFindOverview(this.view.dom?.closest?.('.file-editor-panel'));
       if (!panel) return;
+      const phrases = codeMirrorPhraseValues();
       const next = panel.querySelector?.('.cm-button[name="next"]');
       const previous = panel.querySelector?.('.cm-button[name="prev"]');
       if (next) {
-        next.title = 'Next match (Enter)';
-        next.setAttribute('aria-label', 'Next match (Enter)');
+        const title = `${phrases.next} (Enter)`;
+        next.title = title;
+        next.setAttribute('aria-label', title);
       }
       if (previous) {
-        previous.title = 'Previous match (Shift+Enter)';
-        previous.setAttribute('aria-label', 'Previous match (Shift+Enter)');
+        const title = `${phrases.previous} (Shift+Enter)`;
+        previous.title = title;
+        previous.setAttribute('aria-label', title);
       }
+      for (const button of panel.querySelectorAll?.('.cm-button[name="select"], .cm-button[name="replaceAll"]') || []) {
+        button.dataset.searchLabel = phrases.all;
+      }
+      const wordLabel = panel.querySelector?.('label:has(input[name="word"])');
+      if (wordLabel) wordLabel.dataset.searchLabel = phrases['whole word short'];
       let count = panel.querySelector?.('.cm-search-count');
       if (!count) {
         count = document.createElement('span');
@@ -3243,7 +3276,9 @@ function updateCodeMirrorCursorStatus(panel) {
   const column = main.head - line.from + 1;
   const selectedChars = view.state.selection.ranges.reduce((sum, range) => sum + Math.abs(range.to - range.from), 0);
   const selections = view.state.selection.ranges.length;
-  const selectionText = selectedChars ? ` · ${selections} sel · ${selectedChars} chars` : '';
+  const selectionText = selectedChars
+    ? ` · ${tPlural('editor.status.selections', selections)} · ${tPlural('editor.status.selectedChars', selectedChars)}`
+    : '';
   status.textContent = `${line.number}:${column}${selectionText}`;
 }
 
@@ -3326,6 +3361,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     } : null,
   ].filter(Boolean));
   return [
+    codeMirrorLocaleExtensions(api, panel),
     api.history(),
     api.drawSelection(),
     codeMirrorContextMenuSelectionExtension(api),

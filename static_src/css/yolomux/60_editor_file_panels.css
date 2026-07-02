@@ -2956,7 +2956,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror-panel .cm-search .cm-button[name="select"]::before,
 .file-editor-codemirror .cm-search .cm-button[name="replaceAll"]::before,
 .file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"]::before {
-  content: "All";
+  content: attr(data-search-label);
   font-size: var(--ui-font-size-2xs);
   font-family: var(--ui-font);
 }
@@ -3073,7 +3073,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .file-editor-codemirror .cm-search label:has(input[name="word"])::after,
 .file-editor-codemirror-panel .cm-search label:has(input[name="word"])::after {
-  content: "word";
+  content: attr(data-search-label);
   font-size: var(--ui-font-size-3xs);
 }
 .file-editor-codemirror .cm-search label:has(input:checked),

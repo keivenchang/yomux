@@ -28,7 +28,7 @@ function fileExplorerHiddenStatusMessage() {
 }
 
 function hiddenFromLayoutStatusMessage(item) {
-  return isFileExplorerItem(item) ? fileExplorerHiddenStatusMessage() : `${itemLabel(item)} hidden from layout`;
+  return isFileExplorerItem(item) ? fileExplorerHiddenStatusMessage() : t('layout.status.hidden', {items: itemLabel(item)});
 }
 
 function removeSessionFromLayout(item, options = {}) {
@@ -51,7 +51,7 @@ function removePaneFromLayout(item) {
   if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
   if (typeof closePopoutsForLayoutItem === 'function') moved.forEach(closePopoutsForLayoutItem);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
+    message: moved.length ? t('layout.status.hidden', {items: moved.map(itemLabel).join(', ')}) : '',
   });
 }
 
@@ -150,7 +150,7 @@ function minimizePaneFromLayout(item) {
   applyLayoutSlots(next, {
     focusSession: targetActive || targetTabs[0],
     prune: false,
-    message: `${minimizedTabs.map(itemLabel).join(', ')} minimized`,
+    message: t('layout.status.minimized', {items: minimizedTabs.map(itemLabel).join(', ')}),
   });
 }
 
@@ -190,7 +190,7 @@ function expandPaneFromLayout(item) {
   applyLayoutSlots(next, {
     focusSession: active,
     prune: false,
-    message: `${itemLabel(active)} expanded`,
+    message: t('layout.status.expanded', {item: itemLabel(active)}),
   });
 }
 
@@ -210,10 +210,7 @@ function preferredNonFinderLayoutSlots(finderSlot = null) {
 
 function layoutModeStatusMessage(mode) {
   const normalized = normalizeLayoutMode(mode);
-  if (normalized === 'single') return 'single pane layout';
-  if (normalized === 'split') return 'split layout';
-  if (normalized === 'grid') return 'grid layout';
-  return 'wall layout';
+  return t(`menu.view.layout.${normalized}`);
 }
 
 function applyNonFinderLayoutMode(mode) {
@@ -474,7 +471,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
-    message: evicted.length ? `${evicted.map(itemLabel).join(', ')} auto-closed (tab limit ${maxTabsPerPane()})` : '',
+    message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
   });
 }
 
@@ -921,25 +918,27 @@ function pullRequestStatusLabel(pr) {
 function pullRequestStatusDisplay(pr) {
   const status = pullRequestStatusLabel(pr);
   if (!status) return '';
+  if (pullRequestIsMerged(pr)) return t('pr.status.merged');
   const key = status.toLowerCase();
   if (key === 'unknown') return '';
-  if (key === 'merged') return t('pr.status.merged');
   if (key === 'draft') return t('pr.status.draft');
   if (key === 'closed') return t('pr.status.closed');
   if (key === 'open') return t('pr.status.open');
-  if (key.includes('failing')) return t('pr.status.failing');
-  if (key.includes('pending')) return t('pr.status.pending');
-  if (key.includes('passing')) return t('pr.status.passing');
+  const ci = pullRequestCiStatus(pr);
+  if (ci) return ci.text;
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
 }
 
 function pullRequestIsMerged(pr) {
-  return pullRequestStatusLabel(pr).toLowerCase() === 'merged';
+  if (!pr) return false;
+  if (pr.merged === true || pr.merged_at) return true;
+  return /\bmerged\b/.test(pullRequestStatusLabel(pr).toLowerCase());
 }
 
 function pullRequestInlineStatusDisplay(pr) {
+  if (pullRequestIsMerged(pr)) return '';
   const key = pullRequestStatusLabel(pr).toLowerCase();
-  if (key === 'merged' || key === 'open') return '';
+  if (key === 'open') return '';
   return pullRequestStatusDisplay(pr);
 }
 
@@ -948,23 +947,42 @@ function pullRequestLinkLabel(pr) {
   return `#${pr.number}${status ? ` ${status}` : ''}`;
 }
 
-function pullRequestStatusClass(pr) {
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (status.includes('failing')) return 'pr-status-failing';
-  if (status.includes('pending')) return 'pr-status-pending';
-  if (status.includes('passing')) return 'pr-status-passing';
-  if (status.includes('merged')) return 'pr-status-merged';
-  if (status.includes('draft')) return 'pr-status-draft';
-  if (status.includes('closed')) return 'pr-status-closed';
-  return 'pr-status-unknown';
+const PULL_REQUEST_CI_STATUS_SPECS = Object.freeze({
+  passing: Object.freeze({className: 'pr-status-passing', key: 'pr.ci.passing', fallback: 'CI passing'}),
+  failing: Object.freeze({className: 'pr-status-failing', key: 'pr.ci.failing', fallback: 'CI failing'}),
+  pending: Object.freeze({className: 'pr-status-pending', key: 'pr.ci.pending', fallback: 'CI pending'}),
+});
+
+function pullRequestCiState(pr) {
+  if (!pr || pullRequestIsMerged(pr)) return '';
+  const checks = pr.checks && typeof pr.checks === 'object' ? pr.checks : {};
+  const candidates = [checks.state, checks.status_label, checks.conclusion, pr.status_label];
+  for (const value of candidates) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw || raw === 'unknown' || raw === 'ci unknown') continue;
+    if (/\b(failure|failing|failed|red|error|cancelled|timed_out|action_required)\b/.test(raw)) return 'failing';
+    if (/\b(pending|queued|in_progress|running|waiting|requested)\b/.test(raw)) return 'pending';
+    if (/\b(success|passing|passed|green)\b/.test(raw)) return 'passing';
+  }
+  return '';
 }
 
-function pullRequestCiStatusClass(pr) {
-  const state = String(pr?.checks?.state || '').toLowerCase();
-  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
-  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
-  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
-  return pullRequestStatusClass(pr);
+function pullRequestCiStatus(pr) {
+  const state = pullRequestCiState(pr);
+  const spec = PULL_REQUEST_CI_STATUS_SPECS[state];
+  if (!spec) return null;
+  const descriptor = {key: spec.key, params: {}, fallback: spec.fallback};
+  return {state, className: spec.className, descriptor, text: messageDescriptorText(descriptor)};
+}
+
+function pullRequestStatusClass(pr) {
+  if (pullRequestIsMerged(pr)) return 'pr-status-merged';
+  const status = pullRequestStatusLabel(pr).toLowerCase();
+  if (status.includes('draft')) return 'pr-status-draft';
+  if (status.includes('closed')) return 'pr-status-closed';
+  const ci = pullRequestCiStatus(pr);
+  if (ci) return ci.className;
+  return 'pr-status-unknown';
 }
 
 function pullRequestStatusBadgeHtml(session, text, statusClass, options = {}) {
@@ -982,10 +1000,9 @@ function pullRequestStatusIndicatorHtml(session, pr) {
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
-  if (pullRequestIsMerged(pr)) return '';
-  const state = pr?.checks?.state;
-  if (!state || state === 'unknown') return '';
-  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
+  const ci = pullRequestCiStatus(pr);
+  if (!ci) return '';
+  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${ci.className}`)}">CI</span>`;
 }
 
 function pullRequestNumberIndicatorHtml(session, pr) {
@@ -1060,11 +1077,10 @@ function pullRequestColumnLinkHtml(pr) {
 }
 
 function pullRequestChecksHtml(pr) {
-  if (pullRequestIsMerged(pr)) return '';
-  const checks = pr?.checks;
-  if (!checks || !checks.state || checks.state === 'unknown') return '';
-  const cls = pullRequestCiStatusClass(pr);
-  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || t('pr.checks.state', {state: checks.state}))}</span>`];
+  const ci = pullRequestCiStatus(pr);
+  if (!ci) return '';
+  const checks = pr?.checks && typeof pr.checks === 'object' ? pr.checks : {};
+  const parts = [`<span class="meta-pr-status ${ci.className}">${esc(ci.text)}</span>`];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
   )).filter(Boolean).join(', ');
@@ -1220,9 +1236,8 @@ function projectMetaParts(session, info, options = {}) {
   if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (pr?.number) {
-    if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
-      metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
-    }
+    const ci = pullRequestCiStatus(pr);
+    if (ci) metadataParts.push(`<span class="meta-pr-status ${ci.className}">${esc(ci.text)}</span>`);
   }
   const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
   if (desc) {
@@ -1287,37 +1302,52 @@ function showRepoChipMenu(session, x, y) {
   repoChipContextMenu.open(menu, x, y);
 }
 
+function summaryAgentContextText(agent) {
+  const params = {
+    agent: agent?.kind || t('popover.agent'),
+    pid: agent?.pid || '',
+    status: agent?.status || '',
+  };
+  return t(agent?.status ? 'summary.agentDetailsWithStatus' : 'summary.agentDetails', params);
+}
+
 function summaryContextHtml(session, info, agent) {
   const lines = [];
   const pane = info?.selected_pane;
   if (agent) {
-    lines.push(summaryContextLine('agent', `${agent.kind || 'agent'} pid=${agent.pid || ''}${agent.status ? ` status=${agent.status}` : ''}`));
-    if (agent.transcript) lines.push(summaryContextLine('transcript', agent.transcript));
-    if (agent.error && !agent.transcript) lines.push(summaryContextLine('transcript', agent.error));
+    lines.push(summaryContextLine(t('popover.agent'), summaryAgentContextText(agent)));
+    if (agent.transcript) lines.push(summaryContextLine(t('tab.transcript'), agent.transcript));
+    if (agent.error && !agent.transcript) lines.push(summaryContextLine(t('tab.transcript'), agent.error));
   } else {
-    lines.push(summaryContextLine('agent', 'not detected'));
+    lines.push(summaryContextLine(t('popover.agent'), t('agent.notDetected')));
   }
-  if (pane) lines.push(summaryContextLine('pane', `${pane.command || 'tmux'} ${pane.target || session} in ${pane.current_path || ''}`));
+  if (pane) {
+    lines.push(summaryContextLine(t('yoagent.action.row.pane'), t('summary.paneLocation', {
+      command: pane.command || 'tmux',
+      target: pane.target || session,
+      path: pane.current_path || '',
+    })));
+  }
 
   const project = info?.project || {};
   const git = project.git;
   if (git) {
-    lines.push(summaryContextLine('branch', `${git.branch || 'unknown'}${git.upstream ? ` -> ${git.upstream}` : ''}`));
-    if (git.root) lines.push(summaryContextLine('repo', git.root));
+    lines.push(summaryContextLine(t('popover.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
+    if (git.root) lines.push(summaryContextLine(t('popover.repo'), git.root));
     // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-    if (git.worktree) lines.push(summaryContextLine('worktree', `${git.worktree.name || git.worktree.path} — worktree of ${git.worktree.parent_root}`));
-    if (git.head) lines.push(summaryContextLine('head', git.head));
+    if (git.worktree) lines.push(summaryContextLine(t('popover.worktree'), worktreeDisplayText(git.worktree)));
+    if (git.head) lines.push(summaryContextLine(t('info.meta.gitCommit'), git.head));
   } else {
-    lines.push(summaryContextLine('repo', 'no git checkout detected'));
+    lines.push(summaryContextLine(t('popover.repo'), t('git.noCheckout')));
   }
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const label = pullRequestLinkLabel(pr);
-    lines.push(summaryContextLine('github', `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
+    lines.push(summaryContextLine(t('pref.section.github'), `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
   }
   for (const issue of project.linear || []) {
     const label = `${issue.identifier}${issue.state ? ` ${issue.state}` : ''}`;
-    lines.push(summaryContextLine('linear', `${label} ${issue.title || ''}`, issue.url, issue.identifier));
+    lines.push(summaryContextLine(t('info.field.linear'), `${label} ${issue.title || ''}`, issue.url, issue.identifier));
   }
   return lines.join('');
 }
@@ -1338,12 +1368,12 @@ async function ensureSession(session) {
     try {
       const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
       statusEl.innerHTML = payload.created
-        ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
-        : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
+        ? `<span class="ok">${localizedHtml('status.sessionCreatedWithAgent', {session: sessionLabel(session), agent: 'Claude'})}</span>`
+        : `<span class="ok">${localizedHtml('status.sessionReady', {session: sessionLabel(session)})}</span>`;
       return true;
     } catch (error) {
       if (error?.status) {
-        statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+        statusErr(esc(userMessageText(error, t('status.sessionCreateFailedDefault'))));
         return false;
       }
       statusErr(localizedHtml('status.sessionCheckFailed', {error}));
@@ -1375,8 +1405,8 @@ async function createNextSession(agent) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
   }
-  const agentLabel = agentName(agent) || 'agent';
-  statusEl.textContent = `creating ${agentLabel} session...`;
+  const agentLabel = agentName(agent) || t('popover.agent');
+  statusEl.textContent = t('status.sessionCreating', {agent: agentLabel});
   try {
     const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     markPendingTmuxSession(payload.session);
@@ -1388,10 +1418,14 @@ async function createNextSession(agent) {
     await ensureTerminalRunning(payload.session);
     refreshTranscripts({force: true});
     renderAutoApproveButtons();
-    statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
+    statusOk(localizedHtml('status.sessionCreated', {
+      label: sessionLabel(payload.session),
+      session: payload.session,
+      agent: agentName(payload.agent) || agentLabel,
+    }));
   } catch (error) {
     if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+      statusErr(esc(userMessageText(error, t('status.sessionCreateFailedDefault'))));
       return;
     }
     statusErr(localizedHtml('status.sessionCreateFailed', {error}));
@@ -1568,7 +1602,7 @@ async function renameTmuxSession(session, proposedName) {
     closeSessionRenameDialog();
     return true;
   }
-  statusEl.textContent = `renaming ${sessionLabel(session)}...`;
+  statusEl.textContent = t('status.sessionRenaming', {session: sessionLabel(session)});
   try {
     const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
     const renamed = payload.new_session || newName;
@@ -1577,11 +1611,11 @@ async function renameTmuxSession(session, proposedName) {
     await ensureTerminalRunning(renamed);
     refreshTranscripts({force: true});
     renderAutoApproveButtons();
-    statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
+    statusOk(localizedHtml('status.sessionRenamed', {oldName: session, newName: renamed}));
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionRenameFailedDefault')));
+      statusErr(esc(userMessageText(error, t('status.sessionRenameFailedDefault'))));
       return false;
     }
     statusErr(localizedHtml('status.sessionRenameFailed', {error}));
@@ -1595,8 +1629,8 @@ async function killTmuxSession(session) {
     return false;
   }
   if (!isTmuxSession(session)) return false;
-  if (!window.confirm(`Kill tmux session ${sessionLabel(session)}?`)) return false;
-  statusEl.textContent = `killing ${sessionLabel(session)}...`;
+  if (!window.confirm(t('dialog.sessionKill', {session: sessionLabel(session)}))) return false;
+  statusEl.textContent = t('status.sessionKilling', {session: sessionLabel(session)});
   try {
     const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
@@ -1610,11 +1644,11 @@ async function killTmuxSession(session) {
     if (sessionsChanged) renderPaneTabStrips();
     refreshTranscripts({force: true});
     renderAutoApproveButtons();
-    statusOk(`killed ${esc(sessionLabel(session))}`);
+    statusOk(localizedHtml('status.sessionKilled', {session: sessionLabel(session)}));
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionKillFailedDefault')));
+      statusErr(esc(userMessageText(error, t('status.sessionKillFailedDefault'))));
       return false;
     }
     statusErr(localizedHtml('status.sessionKillFailed', {error}));
@@ -2538,7 +2572,7 @@ function dismissTerminalConnectionToasts(session) {
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
   const node = showToast(
-    compactNotificationTitle(sessionLabel(session), 'terminal', {inApp: true}),
+    compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true}),
     text,
     {
       container: displayToastContainer(session),
@@ -2590,7 +2624,7 @@ function pruneDeadSession(session) {
   renderPanels(previousActive);
   renderPaneTabStrips();
   renderAutoApproveButtons();
-  statusOk(`${esc(sessionLabel(session))} ended`);
+  statusOk(localizedHtml('status.sessionEnded', {session: sessionLabel(session)}));
 }
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
@@ -2876,7 +2910,7 @@ function swapPaneSlots(sourceSlot, targetSlot) {
     focusSession: activeItemForSide(targetSlot, next) || activeItemForSide(sourceSlot, next),
     prune: false,
     forceFull: dockviewLayoutActive(),
-    message: 'panes swapped',
+    message: t('layout.status.swapped'),
   });
   return true;
 }
@@ -3039,6 +3073,15 @@ function applyDockedFileExplorerBoundaryPreviewGeometry(node, intent) {
   node.style.setProperty('--drop-preview-width', `${Math.round(Math.max(0, contentRect.width - 12))}px`);
 }
 
+function dropPreviewLabel(intent = {}) {
+  const zone = intent.zone || 'middle';
+  if (intent.swap === true) return t('layout.drop.swap');
+  if (intent.boundary === 'root') return t('layout.drop.fullZone', {zone: t(`layout.zone.${zone}`)});
+  if (intent.boundary === 'gutter') return t('layout.drop.fullSpan');
+  if (zone === 'middle') return t('layout.drop.takeOver');
+  return t(`layout.zone.${zone}`);
+}
+
 function showDropPreview(intent) {
   clearDropPreview();
   const node = intent?.boundary ? grid : intent?.previewNode;
@@ -3046,15 +3089,7 @@ function showDropPreview(intent) {
   const zone = intent.zone || 'middle';
   node.classList.add(CLS.dragOver, CLS.dropPreview, `drop-preview-${zone}`);
   if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
-  node.dataset.dropLabel = intent.swap === true
-    ? 'swap'
-    : intent.boundary === 'root'
-    ? `full ${zone}`
-    : intent.boundary === 'gutter'
-      ? 'full span'
-      : zone === 'middle'
-        ? 'take over'
-        : zone;
+  node.dataset.dropLabel = dropPreviewLabel(intent);
   applyGutterDropPreviewGeometry(node, intent);
   applyDockedFileExplorerBoundaryPreviewGeometry(node, intent);
 }

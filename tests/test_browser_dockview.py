@@ -4132,7 +4132,7 @@ def test_dockview_root_left_drag_shows_full_span_preview_before_drop(browser, tm
         cdp_release(browser, end)
     assert preview["root"] is True
     assert preview["left"] is True
-    assert preview["label"] == "full left"
+    assert preview["label"] == "Full left"
     assert preview["borderColor"] == preview["separatorHover"]
 
 
@@ -4176,7 +4176,7 @@ def test_dockview_root_right_drag_shows_full_span_preview_before_drop(browser, t
         cdp_release(browser, end)
     assert preview["root"] is True
     assert preview["right"] is True
-    assert preview["label"] == "full right"
+    assert preview["label"] == "Full right"
     assert preview["borderColor"] == preview["separatorHover"]
 
 
@@ -4334,13 +4334,15 @@ def test_dockview_language_switch_remounts_finder_content(browser, tmp_path):
         grid_height=620,
     )
     wait_for_dockview(browser, min_tabs=2)
+    he_catalog = json.loads(Path("static/locales/he.json").read_text(encoding="utf-8"))
     result = browser.execute_async_script(
         """
+        const heCatalog = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
           const before = panelNodes.get(fileExplorerItemId);
-          i18nSetCatalogForTest('finder-test', {});
-          await applyLocale('finder-test');
+          i18nSetCatalogForTest('he', heCatalog);
+          await applyLocale('he');
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const after = panelNodes.get(fileExplorerItemId);
           const group = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview');
@@ -4352,9 +4354,12 @@ def test_dockview_language_switch_remounts_finder_content(browser, tmp_path):
             toolbar: Boolean(mounted?.querySelector('.file-explorer-toolbar')),
             tree: Boolean(mounted?.querySelector('.file-explorer-tree-panel')),
             childCount: mounted?.childElementCount || 0,
+            refreshTitle: mounted?.querySelector('[data-file-explorer-refresh]')?.title || '',
+            dir: document.documentElement.dir,
           });
         })().catch(error => done({error: String(error)}));
-        """
+        """,
+        he_catalog,
     )
     assert result == {
         "replaced": True,
@@ -4363,6 +4368,8 @@ def test_dockview_language_switch_remounts_finder_content(browser, tmp_path):
         "toolbar": True,
         "tree": True,
         "childCount": 2,
+        "refreshTitle": "רענן",
+        "dir": "rtl",
     }
 
 
@@ -4514,7 +4521,7 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
     assert metrics["finderIntent"] is None, metrics
     assert metrics["preview"]["root"] is True, metrics
     assert metrics["preview"]["bottom"] is True, metrics
-    assert metrics["preview"]["label"] == "full bottom", metrics
+    assert metrics["preview"]["label"] == "Full bottom", metrics
     assert metrics["preview"]["borderColor"] == metrics["preview"]["separatorHover"], metrics
     expected_left = metrics["contentRect"]["left"] - metrics["gridRect"]["left"] + 6
     expected_width = metrics["contentRect"]["width"] - 12
@@ -4617,7 +4624,7 @@ def test_dockview_root_top_drag_preview_preserves_docked_finder_column(browser, 
         cdp_release(browser, end)
     assert preview["root"] is True, preview
     assert preview["top"] is True, preview
-    assert preview["label"] == "full top", preview
+    assert preview["label"] == "Full top", preview
     assert preview["borderColor"] == preview["separatorHover"], preview
     expected_left = preview["contentRect"]["left"] - preview["gridRect"]["left"] + 6
     expected_width = preview["contentRect"]["width"] - 12
@@ -4702,7 +4709,7 @@ def test_dockview_root_top_bottom_preview_normalizes_right_finder_and_avoids_res
         assert item["finderIntent"] is None, metrics
         assert item["preview"]["root"] is True, metrics
         assert item["preview"]["zone"] is True, metrics
-        assert item["preview"]["label"] == f"full {zone}", metrics
+        assert item["preview"]["label"] == f"Full {zone}", metrics
         assert item["preview"]["borderColor"] == item["preview"]["separatorHover"], metrics
         expected_left = metrics["contentRect"]["left"] - metrics["gridRect"]["left"] + 6
         expected_width = metrics["contentRect"]["width"] - 12
@@ -4986,7 +4993,7 @@ def test_dockview_multi_file_drag_preserves_order_dedupes_and_uses_one_target(br
     assert result["over"]["dropEffect"] == "copy", result
     assert result["preview"]["previewCount"] == 1, result
     assert result["preview"]["groupPreview"] is True, result
-    assert result["preview"]["label"] == "take over", result
+    assert result["preview"]["label"] == "Take over", result
     assert result["drop"]["defaultPrevented"] is True, result
     assert [item["path"] for item in result["opened"]] == [
         "/home/test/yolomux.dev/a.md",

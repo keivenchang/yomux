@@ -119,7 +119,12 @@ def _git_blob_text(repo: Path, ref: str, rel_path: str, label: str) -> tuple[str
     if result.returncode != 0:
         return "", ""
     if len(result.stdout) > paths.MAX_READ_BYTES:
-        raise paths.FilesystemError(f"{label} too large (max {paths.MAX_READ_BYTES})", status=413)
+        raise paths.FilesystemError(
+            f"{label} too large (max {paths.MAX_READ_BYTES})",
+            status=413,
+            message_key="fs.error.gitBlobTooLarge",
+            message_params={"label": label, "max": paths.MAX_READ_BYTES},
+        )
     if paths._looks_binary(result.stdout):
         return "", f"{label} file appears to be binary"
     return result.stdout.decode("utf-8", errors="replace"), ""
@@ -139,12 +144,12 @@ def _refs_requested(from_ref: str | None, to_ref: str | None) -> bool:
 
 
 def _diff_ref_resolution_error(error: Exception) -> bool:
-    message = str(error)
-    return (
-        message.startswith("unknown FROM ref:")
-        or message.startswith("unknown TO ref:")
-        or message.startswith("FROM ref must be older than TO ref")
-    )
+    return isinstance(error, paths.FilesystemError) and error.message_key in {
+        "fs.error.unknownFromRef",
+        "fs.error.unknownToRef",
+        "fs.error.refOrderCurrent",
+        "fs.error.refOrder",
+    }
 
 
 def _ref_exists(repo: Path, ref: str) -> bool:
@@ -155,31 +160,57 @@ def _ref_exists(repo: Path, ref: str) -> bool:
 def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
     if to_ref == "current":
         if from_ref == "current":
-            raise paths.FilesystemError("FROM ref must be older than TO ref (current is the working tree)", status=400)
+            raise paths.FilesystemError(
+                "FROM ref must be older than TO ref (current is the working tree)",
+                message_key="fs.error.refOrderCurrent",
+            )
         if not _ref_exists(repo, from_ref):
-            raise paths.FilesystemError(f"unknown FROM ref: {from_ref}", status=400)
+            raise paths.FilesystemError(
+                f"unknown FROM ref: {from_ref}",
+                message_key="fs.error.unknownFromRef",
+                message_params={"ref": from_ref},
+            )
         return
     if from_ref == "current":
-        raise paths.FilesystemError("FROM ref must be older than TO ref (current is the working tree)", status=400)
+        raise paths.FilesystemError(
+            "FROM ref must be older than TO ref (current is the working tree)",
+            message_key="fs.error.refOrderCurrent",
+        )
     if not _ref_exists(repo, from_ref):
-        raise paths.FilesystemError(f"unknown FROM ref: {from_ref}", status=400)
+        raise paths.FilesystemError(
+            f"unknown FROM ref: {from_ref}",
+            message_key="fs.error.unknownFromRef",
+            message_params={"ref": from_ref},
+        )
     if not _ref_exists(repo, to_ref):
-        raise paths.FilesystemError(f"unknown TO ref: {to_ref}", status=400)
+        raise paths.FilesystemError(
+            f"unknown TO ref: {to_ref}",
+            message_key="fs.error.unknownToRef",
+            message_params={"ref": to_ref},
+        )
     order = git(["merge-base", "--is-ancestor", from_ref, to_ref], cwd=str(repo), timeout=5.0)
     if order.returncode != 0:
-        raise paths.FilesystemError(f"FROM ref must be older than TO ref ({from_ref} is not an ancestor of {to_ref})", status=400)
+        raise paths.FilesystemError(
+            f"FROM ref must be older than TO ref ({from_ref} is not an ancestor of {to_ref})",
+            message_key="fs.error.refOrder",
+            message_params={"fromRef": from_ref, "toRef": to_ref},
+        )
 
 
 def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
     repo_root = git_root_for_path(path)
     if not repo_root:
-        raise paths.FilesystemError(f"not in a git repo: {path}", status=400)
+        raise paths.FilesystemError(
+            f"not in a git repo: {path}",
+            message_key="fs.error.notGitRepo",
+            message_params={"path": str(path)},
+        )
     repo = Path(repo_root)
     try:
         rel_path = path.relative_to(repo).as_posix()
     except ValueError as exc:
-        raise paths.FilesystemError(f"path is outside repo: {path}", status=400) from exc
+        raise paths.FilesystemError.outside_repo(path) from exc
     tracked = git(["ls-files", "--error-unmatch", "--", rel_path], cwd=str(repo), timeout=3.0)
     diff_from, diff_to = _diff_refs(from_ref, to_ref)
     if not (diff_to == "current" and tracked.returncode != 0):
@@ -209,10 +240,20 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
         untracked = False
     if result.returncode not in {0, 1}:
         message = cmd_error(result, "git diff failed")
-        raise paths.FilesystemError(message, status=500)
+        raise paths.FilesystemError(
+            "git diff failed",
+            status=500,
+            message_key="fs.error.gitDiffFailed",
+            diagnostic=message,
+        )
     diff = result.stdout or ""
     if len(diff.encode("utf-8", errors="replace")) > paths.MAX_READ_BYTES:
-        raise paths.FilesystemError(f"diff too large (max {paths.MAX_READ_BYTES})", status=413)
+        raise paths.FilesystemError(
+            f"diff too large (max {paths.MAX_READ_BYTES})",
+            status=413,
+            message_key="fs.error.diffTooLarge",
+            message_params={"max": paths.MAX_READ_BYTES},
+        )
     return {
         "path": str(path),
         "repo": str(repo),
@@ -284,7 +325,7 @@ def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
     try:
         rel_path = path.relative_to(repo).as_posix()
     except ValueError as exc:
-        raise paths.FilesystemError(f"path is outside repo: {path}", status=400) from exc
+        raise paths.FilesystemError.outside_repo(path) from exc
     head = git(["rev-parse", "HEAD"], cwd=str(repo), timeout=1.0)
     head_sha = (head.stdout or "").strip() if head.returncode == 0 else ""
     try:

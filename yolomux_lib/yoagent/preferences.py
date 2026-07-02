@@ -15,11 +15,28 @@ from ..settings import SETTINGS_DISPLAY_PATH
 from ..settings import canonical_image_action_order_item
 from ..settings import default_settings
 from ..settings import settings_catalog
+from ..web import server_string
 from .transports import BACKEND_REASON_AVAILABLE
 from .transports import BACKEND_REASON_MODULE_MISSING
 from .transports import BACKEND_REASON_NO_CREDENTIALS
 from .transports import BACKEND_REASON_NO_PROVIDER
 from .transports import BackendAvailability
+
+
+# Every visible deterministic YO!agent sentence resolves through this one catalog-backed descriptor owner.
+
+
+def yoagent_text(locale: str, key: str, **params: Any) -> str:
+    replacements = {name: str(value) for name, value in params.items()}
+    return server_string(str(locale or "en"), key, **replacements)
+
+
+def yoagent_user_message_text(locale: str, payload: dict[str, Any], fallback_key: str) -> str:
+    descriptor = payload.get("user_message") if isinstance(payload.get("user_message"), dict) else {}
+    key = str(descriptor.get("key") or fallback_key).strip()
+    params = descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {}
+    return yoagent_text(locale, key, **params)
+
 
 
 SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
@@ -172,12 +189,12 @@ def direct_setting_path_for_question(question: str, catalog: dict[str, dict[str,
     return path if path in catalog else ""
 
 
-def hidden_setting_message(question: str) -> str:
+def hidden_setting_message(question: str, locale: str = "en") -> str:
     text = normalize_text(question)
     if "appearance.editor_color_scheme" in text or "editor color scheme" in text or "editor scheme" in text:
-        return "`appearance.editor_color_scheme` is a legacy compatibility value and is not a live Preference. Use `appearance.editor_dark_color_scheme` or `appearance.editor_light_color_scheme` instead."
+        return yoagent_text(locale, "yoagent.operator.hiddenEditorScheme")
     if "general.default_sessions" in text or "default sessions" in text:
-        return "`general.default_sessions` is legacy compatibility only. Running servers default to all discovered tmux sessions unless launched with `--sessions`."
+        return yoagent_text(locale, "yoagent.operator.hiddenDefaultSessions")
     return ""
 
 
@@ -202,23 +219,34 @@ def nested_setting(settings: dict[str, Any], path: str) -> Any:
     return values.get(key, defaults.get(section, {}).get(key)) if isinstance(values, dict) else defaults.get(section, {}).get(key)
 
 
-def format_setting_value(value: Any) -> str:
+def format_setting_value(value: Any, locale: str = "en") -> str:
     if isinstance(value, bool):
-        return "on" if value else "off"
+        return yoagent_text(locale, "notify.state.on" if value else "notify.state.off")
     if isinstance(value, list):
-        return ", ".join(f"`{item}`" for item in value) if value else "(empty)"
+        return ", ".join(f"`{item}`" for item in value) if value else yoagent_text(locale, "yoagent.prompt.none")
     return f"`{value}`"
 
 
-def setting_display_name(path: str, item: dict[str, Any] | None = None) -> str:
+def localized_setting_catalog_text(item: dict[str, Any], field: str, locale: str = "en") -> str:
+    locale_keys = item.get("locale_keys") if isinstance(item.get("locale_keys"), dict) else {}
+    key = str(locale_keys.get(field) or "").strip()
+    if not key:
+        return ""
+    value = yoagent_text(locale, key)
+    return "" if value == key else value
+
+
+def setting_display_name(path: str, item: dict[str, Any] | None = None, locale: str = "en") -> str:
+    localized = localized_setting_catalog_text(item or {}, "label", locale)
     label = str((item or {}).get("label") or "").strip()
-    return label or path.split(".", 1)[1].replace("_", " ")
+    return localized or label or path.split(".", 1)[1].replace("_", " ")
 
 
-def setting_location_text(item: dict[str, Any]) -> str:
+def setting_location_text(item: dict[str, Any], locale: str = "en") -> str:
     gui = item.get("gui") if isinstance(item.get("gui"), dict) else {}
-    section = str(gui.get("section") or "").strip()
-    return f"Preferences -> {section}" if section else "not shown in Preferences"
+    section_key = str(gui.get("section_locale_key") or "").strip()
+    section = yoagent_text(locale, section_key) if section_key else ""
+    return yoagent_text(locale, "yoagent.operator.preferencesLocation", section=section) if section else yoagent_text(locale, "yoagent.operator.notInPreferences")
 
 
 def setting_candidates(question: str, catalog: dict[str, dict[str, Any]]) -> list[tuple[int, str]]:
@@ -267,7 +295,7 @@ def settings_for_topic(question: str, catalog: dict[str, dict[str, Any]]) -> lis
     return []
 
 
-def changed_settings_lines(payload: dict[str, Any]) -> list[str]:
+def changed_settings_lines(payload: dict[str, Any], locale: str = "en") -> list[str]:
     settings = settings_from_payload(payload)
     defaults = payload.get("defaults") if isinstance(payload.get("defaults"), dict) else default_settings()
     catalog = catalog_from_payload(payload)
@@ -276,42 +304,49 @@ def changed_settings_lines(payload: dict[str, Any]) -> list[str]:
         current = nested_setting(settings, path)
         default = nested_setting(defaults, path)
         if current != default:
-            lines.append(f"- `{path}`: {format_setting_value(default)} -> {format_setting_value(current)}")
+            lines.append(f"- `{path}`: {format_setting_value(default, locale)} -> {format_setting_value(current, locale)}")
     return lines
 
 
-def setting_summary_line(path: str, item: dict[str, Any]) -> str:
+def setting_summary_line(path: str, item: dict[str, Any], locale: str = "en") -> str:
     parts = [
-        f"- `{path}` ({setting_location_text(item)}): current {format_setting_value(item.get('current'))}; default {format_setting_value(item.get('default'))}.",
+        yoagent_text(
+            locale,
+            "yoagent.operator.settingSummary",
+            path=path,
+            location=setting_location_text(item, locale),
+            current=format_setting_value(item.get("current"), locale),
+            default=format_setting_value(item.get("default"), locale),
+        ),
     ]
     choices = item.get("choices") if isinstance(item.get("choices"), list) else []
     limits = item.get("limits") if isinstance(item.get("limits"), dict) else None
     units = str(item.get("units") or "")
     if choices:
-        parts.append(f"Choices: {', '.join(f'`{choice}`' for choice in choices)}.")
+        parts.append(yoagent_text(locale, "yoagent.operator.choices", choices=", ".join(f"`{choice}`" for choice in choices)))
     elif limits:
         unit_text = f" {units}" if units else ""
-        parts.append(f"Range: `{limits.get('min')}` to `{limits.get('max')}`{unit_text}.")
-    description = str(item.get("description") or "").strip()
+        parts.append(yoagent_text(locale, "yoagent.operator.range", minimum=limits.get("min"), maximum=limits.get("max"), units=unit_text))
+    description = localized_setting_catalog_text(item, "description", locale)
     if description:
         parts.append(description)
     return " ".join(parts)
 
 
-def answer_settings_read(question: str, payload: dict[str, Any]) -> str:
+def answer_settings_read(question: str, payload: dict[str, Any], locale: str = "en") -> str:
     text = normalize_text(question)
     catalog = catalog_from_payload(payload)
     display_path = str(payload.get("display_path") or SETTINGS_DISPLAY_PATH)
-    hidden_message = hidden_setting_message(question)
+    hidden_message = hidden_setting_message(question, locale)
     if hidden_message:
         return hidden_message
     if "where" in text and any(term in text for term in ["settings", "preferences", "config", "yaml"]):
-        return f"YOLOmux Preferences are stored in `{display_path}`. The server exposes the current sanitized values through `GET /api/settings`."
+        return yoagent_text(locale, "yoagent.operator.settingsLocation", path=display_path)
     if "changed" in text and ("default" in text or "defaults" in text):
-        lines = changed_settings_lines(payload)
+        lines = changed_settings_lines(payload, locale)
         if not lines:
-            return f"No Preferences differ from the defaults in `{display_path}`."
-        return "\n".join([f"These Preferences differ from defaults in `{display_path}`:", *lines[:40]])
+            return yoagent_text(locale, "yoagent.operator.noChangedDefaults", path=display_path)
+        return "\n".join([yoagent_text(locale, "yoagent.operator.changedDefaults", path=display_path), *lines[:40]])
     topic_paths = settings_for_topic(question, catalog) if any(word in text for word in ["all", "affect", "settings", "preference", "preferences"]) else []
     candidates = setting_candidates(question, catalog)
     paths = topic_paths or [path for _score, path in candidates[:1]]
@@ -322,11 +357,11 @@ def answer_settings_read(question: str, payload: dict[str, Any]) -> str:
     if len(paths) == 1:
         path = paths[0]
         item = catalog[path]
-        return setting_summary_line(path, item)
-    lines = [setting_summary_line(path, catalog[path]) for path in paths[:12]]
+        return setting_summary_line(path, item, locale)
+    lines = [setting_summary_line(path, catalog[path], locale) for path in paths[:12]]
     extra = len(paths) - len(lines)
     if extra > 0:
-        lines.append(f"- +{extra} more matching settings.")
+        lines.append(yoagent_text(locale, "yoagent.operator.moreSettings", count=extra))
     return "\n".join(lines)
 
 
@@ -341,7 +376,7 @@ def coerce_bool_from_question(question: str, current: bool) -> bool | None:
     return None
 
 
-def numeric_value_from_question(question: str, item: dict[str, Any], current: Any) -> tuple[int | float | None, str]:
+def numeric_value_from_question(question: str, item: dict[str, Any], current: Any, locale: str = "en") -> tuple[int | float | None, str]:
     text = normalize_text(question)
     units = str(item.get("units") or "")
     limits = item.get("limits") if isinstance(item.get("limits"), dict) else {}
@@ -355,13 +390,13 @@ def numeric_value_from_question(question: str, item: dict[str, Any], current: An
             number = float(current) + step
         except (TypeError, ValueError):
             return None, ""
-        return clamp_numeric_setting_value(number, item)
+        return clamp_numeric_setting_value(number, item, locale)
     if any(word in text for word in ["smaller", "decrease", "narrower", "faster", "shorter", "less"]):
         try:
             number = float(current) - step
         except (TypeError, ValueError):
             return None, ""
-        return clamp_numeric_setting_value(number, item)
+        return clamp_numeric_setting_value(number, item, locale)
     match = re.search(r"(-?\d+(?:\.\d+)?)", question)
     if not match:
         return None, ""
@@ -373,10 +408,10 @@ def numeric_value_from_question(question: str, item: dict[str, Any], current: An
         number /= 1000
     if item.get("path") == "uploads.max_bytes" and re.search(r"\b(?:mb|mib|megabyte|megabytes)\b", lower_context):
         number *= 1024 * 1024
-    return clamp_numeric_setting_value(number, item)
+    return clamp_numeric_setting_value(number, item, locale)
 
 
-def clamp_numeric_setting_value(number: float, item: dict[str, Any]) -> tuple[int | float, str]:
+def clamp_numeric_setting_value(number: float, item: dict[str, Any], locale: str = "en") -> tuple[int | float, str]:
     limits = item.get("limits") if isinstance(item.get("limits"), dict) else {}
     units = str(item.get("units") or "")
     requested = float(number)
@@ -389,7 +424,7 @@ def clamp_numeric_setting_value(number: float, item: dict[str, Any]) -> tuple[in
         clamped = max(lower, min(upper, float(number)))
         if clamped != float(number):
             unit_text = f" {units}" if units else ""
-            note = f"I clamped it to the allowed range `{limits.get('min')}` to `{limits.get('max')}`{unit_text}."
+            note = yoagent_text(locale, "yoagent.operator.clamped", minimum=limits.get("min"), maximum=limits.get("max"), units=unit_text)
         number = clamped
     value = int(number) if item.get("type") == "integer" else round(float(number), 3)
     if note and value == requested:
@@ -482,7 +517,7 @@ def quoted_or_path_like_item(question: str) -> str:
     return path_match.group(0).strip() if path_match else ""
 
 
-def notification_transition_item(question: str) -> tuple[str, str]:
+def notification_transition_item(question: str, locale: str = "en") -> tuple[str, str]:
     text = normalize_text(question)
     aliases = {
         "needs input": "needs-input",
@@ -501,10 +536,10 @@ def notification_transition_item(question: str) -> tuple[str, str]:
     for item in sorted(NOTIFY_TRANSITION_KEYS, key=len, reverse=True):
         if normalize_text(item) in text:
             return item, ""
-    return "", f"I need one of the known notification transition keys, such as `needs-input`, `blocked`, `done`, `pr-merged`, `pr-ci-failing`, or `pr-review`."
+    return "", yoagent_text(locale, "yoagent.operator.notificationTransitionRequired")
 
 
-def image_action_order_item(question: str) -> tuple[str, str]:
+def image_action_order_item(question: str, locale: str = "en") -> tuple[str, str]:
     raw = quoted_or_path_like_item(question)
     text = normalize_text(question)
     if not raw:
@@ -518,44 +553,44 @@ def image_action_order_item(question: str) -> tuple[str, str]:
             raw = "info"
     canonical = canonical_image_action_order_item(raw)
     if not canonical:
-        return "", "I need an image action such as `img-ocr`, `img-error`, `img-describe`, `info`, or a custom `Label: ; prompt` row."
+        return "", yoagent_text(locale, "yoagent.operator.imageActionRequired")
     return canonical, ""
 
 
-def list_value_from_question(question: str, path: str, current: list[Any], operation: str) -> tuple[list[str] | None, str]:
+def list_value_from_question(question: str, path: str, current: list[Any], operation: str, locale: str = "en") -> tuple[list[str] | None, str]:
     values = [str(item) for item in current if str(item).strip()]
     if path == "github.watched_prs":
         match = PR_RE.search(question)
         if not match:
-            return None, "I need a pull request like `owner/repo#123` or a GitHub PR URL."
+            return None, yoagent_text(locale, "yoagent.operator.prRequired")
         parsed = parse_pull_request_ref(match.group(0))
         if not parsed:
-            return None, "That does not look like a valid GitHub pull request reference."
+            return None, yoagent_text(locale, "yoagent.operator.prInvalid")
         item = str(parsed["ref"])
     elif path == "notifications.notify_transitions":
-        item, error = notification_transition_item(question)
+        item, error = notification_transition_item(question, locale)
         if error:
             return None, error
     elif path == "uploads.image_action_order":
-        item, error = image_action_order_item(question)
+        item, error = image_action_order_item(question, locale)
         if error:
             return None, error
     else:
         item = quoted_or_path_like_item(question)
     if not item:
-        return None, "I need the exact list item to add or remove."
+        return None, yoagent_text(locale, "yoagent.operator.exactListItem")
     if BLOCKED_PATH_RE.search(item):
-        return None, "That path or value looks credential-sensitive, so I will not store it in Preferences."
+        return None, yoagent_text(locale, "yoagent.operator.credentialSensitive")
     if operation == "remove":
         next_values = [value for value in values if value != item]
-        return next_values, "" if len(next_values) != len(values) else f"`{item}` was not in `{path}`."
+        return next_values, "" if len(next_values) != len(values) else yoagent_text(locale, "yoagent.operator.itemNotPresent", item=item, path=path)
     if item in values:
-        return values, f"`{item}` is already in `{path}`."
+        return values, yoagent_text(locale, "yoagent.operator.itemAlreadyPresent", item=item, path=path)
     values.append(item)
     return values, ""
 
 
-def setting_value_from_question(question: str, item: dict[str, Any], operation: str) -> tuple[Any, str]:
+def setting_value_from_question(question: str, item: dict[str, Any], operation: str, locale: str = "en") -> tuple[Any, str]:
     path = str(item.get("path") or "")
     current = item.get("current")
     setting_type = str(item.get("type") or "")
@@ -563,30 +598,31 @@ def setting_value_from_question(question: str, item: dict[str, Any], operation: 
         return item.get("default"), ""
     if setting_type == "boolean":
         value = coerce_bool_from_question(question, bool(current))
-        return (value, "") if value is not None else (None, f"I need `on` or `off` for `{path}`.")
+        return (value, "") if value is not None else (None, yoagent_text(locale, "yoagent.operator.onOffRequired", path=path))
     if setting_type in {"integer", "number"}:
-        value, note = numeric_value_from_question(question, item, current)
-        return (value, note) if value is not None else (None, f"I need a number for `{path}`.")
+        value, note = numeric_value_from_question(question, item, current, locale)
+        return (value, note) if value is not None else (None, yoagent_text(locale, "yoagent.operator.numberRequired", path=path))
     if item.get("choices"):
         value = choice_value_from_question(question, item)
-        return (value, "") if value else (None, f"I need one of: {', '.join(f'`{choice}`' for choice in item.get('choices') or [])}.")
+        choices = ", ".join(f"`{choice}`" for choice in item.get("choices") or [])
+        return (value, "") if value else (None, yoagent_text(locale, "yoagent.operator.choiceRequired", choices=choices))
     if setting_type == "list":
         if path == "notifications.notify_transitions" and operation == "set":
             text = normalize_text(question)
             if re.search(r"\b(?:no|quiet|silent|silence|disable|off)\b", text) and re.search(r"\b(?:notify|notification|notifications|alerts)\b", text):
                 return [], ""
         if operation not in {"add", "remove"}:
-            return None, f"Tell me whether to add or remove an item from `{path}`."
-        return list_value_from_question(question, path, current if isinstance(current, list) else [], operation)
+            return None, yoagent_text(locale, "yoagent.operator.listOperationRequired", path=path)
+        return list_value_from_question(question, path, current if isinstance(current, list) else [], operation, locale)
     value = string_value_from_question(question, path)
     if value == "" and item.get("empty_allowed"):
         return "", ""
     if not value:
-        return None, f"I need the new text value for `{path}`."
+        return None, yoagent_text(locale, "yoagent.operator.newTextRequired", path=path)
     if item.get("sensitivity") in {"path", "path-list"} and BLOCKED_PATH_RE.search(value):
-        return None, "That value looks credential-sensitive, so I will not store it in Preferences."
+            return None, yoagent_text(locale, "yoagent.operator.credentialSensitive")
     if unsafe_config_path_value(path, value):
-        return None, f"`{path}` is a config-like setting. Use a path under `~/.config/yolomux/` or a relative path, then confirm the change."
+        return None, yoagent_text(locale, "yoagent.operator.unsafeConfigPath", path=path)
     return value, ""
 
 
@@ -595,33 +631,37 @@ def patch_for_setting(path: str, value: Any) -> dict[str, dict[str, Any]]:
     return {section: {key: value}}
 
 
-def changed_setting_answer(path: str, item: dict[str, Any], before: Any, after: Any, note: str = "", coerced: list[str] | None = None) -> str:
+def changed_setting_answer(path: str, item: dict[str, Any], before: Any, after: Any, note: str = "", coerced: list[str] | None = None, locale: str = "en") -> str:
     live_apply = str(item.get("live_apply") or "live")
     lines = [
-        "Updated this Preference:",
-        "",
-        "| setting | before | after | where | live apply |",
-        "| --- | --- | --- | --- | --- |",
-        f"| `{path}` | {format_setting_value(before)} | {format_setting_value(after)} | {setting_location_text(item)} | `{live_apply}` |",
+        yoagent_text(
+            locale,
+            "yoagent.operator.updatedPreference",
+            path=path,
+            before=format_setting_value(before, locale),
+            after=format_setting_value(after, locale),
+            location=setting_location_text(item, locale),
+            live_apply=live_apply,
+        ),
     ]
     if note:
         lines.extend(["", note.strip()])
     if coerced:
-        lines.extend(["", f"Coerced/clamped by settings validation: {', '.join(f'`{key}`' for key in coerced)}."])
+        lines.extend(["", yoagent_text(locale, "yoagent.operator.coerced", keys=", ".join(f"`{key}`" for key in coerced))])
     return "\n".join(lines)
 
 
-def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def parse_settings_write(question: str, payload: dict[str, Any], locale: str = "en") -> dict[str, Any] | None:
     if READ_RE.search(question) and not WRITE_RE.search(question):
         return None
     if not WRITE_RE.search(question) and not implicit_settings_write_question(question):
         return None
     text = normalize_text(question)
-    hidden_message = hidden_setting_message(question)
+    hidden_message = hidden_setting_message(question, locale)
     if hidden_message:
         return {"type": "settings_clarify", "answer": hidden_message}
     if "reset" in text and any(term in text for term in ["all", "everything", "preferences", "settings"]):
-        return {"type": "settings_clarify", "answer": "Resetting all Preferences is broad and can disrupt the running UI. Tell me the specific setting to reset, or use Preferences -> Reset all defaults."}
+        return {"type": "settings_clarify", "answer": yoagent_text(locale, "yoagent.operator.resetBroad")}
     catalog = catalog_from_payload(payload)
     direct_path = direct_setting_path_for_question(question, catalog)
     candidates = [(1000, direct_path)] if direct_path else setting_candidates(question, catalog)
@@ -631,7 +671,7 @@ def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, An
     top_paths = [path for score, path in candidates if score == top_score][:4]
     if len(top_paths) > 1 and not any(path in normalize_text(question) for path in top_paths):
         labels = ", ".join(f"`{path}`" for path in top_paths)
-        return {"type": "settings_clarify", "answer": f"Which setting do you mean: {labels}?"}
+        return {"type": "settings_clarify", "answer": yoagent_text(locale, "yoagent.operator.whichSetting", settings=labels)}
     path = top_paths[0]
     item = catalog[path]
     if "reset" in text:
@@ -642,7 +682,7 @@ def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, An
         operation = "add"
     else:
         operation = "set"
-    value, error = setting_value_from_question(question, item, operation)
+    value, error = setting_value_from_question(question, item, operation, locale)
     if error and value is None:
         return {"type": "settings_clarify", "answer": error}
     requires_confirmation = bool(item.get("requires_confirmation")) and not CONFIRM_RE.search(question)
@@ -658,7 +698,7 @@ def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, An
     }
 
 
-def parse_settings_read(question: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def parse_settings_read(question: str, payload: dict[str, Any], locale: str = "en") -> dict[str, Any] | None:
     text = normalize_text(question)
     if not READ_RE.search(question):
         return None
@@ -668,7 +708,7 @@ def parse_settings_read(question: str, payload: dict[str, Any]) -> dict[str, Any
         "config", "default",
     ]):
         return None
-    answer = answer_settings_read(question, payload)
+    answer = answer_settings_read(question, payload, locale)
     return {"type": "settings_read", "answer": answer} if answer else None
 
 
@@ -715,39 +755,46 @@ def backend_no_backend_notice(availability: BackendAvailability) -> dict[str, An
 def product_capability_registry() -> list[dict[str, Any]]:
     return [
         {
+            "key": "preferences",
             "name": "Preferences",
             "read": True,
             "write": True,
             "read_action": "explain current/default/choices/ranges",
             "write_action": "save validated settings patch",
             "auth": "readonly for reads, admin for writes",
+            "locale_keys": {"name": "menu.file.preferences"},
             "backing": "settings_catalog + TmuxWebtermApp.save_settings",
             "setting_keys": ["appearance.theme", "appearance.tab_width", "updates.notify_level", "uploads.subdir"],
             "examples": ["what is my tab width?", "set theme to light", "change update notify level to patch"],
         },
         {
+            "key": "panesTabs",
             "name": "Panes and tabs",
             "read": True,
             "write": True,
             "read_action": "summarize layout/tabs",
             "write_action": "route normal GUI tab actions",
             "auth": "admin for writes",
+            "locale_keys": {"auth": "yoagent.capability.auth.adminForWrites"},
             "backing": "layout state helpers and tab action handlers",
             "setting_keys": ["appearance.tab_width", "appearance.max_tabs_per_pane"],
             "examples": ["what tabs are open?", "open YO!agent on the right pane"],
         },
         {
+            "key": "finderDifferTabber",
             "name": "Finder, Differ, and Tabber",
             "read": True,
             "write": True,
             "read_action": "use cached session files/activity",
             "write_action": "use Finder/Differ open/search APIs",
             "auth": "admin for writes",
+            "locale_keys": {"auth": "yoagent.capability.auth.adminForWrites"},
             "backing": "/api/session-files, /api/activity-summary, filesystem helpers",
             "setting_keys": ["file_explorer.root_mode", "file_explorer.indexed_dirs", "file_explorer.quick_access_paths"],
             "examples": ["where is README.md?", "show recent agents", "open changed files"],
         },
         {
+            "key": "orchestration",
             "name": "Agent orchestration",
             "read": True,
             "write": True,
@@ -759,6 +806,7 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "examples": ["ask session 1 what changed, then ask session 2 if it is correct", "notify me when all sessions are idle"],
         },
         {
+            "key": "skills",
             "name": "YO!skills",
             "read": True,
             "write": True,
@@ -770,34 +818,40 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "examples": ["list my YO!skills", "create a skill local-status"],
         },
         {
+            "key": "uploads",
             "name": "Uploads and file actions",
             "read": True,
             "write": True,
             "read_action": "explain upload/drop action settings",
             "write_action": "save validated upload Preferences",
             "auth": "admin for writes",
+            "locale_keys": {"auth": "yoagent.capability.auth.adminForWrites"},
             "backing": "settings catalog + drop-action registry",
             "setting_keys": ["uploads.image_action_order", "uploads.custom_actions", "uploads.subdir"],
             "examples": ["what are my image paste actions?", "set upload subdir to .uploads"],
         },
         {
+            "key": "share",
             "name": "YO!share",
             "read": True,
             "write": True,
             "read_action": "explain share defaults and active shares",
             "write_action": "route through share creation/management helpers",
             "auth": "admin for shares",
+            "locale_keys": {"name": "brand.share"},
             "backing": "share APIs and share.* Preferences",
             "setting_keys": ["share.ttl_seconds", "share.max_viewers", "share.read_only", "share.scheme"],
             "examples": ["what are my share defaults?", "make share links read-only"],
         },
         {
+            "key": "recentWork",
             "name": "PR and recent-work state",
             "read": True,
             "write": False,
             "read_action": "summarize cached activity, watched PRs, transcript metadata",
             "write_action": "",
             "auth": "readonly",
+            "locale_keys": {"write": "common.readOnly"},
             "backing": "/api/activity-summary and watched PR metadata",
             "setting_keys": ["github.watched_prs", "notifications.notify_transitions"],
             "examples": ["what did I last work on?", "what PR was that?"],
@@ -805,12 +859,28 @@ def product_capability_registry() -> list[dict[str, Any]]:
     ]
 
 
-def product_capabilities_answer() -> str:
-    lines = ["YO!agent can help operate these YOLOmux areas:"]
+def product_capability_locale_key(item: dict[str, Any], field: str) -> str:
+    locale_keys = item.get("locale_keys") if isinstance(item.get("locale_keys"), dict) else {}
+    return str(locale_keys.get(field) or f"yoagent.capability.{item['key']}.{field}")
+
+
+def product_capabilities_answer(locale: str = "en") -> str:
+    lines = [yoagent_text(locale, "yoagent.capabilities.intro")]
     for item in product_capability_registry():
-        examples = "; ".join(f"`{example}`" for example in item["examples"][:2])
-        backing = f" Backing: {item['backing']}." if item.get("backing") else ""
-        lines.append(f"- **{item['name']}** ({item['auth']}): {item['read_action']}; {item['write_action'] or 'read-only'}.{backing} Examples: {examples}")
+        key = str(item["key"])
+        examples = "; ".join(f"`{yoagent_text(locale, f'yoagent.capability.{key}.example{index}')}`" for index in range(1, 3))
+        backing_value = yoagent_text(locale, f"yoagent.capability.{key}.backing") if item.get("backing") else ""
+        backing = yoagent_text(locale, "yoagent.capabilities.backing", backing=backing_value) if backing_value else ""
+        lines.append(yoagent_text(
+            locale,
+            "yoagent.capabilities.item",
+            name=yoagent_text(locale, product_capability_locale_key(item, "name")),
+            auth=yoagent_text(locale, product_capability_locale_key(item, "auth")),
+            read=yoagent_text(locale, product_capability_locale_key(item, "read")),
+            write=yoagent_text(locale, product_capability_locale_key(item, "write")),
+            backing=backing,
+            examples=examples,
+        ))
     return "\n".join(lines)
 
 
@@ -825,32 +895,32 @@ def sorted_session_summaries(activity_payload: dict[str, Any]) -> list[dict[str,
     return summaries
 
 
-def answer_product_state(question: str, activity_payload: dict[str, Any]) -> str:
+def answer_product_state(question: str, activity_payload: dict[str, Any], locale: str = "en") -> str:
     text = normalize_text(question)
     if ("what can" in text and ("yoagent" in text or "yo agent" in text or "yolomux" in text)) or "what can i do from here" in text:
-        return product_capabilities_answer()
+        return product_capabilities_answer(locale)
     if "where" in text and ("skills" in text or "context" in text):
-        return "Built-in YO!skills live under `yolomux_lib/yoagent/builtin_skills/`; user YO!skills live in `~/.config/yolomux/skills.d/`; user context lives in `~/.config/yolomux/context.d/`."
+        return yoagent_text(locale, "yoagent.operator.skillLocations")
     summaries = sorted_session_summaries(activity_payload)
     if any(phrase in text for phrase in ["last worked", "last work", "what did i work", "what was i working"]):
         if not summaries:
-            return "I do not have recent session activity cached yet."
+            return yoagent_text(locale, "yoagent.operator.noRecentActivity")
         item = summaries[0]
-        repos = ", ".join(f"`{repo}`" for repo in item.get("repos") or []) or "`unknown repo`"
-        work = str(item.get("work") or item.get("goal") or item.get("status_text") or "recent work")
-        last = str(item.get("last_activity_text") or "unknown time")
-        return f"Your freshest cached work is tmux session `{item.get('session')}` in {repos}: {work}. Last worked: {last}."
+        repos = ", ".join(f"`{repo}`" for repo in item.get("repos") or []) or f"`{yoagent_text(locale, 'common.unknown')}`"
+        work = str(item.get("work") or item.get("goal") or item.get("status_text") or yoagent_text(locale, "common.unknown"))
+        last = str(item.get("last_activity_text") or yoagent_text(locale, "common.unknown"))
+        return yoagent_text(locale, "yoagent.operator.lastWork", session=item.get("session"), repos=repos, work=work, last=last)
     if "what pr" in text or "which pr" in text or "pull request" in text:
         rows = [item for item in summaries if item.get("pr_number") or "PR #" in str(item.get("status_text") or "")]
         if not rows:
-            return "I do not see a PR linked in the cached session metadata. Check the session branch metadata or add the PR to watched PRs."
-        return "\n".join(f"- tmux session `{item.get('session')}`: PR #{item.get('pr_number') or '?'}; {item.get('status_text') or item.get('work') or ''}" for item in rows[:8])
+            return yoagent_text(locale, "yoagent.operator.prNotCached")
+        return "\n".join(yoagent_text(locale, "yoagent.operator.prRow", session=item.get("session"), number=item.get("pr_number") or "?", detail=item.get("status_text") or item.get("work") or "") for item in rows[:8])
     if "which sessions" in text or "sessions are" in text:
         if not summaries:
-            return "I do not have session activity cached yet."
-        lines = ["| session | state | work |", "| --- | --- | --- |"]
+            return yoagent_text(locale, "yoagent.operator.noCachedActivity")
+        lines = [yoagent_text(locale, "yoagent.operator.sessionTableHeader"), "| --- | --- | --- |"]
         for item in summaries:
-            state = str(item.get("activity_label") or item.get("state", {}).get("key") or "unknown")
+            state = str(item.get("activity_label") or item.get("state", {}).get("key") or yoagent_text(locale, "common.unknown"))
             work = str(item.get("work") or item.get("goal") or item.get("status_text") or "")
             lines.append(f"| `{item.get('session')}` | {state} | {work} |")
         return "\n".join(lines)
@@ -858,35 +928,38 @@ def answer_product_state(question: str, activity_payload: dict[str, Any]) -> str
         lines: list[str] = []
         for item in summaries:
             for file_line in item.get("file_lines") or []:
-                lines.append(f"- tmux session `{item.get('session')}`: {file_line}")
+                session_label = yoagent_text(locale, "common.tmuxSession", label=f"`{item.get('session')}`")
+                lines.append(f"- {session_label}: {file_line}")
         if lines:
-            return "\n".join(["Cached changed files:", *lines[:20]])
+            return "\n".join([yoagent_text(locale, "yoagent.operator.cachedChangedFiles"), *lines[:20]])
         agents = activity_payload.get("agents") if isinstance(activity_payload, dict) else []
         for agent in agents if isinstance(agents, list) else []:
             for path in agent.get("recent_paths") or []:
                 if isinstance(path, dict) and path.get("path"):
-                    lines.append(f"- tmux session `{agent.get('session')}`: `{path.get('path')}`")
-        return "\n".join(["Cached recent paths:", *lines[:20]]) if lines else "I do not see changed-file details in the current activity cache."
+                    session_label = yoagent_text(locale, "common.tmuxSession", label=f"`{agent.get('session')}`")
+                    lines.append(f"- {session_label}: `{path.get('path')}`")
+        return "\n".join([yoagent_text(locale, "yoagent.operator.cachedRecentPaths"), *lines[:20]]) if lines else yoagent_text(locale, "yoagent.operator.noCachedChangedFiles")
     if "why" in text and ("session" in text or "tab" in text):
         session_match = re.search(r"\b(?:session|tab)\s+([A-Za-z0-9_.:-]+)\b", question, flags=re.IGNORECASE)
         wanted = session_match.group(1) if session_match else ""
         rows = [item for item in summaries if not wanted or str(item.get("session") or "") == wanted]
         if not rows:
-            return "I do not have enough cached activity for that session or tab yet."
+            return yoagent_text(locale, "yoagent.operator.noSessionDetail")
         item = rows[0]
-        state = str(item.get("activity_label") or item.get("state", {}).get("key") or "unknown")
-        work = str(item.get("work") or item.get("goal") or item.get("status_text") or "no cached detail")
+        state = str(item.get("activity_label") or item.get("state", {}).get("key") or yoagent_text(locale, "common.unknown"))
+        work = str(item.get("work") or item.get("goal") or item.get("status_text") or yoagent_text(locale, "common.unknown"))
         blockers = item.get("blockers") if isinstance(item.get("blockers"), list) else []
-        blocker_text = f" Blockers: {', '.join(str(blocker) for blocker in blockers[:3])}." if blockers else ""
-        return f"Cached state for tmux session `{item.get('session')}` is `{state}`. Current detail: {work}.{blocker_text}"
+        blocker_text = yoagent_text(locale, "yoagent.operator.blockers", blockers=", ".join(str(blocker) for blocker in blockers[:3])) if blockers else ""
+        return yoagent_text(locale, "yoagent.operator.currentDetail", session=item.get("session"), state=state, work=work, blockers=blocker_text)
     if "where is my" in text or ("where" in text and "file" in text):
         term = text.split("where is my", 1)[-1].replace("file", "").strip() if "where is my" in text else ""
         matches: list[str] = []
         for item in summaries:
             for file_line in item.get("file_lines") or []:
                 if not term or term in normalize_text(file_line):
-                    matches.append(f"- tmux session `{item.get('session')}`: {file_line}")
-        return "\n".join(["Possible matches from cached session files:", *matches[:12]]) if matches else "I do not see that file in cached session activity. Try Finder/Quick Search for a filesystem-wide search."
+                    session_label = yoagent_text(locale, "common.tmuxSession", label=f"`{item.get('session')}`")
+                    matches.append(f"- {session_label}: {file_line}")
+        return "\n".join([yoagent_text(locale, "yoagent.operator.possibleFileMatches"), *matches[:12]]) if matches else yoagent_text(locale, "yoagent.operator.fileNotCached")
     return ""
 
 
@@ -913,19 +986,20 @@ def yoagent_operator_response(
     activity_payload: dict[str, Any],
     access_role: str,
     save_settings_callback: Callable[[dict[str, Any]], dict[str, Any]],
+    locale: str = "en",
 ) -> dict[str, Any] | None:
     started = time.monotonic()
-    write_intent = parse_settings_write(question, settings_payload_data)
+    write_intent = parse_settings_write(question, settings_payload_data, locale)
     if write_intent:
         answer = str(write_intent.get("answer") or "")
         if write_intent["type"] == "settings_clarify":
             return deterministic_response(answer, started)
         if access_role != "admin":
             path = str(write_intent.get("path") or "")
-            return deterministic_response(f"`{path}` is readable, but changing Preferences requires an admin login. I did not change anything.", started)
+            return deterministic_response(yoagent_text(locale, "yoagent.operator.readonlyWrite", path=path), started)
         if write_intent.get("requires_confirmation"):
             path = str(write_intent.get("path") or "")
-            return deterministic_response(f"`{path}` is a higher-risk Preference. Tell me to confirm/apply it explicitly before I change it.", started)
+            return deterministic_response(yoagent_text(locale, "yoagent.operator.confirmRisk", path=path), started)
         path = str(write_intent["path"])
         before = nested_setting(settings_from_payload(settings_payload_data), path)
         result = save_settings_callback(write_intent["patch"])
@@ -933,12 +1007,12 @@ def yoagent_operator_response(
         item = catalog_from_payload(result).get(path, write_intent.get("item") or {})
         note = f" {write_intent.get('note')}" if write_intent.get("note") else ""
         coerced = result.get("coerced") if isinstance(result.get("coerced"), list) else []
-        answer = changed_setting_answer(path, item, before, after, note=note, coerced=coerced)
+        answer = changed_setting_answer(path, item, before, after, note=note, coerced=coerced, locale=locale)
         return deterministic_response(answer, started, changed_settings=[{"path": path, "before": before, "after": after}])
-    read_intent = parse_settings_read(question, settings_payload_data)
+    read_intent = parse_settings_read(question, settings_payload_data, locale)
     if read_intent:
         return deterministic_response(str(read_intent["answer"]), started)
-    product_answer = answer_product_state(question, activity_payload)
+    product_answer = answer_product_state(question, activity_payload, locale)
     if product_answer:
         return deterministic_response(product_answer, started)
     return None

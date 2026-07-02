@@ -32,7 +32,14 @@ def test_yoagent_stream_callback_uses_extracted_stream_owner(monkeypatch):
     assert webapp.yoagent_stream_lock is webapp.yoagent_streams.store.lock
     assert stream_events[-1][0] == ("stream-owner", "")
     assert stream_events[-1][1]["phase"] == "thinking"
-    assert fields["auxiliary_lines"] == ["thinking: Checking stream owner"]
+    assert fields["stream_items"] == [{
+        "kind": "thinking",
+        "text": "Checking stream owner",
+        "eventKind": "hidden_work_delta",
+        "labelKey": "yoagent.stream.thinking",
+        "labelParams": {},
+        "fallback": "thinking",
+    }]
 
 
 def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypatch):
@@ -58,24 +65,23 @@ def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypa
     payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
     assert payloads[-1]["content"] == "Visible answer"
     assert payloads[-1]["auxiliary_done"] is True
-    assert payloads[-1]["auxiliary_preview"] == "tool done: command: passed"
-    assert payloads[-1]["auxiliary_lines"] == [
-        "thinking: Checking repo state and reading files",
-        "tool start: command: python3 tools/check.py",
-        "tool output: command: line 1\nline 2",
-        "tool done: command: passed",
+    assert payloads[-1]["auxiliary_preview"] == "Checking repo state and reading files"
+    assert [
+        (item["kind"], item["text"], item.get("labelKey"), item.get("fallback"))
+        for item in payloads[-1]["stream_items"]
+    ] == [
+        ("thinking", "Checking repo state and reading files", "yoagent.stream.thinking", "thinking"),
+        ("tool", "python3 tools/check.py", "yoagent.stream.toolStart", "tool start: command"),
+        ("tool", "line 1\nline 2", "yoagent.stream.toolOutput", "tool output: command"),
+        ("assistant", "Visible answer", None, None),
+        ("tool", "passed", "yoagent.stream.toolDone", "tool done: command"),
     ]
-    assert stored_messages[-1]["auxiliaryPreview"] == "tool done: command: passed"
-    assert "thinking: Checking repo state and reading files" in stored_messages[-1]["auxiliaryText"]
-    assert "tool output: command: line 1\nline 2" in stored_messages[-1]["auxiliaryText"]
+    assert "auxiliaryLines" not in stored_messages[-1]
+    assert "auxiliaryText" not in stored_messages[-1]
+    assert "auxiliaryPreview" not in stored_messages[-1]
     assert stored_messages[-1]["auxiliaryDone"] is True
-    assert stored_messages[-1]["streamItems"] == [
-        {"kind": "thinking", "text": "thinking: Checking repo state and reading files"},
-        {"kind": "tool", "text": "tool start: command: python3 tools/check.py"},
-        {"kind": "tool", "text": "tool output: command: line 1\nline 2"},
-        {"kind": "assistant", "text": "Visible answer"},
-        {"kind": "tool", "text": "tool done: command: passed"},
-    ]
+    assert stored_messages[-1]["streamItems"] == payloads[-1]["stream_items"]
+    assert stored_messages[-1]["streamItems"][1]["labelParams"] == {"tool": "command"}
 
 
 def test_yoagent_stream_callback_preserves_interleaved_order():
@@ -94,14 +100,49 @@ def test_yoagent_stream_callback_preserves_interleaved_order():
     finally:
         webapp.control_server.stop()
 
-    assert last_payload["stream_items"] == [
-        {"kind": "thinking", "text": "thinking: Reading context"},
-        {"kind": "assistant", "text": "First visible sentence. "},
-        {"kind": "tool", "text": "tool start: command: python3 tools/check.py"},
-        {"kind": "tool", "text": "tool done: command: passed"},
-        {"kind": "thinking", "text": "thinking: Preparing final answer"},
-        {"kind": "assistant", "text": "Second visible sentence."},
+    assert [
+        (item["kind"], item["text"], item.get("labelKey"))
+        for item in last_payload["stream_items"]
+    ] == [
+        ("thinking", "Reading context", "yoagent.stream.thinking"),
+        ("assistant", "First visible sentence. ", None),
+        ("tool", "python3 tools/check.py", "yoagent.stream.toolStart"),
+        ("tool", "passed", "yoagent.stream.toolDone"),
+        ("thinking", "Preparing final answer", "yoagent.stream.thinking"),
+        ("assistant", "Second visible sentence.", None),
     ]
+    assert fields["stream_items"] == last_payload["stream_items"]
+
+
+def test_yoagent_stream_callback_preserves_approval_request_descriptor():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    last_payload = {}
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: last_payload.update(payload or {}) if event_type == "yoagent_stream_delta" else None
+    try:
+        callback = webapp.yoagent_stream_callback("stream-approval", "codex")
+        callback({
+            "kind": "approval_requested",
+            "text": "run tests",
+            "command": "python3 tools/check.py",
+            "path": "/repo",
+        })
+        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-approval")
+    finally:
+        webapp.control_server.stop()
+
+    assert last_payload["phase"] == "approval"
+    assert "tool_active" not in last_payload
+    assert "auxiliary_done" not in last_payload
+    assert last_payload["stream_items"] == [{
+        "kind": "tool",
+        "text": "python3 tools/check.py",
+        "eventKind": "approval_requested",
+        "command": "python3 tools/check.py",
+        "path": "/repo",
+        "labelKey": "yoagent.stream.approvalRequested",
+        "labelParams": {},
+        "fallback": "approval requested",
+    }]
     assert fields["stream_items"] == last_payload["stream_items"]
 
 
@@ -117,8 +158,15 @@ def test_yoagent_stream_callback_preserves_raw_thinking_detail_text():
     finally:
         webapp.control_server.stop()
 
-    assert last_payload["auxiliary_lines"] == ["thinking: First line second line"]
-    assert last_payload["stream_items"] == [{"kind": "thinking", "text": "thinking: First line\n  second line"}]
+    assert last_payload["auxiliary_preview"] == "First line\n  second line"
+    assert last_payload["stream_items"] == [{
+        "kind": "thinking",
+        "text": "First line\n  second line",
+        "eventKind": "hidden_work_delta",
+        "labelKey": "yoagent.stream.thinking",
+        "labelParams": {},
+        "fallback": "thinking",
+    }]
     assert fields["stream_items"] == last_payload["stream_items"]
 
 
@@ -128,15 +176,16 @@ def test_yoagent_stream_callback_replaces_claude_thinking_heartbeat():
     webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
     try:
         callback = webapp.yoagent_stream_callback("stream-claude", "claude")
-        callback({"kind": "hidden_work_delta", "text": "thinking... (~50 tokens)"})
+        callback({"kind": "hidden_work_delta", "text": "thinking... (~50 tokens)", "heartbeat": True, "metadata": {"estimated_tokens": 50}})
         callback({"kind": "hidden_work_delta", "text": "Reading context"})
         callback({"kind": "hidden_work_delta", "text": " and checking files"})
     finally:
         webapp.control_server.stop()
 
     payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
-    assert payloads[-1]["auxiliary_preview"] == "thinking: Reading context and checking files"
-    assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context and checking files"]
+    assert payloads[-1]["auxiliary_preview"] == "Reading context and checking files"
+    assert payloads[-1]["stream_items"][0]["text"] == "Reading context and checking files"
+    assert payloads[-1]["stream_items"][0]["labelKey"] == "yoagent.stream.thinking"
 
 
 def test_yoagent_stream_callback_ignores_later_claude_heartbeats_after_words():
@@ -145,17 +194,18 @@ def test_yoagent_stream_callback_ignores_later_claude_heartbeats_after_words():
     webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
     try:
         callback = webapp.yoagent_stream_callback("stream-claude-live-words", "claude")
-        callback({"kind": "hidden_work_delta", "text": "thinking... (~3 tokens)"})
+        callback({"kind": "hidden_work_delta", "text": "thinking... (~3 tokens)", "heartbeat": True, "metadata": {"estimated_tokens": 3}})
         callback({"kind": "hidden_work_delta", "text": "Reading context"})
-        callback({"kind": "hidden_work_delta", "text": "thinking... (~23 tokens)"})
+        callback({"kind": "hidden_work_delta", "text": "thinking... (~23 tokens)", "heartbeat": True, "metadata": {"estimated_tokens": 23}})
         callback({"kind": "hidden_work_delta", "text": " and checking files"})
     finally:
         webapp.control_server.stop()
 
     payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
-    assert payloads[2]["auxiliary_lines"] == ["thinking: Reading context"]
-    assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context and checking files"]
-    assert payloads[-1]["stream_items"] == [{"kind": "thinking", "text": "thinking: Reading context and checking files"}]
+    assert payloads[2]["stream_items"][0]["text"] == "Reading context"
+    assert payloads[-1]["auxiliary_preview"] == "Reading context and checking files"
+    assert payloads[-1]["stream_items"][0]["text"] == "Reading context and checking files"
+    assert payloads[-1]["stream_items"][0]["labelKey"] == "yoagent.stream.thinking"
 
 
 def test_yoagent_stream_callback_replaces_plain_claude_thinking_heartbeat_at_done(monkeypatch):
@@ -166,7 +216,7 @@ def test_yoagent_stream_callback_replaces_plain_claude_thinking_heartbeat_at_don
     monkeypatch.setattr(app_module.yoagent_conversation, "append_message", lambda message: stored_messages.append(message) or message)
     try:
         callback = webapp.yoagent_stream_callback("stream-plain-heartbeat", "claude")
-        callback({"kind": "thinking"})
+        callback({"kind": "hidden_work_delta", "text": "thinking", "heartbeat": True})
         callback({"kind": "hidden_work_delta", "text": "Reading context across files"})
         callback({"kind": "hidden_work_delta", "text": " and preparing answer"})
         callback({"kind": "assistant_delta", "text": "Final answer"})
@@ -178,14 +228,11 @@ def test_yoagent_stream_callback_replaces_plain_claude_thinking_heartbeat_at_don
 
     payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
     assert payloads[-1]["auxiliary_done"] is True
-    assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context across files and preparing answer"]
-    assert payloads[-1]["stream_items"] == [
-        {"kind": "thinking", "text": "thinking: Reading context across files and preparing answer"},
-        {"kind": "assistant", "text": "Final answer"},
-    ]
-    assert stored_messages[-1]["auxiliaryText"] == "thinking: Reading context across files and preparing answer"
-    assert stored_messages[-1]["streamItems"][0]["text"] == "thinking: Reading context across files and preparing answer"
-    assert "thinking: thinking" not in stored_messages[-1]["auxiliaryText"]
+    assert payloads[-1]["stream_items"][0]["text"] == "Reading context across files and preparing answer"
+    assert payloads[-1]["stream_items"][0]["labelKey"] == "yoagent.stream.thinking"
+    assert payloads[-1]["stream_items"][1] == {"kind": "assistant", "text": "Final answer"}
+    assert stored_messages[-1]["streamItems"] == payloads[-1]["stream_items"]
+    assert "auxiliaryText" not in stored_messages[-1]
 
 
 def test_yoagent_stream_callback_keeps_claude_token_progress_after_empty_thinking_snapshot(monkeypatch):
@@ -214,13 +261,20 @@ def test_yoagent_stream_callback_keeps_claude_token_progress_after_empty_thinkin
         webapp.control_server.stop()
 
     payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
-    assert payloads[-1]["auxiliary_lines"] == ["thinking... (~200 tokens)"]
     assert payloads[-1]["stream_items"] == [
-        {"kind": "thinking", "text": "thinking... (~200 tokens)"},
+        {
+            "kind": "thinking",
+            "text": "",
+            "eventKind": "hidden_work_delta",
+            "tokenCount": 200,
+            "labelKey": "yoagent.stream.thinking",
+            "labelParams": {},
+            "fallback": "thinking",
+        },
         {"kind": "assistant", "text": "Final answer"},
     ]
-    assert stored_messages[-1]["auxiliaryText"] == "thinking... (~200 tokens)"
-    assert "thinking: thinking" not in stored_messages[-1]["auxiliaryText"]
+    assert stored_messages[-1]["streamItems"] == payloads[-1]["stream_items"]
+    assert "auxiliaryText" not in stored_messages[-1]
 
 
 def test_yoagent_stream_callback_keeps_claude_usage_from_hiding_thinking(monkeypatch):
@@ -250,15 +304,15 @@ def test_yoagent_stream_callback_keeps_claude_usage_from_hiding_thinking(monkeyp
         webapp.control_server.stop()
 
     payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
-    assert payloads[-1]["auxiliary_preview"] == "thinking... (~86 tokens)"
-    assert payloads[-1]["auxiliary_lines"] == ["thinking... (~86 tokens)"]
-    assert payloads[-1]["stream_items"] == [
-        {"kind": "thinking", "text": "thinking... (~86 tokens)"},
-        {"kind": "assistant", "text": "Final answer"},
+    assert [(item["kind"], item["text"], item.get("labelKey")) for item in payloads[-1]["stream_items"]] == [
+        ("thinking", "", "yoagent.stream.thinking"),
+        ("assistant", "Final answer", None),
+        ("diagnostic", '{"input_tokens": 1, "output_tokens": 2}', "yoagent.stream.usage"),
     ]
-    assert stored_messages[-1]["auxiliaryPreview"] == "thinking... (~86 tokens)"
-    assert stored_messages[-1]["auxiliaryText"] == "thinking... (~86 tokens)"
-    assert "usage:" not in stored_messages[-1]["auxiliaryText"]
+    assert payloads[-1]["stream_items"][0]["tokenCount"] == 86
+    assert payloads[-1]["stream_items"][2]["fallback"] == "usage"
+    assert stored_messages[-1]["streamItems"] == payloads[-1]["stream_items"]
+    assert "auxiliaryText" not in stored_messages[-1]
 
 
 def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):
@@ -371,9 +425,11 @@ def test_yoagent_stream_callback_truncates_oversized_auxiliary_history(no_contro
 
     assert last_payload["auxiliary_truncated"] is True
     assert fields["auxiliary_truncated"] is True
-    assert len(last_payload["auxiliary_lines"]) < 5005
-    assert len(fields["auxiliary_lines"]) < 5005
-    assert fields["auxiliary_lines"][-1] == "tool output: command: line 5004"
-    assert "tool output: command: line 0 " not in "\n".join(fields["auxiliary_lines"])
-    assert len("\n".join(fields["auxiliary_lines"])) <= app_module.yoagent_conversation.YOAGENT_AUXILIARY_TOTAL_LIMIT
+    assert "auxiliary_lines" not in last_payload
+    assert "auxiliary_lines" not in fields
+    assert len(last_payload["stream_items"]) == app_module.yoagent_conversation.YOAGENT_STREAM_ITEMS_LIMIT
+    assert len(fields["stream_items"]) == app_module.yoagent_conversation.YOAGENT_STREAM_ITEMS_LIMIT
+    assert fields["stream_items"][-1]["text"] == "line 5004"
+    assert fields["stream_items"][-1]["labelKey"] == "yoagent.stream.toolOutput"
+    assert not any(item["text"].startswith("line 0 ") for item in fields["stream_items"])
     assert len("\n".join(item["text"] for item in fields["stream_items"])) <= app_module.yoagent_conversation.YOAGENT_STREAM_ITEMS_TOTAL_LIMIT

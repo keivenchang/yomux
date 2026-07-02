@@ -103,14 +103,14 @@ def _visible_directory_names(path: Path) -> tuple[list[str], bool]:
 def list_directory(raw_path: str) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
     if not path.exists():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
+        raise paths.FilesystemError.path_not_found(path)
     if not path.is_dir():
-        raise paths.FilesystemError(f"not a directory: {path}", status=400)
+        raise paths.FilesystemError.not_directory(path)
     try:
         names, truncated = _visible_directory_names(path)
         entries = [_entry_info(path / name, name) for name in names]
     except PermissionError as exc:
-        raise paths.FilesystemError(str(exc), status=403) from exc
+        raise paths.FilesystemError.os_error(exc, status=403) from exc
     entries.sort(key=lambda entry: (entry.get("kind") != "dir", str(entry.get("name", "")).lower()))
     parent = str(path.parent) if str(path) != "/" else None
     return {

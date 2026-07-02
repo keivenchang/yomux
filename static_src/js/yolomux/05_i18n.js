@@ -3,8 +3,45 @@
 // This partial loads right after the bootstrap (00) and before everything else (10+), so all code
 // can call t(). Keys are dotted ids (e.g. pref.appearance.theme.label); values may hold {tokens}.
 
-let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.locale) ? String(bootstrap.locale) : 'en';
-const i18nFallbackLocale = 'en';
+function i18nRegistryFromBootstrap() {
+  const boot = typeof bootstrap === 'object' && bootstrap ? bootstrap : {};
+  const raw = boot.localeRegistry && typeof boot.localeRegistry === 'object' ? boot.localeRegistry : {};
+  const seen = new Set();
+  const locales = (Array.isArray(raw.locales) ? raw.locales : []).map(item => {
+    const source = item && typeof item === 'object' ? item : {};
+    const id = String(source.id || '').trim();
+    if (!id || seen.has(id.toLowerCase())) return null;
+    seen.add(id.toLowerCase());
+    return {
+      id,
+      endonym: String(source.endonym || id),
+      direction: String(source.direction || '').toLowerCase() === 'rtl' ? 'rtl' : 'ltr',
+    };
+  }).filter(Boolean);
+  const byCasefold = new Map(locales.map(spec => [spec.id.toLowerCase(), spec.id]));
+  const bootLocale = String(boot.locale || '').trim();
+  const catalogLocale = Object.keys(boot.strings && typeof boot.strings === 'object' ? boot.strings : {})[0] || '';
+  const fallbackCandidate = String(raw.fallback || '').trim();
+  const fallback = byCasefold.get(fallbackCandidate.toLowerCase()) || locales[0]?.id || bootLocale || catalogLocale;
+  const pseudo = String(raw.pseudo || '').trim();
+  const systemPreference = String(raw.systemPreference || '').trim();
+  const allowed = new Map([...byCasefold, ...(pseudo ? [[pseudo.toLowerCase(), pseudo]] : [])]);
+  const systemCandidate = String(raw.systemLocale || '').trim();
+  const systemLocale = allowed.get(systemCandidate.toLowerCase()) || fallback;
+  return {fallback, pseudo, systemPreference, systemLocale, locales, allowed};
+}
+
+const i18nLocaleRegistry = i18nRegistryFromBootstrap();
+const i18nFallbackLocale = i18nLocaleRegistry.fallback;
+function i18nNormalizeLocale(value, options = {}) {
+  const text = String(value || '').trim();
+  if (options.allowSystem === true && text.toLowerCase() === i18nLocaleRegistry.systemPreference.toLowerCase()) {
+    return i18nLocaleRegistry.systemPreference;
+  }
+  return i18nLocaleRegistry.allowed.get(text.toLowerCase()) || i18nFallbackLocale;
+}
+
+let i18nActiveLocale = i18nNormalizeLocale(typeof bootstrap === 'object' && bootstrap ? bootstrap.locale : '');
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
 let i18nApplyLocaleRequestId = 0;
 // seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
@@ -45,7 +82,10 @@ function tPlural(key, count, params) {
   const number = Number(count) || 0;
   let category = 'other';
   try { category = new Intl.PluralRules(i18nActiveLocale).select(number); } catch (_) {}
-  const value = i18nResolve(`${key}.${category}`) ?? i18nResolve(`${key}.other`);
+  const value = i18nCatalogValue(i18nActiveLocale, `${key}.${category}`)
+    ?? i18nCatalogValue(i18nActiveLocale, `${key}.other`)
+    ?? i18nCatalogValue(i18nFallbackLocale, `${key}.${category}`)
+    ?? i18nCatalogValue(i18nFallbackLocale, `${key}.other`);
   return i18nInterpolate(value == null ? String(key) : value, {...(params || {}), count: number});
 }
 
@@ -126,14 +166,14 @@ function i18nSetCatalogForTest(locale, catalog) {
 }
 
 async function i18nLoadCatalog(locale) {
-  if (!locale) return null;
-  if (i18nCatalogs.has(locale)) return i18nCatalogs.get(locale);
+  const normalized = i18nNormalizeLocale(locale);
+  if (i18nCatalogs.has(normalized)) return i18nCatalogs.get(normalized);
   try {
-    const response = await fetch(`/static/locales/${encodeURIComponent(locale)}.json`, {cache: 'no-store'});
+    const response = await fetch(`/static/locales/${encodeURIComponent(normalized)}.json`, {cache: 'no-store'});
     if (!response.ok) return null;
     const data = await response.json();
     if (data && typeof data === 'object' && !Array.isArray(data)) {
-      i18nCatalogs.set(locale, data);
+      i18nCatalogs.set(normalized, data);
       return data;
     }
   } catch (_) {}
@@ -144,7 +184,10 @@ async function i18nLoadCatalog(locale) {
 // the localized surfaces. Safe to call before the render functions exist (guarded).
 async function applyLocale(locale) {
   const requestId = ++i18nApplyLocaleRequestId;
-  const next = String(locale || i18nFallbackLocale);
+  const next = i18nNormalizeLocale(locale);
+  if (typeof preferenceSections === 'function' && typeof setCollapsedPreferenceSections === 'function') {
+    setCollapsedPreferenceSections(collapsedPreferenceSections, {sections: preferenceSections(), persist: true});
+  }
   await i18nLoadCatalog(i18nFallbackLocale);
   if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
   if (requestId !== i18nApplyLocaleRequestId) return;
@@ -159,82 +202,65 @@ async function applyLocale(locale) {
   if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
 }
 
-// The real (non-pseudo) locales that ship a catalog, in product-priority order. 'system' resolves
-// against navigator.language to one of these. Add new locales here as their catalogs ship.
+// The real (non-pseudo) locales in the Python registry's product-priority order.
 function i18nSupportedLocales() {
-  return ['en', 'zh-Hant', 'zh-Hans', 'ja', 'ko', 'es', 'de', 'fr', 'it', 'pt-BR', 'pl', 'nl', 'he', 'ar', 'ru', 'hi', 'vi', 'th', 'tr'];
+  return i18nLocaleRegistry.locales.map(spec => spec.id);
 }
 
-// Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
 function i18nIsRtl(locale) {
-  const base = String(locale || '').toLowerCase().split('-')[0];
-  return base === 'ar' || base === 'he' || base === 'fa' || base === 'ur';
+  const normalized = i18nNormalizeLocale(locale);
+  return i18nLocaleRegistry.locales.find(spec => spec.id === normalized)?.direction === 'rtl';
 }
 
-// The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
-// script (never translated); 'system'/pseudo are localized. en-XA stays last as the QA pseudo-locale.
+// The language-switcher choices (Preferences picker + topbar switcher) project the Python registry.
 function i18nLocaleChoices() {
-  return [
-    {value: 'system', label: t('pref.general.language.system')},
-    {value: 'en', label: 'English'},
-    {value: 'zh-Hant', label: '繁體中文'},
-    {value: 'zh-Hans', label: '简体中文'},
-    {value: 'ja', label: '日本語'},
-    {value: 'ko', label: '한국어'},
-    {value: 'es', label: 'Español'},
-    {value: 'de', label: 'Deutsch'},
-    {value: 'fr', label: 'Français'},
-    {value: 'it', label: 'Italiano'},
-    {value: 'pt-BR', label: 'Português (BR)'},
-    {value: 'pl', label: 'Polski'},
-    {value: 'nl', label: 'Nederlands'},
-    {value: 'he', label: 'עברית'},
-    {value: 'ar', label: 'العربية'},
-    {value: 'ru', label: 'Русский'},
-    {value: 'hi', label: 'हिन्दी'},
-    {value: 'vi', label: 'Tiếng Việt'},
-    {value: 'th', label: 'ไทย'},
-    {value: 'tr', label: 'Türkçe'},
-    {value: 'en-XA', label: t('pref.general.language.pseudo')},
+  const choices = [
+    {value: i18nLocaleRegistry.systemPreference, label: t('pref.general.language.system')},
+    ...i18nLocaleRegistry.locales.map(spec => ({value: spec.id, label: spec.endonym})),
   ];
+  if (i18nLocaleRegistry.pseudo) choices.push({value: i18nLocaleRegistry.pseudo, label: t('pref.general.language.pseudo')});
+  return choices;
 }
 
-// Resolve a `general.language` pref to a concrete locale. "system" matches navigator.language against
-// the locales that ship a catalog: zh-TW/HK/MO/Hant -> zh-Hant, other zh-* -> zh-Hans, else by language
-// prefix, falling back to en.
+// Resolve a `general.language` pref through the server-resolved registry value.
 function resolveLocalePref(pref) {
-  const value = String(pref || 'system');
-  if (value !== 'system') return value;
-  const nav = (typeof navigator === 'object' && navigator && navigator.language) ? String(navigator.language).toLowerCase() : 'en';
-  if (nav.startsWith('zh')) return /hant|\b(tw|hk|mo)\b|-tw|-hk|-mo/.test(nav) ? 'zh-Hant' : 'zh-Hans';
-  for (const loc of i18nSupportedLocales()) {
-    const base = loc.toLowerCase().split('-')[0];
-    if (nav === loc.toLowerCase() || nav === base || nav.startsWith(base + '-')) return loc;
+  const value = String(pref || i18nLocaleRegistry.systemPreference);
+  const normalized = i18nNormalizeLocale(value, {allowSystem: true});
+  return normalized === i18nLocaleRegistry.systemPreference ? i18nLocaleRegistry.systemLocale : normalized;
+}
+
+const localeGlobalSurfaceHooks = Object.freeze([
+  options => typeof renderSessionButtons === 'function' && renderSessionButtons({force: true}),
+  options => typeof renderTabMetaToggle === 'function' && renderTabMetaToggle(),
+  options => typeof renderPaneTabStrips === 'function' && renderPaneTabStrips(),
+  options => typeof refreshActivePanelHeaders === 'function' && refreshActivePanelHeaders(),
+  options => typeof relocalizeKeyboardShortcutsOverlay === 'function' && relocalizeKeyboardShortcutsOverlay(),
+  options => typeof refreshOpenEventLogs === 'function' && refreshOpenEventLogs(),
+  options => options.localeChange === true && typeof refreshActivitySummary === 'function'
+    && refreshActivitySummary({force: true, silent: true, localeChange: true}),
+  options => typeof renderTopbarStaticChrome === 'function' && renderTopbarStaticChrome(),
+  options => typeof renderNotifyToggle === 'function' && renderNotifyToggle(),
+  options => typeof renderBrandWordmark === 'function' && renderBrandWordmark(),
+  options => typeof renderUpdateBadgeChrome === 'function' && renderUpdateBadgeChrome(),
+  options => typeof updateDocumentTitle === 'function' && updateDocumentTitle(),
+  options => typeof renderTransportWarning === 'function' && renderTransportWarning(),
+  options => typeof refreshMetaButtonChrome === 'function' && refreshMetaButtonChrome(),
+  options => typeof relocalizeModalChrome === 'function' && relocalizeModalChrome(),
+  options => typeof renderFileExplorerChangesPanels === 'function' && renderFileExplorerChangesPanels({force: true}),
+  options => typeof relocalizeFileUploadDropLabels === 'function' && relocalizeFileUploadDropLabels(),
+]);
+
+function relocalizeMountedPanels(options = {}) {
+  if (!(panelNodes instanceof Map)) return;
+  for (const [item, panel] of [...panelNodes.entries()]) {
+    const relocalize = tabTypeForItem(item)?.relocalize;
+    if (typeof relocalize === 'function') relocalize(item, panel, options);
   }
-  return 'en';
 }
 
 function rerenderForLocale(options = {}) {
-  // force-re-render EVERY localized surface so a language switch repaints the open UI on
-  // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
-  // the active-control guard (the language <select> is the active control when the switch fires).
-  if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
-  if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});  // rebuilds the app menu bar
-  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
-  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
-  if (typeof relocalizeYoagentPanelChrome === 'function') relocalizeYoagentPanelChrome();
-  if (typeof renderInfoPanel === 'function') renderInfoPanel();
-  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
-  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
-  if (typeof relocalizeYoagentPanelChrome === 'function') relocalizeYoagentPanelChrome();
-  if (options.localeChange === true && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true, silent: true, localeChange: true});
-  if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
-  if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();
-  // The Finder diff panel localizes its title, FROM/TO, session/sort, and Refresh strings in the panel
-  // head. Force-re-render it so a language switch repaints the head in the new locale.
-  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-  // The Finder's toolbar chrome (root/dates/sort labels) is baked into the panel at creation time, so the
-  // body re-renders above never touch it — rebuild the Finder panel from source so a language switch
-  // repaints its buttons too (the bug where switching to Hebrew left the toolbar in the previous locale).
-  if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
+  // Mounted panel types own their relocalization path through TAB_TYPES. Global chrome lives in the
+  // separate registry below, so adding a surface cannot require another bespoke branch here.
+  relocalizeMountedPanels(options);
+  localeGlobalSurfaceHooks.forEach(run => run(options));
 }

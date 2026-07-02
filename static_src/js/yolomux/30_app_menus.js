@@ -64,10 +64,10 @@ function topbarVersionTitle() {
   const sha = aboutCommitShaText();
   const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
-  if (sha) lines.push(`SHA: ${sha}`);
-  if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
-  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(`Commits: ${commitCount}`);
-  return lines.join('\n') || 'SHA unknown';
+  if (sha) lines.push(t('menu.help.about.sha', {sha}));
+  if (bootstrap.versionCommitTime) lines.push(t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}));
+  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(t('menu.help.about.commits', {count: commitCount}));
+  return lines.join('\n') || t('menu.help.about.shaUnknown');
 }
 
 function topbarServerStartedAtMs() {
@@ -79,7 +79,7 @@ function topbarServerStartedAtMs() {
 
 function topbarDurationText(seconds) {
   const remaining = Math.max(0, Math.floor(Number(seconds) || 0));
-  if (remaining < 1) return 'under 1 second';
+  if (remaining < 1) return t('duration.underOneSecond');
   const units = [
     ['day', 86400],
     ['hour', 3600],
@@ -123,13 +123,9 @@ function showAboutModal() {
   const modal = document.getElementById('modal');
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
-  const close = document.getElementById('closeModal');
   if (!modal || !title || !body) return;
   title.textContent = t('menu.help.about');
-  if (close) {
-    close.title = t('common.close');
-    close.setAttribute('aria-label', t('common.close'));
-  }
+  relocalizeModalChrome({content: false});
   modal.classList.add('about-open');
   const version = bootstrap.version || '';
   const sha = aboutCommitShaText();
@@ -304,10 +300,10 @@ function applyAndSaveGlobalTheme(next) {
   renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
-      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
+      statusEl.textContent = t('status.themeChanged', {theme: globalThemeLabel(next)});
     })
     .catch(error => {
-      statusErr(localizedHtml('status.themeSaveFailed', {error}));
+      statusErr(localizedHtml('status.themeSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
       refreshSettings({force: true});
     });
 }
@@ -322,12 +318,12 @@ function cycleGlobalThemeSetting() {
 }
 
 function yoloRuleStatusDetail() {
-  const source = yoloRulesPayload.source || 'unknown';
+  const source = structuredMessageText(yoloRulesPayload, 'source', t('common.unknown'));
   const count = Number(yoloRulesPayload.rule_count || 0);
   const countText = tPlural('menu.yolo.ruleCount', count);
   const dryRun = yoloRulesPayload.dry_run ? t('menu.yolo.dryRunSuffix') : '';
   return yoloRulesPayload.error
-    ? t('menu.yolo.errorDetail', {error: yoloRulesPayload.error})
+    ? t('menu.yolo.errorDetail', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)})
     : t('menu.yolo.statusDetail', {source, rules: countText, dryRun});
 }
 
@@ -353,10 +349,11 @@ async function reloadYoloRules() {
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
+    const errorText = userMessageText(payload, payload.error || '');
     statusEl.innerHTML = payload.error
-      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: payload.error})}</span>`
+      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: errorText})}</span>`
       : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
-    showToast(t('status.yoloToastTitle'), payload.error || yoloRuleStatusDetail(), {level});
+    showToast(t('status.yoloToastTitle'), errorText || yoloRuleStatusDetail(), {level});
   } catch (error) {
     statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
@@ -774,7 +771,7 @@ function appMenuTree() {
           detail: appShortcutText('P', {shift: true}),
         })],
         [
-          menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
+          menuCommand(t('menu.help.version', {version: bootstrap.version || ''}).trim(), null, {
             disabled: true,
             detail: bootstrap.versionCommitTime ? t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}) : '',
           }),
@@ -880,7 +877,21 @@ function renderSessionButtonsMeasured(options = {}) {
 function renderBrandWordmark() {
   for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
   for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
+  for (const brand of document.querySelectorAll('.brand-title')) {
+    brand.setAttribute('aria-label', t('brand.aria', {version: bootstrap.version || ''}));
+  }
   updateBrandTitles();
+}
+
+function renderTopbarStaticChrome() {
+  sessionButtons?.setAttribute('aria-label', t('app.menusAria'));
+  if (latencyMeter) latencyMeter.title = t('app.latencyTitle');
+  if (logoutButton) {
+    const label = t('menu.file.logout');
+    logoutButton.textContent = label;
+    logoutButton.title = label;
+    logoutButton.setAttribute('aria-label', label);
+  }
 }
 
 function createAppMenuBar() {
@@ -955,7 +966,7 @@ function createTopbarSearch() {
 function createTopbarLanguageSwitcher() {
   const pref = String(initialSetting('general.language', 'system'));
   const choices = i18nLocaleChoices();
-  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: 'Auto'};
+  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: t('pref.general.language.system')};
   const wrapper = createAppMenu({
     id: 'language',
     label: active.label,
@@ -970,7 +981,7 @@ function createTopbarLanguageSwitcher() {
         scheduleShareAppearancePublish();
         if (readOnlyMode) return;
         saveSettingsPatch(settingPatch('general.language', value))
-          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
       },
     })),
   });
@@ -1179,10 +1190,10 @@ function createAppMenuNumberSetting(item) {
     saveSettingsPatch(settingPatch(item.path, next))
       .then(() => {
         renderPreferencesPanels();
-        statusEl.textContent = `saved ${item.path}`;
+        statusEl.textContent = t('status.settingSaved', {path: item.path});
       })
       .catch(error => {
-        statusErr(localizedHtml('status.settingsSaveFailed', {error}));
+        statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
         refreshSettings({force: true});
       });
   });

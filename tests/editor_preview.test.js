@@ -70,6 +70,58 @@ function tmuxWindowButtonFromElement(root, index) {
 }
 
 async function runEditorPreviewSuite() {
+  test('Preferences identity and YO!agent job labels use shared locale-neutral classifiers', () => {
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const preferencesSource = fs.readFileSync('static_src/js/yolomux/82_preferences_panel.js', 'utf8');
+    const yoagentSource = fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8');
+    const en = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
+
+    const sectionIds = [...preferencesSource.matchAll(/\{id: PREFERENCE_SECTION_IDS\.(\w+), title:/g)].map(match => match[1]);
+    assert.deepStrictEqual(sectionIds, ['general', 'appearance', 'terminalEditor', 'notifications', 'fileExplorer', 'uploads', 'performance', 'github', 'yoagent', 'share', 'yolo'], 'every Preferences section has one stable ID owned by PREFERENCE_SECTION_IDS');
+    assert.ok(/function normalizeCollapsedPreferenceSections\(values, sections = \[\]\)[\s\S]*validIds[\s\S]*legacyTitleIds/.test(coreSource), 'collapsed Preferences state migrates legacy titles through one normalizer');
+    assert.ok(preferencesSource.includes('collapsedPreferenceSections.has(section.id)') && preferencesSource.includes('data-preference-section="${esc(section.id)}"'), 'Preferences rendering uses stable IDs rather than translated titles');
+    assert.equal(preferencesSource.includes("choices: ['fixed', 'sync']"), false, 'Finder root-mode choices do not use title-cased protocol values');
+    assert.equal(preferencesSource.includes("choices: ['same-tab', 'new-tab']"), false, 'image open-mode choices do not use title-cased protocol values');
+    assert.ok(preferencesSource.includes("suffix: t('unit.line.other')"), 'terminal scrollback uses the shared localized line unit');
+
+    assert.ok(/const YOAGENT_JOB_CLASSIFICATION_KEYS = Object\.freeze\([\s\S]*status:[\s\S]*type:/.test(yoagentSource), 'YO!agent job status and type labels share one classifier table');
+    assert.ok(/function yoagentJobClassificationText\(classification, value\)[\s\S]*YOAGENT_JOB_CLASSIFICATION_KEYS/.test(yoagentSource), 'YO!agent job rows resolve both classifications through one helper');
+    for (const key of [
+      'pref.file_explorer.root_mode.fixed', 'finder.toolbar.syncLabel',
+      'pref.file_explorer.image_open_mode.sameTab', 'pref.file_explorer.image_open_mode.newTab', 'unit.line.other',
+      'yoagent.jobs.status.queued', 'yoagent.jobs.status.fired', 'yoagent.jobs.status.failed', 'yoagent.jobs.status.cancelled',
+      'yoagent.jobs.type.notifySessionIdle', 'yoagent.jobs.type.notifySessionNeedsInput',
+      'yoagent.jobs.type.notifySessionBlocked', 'yoagent.jobs.type.notifySessionDoneAfterWorking',
+      'yoagent.jobs.type.notifyAllIdle', 'yoagent.jobs.type.waitThenSend', 'yoagent.jobs.type.resultWatch', 'yoagent.jobs.type.unknown',
+    ]) assert.equal(typeof en[key], 'string', `English catalog defines ${key}`);
+  });
+
+  test('shared popover labels resolve through the active locale', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
+    assert.ok(source.includes("const title = options.title || t('contextmenu.copyPath');"), 'path copy buttons reuse the shared localized Copy path label');
+    assert.ok(source.includes("const copyLabel = options.title || t('debug.copy');"), 'generic popover copy buttons reuse one localized Copy label');
+    assert.ok(source.includes("${esc(t('yoagent.emptyPerSession'))}"), 'empty per-session agent popovers reuse the localized empty-state label');
+    assert.ok(source.includes("tPlural('common.tabs', count)"), 'pane drag previews use the localized tab count');
+    assert.ok(source.includes("t('common.items', {count: normalizedPaths.length})"), 'multi-item file drags use the localized item count');
+    assert.ok(source.includes("t('common.more', {count: normalizedPaths.length - 4})"), 'file drag previews reuse the localized count-aware more label');
+    assert.ok(/function worktreePopoverValueHtml\(worktree\)[\s\S]*t\('popover\.worktreeOf'/.test(source), 'every worktree relation reuses one localized renderer');
+    assert.ok(source.includes("title: t('popover.copySessionId')") && source.includes("title: t('transcript.copyPath')"), 'transcript copy controls use localized tooltips');
+    assert.ok(source.includes("popoverRow(t('info.field.linear'), linearValue)") && source.includes("popoverRow(t('searchHistory.pr'), pullRequestPopoverRowHtml(session, pr))"), 'Linear and PR popover rows reuse shared localized field labels');
+    assert.ok(source.includes("t('state.workingFor', {duration: compactElapsedDurationText(elapsed)})"), 'agent working duration uses the localized state label');
+    assert.ok(source.includes("tPlural('status.openedFiles', opened, {name: basenameOf(paths[0])})"), 'drag-open status uses localized singular/plural text');
+    assert.equal(/['`]Copy path['`]|['`]Copy['`]|no AI agents in this tab|\$\{normalizedPaths\.length\} items|\+ \$\{normalizedPaths\.length - 4\} more|1 tab|\$\{count\} tabs|worktree of|Copy session ID|Copy transcript path|working for|popoverRow\('Linear'|popoverRow\('PR'|`opened /.test(source), false, 'product popover and drag paths contain no parallel raw-English copies');
+  });
+
+  test('Tabber and agent-window accessibility labels share localized state owners', () => {
+    const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
+    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(finderSource.includes("esc(t('tabber.empty'))"), 'Tabber empty state resolves through the active locale');
+    assert.ok(/function agentWindowActivityLabel\(agentKey, state, acknowledged = false\)[\s\S]*stateDef\(stateKey\)\.label[\s\S]*t\('state\.agentStatus'[\s\S]*t\('state\.statusAcknowledged'/.test(activitySource), 'agent-window aria labels share one locale-aware state-label helper');
+    assert.equal(/\$\{agentLabel\(kind\)\} (?:acknowledged|stopped|active)|\? 'acknowledged'/.test(activitySource), false, 'agent-window aria labels contain no parallel raw-English state composition');
+    assert.ok(terminalSource.includes("link.title = t('yoagent.openSession', {session});"), 'YO!agent session links use the localized open-session title');
+  });
+
   test('search history pane renders search results and compact runs', () => {
     const api = loadYolomux('', ['1']);
     api.setSearchHistoryStateForTest(
@@ -107,6 +159,290 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('data-run-history-session="1"'), 'run history rows are actionable');
     assert.ok(html.includes('please ship beta rollout'), 'run history prompts render');
     assert.ok(html.includes('beta rollout finished'), 'run history summaries render');
+  });
+
+  test('search history and transcript metadata resolve descriptors at render time', () => {
+    const api = loadYolomux('', ['1']);
+    api.i18nSetCatalogForTest('zz', {
+      'common.result': 'ZZ result',
+      'common.requestFailed': 'ZZ request failed',
+      'common.unknown': 'ZZ unknown',
+      'events.message.yolo.enabled': 'ZZ event enabled',
+      'pr.status.open': 'ZZ OPEN',
+      'searchHistory.detail': 'ZZ detail',
+      'searchHistory.ended': 'ZZ ended',
+      'searchHistory.emptyQuery': 'ZZ empty query',
+      'searchHistory.emptyResults': 'ZZ empty results',
+      'searchHistory.emptyRuns': 'ZZ empty runs',
+      'searchHistory.finalState': 'ZZ state',
+      'searchHistory.pr': 'ZZ PR',
+      'searchHistory.prompt': 'ZZ prompt',
+      'searchHistory.query.placeholder': 'ZZ query',
+      'searchHistory.refresh': 'ZZ refresh',
+      'searchHistory.results': 'ZZ results',
+      'searchHistory.error.discovery': 'ZZ discovery: {error}',
+      'searchHistory.runState.waiting': 'ZZ waiting',
+      'searchHistory.runHistory': 'ZZ runs',
+      'searchHistory.search': 'ZZ search',
+      'searchHistory.source.event': 'ZZ event source',
+      'searchHistory.started': 'ZZ started',
+      'searchHistory.summary': 'ZZ summary',
+      'state.done': 'ZZ done',
+      'transcript.itemHeader': '{role} ZZ ({meta})',
+      'transcript.contextLoadFailed': 'ZZ context failed: {error}',
+      'transcript.error.unavailable': 'ZZ transcript unavailable: {error}',
+      'transcript.role.assistant': 'ZZ assistant',
+    });
+    api.setActiveLocaleForTest('zz');
+    api.setSearchHistoryStateForTest(
+      'enabled',
+      {
+        query: 'enabled',
+        results: [{
+          session: '1',
+          source: 'event',
+          title: 'raw English title',
+          title_key: 'events.message.yolo.enabled',
+          title_params: {},
+          snippet: 'raw English snippet',
+          snippet_key: 'events.message.yolo.enabled',
+          snippet_params: {},
+          target: {type: 'events', session: '1', tab: 'events'},
+        }],
+      },
+      {
+        runs: [
+          {session: '1', final_state: 'done', pr: {number: 42, state: 'open'}},
+          {session: '2', final_state: 'waiting'},
+        ],
+        errors: [{
+          message: 'raw discovery diagnostic',
+          message_key: 'searchHistory.error.discovery',
+          message_params: {error: 'tmux down'},
+        }],
+      },
+    );
+
+    const html = api.searchHistoryPanelHtmlForTest();
+    const transcript = api.transcriptItemHtmlForTest({
+      role: 'assistant',
+      header: 'assistant (raw English)',
+      timestamp: '2026-07-02T01:02:03Z',
+      cwd: '/repo/demo',
+      text: 'content stays verbatim',
+    });
+
+    assert.ok(html.includes('ZZ event source'), 'search result source enum is localized');
+    assert.ok(html.includes('ZZ event enabled'), 'search result title/snippet descriptors resolve in the active locale');
+    assert.ok(html.includes('ZZ state: ZZ done'), 'run-history state reuses the shared localized state definition');
+    assert.ok(html.includes('ZZ state: ZZ waiting'), 'the run-history-only waiting enum resolves at render time');
+    assert.ok(html.includes('ZZ PR #42 ZZ OPEN'), 'run-history PR state reuses the shared PR status renderer');
+    assert.ok(html.includes('ZZ discovery: tmux down'), 'run-history discovery errors stay structured until panel render');
+    assert.equal(html.includes('raw English'), false, 'structured search results do not print raw fallback prose');
+    assert.equal(html.includes('raw discovery diagnostic'), false, 'structured run-history errors do not print raw diagnostic prose');
+    assert.ok(transcript.includes('ZZ assistant ZZ (2026-07-02T01:02:03Z, /repo/demo)'), 'transcript header metadata is rebuilt from structured fields in the active locale');
+    assert.equal(transcript.includes('assistant (raw English)'), false, 'legacy transcript header fallback does not override structured metadata');
+
+    const agentError = api.transcriptAgentErrorTextForTest({
+      error: 'raw transcript diagnostic',
+      error_key: 'transcript.error.unavailable',
+      error_params: {error: 'file missing'},
+    });
+    const contextError = api.transcriptContextLoadErrorTextForTest({
+      error: 'raw request diagnostic',
+      user_message: {
+        key: 'transcript.error.unavailable',
+        params: {error: 'stream missing'},
+        fallback: 'raw request diagnostic',
+      },
+    });
+    api.setTranscriptMetadataLoadErrorForTest({
+      error: 'raw metadata diagnostic',
+      user_message: {
+        key: 'transcript.error.unavailable',
+        params: {error: 'metadata missing'},
+        fallback: 'raw metadata diagnostic',
+      },
+    });
+    assert.equal(agentError, 'ZZ transcript unavailable: file missing', 'agent transcript discovery errors resolve through structuredMessageText');
+    assert.equal(contextError, 'ZZ context failed: ZZ transcript unavailable: stream missing', 'transcript API errors resolve through userMessageText before the localized context wrapper');
+    assert.equal(api.transcriptMetadataLoadErrorTextForTest(), 'ZZ transcript unavailable: metadata missing', 'metadata load errors retain their user-message descriptor');
+
+    api.i18nSetCatalogForTest('yy', {
+      'events.message.yolo.enabled': 'YY event enabled',
+      'searchHistory.source.event': 'YY event source',
+      'transcript.error.unavailable': 'YY transcript unavailable: {error}',
+    });
+    api.setActiveLocaleForTest('yy');
+    assert.ok(api.searchHistoryPanelHtmlForTest().includes('YY event enabled'), 'cached Search & Runs descriptors repaint in a second locale without refetching');
+    assert.equal(
+      api.transcriptAgentErrorTextForTest({error: 'raw', error_key: 'transcript.error.unavailable', error_params: {error: 'gone'}}),
+      'YY transcript unavailable: gone',
+      'cached transcript error descriptors repaint in a second locale without refetching',
+    );
+    assert.equal(api.transcriptMetadataLoadErrorTextForTest(), 'YY transcript unavailable: metadata missing', 'cached metadata-load descriptors repaint in a second locale without refetching');
+
+    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function refreshActivePanelHeaders[\s\S]*relocalizeTranscriptPanelStatus\(session\)/.test(terminalSource), 'the shared locale repaint hook refreshes persistent transcript error/status chrome');
+    assert.equal(terminalSource.includes('transcriptMetaLoadError = String(error)'), false, 'metadata errors are not frozen into already-localized prose');
+    assert.equal(/userMessageSnapshot\(error,\s*t\(/.test(terminalSource), false, 'transcript request failures do not cache a translated fallback in persistent state');
+  });
+
+  test('open file errors and YO!agent notification titles resolve in the current locale', () => {
+    const api = loadYolomux('', ['1']);
+    api.i18nSetCatalogForTest('file-a', {
+      'brand.tab.agent': 'Agent A',
+      'yoagent.job.notification.idle': 'Idle A: {session}',
+      'dialog.missingOnDisk': 'Missing A',
+      'editor.fileLoadFailed': 'Load failed A',
+      'editor.fileTooLargeDetail': 'Too large A: {size}/{limit}',
+      'fs.error.notDirectory': '{path} not a directory A',
+    });
+    api.i18nSetCatalogForTest('file-b', {
+      'brand.tab.agent': 'Agent B',
+      'yoagent.job.notification.idle': 'Idle B: {session}',
+      'dialog.missingOnDisk': 'Missing B',
+      'editor.fileLoadFailed': 'Load failed B',
+      'editor.fileTooLargeDetail': 'Too large B: {size}/{limit}',
+      'fs.error.notDirectory': '{path} not a directory B',
+    });
+    const loadError = api.fileErrorStateForTest();
+    const missingError = api.missingFileStateForTest();
+    const tooLargeError = api.tooLargeFileStateForTest(10);
+    const serverError = api.fileErrorStateForTest({
+      payload: {
+        error: 'raw English diagnostic',
+        user_message: {key: 'fs.error.notDirectory', params: {path: '/tmp/demo'}, fallback: 'raw English diagnostic'},
+      },
+    });
+    const localized = () => ({
+      load: api.fileErrorTextForTest(loadError.error, 'editor.fileLoadFailed'),
+      missing: api.fileErrorTextForTest(missingError.error, 'editor.fileLoadFailed'),
+      tooLarge: api.fileErrorTextForTest(tooLargeError.error, 'editor.fileTooLargeDetail', {size: '10 B', limit: '5 B'}),
+      server: api.fileErrorTextForTest(serverError.error, 'editor.fileLoadFailed'),
+      notification: api.yoagentJobNotificationTitleForTest({}),
+      notificationBody: api.yoagentJobNotificationBodyForTest({
+        body: 'raw English fallback',
+        body_key: 'yoagent.job.notification.idle',
+        body_params: {session: '6'},
+      }),
+    });
+
+    api.setActiveLocaleForTest('file-a');
+    assert.deepStrictEqual(canonical(localized()), {
+      load: 'Load failed A',
+      missing: 'Missing A',
+      tooLarge: 'Too large A: 10 B/5 B',
+      server: '/tmp/demo not a directory A',
+      notification: 'Agent A',
+      notificationBody: 'Idle A: 6',
+    });
+    api.setActiveLocaleForTest('file-b');
+    assert.deepStrictEqual(canonical(localized()), {
+      load: 'Load failed B',
+      missing: 'Missing B',
+      tooLarge: 'Too large B: 10 B/5 B',
+      server: '/tmp/demo not a directory B',
+      notification: 'Agent B',
+      notificationBody: 'Idle B: 6',
+    }, 'cached descriptors repaint in the second locale without refetching or rebuilding state');
+
+    const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    const editorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
+    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function renderErrorEditor[\s\S]*fileErrorText\(state\.error/.test(editorSource), 'file error panes resolve their stored descriptor at render time');
+    assert.equal(/fileErrorState\([^)]*t\(/.test(fileSource), false, 'file error state constructors do not receive translated fallback prose');
+    assert.ok(/function yoagentJobNotificationTitle\([^)]*\)[\s\S]*t\('brand\.tab\.agent'\)/.test(terminalSource), 'YO!agent notifications reuse the current localized brand key');
+    assert.equal(terminalSource.includes("notification.title || 'YO!agent'"), false, 'YO!agent notifications have no parallel ASCII brand fallback');
+  });
+
+  await testAsync('settings and file-transfer failures resolve shared structured user messages', async () => {
+    const api = loadYolomux('', ['1']);
+    api.i18nSetCatalogForTest('failure-test', {
+      'common.requestFailed': 'REQUEST-T',
+      'fileTransfer.failed': 'TRANSFER-T',
+      'fileTransfer.failedTitle': 'TRANSFER TITLE-T',
+      'status.copyFailed': 'COPY-T {error}',
+      'status.themeSaveFailed': 'THEME-T {error}',
+      'test.transferDenied': 'DENIED-T {name}',
+      'test.settingsDenied': 'SETTINGS-T {name}',
+    });
+    api.setActiveLocaleForTest('failure-test');
+    const toasts = [];
+    api.setShowToastForTest((title, lines) => {
+      toasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
+      return new TestElement('failure-toast');
+    });
+    let clipboardWrites = 0;
+    api.setClipboardForTest({write: async () => { clipboardWrites += 1; }}, class {
+      constructor(parts) { this.parts = parts; }
+    });
+    api.setFetchForTest(async () => jsonResponse({
+      error: 'raw copy diagnostic',
+      user_message: {key: 'test.transferDenied', params: {name: 'image'}, fallback: 'raw copy diagnostic'},
+    }, 403));
+    await api.copyImageFileToClipboardForTest('/repo/image.png');
+    assert.equal(clipboardWrites, 0, 'copy-image stops before clipboard write when the raw-file response is not OK');
+    assert.equal(toasts.at(-1).lines[0], 'DENIED-T image', 'copy-image HTTP errors use the shared response/user-message resolver');
+
+    api.setFetchForTest(async () => ({
+      ...jsonResponse({}, 200),
+      headers: {get: () => 'attachment; filename="file.txt"'},
+      blob: async () => { throw {payload: {error: 'raw blob diagnostic', user_message: {key: 'test.transferDenied', params: {name: 'blob'}}}}; },
+    }));
+    await api.triggerFileDownloadForTest('/repo/file.txt');
+    assert.equal(toasts.at(-1).lines[0], 'DENIED-T blob', 'download blob failures stay inside the shared file-transfer error path');
+
+    api.setFetchForTest(async () => ({
+      ...jsonResponse({}, 200),
+      headers: {get: () => 'attachment; filename="folder.zip"'},
+      blob: async () => ({size: 4}),
+    }));
+    api.setSaveBlobDownloadForTest(() => { throw {payload: {error: 'raw save diagnostic', user_message: {key: 'test.transferDenied', params: {name: 'save'}}}}; });
+    await api.triggerFolderZipDownloadForTest('/repo/folder');
+    assert.equal(toasts.at(-1).lines[0], 'DENIED-T save', 'zip save failures stay inside the same shared file-transfer error path');
+
+    let settingsRequestCount = 0;
+    api.setFetchForTest(async () => {
+      settingsRequestCount += 1;
+      if (settingsRequestCount === 1) {
+        return jsonResponse({
+          error: 'raw settings diagnostic',
+          user_message: {key: 'test.settingsDenied', params: {name: 'theme'}, fallback: 'raw settings diagnostic'},
+        }, 403);
+      }
+      return jsonResponse({settings: {}, defaults: {}});
+    });
+    await api.applyAndSaveGlobalThemeForTest('dark');
+    assert.ok(api.statusHtmlForTest().includes('THEME-T SETTINGS-T theme'), 'settings catches interpolate the localized structured message instead of the raw Error object');
+    assert.equal(api.statusHtmlForTest().includes('raw settings diagnostic'), false, 'settings catches do not leak raw backend diagnostics when a descriptor is available');
+
+    const settingsSources = [
+      'static_src/js/yolomux/20_layout_state.js',
+      'static_src/js/yolomux/30_app_menus.js',
+      'static_src/js/yolomux/80_info_panel.js',
+      'static_src/js/yolomux/90_changes_editor.js',
+    ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
+    assert.equal(/status\.(?:settingsSaveFailed|settingsResetFailed|themeSaveFailed)', \{error\}\)/.test(settingsSources), false, 'settings save/reset/theme catches have no raw Error interpolation path');
+  });
+
+  test('Differ repo issues resolve descriptors at render time', () => {
+    const api = loadYolomux('', ['1']);
+    api.i18nSetCatalogForTest('zz', {'diff.warning.refsFallback': 'ZZ fallback for {repo}'});
+    api.setActiveLocaleForTest('zz');
+
+    const html = api.repoComparisonErrorHtmlForTest({
+      repo: '/repo/demo',
+      error: 'raw English fallback',
+      error_message: {
+        key: 'diff.warning.refsFallback',
+        params: {repo: 'demo'},
+        fallback: 'raw English fallback',
+      },
+    });
+
+    assert.ok(html.includes('ZZ fallback for demo'), 'Differ resolves the structured repo issue in the active locale');
+    assert.equal(html.includes('raw English fallback'), false, 'Differ does not print the raw diagnostic when a translation exists');
   });
 
   test('Markdown preview HTML bgcolor callouts adapt to editor theme', () => {
@@ -504,14 +840,24 @@ async function runEditorPreviewSuite() {
     const missingHtml = api.fileEditorPaneTabHtml(fileItem);
     assert.ok(missingHtml.includes('file-tab-missing-badge'), 'missing file tabs show a badge');
     assert.ok(missingHtml.includes('a.png'), 'missing file tabs still show the basename');
-    assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('file state unknown'), true);
-    assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
+    const networkErrorStatus = api.openFileStatus({kind: 'text', externalError: 'network down'});
+    assert.equal(networkErrorStatus.message, `${api.t('dialog.unableLoadDisk')}: network down`, 'file-state errors use the shared localized disk-load message');
+    assert.equal(networkErrorStatus.message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
     assert.equal(
       api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/docs/preview-samples/03-mixed.md'),
-      'outside allowed root (HTTP 403)',
-      'file inspection preserves the backend reason and HTTP status before falling back to the generic path message',
+      'outside allowed root',
+      'file inspection resolves the structured backend reason through the shared user-message parent',
     );
-    assert.equal(api.openFileStatus({kind: 'text', externalError: 'outside allowed root (HTTP 403)'}).message.includes('outside allowed root (HTTP 403)'), true);
+    assert.equal(api.openFileStatus({kind: 'text', externalError: 'outside allowed root'}).message.includes('outside allowed root'), true);
+    api.i18nSetCatalogForTest('fs-message-test', {'fs.error.outsideRoot': 'LOCALIZED outside {path}'});
+    api.setActiveLocaleForTest('fs-message-test');
+    assert.equal(api.fileInspectionErrorMessageForTest({
+      payload: {
+        error: 'raw English outside-root diagnostic',
+        user_message: {key: 'fs.error.outsideRoot', params: {path: '/repo/file.txt'}},
+      },
+      status: 403,
+    }, '/repo/file.txt'), 'LOCALIZED outside /repo/file.txt', 'file inspection prefers the shared structured user-message descriptor over raw backend diagnostics');
   });
 
   test('t@6274', () => {
@@ -543,7 +889,7 @@ async function runEditorPreviewSuite() {
     assert.equal(readonlyState.renameDisabled, true);
     assert.equal(readonlyState.deleteDisabled, true);
     const actionSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
-    assert.ok(actionSource.includes("if (entry?.kind === 'dir')") && actionSource.includes("'Zip & download'"), 'Zip & download is appended only from the folder branch of the shared Finder context menu');
+    assert.ok(actionSource.includes("if (entry?.kind === 'dir')") && actionSource.includes("t('contextmenu.zipDownload')"), 'Zip & download is appended from the folder branch through the shared locale key');
   });
 
   test('t@6296', () => {
@@ -1855,7 +2201,7 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('sessionTabDescription(session, transcriptMeta.sessions?.[session])'), 'session attention notifications include the same concise description used by tabs');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}'), false, 'attention notifications drop verbose host-prefixed titles');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${message}'), false, 'watched-PR browser notifications drop verbose host-prefixed titles');
-    assert.ok(source.includes("compactNotificationTitle(sessionLabel(session), 'terminal', {inApp: true})"), 'terminal connection toasts use the shared in-app title path without redundant external app context');
+    assert.ok(source.includes("compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true})"), 'terminal connection toasts use the shared localized in-app title path without redundant external app context');
     assert.ok(source.includes("showToast(hostNotificationTitle(t('notify.testToastTitle'), {inApp: true})"), 'the in-page notification test uses the shared context-free toast title path');
     assert.ok(source.includes("sendBrowserNotification(t('notify.testTitle', {host: serverHostname})"), 'the browser-to-OS notification test keeps the branded host title');
     assert.ok(source.includes('function renderBrowserAppIconDataUrl(options = {})'), 'favicon and OS notifications share one app-icon renderer');
@@ -2077,7 +2423,7 @@ async function runEditorPreviewSuite() {
     assert.equal(branchList.includes('info-branch-current'), false, 'popover branch list drops the redundant current label');
     assert.ok(/branch-name"><span class="ci-indicator tab-symbol branch-indicator[^"]*">MAIN<\/span>[\s\S]*branch-meta">[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<\/span>/.test(branchList), 'popover branch list mirrors MAIN and merged PR chips for the current branch');
     assert.equal(branchList.includes('<div class="branch-subject">ci: Update the dep'), false, 'popover branch list suppresses the current branch subject when it duplicates the header title');
-    assert.ok(/popover-chip-link[\s\S]*pr-number-chip[^>]*>#10075<\/span>[\s\S]*meta-pr-status pr-status-passing[^>]*>PASSING/.test(branchList), 'popover branch list shows non-current PR numbers as chips while keeping meaningful status text');
+    assert.ok(/popover-chip-link[\s\S]*pr-number-chip[^>]*>#10075<\/span>[\s\S]*meta-pr-status pr-status-passing[^>]*>CI passing/.test(branchList), 'popover branch list shows non-current PR numbers as chips while keeping the shared localized CI status text');
     assert.ok(branchList.includes('<div class="branch-subject">feat: add InternLM tool parser parity</div>'), 'popover branch list keeps non-current branch subjects because they add detail');
 
     const blockedHtml = api.tmuxPaneTabHtml('4', info, {key: 'blocked', short: 'Blocked', label: 'Blocked', reason: 'blocked command'}, false);
@@ -2157,6 +2503,11 @@ async function runEditorPreviewSuite() {
     api.applyServerMetadataPulsesForTest('8', {status: 20000});
     const mergedPulseHtml = api.tmuxPaneTabHtml('8', mergedInfo, {key: 'idle'}, true);
     assert.ok(mergedPulseHtml.includes('pr-number-chip pr-status-merged metadata-pulse'), 'merged #number chip pulses after status change');
+    const mergedComposite = {number: 120, merged: true, status_label: 'open · CI failing', checks: {state: 'failure'}};
+    assert.equal(api.pullRequestCiState(mergedComposite), '', 'merged PR facts suppress stale composite CI labels');
+    assert.equal(api.pullRequestStatusClass(mergedComposite), 'pr-status-merged', 'merged PR facts win the shared lifecycle class');
+    assert.equal(api.pullRequestInlineStatusDisplay(mergedComposite), '', 'merged PR inline status stays consolidated into the number chip');
+    assert.equal(api.pullRequestChecksHtml(mergedComposite), '', 'merged PRs suppress stale checks HTML');
 
     [
       {session: '9', number: 13, state: 'failure', statusLabel: 'CI failing', statusClass: 'pr-status-failing', pulse: true, label: 'failing open PR'},
@@ -2176,6 +2527,66 @@ async function runEditorPreviewSuite() {
       if (pulse) assert.ok(ciHtml.includes('metadata-pulse'), `${label} CI badge is marked after CI change`);
       if (state !== 'unknown') assertSingleCiBadge(ciHtml, label);
     });
+    const structuredCi = {number: 17, status_label: 'CI failing', checks: {state: 'passing'}};
+    assert.equal(api.pullRequestCiState(structuredCi), 'passing', 'structured checks.state wins over a stale PR-level CI label');
+    assert.equal(api.pullRequestCiStatus(structuredCi).text, api.t('pr.ci.passing'), 'the shared CI classifier localizes the winning structured state');
+    assert.ok(api.pullRequestChecksHtml(structuredCi).includes(`>${api.t('pr.ci.passing')}<`), 'popover checks consume the same shared localized CI status');
+    const labelOnlyCi = {number: 18, status_label: 'CI pending'};
+    assert.equal(api.pullRequestCiState(labelOnlyCi), 'pending', 'PR-level CI labels remain a fallback when no checks object exists');
+    assert.ok(api.pullRequestChecksHtml(labelOnlyCi).includes(`>${api.t('pr.ci.pending')}<`), 'popover checks render a PR-level pending label without a checks object');
+    const mergedCompositeCi = {number: 20, merged: true, status_label: 'open · CI failing', checks: {state: 'failure'}};
+    assert.equal(api.pullRequestCiState(mergedCompositeCi), '', 'merged lifecycle facts suppress stale composite CI labels');
+    assert.equal(api.pullRequestCiStatus(mergedCompositeCi), null, 'merged PRs expose no shared CI status');
+    assert.equal(api.pullRequestStatusDisplay(mergedCompositeCi), api.t('pr.status.merged'), 'merged lifecycle facts win over stale composite status text');
+    assert.equal(api.pullRequestChecksHtml(mergedCompositeCi), '', 'merged PR popovers omit stale CI checks');
+    const mergedCompositeHtml = api.tmuxPaneTabHtml('13', {
+      project: {git: {branch: 'feature'}, pull_request: mergedCompositeCi},
+    }, {key: 'idle'}, true);
+    assert.ok(mergedCompositeHtml.includes('pr-number-chip pr-status-merged'), 'merged PR number chips retain the merged class with stale composite status text');
+    assert.equal(mergedCompositeHtml.includes('pr-status-failing'), false, 'merged PR tabs do not leak the stale failing CI class');
+    for (const [state, key, className] of [
+      ['success', 'pr.ci.passing', 'pr-status-passing'],
+      ['failure', 'pr.ci.failing', 'pr-status-failing'],
+      ['pending', 'pr.ci.pending', 'pr-status-pending'],
+    ]) {
+      const pr = {number: 19, status_label: `CI ${state}`, checks: {state}};
+      const ci = api.pullRequestCiStatus(pr);
+      assert.equal(ci.text, api.t(key), `${state} resolves through the shared locale key`);
+      assert.equal(ci.className, className, `${state} resolves through the shared CSS class`);
+      assert.equal(api.pullRequestStatusDisplay(pr), ci.text, `${state} lifecycle display consumes the shared CI classifier`);
+      assert.ok(api.pullRequestChecksHtml(pr).includes(`class="meta-pr-status ${className}">${ci.text}<`), `${state} checks HTML consumes the same text and class`);
+    }
+    const prSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    assert.equal(prSource.includes('checks.summary ||'), false, 'PR UI no longer renders raw server summary text');
+    assert.equal(/function infoPullRequestCiText/.test(infoSource), false, 'YO!info no longer carries a parallel CI text classifier');
+    for (const [source, name] of [
+      [infoSource, 'infoPullRequestCiClass'],
+      [prSource, 'pullRequestCiStatusClass'],
+      [fileSource, 'apiErrorMessage'],
+      [fileSource, 'transferErrorMessageFromResponse'],
+    ]) {
+      assert.equal((source.match(new RegExp(`function ${name}\\(`, 'g')) || []).length, 0, `${name} parallel classifier/resolver is removed`);
+    }
+    const parityPr = {number: 20, url: 'https://example.test/pull/20', title: 'CI parity', status_label: 'CI failing', checks: {state: 'failure'}};
+    const parityCi = api.pullRequestCiStatus(parityPr);
+    const parityInfo = {
+      project: {
+        git: {root: '/repo/ci-parity', branch: 'feature/ci', other_branches: {branches: [{name: 'feature/ci', current: true, pull_request: parityPr}]}},
+        pull_request: parityPr,
+      },
+      selected_pane: {current_path: '/repo/ci-parity'},
+    };
+    const projectMeta = api.projectMetaHtml('ci-parity', parityInfo, {fullText: true});
+    assert.ok(projectMeta.includes(`meta-pr-status ${parityCi.className}">${parityCi.text}<`), 'project metadata consumes the shared CI text/class pair');
+    api.setTranscriptSessionOrderForTest(['ci-parity']);
+    api.setTranscriptInfoForTest('ci-parity', parityInfo);
+    const parityRecord = api.infoRelationshipRecords().find(record => record.prNumber === 20);
+    assert.equal(parityRecord?.prCiText, parityCi.text, 'YO!info records consume the shared CI text');
+    assert.equal(parityRecord?.prCiClass, parityCi.className, 'YO!info records consume the shared CI class');
+    const parityInfoHtml = api.infoTreeHtmlForTest([parityRecord], ['path']);
+    assert.ok(parityInfoHtml.includes(`${parityCi.className}`) && parityInfoHtml.includes(`>${parityCi.text}<`), 'YO!info rendering preserves the same shared CI text/class pair as project metadata and checks HTML');
     api.setAutoApproveStateForTest('4', {agent_windows: [
       {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
       {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
@@ -2260,7 +2671,10 @@ async function runEditorPreviewSuite() {
     const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
     for (const file of localeFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
-      assert.ok(catalog['popover.tmuxSession']?.includes('{label}'), `${file} localizes popover.tmuxSession and preserves {label}`);
+      assert.ok(catalog['brand.share'], `${file} localizes brand.share`);
+      assert.ok(catalog['common.readOnly'], `${file} localizes common.readOnly`);
+      assert.ok(catalog['common.result'], `${file} localizes common.result`);
+      assert.ok(catalog['common.tmuxSession']?.includes('{label}'), `${file} localizes common.tmuxSession and preserves {label}`);
       assert.ok(catalog['popover.tmuxWindow']?.includes('{label}'), `${file} localizes popover.tmuxWindow and preserves {label}`);
       assert.ok(catalog['popover.sessionId'], `${file} localizes popover.sessionId`);
     }
@@ -2436,7 +2850,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
     assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-api-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API line and legend share the API series color');
     assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE line and legend share the distinct SSE series color');
-    assert.ok(/\.js-debug-line--apiSseTotal\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--js-debug-api-sse-total-series\)\)/.test(debugPaneCss), 'YO!stats combined all-client API+SSE uses one shared distinct series color');
+    assert.ok(/\.js-debug-line--apiSseTotal\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--bad\)\)/.test(debugPaneCss), 'YO!stats combined all-client API+SSE reuses the shared red status color');
     assert.ok(/\.js-debug-line--cpu\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--cpu\s*\{[\s\S]*color:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss), 'YO!stats per-server CPU lines and legends consume their shared series color');
     assert.ok(/\.js-debug-line--systemCpu\s*\{[\s\S]*stroke:\s*var\(--bad\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--systemCpu\s*\{[\s\S]*color:\s*var\(--bad\)/.test(debugPaneCss), 'YO!stats system CPU uses the red warning color');
     assert.ok(/\.js-debug-chart\s*\{[\s\S]*border:\s*1px solid color-mix\(in srgb, var\(--line\) 88%, transparent\)[\s\S]*border-radius:\s*6px/.test(debugPaneCss), 'YO!stats encloses each graph in a clear bordered chart box');
@@ -2631,8 +3045,8 @@ async function runEditorPreviewSuite() {
     assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-line="solid"/, 'the current browser uses a solid API line');
     assert.match(html, /data-js-debug-series="client:all-clients-total:apiSseTotal"[^>]*data-js-debug-client-line="dot"/, 'all browsers share one dotted combined API+SSE total line');
     assert.equal(html.includes('client:all-clients-total:api"') || html.includes('client:all-clients-total:sse"'), false, 'separate all-client API and SSE total lines are removed');
-    assert.match(html, /data-js-debug-series="client:other-clients-average:latency"[^>]*data-js-debug-client-line="dash"/, 'other browsers share one dashed average latency line');
-    assert.match(html, /data-js-debug-series="client:other-clients-average:bandwidth"[^>]*data-js-debug-client-line="dash"/, 'other browsers share one dashed average bandwidth line');
+    assert.match(html, /data-js-debug-series="client:other-clients-average:latency"[^>]*data-js-debug-client-line="dot"/, 'other browsers share one dotted average latency line');
+    assert.match(html, /data-js-debug-series="client:other-clients-average:bandwidth"[^>]*data-js-debug-client-line="dot"/, 'other browsers share one dotted average bandwidth line');
     assert.equal(/data-js-debug-series="client:client-(?:alpha|beta|gamma):/.test(html), false, 'individual peer lines are not rendered');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
@@ -2818,6 +3232,82 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('data-js-debug-x-tick="start"') && html.includes('data-js-debug-x-tick="mid"') && html.includes('data-js-debug-x-tick="end"'), 'split charts render start/mid/end time ticks on the X axis');
   });
 
+  test('YO!stats and every YO brand string localize in both Chinese catalogs', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const english = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+    const now = Date.now();
+    const thisClientId = api.jsDebugStatsClientIdForRequestForTest();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 91,
+      records: [{
+        start: Math.floor((now - 500) / 1000),
+        duration: 1,
+        sequence: 91,
+        api_count: 3,
+        sse_count: 2,
+        latency_total_ms: 12,
+        latency_count: 1,
+        bandwidth_bytes: 4096,
+        cpu_total_percent: 10,
+        cpu_count: 1,
+        system_cpu_total_percent: 20,
+        system_cpu_count: 1,
+        clients: {
+          [thisClientId]: {api_count: 3, sse_count: 2, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 4096},
+          'client-peer': {api_count: 4, sse_count: 1, latency_total_ms: 24, latency_count: 1, bandwidth_bytes: 2048},
+        },
+      }],
+    });
+    const escaped = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    for (const locale of ['zh-Hant', 'zh-Hans']) {
+      const catalog = JSON.parse(fs.readFileSync(`static/locales/${locale}.json`, 'utf8'));
+      api.i18nSetCatalogForTest(locale, catalog);
+      api.setActiveLocaleForTest(locale);
+      const glyph = locale === 'zh-Hant' ? '優' : '优';
+      assert.equal(catalog['tab.debug'], `${glyph}!${locale === 'zh-Hant' ? '統計' : '统计'}`, `${locale} localizes the YO!stats tab name`);
+      assert.equal(Object.entries(catalog).filter(([, value]) => String(value).includes('YO')).length, 0, `${locale} contains no untranslated Latin YO brand strings`);
+      for (const key of ['legend.section.agentStatus', 'legend.section.colors', 'legend.section.icons', 'legend.section.yo', 'shortcuts.section.menus', 'shortcuts.finderDiffer.openSelected']) {
+        assert.notEqual(catalog[key], english[key], `${locale} localizes Help key ${key}`);
+      }
+      const helpHtml = api.keyboardShortcutsHtml();
+      for (const key of ['legend.section.agentStatus', 'legend.section.colors', 'legend.section.icons', 'legend.section.yo', 'shortcuts.section.menus', 'shortcuts.finderDiffer.openSelected']) {
+        assert.ok(helpHtml.includes(escaped(catalog[key])), `${locale} Help renders ${key}`);
+      }
+      assert.ok(helpHtml.includes(`session-yolo-marker inactive">${glyph}</span>`), `${locale} Help reuses the localized YO marker glyph`);
+      assert.equal(/Agent status glyphs|Color meanings|Icon meanings|YO button meanings|Menus, palettes, and pickers|Open selected file or folder/.test(helpHtml), false, `${locale} Help leaks no English section or action labels`);
+      const html = api.debugPanelHtmlForTest();
+      for (const key of [
+        'tab.debug',
+        'debug.graph.chart.clientLatency',
+        'debug.graph.chart.clientApiSse',
+        'debug.graph.chart.clientBandwidth',
+        'debug.graph.chart.agentStatus',
+        'debug.graph.chart.agentTokens',
+        'debug.graph.series.systemCpu',
+        'debug.graph.series.allClientsApiSseTotal',
+        'debug.graph.control.bucketSize',
+        'debug.graph.control.timeRange',
+      ]) {
+        assert.ok(html.includes(escaped(catalog[key])), `${locale} YO!stats renders ${key}`);
+      }
+      assert.equal(/Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|All agents total|sum of tokens from displayed|Graph bucket size|Graph time range/.test(html), false, `${locale} YO!stats leaks no graph-label English`);
+    }
+    const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
+    const tabTypesSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.ok(/function relocalizeMountedPanels\(options = \{\}\)[\s\S]*tabTypeForItem\(item\)\?\.relocalize[\s\S]*relocalize\(item, panel, options\)/.test(i18nSource), 'mounted panes relocalize through their shared TAB_TYPES hook');
+    assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*relocalizeMountedPanels\(options\)[\s\S]*localeGlobalSurfaceHooks\.forEach\(run => run\(options\)\)/.test(i18nSource), 'a runtime language change dispatches through the mounted-pane and global-surface registries');
+    assert.ok(/const localeGlobalSurfaceHooks[\s\S]*relocalizeKeyboardShortcutsOverlay\(\)/.test(i18nSource), 'the cached Help overlay is registered as shared global locale chrome');
+    assert.ok(/key:\s*'debug'[\s\S]*relocalize:\s*\(_item, panel\) => \{[\s\S]*renderDebugPanels\(\{force: true\}\)[\s\S]*relocalizeDebugPanelChrome\(panel\)/.test(tabTypesSource), 'YO!stats owns its body and chrome relocalization through TAB_TYPES');
+    const virtualPanelSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+    const statsPanelSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(/function relocalizeVirtualPanelChrome\(panel, label = ''\)[\s\S]*data-pane-minimize[\s\S]*data-pane-expand[\s\S]*panel-session-label/.test(virtualPanelSource), 'persistent virtual panels share one chrome relocalization parent');
+    assert.ok(/function relocalizeInfoPanelChrome[\s\S]*relocalizeVirtualPanelChrome\(panel, infoTabLabel\(\)\)/.test(infoPanelSource), 'YO!info reuses shared virtual-panel chrome localization');
+    assert.ok(/function relocalizeYoagentPanelChrome[\s\S]*relocalizeVirtualPanelChrome\(panel, yoagentTabLabel\(\)\)/.test(infoPanelSource), 'YO!agent reuses shared virtual-panel chrome localization');
+    assert.ok(/function relocalizeDebugPanelChrome[\s\S]*relocalizeVirtualPanelChrome\(panel, t\('tab\.debug'\)\)/.test(statsPanelSource), 'YO!stats reuses shared virtual-panel chrome localization');
+  });
+
   test('YO!stats rounds graph Y-axis labels to clean unit steps', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
@@ -2920,7 +3410,9 @@ async function runEditorPreviewSuite() {
     assert.ok(Math.abs(peers('bandwidth').values.at(-1) - (400 / 3)) < 1e-9, 'peer bandwidth average includes zero-valued peer records');
     assert.equal(totalSeries[0].values.at(-1), 20, 'combined API+SSE sums this client and every peer, including zeros');
     assert.equal(totalSeries[0].clientLinePattern, 'dot', 'the combined all-client total uses the dotted line pattern');
-    assert.equal(totalSeries[0].color, 'var(--js-debug-api-sse-total-series)', 'the combined total owns a distinct shared color token');
+    assert.equal(totalSeries[0].color, 'var(--bad)', 'the combined total reuses the shared red status color');
+    assert.ok(peerSeries.every(series => series.clientLinePattern === 'dot'), 'every peer comparison uses the dotted line pattern');
+    assert.equal(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8').includes('.js-debug-line--client-dash'), false, 'YO!stats no longer ships a dashed client comparison variant');
   });
 
   test('YO!stats graph omits the peer average when no other client exists', () => {
@@ -3550,7 +4042,7 @@ async function runEditorPreviewSuite() {
     const api = loadYolomux('', ['4', '5', '6']);
     const baseInfo = {selected_pane: {current_path: '/repo'}, project: {git: {root: '/repo'}}};
     const noAgentHtml = api.sessionPopoverHtml('4', {...baseInfo, agents: []}, '', false);
-    assert.ok(noAgentHtml.includes('no AI agents in this tab'), '0-agent tabs render a clear empty line');
+    assert.ok(noAgentHtml.includes(api.t('yoagent.emptyPerSession')), '0-agent tabs render the shared localized empty line');
 
     const now = Date.now() / 1000;
     const multiInfo = {
@@ -3564,9 +4056,8 @@ async function runEditorPreviewSuite() {
       ],
     });
     const multiText = api.sessionPopoverHtml('5', multiInfo, 'claude', false).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    const workingMatch = /0:claude\s+—\s+working for 2m 38s/.exec(multiText);
+    const workingIndex = multiText.indexOf(`0:claude — ${api.t('state.workingFor', {duration: '2m 38s'})}`);
     const idleMatch = /1:codex(?:\s+○)?\s+—\s+5 min ago/.exec(multiText);
-    const workingIndex = workingMatch?.index ?? -1;
     const idleIndex = idleMatch?.index ?? -1;
     assert.ok(workingIndex >= 0, 'working row uses the live status-counter elapsed');
     assert.ok(idleIndex > workingIndex, 'working agents render before idle agents and idle agents use recency text');
@@ -3625,7 +4116,7 @@ async function runEditorPreviewSuite() {
     const parityPopoverHtml = api.sessionPopoverHtml('5', parityInfo, 'claude', false);
     const parityPopoverText = parityPopoverHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
     assert.ok(/1:claude \(pid=222\)(?:\s+○)?\s+—\s+1 hr ago/.test(parityPopoverText), 'popover keeps the active tmux sub-window row current while showing idle transcript recency');
-    assert.ok(parityPopoverText.includes('0:codex (pid=111) — working for 1m 5s'), 'non-focused window keeps its own working state');
+    assert.ok(parityPopoverText.includes(`0:codex (pid=111) — ${api.t('state.workingFor', {duration: '1m 5s'})}`), 'non-focused window keeps its own localized working state');
     assert.equal((parityPopoverHtml.match(/session-agent-row[^"]*current/g) || []).length, 1, 'popover marks exactly one agent window current');
     assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('5', parityInfo)), ['1'], 'tmux sub-window bar marks the active tmux sub-window');
     const parityRows = api.tabberRenderedRowsForTest();
@@ -3650,7 +4141,7 @@ async function runEditorPreviewSuite() {
       agent_windows: [{kind: 'codex', state: 'working', working_elapsed_seconds: 3720, window_index: 0, window_name: 'codex', window_label: '0:codex'}],
     });
     const singleText = api.sessionPopoverHtml('6', {...baseInfo, agents: [{kind: 'codex'}]}, 'codex', false).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(singleText.includes('0:codex — working for 1h 02m'), '1-agent tabs use the shared compact elapsed formatter with the window label');
+    assert.ok(singleText.includes(`0:codex — ${api.t('state.workingFor', {duration: '1h 02m'})}`), '1-agent tabs use the shared localized compact elapsed formatter with the window label');
 
     const perWindowInfo = {
       selected_pane: {current_path: '/repo/selected-session-path'},
@@ -3754,7 +4245,7 @@ async function runEditorPreviewSuite() {
     assert.ok(searchFields.includes('DeepSeek V4 validation'), 'tab search fields include Linear titles from issue objects');
     assert.ok(detail.includes('GH-2132__reasoning-dangling-end-marker'), 'tab menu detail includes fuller branch name');
     assert.ok(detail.includes('~/project/project3'), 'tab menu detail includes compact path');
-    const prFailingLabel = api.t('pr.status.failing');
+    const prFailingLabel = api.t('pr.ci.failing');
     assert.ok(detail.includes(`#9981 ${prFailingLabel}`), 'tab menu detail includes localized PR and status');
     assert.ok(detail.includes('GH-2132'), 'tab menu detail includes Linear identifier');
     const linearIndex = detail.indexOf('GH-2132', detail.indexOf('~/project/project3'));
@@ -3894,8 +4385,8 @@ async function runEditorPreviewSuite() {
       },
     });
     const [row] = api.infoBranchRows();
-    assert.equal(row.pathLabel, '~/yolomux.dev3 (worktree of ~/yolomux)', 'YO!info path shows the compact full path and its worktree parent');
-    assert.equal(row.pathTitle, '/home/test/yolomux.dev3 (worktree of /home/test/yolomux)', 'YO!info path tooltip keeps the absolute path and parent');
+    assert.equal(row.pathLabel, '~/yolomux.dev3 — worktree of ~/yolomux', 'YO!info path shows the compact full path and its worktree parent');
+    assert.equal(row.pathTitle, '/home/test/yolomux.dev3 — worktree of /home/test/yolomux', 'YO!info path tooltip keeps the absolute path and parent');
   });
 
   test('t@info-branch-worktree-path-identity', () => {
@@ -3948,14 +4439,14 @@ async function runEditorPreviewSuite() {
     assert.deepStrictEqual([...rows.keys()].sort(), ['/repo/main\nbug-10719', '/repo/wt-bug-10719\nbug-10719']);
     assert.deepStrictEqual(canonical(rows.get('/repo/main\nbug-10719').tabAgents.map(item => item.label)), ['parent / no AI'], 'parent checkout keeps its own Tab/AI owner');
     assert.deepStrictEqual(canonical(rows.get('/repo/wt-bug-10719\nbug-10719').tabAgents.map(item => item.label)), ['linked / 0:codex'], 'linked worktree keeps its own Tab/AI owner');
-    assert.equal(rows.get('/repo/wt-bug-10719\nbug-10719').pathLabel, '/repo/wt-bug-10719 (worktree of /repo/main)', 'linked worktree displays the checkout path and parent context');
+    assert.equal(rows.get('/repo/wt-bug-10719\nbug-10719').pathLabel, '/repo/wt-bug-10719 — worktree of /repo/main', 'linked worktree displays the checkout path and parent context');
 
     const relationshipKeys = api.infoRelationshipRecords()
       .filter(record => record.branchKey === 'bug-10719')
       .map(record => `${record.pathKey}|${record.tabLabel}|${record.aiLabel}`)
       .sort();
     assert.deepStrictEqual(canonical(relationshipKeys), [
-      '/repo/main|parent|no AI',
+      `/repo/main|parent|${api.t('info.missing.ai')}`,
       '/repo/wt-bug-10719|linked|0:codex',
     ], 'YO!info relationship records use the checkout path, not the shared parent root, as Path identity');
   });
@@ -4235,7 +4726,7 @@ async function runEditorPreviewSuite() {
     assert.equal(appMainRecord?.tabLabel, 'tab-a', 'YO!info keeps the bare session identity separate from the displayed work description');
     assert.equal(Object.hasOwn(appMainRecord, 'tabWorkDescription'), false, 'YO!info relationships do not carry a parallel Tab detail that can drift from the shared tab renderer');
     assert.equal(appMainRecord?.prLifecycleText, 'OPEN', 'YO!info relationship records carry explicit Open lifecycle status');
-    assert.equal(appMainRecord?.prCiText, 'CI error', 'YO!info relationship records carry CI status separately from PR description');
+    assert.equal(appMainRecord?.prCiText, api.t('pr.ci.failing'), 'YO!info relationship records carry the shared localized CI status separately from PR description');
     assert.equal(appMainRecord?.aiState, 'working', 'YO!info relationship records carry agent-window state for activity dots');
     assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'feature linked').map(record => `${record.tabLabel}|${record.branchLabel}|${record.prTitle}`)), [
       'tab-a|feature/app|#11 App feature PR linked through path',
@@ -4440,15 +4931,15 @@ async function runEditorPreviewSuite() {
     api.setInfoTreeGroupCollapsedForTest(appPathGroupKey, false);
     const prGroupHtml = api.infoTreeHtmlForTest(records, ['pr'], {key: 'name', dir: 'asc'});
     assert.ok(/<span class="info-tree-group-dimension">GitHub PR:<\/span>[\s\S]*<span class="info-tree-group-label info-tree-group-label-pr">[\s\S]*>#10<\/a>[\s\S]*App main PR full description/.test(prGroupHtml), 'YO!info PR group headers render as PR: #number description');
-    assert.ok(/<span class="info-tree-group-dimension">GitHub PR:<\/span>[\s\S]*<span class="info-tree-group-label info-tree-group-label-pr">None<\/span>/.test(prGroupHtml), 'YO!info missing PR group headers render as PR: None');
+    assert.ok(prGroupHtml.includes(`<span class="info-tree-group-dimension">${api.t('info.field.githubPr')}:</span>`) && prGroupHtml.includes(`<span class="info-tree-group-label info-tree-group-label-pr">${api.t('info.group.none')}</span>`), 'YO!info missing PR group headers render through the shared localized field and empty labels');
     const linearGroupHtml = api.infoTreeHtmlForTest(missingSortRecords, ['linear', 'pr'], {key: 'name', dir: 'asc'});
-    assert.ok(/<span class="info-tree-group-dimension">Linear:<\/span>[\s\S]*<span class="info-tree-group-label info-tree-group-label-linear">None<\/span>/.test(linearGroupHtml), 'YO!info missing Linear group headers render as Linear: None');
+    assert.ok(linearGroupHtml.includes(`<span class="info-tree-group-dimension">${api.t('info.field.linear')}:</span>`) && linearGroupHtml.includes(`<span class="info-tree-group-label info-tree-group-label-linear">${api.t('info.group.none')}</span>`), 'YO!info missing Linear group headers render through the shared localized field and empty labels');
     const pathOnlyHtml = api.infoTreeHtmlForTest(records, ['path']);
     assert.equal((pathOnlyHtml.match(/info-tree-field-path/g) || []).length, 0, 'YO!info hides path rows when Path is already the parent group');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Git branch:</span>') && pathOnlyHtml.includes('feature/app') && pathOnlyHtml.includes('lib-main'), 'YO!info leaf rows show labeled Git branch identities when Branch is not already supplied by an ancestor group');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">GitHub PR:</span>') && pathOnlyHtml.includes('#11') && pathOnlyHtml.includes('App feature PR linked through path'), 'YO!info leaf rows show labeled PR descriptions when a PR exists');
     assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path/.test(pathOnlyHtml), 'YO!info generated rows make the PR number clickable and render the PR description after it');
-    assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/10"[\s\S]*>#10<\/a>[\s\S]*App main PR full description[\s\S]*ci-indicator tab-symbol pr-status-open[\s\S]*OPEN[\s\S]*ci-indicator tab-symbol pr-status-failing[\s\S]*CI error/.test(pathOnlyHtml), 'YO!info PR rows reuse the same compact status badges as tabs beside the full description');
+    assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/10"[\s\S]*>#10<\/a>[\s\S]*App main PR full description[\s\S]*ci-indicator tab-symbol pr-status-open[\s\S]*OPEN[\s\S]*ci-indicator tab-symbol pr-status-failing[\s\S]*CI failing/.test(pathOnlyHtml), 'YO!info PR rows reuse the same localized compact status badges as tabs beside the full description');
     assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path[\s\S]*ci-indicator tab-symbol pr-status-merged[\s\S]*MERGED/.test(pathOnlyHtml), 'YO!info PR rows reuse the shared purple merged badge');
     assert.ok(/<span class="info-tree-field-label">Linear:<\/span>[\s\S]*<a href="https:\/\/linear\.test\/DYN-10"[\s\S]*>DYN-10<\/a>[\s\S]*Main Linear description/.test(pathOnlyHtml), 'YO!info generated rows make the Linear identifier clickable and render the Linear description after it');
     assert.ok(pathOnlyHtml.includes('data-info-open-tab="tab-a"') && pathOnlyHtml.includes('data-info-open-ai-window="0"'), 'YO!info Tab and AI fields are actionable links to the owning tab/window');
@@ -4794,9 +5285,12 @@ async function runEditorPreviewSuite() {
       generated_at: '2026-05-31T12:00:00+00:00',
       global: {
         headline: "Your most recent work is about editor fixes, and you are currently making changes to yolomux.dev in order to finish editor fixes. So far: 3 files changed (+9/-2); 1 of 2 AI agents is active.",
+        detail_lines: ['Resume the highest-priority editor fix next.'],
+        session_lines: ['tmux session alpha: raw per-session detail'],
         lines: [
           "Your most recent work is about editor fixes, and you are currently making changes to yolomux.dev in order to finish editor fixes. So far: 3 files changed (+9/-2); 1 of 2 AI agents is active.",
-          'Session alpha: Codex is active in yolomux.dev; 2 files changed (+8/-1); editor fixes',
+          'Resume the highest-priority editor fix next.',
+          'tmux session alpha: raw per-session detail',
         ],
       },
       sessions: {
@@ -4824,7 +5318,8 @@ async function runEditorPreviewSuite() {
     assert.equal(/data-yoagent-backend[\s\S]*<option value="codex"/.test(claudeOnlyHtml), false, 'Composer hides unavailable backends');
     api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
     assert.ok(api.globalActivitySummaryHtml().includes('YO!agent'), 'global activity summary uses the YO agent label');
-    assert.equal(api.globalActivitySummaryHtml().includes('Session alpha'), false, 'YO!agent default panel does not expose the per-session SESSION detail list');
+    assert.ok(api.globalActivitySummaryHtml().includes('Resume the highest-priority editor fix next.'), 'YO!agent global summary renders explicit global detail_lines');
+    assert.equal(api.globalActivitySummaryHtml().includes('tmux session alpha: raw per-session detail'), false, 'YO!agent global summary omits explicit session_lines without classifying localized prose');
     api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
     assert.equal(api.yoagentChatHtml().includes('Your most recent work is about editor fixes'), false, 'Claude-backed YO!agent does not auto-inject Recent agents until the startup one-shot is enabled');
     assert.equal(api.showYoagentStartupInfoOnceForTest(), true, 'YO!agent startup info can be shown once when the tab first opens');
@@ -4959,6 +5454,12 @@ async function runEditorPreviewSuite() {
     const jobsHtml = api.yoagentChatHtml();
     assert.ok(jobsHtml.includes('yoagent-jobs-list'), 'YO!agent jobs render as a visible queue in the chat history');
     assert.equal((jobsHtml.match(/class="yoagent-job-item/g) || []).length, 5, 'queued, pending, fired, failed, and cancelled jobs render as separate rows');
+    for (const status of ['pending confirmation', 'queued', 'fired', 'failed', 'cancelled']) {
+      assert.ok(jobsHtml.includes(`class="yoagent-job-status">${status}</span>`), `YO!agent localizes the ${status} job status`);
+    }
+    assert.ok(jobsHtml.includes('wait, then send') && jobsHtml.includes('watch for result'), 'YO!agent localizes job types through the shared classifier');
+    assert.equal(jobsHtml.includes('wait_then_send'), false, 'YO!agent does not expose raw job type protocol values');
+    assert.equal(jobsHtml.includes('result_watch'), false, 'YO!agent does not expose raw result-watch protocol values');
     assert.ok(jobsHtml.includes('data-yoagent-job-confirm="job-confirm"'), 'pending-confirmation jobs expose a confirm control');
     assert.ok(jobsHtml.includes('data-yoagent-job-cancel="job-confirm"'), 'pending-confirmation jobs expose a cancel control');
     assert.ok(jobsHtml.includes('data-yoagent-job-cancel="job-queued"'), 'queued jobs expose a cancel control');
@@ -5026,45 +5527,72 @@ async function runEditorPreviewSuite() {
     api.setYoagentMessagesForTest([
       {
         role: 'assistant',
-        content: 'Done',
+        content: '',
         createdAt: '2026-06-13T17:42:00Z',
-        details: 'usage: {"cache_creation":{"input_tokens":123}}',
-        auxiliaryPreview: 'usage: {"cache_creation":{"input_tokens":123}}',
+        streamItems: [
+          {kind: 'assistant', text: 'Done'},
+          {kind: 'diagnostic', text: 'usage: {"cache_creation":{"input_tokens":123}}', labelKey: 'yoagent.stream.usage', fallback: 'usage'},
+        ],
+        detailRows: [
+          {key: 'yoagent.details.responseTime', params: {seconds: '1.000', milliseconds: '1000.0'}, fallback: 'response time: 1.000s (1000.0ms)'},
+        ],
       },
     ]);
     const usageOnlyHtml = api.yoagentChatHtml();
     const usageOnlySummary = usageOnlyHtml.match(/<summary>[\s\S]*?<\/summary>/)?.[0] || '';
-    assert.ok(/<summary><span>details…<\/span><\/summary>/.test(usageOnlyHtml), 'YO!agent diagnostic-only details collapse to just details…');
-    assert.ok(/<pre class="yoagent-safe-details">usage:/.test(usageOnlyHtml), 'YO!agent usage diagnostics remain visible inside the expanded details body');
+    assert.ok(/<summary><span>usage…<\/span><\/summary>/.test(usageOnlyHtml), 'YO!agent structured usage items use their descriptor label in the collapsed summary');
+    assert.ok(/<pre class="yoagent-auxiliary-stream">usage:/.test(usageOnlyHtml), 'YO!agent structured usage diagnostics remain visible inside the expanded stream item');
+    assert.ok(usageOnlyHtml.includes('response time:') && usageOnlyHtml.includes('1.000s') && usageOnlyHtml.includes('1000.0ms'), 'YO!agent structured detailRows render independently of stream item text');
     assert.equal(usageOnlySummary.includes('usage:'), false, 'YO!agent usage diagnostics do not leak into the collapsed summary preview');
     api.setYoagentMessagesForTest([
       {
         role: 'assistant',
-        content: 'Done',
+        content: '',
         createdAt: '2026-06-13T17:42:01Z',
-        details: '- response time: `1.000s` (`1000.0ms`)',
-        auxiliaryLines: ['thinking: reading activity context'],
-        auxiliaryPreview: 'thinking: reading activity context',
+        streamItems: [
+          {kind: 'assistant', text: 'Done'},
+          {kind: 'thinking', text: 'reading activity context', labelKey: 'yoagent.stream.thinking', fallback: 'thinking'},
+        ],
+        detailRows: [
+          {key: 'yoagent.details.responseTime', params: {seconds: '1.000', milliseconds: '1000.0'}, fallback: 'response time: 1.000s (1000.0ms)'},
+        ],
       },
     ]);
     const thinkingPreviewHtml = api.yoagentChatHtml();
-    assert.ok(thinkingPreviewHtml.includes('<summary><span>thinking (4 words)…</span></summary>'), 'completed YO!agent thinking details collapse to a count-only summary');
+    assert.ok(thinkingPreviewHtml.includes('<summary><span>thinking (3 words)…</span></summary>'), 'completed structured thinking items collapse to a count-only summary');
     assert.equal(thinkingPreviewHtml.includes('yoagent-details-preview'), false, 'completed YO!agent thinking details do not keep preview words in the collapsed summary');
-    assert.ok(thinkingPreviewHtml.includes('<pre class="yoagent-auxiliary-stream">thinking: reading activity context</pre>'), 'expanded completed YO!agent thinking details keep the real thinking text');
+    assert.ok(thinkingPreviewHtml.includes('<pre class="yoagent-auxiliary-stream">reading activity context</pre>'), 'expanded structured thinking items keep the real thinking text without an English classifier prefix');
+    assert.ok(thinkingPreviewHtml.includes('response time:') && thinkingPreviewHtml.includes('1.000s') && thinkingPreviewHtml.includes('1000.0ms'), 'structured timing detailRows remain visible beside thinking stream items');
     api.setYoagentBusyForTest(false);
     api.setYoagentDraftForTest('half typed question');
     assert.ok(api.yoagentChatHtml().includes('value="half typed question"'), 'YO!agent chat draft survives summary refresh re-renders');
     api.setYoagentErrorForTest("Couldn't reach the YOLOmux server. Your question is still in the box; retry after the server is back.");
     assert.ok(api.yoagentChatHtml().includes('data-yoagent-retry'), 'YO!agent network failures show a retry action without losing the draft');
-    api.setYoagentErrorForTest('');
-    api.setYoagentNoticeForTest({backend: 'claude', reason: 'Claude CLI is not logged in. Run `claude login`.'});
-    assert.ok(api.yoagentChatHtml().includes('yoagent-chat-notice'), 'YO!agent chat surfaces backend fallback notices');
-    assert.ok(api.yoagentChatHtml().includes('claude'), 'YO!agent fallback notice includes the backend');
-    assert.ok(api.yoagentChatHtml().includes('claude login'), 'YO!agent fallback notice includes the login action');
+    api.i18nSetCatalogForTest('yoagent-a', {
+      'yoagent.test.error': 'Error A: {reason}',
+      'yoagent.test.fallback': 'Fallback A: {reason}',
+      'yoagent.noAnswer': 'No answer A',
+    });
+    api.i18nSetCatalogForTest('yoagent-b', {
+      'yoagent.test.error': 'Error B: {reason}',
+      'yoagent.test.fallback': 'Fallback B: {reason}',
+      'yoagent.noAnswer': 'No answer B',
+    });
+    api.setYoagentErrorForTest({key: 'yoagent.test.error', params: {reason: 'offline'}, fallback: 'raw English error'});
+    api.setYoagentNoticeForTest({backend: '', reason: {key: 'yoagent.test.fallback', params: {reason: 'login'}, fallback: 'raw English fallback'}});
+    api.setYoagentMessagesForTest([{role: 'assistant', content: '', content_key: 'yoagent.noAnswer', content_params: {}}]);
+    api.setActiveLocaleForTest('yoagent-a');
+    const descriptorStateHtmlA = api.yoagentChatHtml();
+    assert.ok(descriptorStateHtmlA.includes('Error A: offline') && descriptorStateHtmlA.includes('Fallback A: login') && descriptorStateHtmlA.includes('No answer A'), 'YO!agent error, fallback notice, and no-answer descriptors resolve in the first locale');
+    api.setActiveLocaleForTest('yoagent-b');
+    const descriptorStateHtmlB = api.yoagentChatHtml();
+    assert.ok(descriptorStateHtmlB.includes('Error B: offline') && descriptorStateHtmlB.includes('Fallback B: login') && descriptorStateHtmlB.includes('No answer B'), 'the same YO!agent descriptor state relocalizes in the second locale');
+    assert.equal(/raw English (?:error|fallback)/.test(descriptorStateHtmlB), false, 'YO!agent descriptor state does not expose raw English fallbacks when the active catalog resolves them');
     assert.ok(api.globalActivitySummaryHtml().includes('3 files changed (+9/-2)'), 'global activity summary renders file totals');
     assert.ok(api.globalActivitySummaryHtml().includes('data-yoagent-global-markdown'), 'global activity summary preserves markdown as escaped fallback until the render pass');
     assert.ok(api.globalActivitySummaryHtml().includes('Your most recent work is about editor fixes'), 'global activity summary renders a human sentence');
-    assert.equal(api.globalActivitySummaryHtml().includes('Session alpha'), false, 'global activity summary omits per-session detail lines');
+    assert.ok(api.globalActivitySummaryHtml().includes('Resume the highest-priority editor fix next.'), 'global activity summary renders only explicit global detail lines');
+    assert.equal(api.globalActivitySummaryHtml().includes('tmux session alpha: raw per-session detail'), false, 'global activity summary does not render explicit per-session lines');
     assert.equal(api.sessionActivitySummary('alpha').local, "Codex session alpha is active in yolomux.dev. It has been working on editor fixes. It currently has 2 files changed (+8/-1).");
     api.setTranscriptInfoForTest('alpha', {
       project: {
@@ -5202,6 +5730,32 @@ async function runEditorPreviewSuite() {
     for (let i = 0; i < 4; i += 1) await flushAsyncWork();
     assert.deepStrictEqual(chatPosts, ['second ask'], 'queued ask is sent only after the pending wait clears');
     assert.deepStrictEqual(canonical(api.yoagentChatQueueForTest()), [], 'sent ask is removed from the queue');
+  });
+
+  await testAsync('a forced locale-change activity refresh is not blocked by silent mode', async () => {
+    const requests = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({
+        generated_at: '2026-07-02T12:00:00Z',
+        global: {headline: 'localized headline', detail_lines: ['localized detail'], session_lines: []},
+        sessions: {},
+        agents: [],
+      }));
+    });
+    api.setActiveLocaleForTest('locale-b');
+
+    await api.refreshActivitySummaryForTest({force: true, silent: true});
+    assert.equal(requests.length, 0, 'ordinary silent refresh remains a watch-root-only no-op');
+
+    await api.refreshActivitySummaryForTest({force: true, silent: true, localeChange: true});
+    assert.equal(requests.length, 1, 'locale change performs exactly one forced refresh even when status UI is silent');
+    const request = new URL(requests[0], 'http://localhost');
+    assert.equal(request.pathname, '/api/activity-summary');
+    assert.equal(request.searchParams.get('force'), '1');
+    assert.equal(request.searchParams.get('locale'), 'locale-b');
+    assert.equal(request.searchParams.get('scope'), 'all');
   });
 
   test('t@6976', () => {
@@ -6415,13 +6969,16 @@ async function runEditorPreviewSuite() {
     assert.ok(/function yoagentRecentAgentsMessageHtml\(\)[\s\S]*yoagentRecentAgentsHtml\(payload\)[\s\S]*yoagent-message assistant yoagent-recent-agents-message/.test(src), 'YO!agent recent agents are wrapped as an assistant response for the startup one-shot');
     assert.ok(/let yoagentStreamingMessages = new Map\(\)/.test(src), 'YO!agent keeps transient streaming assistant messages in chat state');
     assert.ok(/function yoagentStreamingMessagesList\(\)[\s\S]*yoagentStreamingMessages\.values/.test(src), 'YO!agent exposes streamed assistant deltas as renderable messages');
-    assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*hidden_thinking_removed[\s\S]*raw model thinking was hidden/.test(src), 'YO!agent stream events expose safe thinking diagnostics without raw chain-of-thought');
-    assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*auxiliary_lines[\s\S]*auxiliaryPreview[\s\S]*auxiliaryText[\s\S]*auxiliaryTruncated/.test(src), 'YO!agent stream payloads keep auxiliary thinking/tool lines separate from assistant content');
+    assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*payload\.stream_items[\s\S]*yoagentStreamItems[\s\S]*detailRows\.push\(\{key: 'yoagent\.details\.hiddenThinking'/.test(src), 'YO!agent stream events retain structured streamItems and safe descriptor detailRows without raw chain-of-thought');
+    assert.ok(/function yoagentStreamItems\(message\)[\s\S]*\['assistant', 'thinking', 'tool', 'diagnostic'\][\s\S]*labelKey[\s\S]*labelParams/.test(src), 'one structured stream-item normalizer owns assistant/thinking/tool/diagnostic classification');
     assert.ok(src.includes("'yoagent_stream_delta'"), 'YO!agent subscribes to streaming SSE events');
     assert.ok(/function yoagentChatMessagesHtml\(\)[\s\S]*const startupInfo = yoagentStartupInfoVisible \? yoagentStartupInfoHtml\(\) : '';[\s\S]*return `\$\{messageHtml\}\$\{startupInfo\}`;/.test(src), 'YO!agent startup info is state-gated instead of always appended after messages');
     assert.ok(/function showYoagentStartupInfoOnce\(\)[\s\S]*captureYoagentStartupActivitySummarySnapshot\(\)[\s\S]*yoagentStartupInfoVisible = true/.test(src), 'YO!agent startup info freezes the activity snapshot when it is printed');
     assert.ok(/function showYoagentStartupInfoForLatestActivity\(\)[\s\S]*resetYoagentStartupActivitySummarySnapshot\(\)[\s\S]*yoagentStartupInfoShown = false[\s\S]*showYoagentStartupInfoOnce\(\)/.test(src), 'YO!agent can intentionally re-show the latest activity snapshot after clearing conversation');
     assert.ok(/function applyActivitySummaryPayloadFromPush\(payload = \{\}, options = \{\}\)[\s\S]*options\.refreshStartupSnapshot === true[\s\S]*captureYoagentStartupActivitySummarySnapshot\(\{replace: true\}\)/.test(src), 'activity-summary pushes are cache-only unless an explicit refresh requests a new startup snapshot');
+    assert.ok(/function activitySummaryGlobalDetailLines\(summary\)[\s\S]*summary\.detail_lines/.test(src), 'YO!agent global summary consumes the explicit global detail-line field');
+    const globalSummaryRenderer = src.slice(src.indexOf('function activitySummaryGlobalDetailLines('), src.indexOf('function yoagentStreamingMessagesList('));
+    assert.equal(/\^Session|session_lines/.test(globalSummaryRenderer), false, 'YO!agent global summary does not classify localized session prose or render explicit session_lines');
     assert.ok(/async function prewarmYoagent\(options = \{\}\)[\s\S]*visible: shouldRequestStartupAnswer[\s\S]*applyYoagentConversationPayload\(payload\.conversation/.test(src), 'YO!agent prewarm asks for one visible startup LLM answer and applies the saved conversation');
     assert.ok(/async function clearYoagentConversation\(\)[\s\S]*yoagentPrewarmStarted = false[\s\S]*showYoagentStartupInfoForLatestActivity\(\)[\s\S]*refreshActivitySummary\(\{force: true, silent: true\}\)[\s\S]*showYoagentStartupInfoForLatestActivity\(\)/.test(src), 'Clear conversation resets prewarm and re-renders the refreshed latest activity snapshot');
     assert.equal(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*if \(messages\.length\) hideYoagentStartupInfo\(\)/.test(src), false, 'YO!agent real conversation payloads keep the startup Recent agents block');
@@ -6458,11 +7015,12 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-message-body\s*\{[\s\S]*overflow-x:\s*visible[\s\S]*overflow-y:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent message bodies leave vertical wheel scrolling to the chat history owner');
     assert.ok(/function yoagentTimestampText[\s\S]*second:\s*'2-digit'/.test(src), 'YO!agent chat timestamps include seconds');
     assert.ok(/function yoagentMessageLatencyHtml[\s\S]*yoagent-message-latency[\s\S]*yoagent\.responseLatency/.test(src), 'YO!agent assistant timestamps include a localized response-latency suffix');
-    assert.ok(/function yoagentMessageDetailsHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'YO!agent assistant diagnostics render as an expandable details block with a stable message key');
-    assert.ok(/function yoagentAuxiliaryLineIsDiagnostic[\s\S]*usage:[\s\S]*response time/.test(src), 'YO!agent collapsed details filter diagnostics out of auxiliary previews');
-    assert.ok(/function yoagentMessageDetailsHtml[\s\S]*yoagentThinkingDetailsPreview[\s\S]*yoagentDetailsPreviewHtml[\s\S]*yoagent-auxiliary-stream[\s\S]*yoagent-details-note/.test(src), 'YO!agent assistant diagnostics render active thinking preview, expanded stream, and truncation note');
-    assert.ok(/function yoagentToolLineHtml[\s\S]*yoagent-tc-command/.test(src), 'YO!agent tool-call lines wrap executed commands in a dedicated command span');
-    assert.ok(/t\('yoagent\.toolCall\.label'\)/.test(src), 'YO!agent tool-call details use the localized "tool call" label instead of TC');
+    assert.ok(/function yoagentStreamAuxiliaryItemHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'structured YO!agent stream diagnostics render as expandable items with stable keys');
+    assert.ok(/function yoagentMessageDetailRowsHtml\(message\)[\s\S]*messageDescriptorText\(row\)/.test(src), 'structured YO!agent detailRows resolve descriptors only when rendered');
+    assert.ok(/function yoagentMessageStreamItemsHtml[\s\S]*item\.kind === 'assistant'[\s\S]*yoagentStreamAuxiliaryItemHtml/.test(src), 'structured streamItems select assistant versus auxiliary renderers from stable kinds');
+    assert.ok(/function yoagentToolItemBodyHtml[\s\S]*yoagent-tc-command/.test(src), 'structured tool items wrap executed commands in the shared command span');
+    assert.ok(/const descriptorLabel = messageDescriptorText\(\{key: item\.labelKey, params: item\.labelParams, fallback: item\.fallback\}\)/.test(src), 'stream-item labels resolve their descriptors instead of matching English prefixes');
+    assert.ok(/function yoagentMessageDetailsHtml[\s\S]*auxiliaryLines/.test(src), 'legacy persisted auxiliary strings remain readable through the compatibility renderer');
     assert.ok(/\.yoagent-tc-command\s*\{[\s\S]*color:\s*var\(--code-function\)/.test(css), 'YO!agent tool-call command span has a distinct themed color');
     assert.ok(/function refreshYoagentSummaryRegions[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent summary refresh preserves expanded Details blocks');
     assert.ok(/function renderYoagentPanel[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*node\.innerHTML = yoagentChatHtml\(\);[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent full chat rerenders preserve expanded Details blocks');
@@ -6746,7 +7304,7 @@ async function runEditorPreviewSuite() {
     const api = loadYolomux('', ['1']);
     api.setActiveLocaleForTest('en');
     const html = api.preferencesPanelHtmlForTest('');
-    assert.ok(/data-preference-section="Terminal \/ Editor"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Terminal / Editor preferences');
+    assert.ok(/data-preference-section="terminal_editor"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Terminal / Editor preferences');
     assert.ok(html.includes('Preview font size'), 'preview font size preference has a label');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);"), 'preview font size defaults one larger than editor font during bootstrap');
@@ -6829,11 +7387,13 @@ async function runEditorPreviewSuite() {
   test('t@7423', () => {
     // Phase 1: the topbar language switcher + system-locale resolution.
     const api = loadYolomux('', ['1']);
-    // Explicit prefs resolve to themselves; 'system' (no navigator.language in the harness) falls back to en.
+    // Explicit prefs and the server-resolved system locale both come from the bootstrap registry.
     assert.equal(api.resolveLocalePref('zh-Hant'), 'zh-Hant', 'Phase 1: an explicit locale pref resolves to itself');
     assert.equal(api.resolveLocalePref('zh-Hans'), 'zh-Hans', 'Phase 1: Simplified Chinese resolves to itself');
     assert.equal(api.resolveLocalePref('en'), 'en', 'Phase 1: English resolves to itself');
     assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
+    assert.equal(api.i18nNormalizeLocale('PT-br'), 'pt-BR', 'registry normalization canonicalizes case variants');
+    assert.equal(api.i18nNormalizeLocale('../../outside'), 'en', 'registry normalization rejects unsupported/path-shaped locale values');
     // The switcher choices: system + shipped locales in product-priority order + pseudo, endonym-labeled.
     const choices = api.i18nLocaleChoices();
     assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'ja', 'ko', 'es', 'de', 'fr', 'it', 'pt-BR', 'pl', 'nl', 'he', 'ar', 'ru', 'hi', 'vi', 'th', 'tr', 'en-XA'], 'Phase 1/2/4: the locale choices are ordered with all shipped locales then pseudo');
@@ -6857,11 +7417,16 @@ async function runEditorPreviewSuite() {
     // applyLocale flips document.dir; the build CSS uses logical flow properties so RTL mirrors.
     const rtlSrc = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/document\.documentElement\.setAttribute\('dir', i18nIsRtl\(next\) \? 'rtl' : 'ltr'\)/.test(rtlSrc), 'Phase 2: applyLocale sets the document direction for RTL locales');
-    // A language switch must repaint the Finder's static toolbar chrome, not just panel bodies — so
-    // rerenderForLocale rebuilds the Finder panel from source (fixes stale prev-locale toolbar labels).
-    assert.ok(/function rerenderForLocale[\s\S]*?relocalizeFileExplorerPanels\(\)/.test(rtlSrc), 'rerenderForLocale rebuilds the Finder toolbar chrome on a language switch');
-    assert.ok(/function relocalizeFileExplorerPanels\(\)[\s\S]*?removePanelForItem\(fileExplorerItemId\)[\s\S]*?dockviewRemountPanel\(fileExplorerItemId\)[\s\S]*?renderPanels\(/.test(rtlSrc), 'relocalizeFileExplorerPanels evicts then remounts the Finder panel through its shared renderer');
-    assert.ok(/function dockviewRemountPanel\(item\)[\s\S]*?getPanel\?\.\(item\)[\s\S]*?updateParameters/.test(rtlSrc), 'Dockview panel replacement reuses the registered renderer update path when the layout signature is unchanged');
+    // A language switch must repaint Finder's static toolbar chrome through the same TAB_TYPES
+    // relocalization registry as every other mounted pane.
+    const i18nRegistrySource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
+    const tabTypesSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const finderLocaleSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    const dockviewLocaleSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    assert.ok(/key:\s*'files'[\s\S]*relocalize:\s*\(\) => relocalizeFileExplorerPanels\(\)/.test(tabTypesSource), 'Finder registers its locale repaint with TAB_TYPES');
+    assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*relocalizeMountedPanels\(options\)[\s\S]*localeGlobalSurfaceHooks\.forEach/.test(i18nRegistrySource), 'rerenderForLocale uses shared locale registries instead of a Finder-specific branch');
+    assert.ok(/function relocalizeFileExplorerPanels\(\)[\s\S]*?removePanelForItem\(fileExplorerItemId\)[\s\S]*?dockviewRemountPanel\(fileExplorerItemId\)[\s\S]*?renderPanels\(/.test(finderLocaleSource), 'relocalizeFileExplorerPanels evicts then remounts the Finder panel through its shared renderer');
+    assert.ok(/function dockviewRemountPanel\(item\)[\s\S]*?getPanel\?\.\(item\)[\s\S]*?updateParameters/.test(dockviewLocaleSource), 'Dockview panel replacement reuses the registered renderer update path when the layout signature is unchanged');
     const rtlCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.equal(/(^|[^-])(margin|padding|border)-(left|right):/m.test(rtlCss.replace(/[a-z-]*-(left|right)-radius/g, '')), false, 'Phase 2: flow-spacing CSS uses logical (inline) properties, not physical left/right, so RTL mirrors');
     assert.ok(rtlCss.includes('margin-inline-start:') && rtlCss.includes('padding-inline-start:'), 'Phase 2: the CSS uses logical inline properties');
@@ -6877,10 +7442,10 @@ async function runEditorPreviewSuite() {
     const src = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\)/.test(src), 'Phase 1: the topbar renders the language switcher');
     assert.ok(/function createTopbarLanguageSwitcher[\s\S]*?applyLocale\(resolveLocalePref\(value\)\)[\s\S]*?saveSettingsPatch\(settingPatch\('general\.language', value\)\)/.test(src), 'Phase 1: the switcher applies the locale optimistically AND saves general.language (same setting as Preferences)');
-    assert.ok(/function rerenderForLocale[\s\S]*?renderSessionButtons\(\{force: true\}\)/.test(src), 'Phase 1: a real locale switch force-repaints the topbar labels after selection');
+    assert.ok(/const localeGlobalSurfaceHooks[\s\S]*renderSessionButtons\(\{force: true\}\)/.test(i18nRegistrySource), 'Phase 1: the topbar registers its forced locale repaint with the shared global-surface hooks');
     assert.ok(src.includes("active.matches?.('select, input, .topbar-language, .app-menu-button')") && /function renderSessionButtons[\s\S]*?topbarControlIsActive\(\)/.test(src), 'the topbar does not rebuild while a topbar control is focused/open');
-    // The zh fallback mapping (zh-TW/HK/Hant -> Hant, other zh -> Hans).
-    assert.ok(/nav\.startsWith\('zh'\)\) return \/hant\|/.test(src), 'Phase 1: system maps Chinese browser locales to Hant/Hans');
+    assert.ok(/function resolveLocalePref\(pref\)[\s\S]*i18nLocaleRegistry\.systemLocale/.test(src), 'Phase 1: system uses the server-resolved locale from the shared registry');
+    assert.equal(/navigator\.language|nav\.startsWith\('zh'\)/.test(i18nRegistrySource), false, 'the client carries no parallel browser-language classifier');
     assert.ok(/share\.ttl_seconds[\s\S]*suffix:\s*t\('unit\.minute\.short'\)/.test(src), 'YO!share Preferences minute suffix is localized');
     assert.ok(/function tmuxSessionNameError\(name\)[\s\S]*rename\.error\.required[\s\S]*rename\.error\.tooLong[\s\S]*rename\.error\.invalidChars/.test(src), 'session rename validation errors use locale keys');
     assert.ok(/function dropActionDisplayLabel\(action\)[\s\S]*action\.labelKey[\s\S]*t\(action\.labelKey\)/.test(src), 'drop action display labels use locale keys while canonical labels remain stable');
@@ -6947,10 +7512,13 @@ async function runEditorPreviewSuite() {
     assert.ok(/function openDraggedFilesInEditor[\s\S]*?if \(draggedState && !draggedState\.dirty\) \{[\s\S]*?delete draggedState\.externalChanged/.test(src), '#260: drag-drop open clears externalChanged on a non-dirty fresh open (no spurious reload prompt)');
     // boot() resolves the raw general.language pref (so a system pref localizes client-side).
     assert.ok(/await applyLocale\(resolveLocalePref\(initialSetting\('general\.language', 'system'\)\)\)/.test(src), 'Phase 1: boot resolves the raw language pref (system -> navigator)');
-    // The Spanish locale ships with full key-parity and real (non-English) translations.
+    // Every locale includes all English source keys; CLDR-heavy locales add their required forms.
     const en = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+    const assertSourceKeysPresent = (catalog, locale) => {
+      for (const key of Object.keys(en)) assert.ok(Object.hasOwn(catalog, key), `${locale} includes source key ${key}`);
+    };
     const es = JSON.parse(fs.readFileSync('static/locales/es.json', 'utf8'));
-    assert.deepEqual(Object.keys(es).sort(), Object.keys(en).sort(), 'Phase 1: es.json has exactly the same keys as en.json (parity)');
+    assertSourceKeysPresent(es, 'es');
     const contextMenuOpenKeys = ['contextmenu.openInDiffer', 'contextmenu.openNewDiffEditor', 'contextmenu.openNewEditor'];
     const updatePreferenceKeys = [
       'pref.general.reload_on_update.label',
@@ -6998,22 +7566,22 @@ async function runEditorPreviewSuite() {
     assert.equal(es['pref.reset.cancel'], 'Cancelar', 'Phase 1: es translates the reset cancel button');
     assert.ok(es['pref.appearance.file_explorer_font_size.label'].includes('{name}'), 'Phase 1: es preserves interpolation placeholders');
     const ja = JSON.parse(fs.readFileSync('static/locales/ja.json', 'utf8'));
-    assert.deepEqual(Object.keys(ja).sort(), Object.keys(en).sort(), 'Phase 1: ja.json has exactly the same keys as en.json (parity)');
+    assertSourceKeysPresent(ja, 'ja');
     assert.equal(ja['menu.file'], 'ファイル', 'Phase 1: ja translates a representative menu label');
     assert.equal(ja['pref.reset.cancel'], 'キャンセル', 'Phase 1: ja translates the reset cancel button');
     assert.ok(ja['changes.fileCount.other'].includes('{count}'), 'Phase 1: ja preserves count placeholders');
     const de = JSON.parse(fs.readFileSync('static/locales/de.json', 'utf8'));
-    assert.deepEqual(Object.keys(de).sort(), Object.keys(en).sort(), 'Phase 2: de.json has exactly the same keys as en.json (parity)');
+    assertSourceKeysPresent(de, 'de');
     assert.equal(de['menu.file'], 'Datei', 'Phase 2: de translates a representative menu label');
     assert.equal(de['login.signIn'], 'Anmelden', 'Phase 2: de translates the login sign-in label');
     const fr = JSON.parse(fs.readFileSync('static/locales/fr.json', 'utf8'));
-    assert.deepEqual(Object.keys(fr).sort(), Object.keys(en).sort(), 'Phase 2: fr.json has exactly the same keys as en.json (parity)');
+    assertSourceKeysPresent(fr, 'fr');
     assert.equal(fr['menu.file'], 'Fichier', 'Phase 2: fr translates a representative menu label');
     assert.equal(fr['pref.reset.cancel'], 'Annuler', 'Phase 2: fr translates the reset cancel button');
     // The Phase 2 tail locales all ship with full key-parity and preserve placeholders.
     for (const loc of ['pt-BR', 'ru', 'ko', 'hi', 'ar', 'he']) {
       const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
-      assert.deepEqual(Object.keys(cat).sort(), Object.keys(en).sort(), `Phase 2: ${loc}.json has exactly the same keys as en.json (parity)`);
+      assertSourceKeysPresent(cat, loc);
       assert.equal(cat['brand.marker'], 'YO', `Phase 2: ${loc} keeps the YO brand marker`);
       assert.equal(cat['brand.tab.info'], 'YO!info', `Phase 2: ${loc} keeps the YO!info tab label`);
       assert.equal(cat['brand.tab.agent'], 'YO!agent', `Phase 2: ${loc} keeps the YO!agent tab label`);
@@ -7037,7 +7605,7 @@ async function runEditorPreviewSuite() {
     };
     for (const [loc, expected] of Object.entries(phase4Expected)) {
       const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
-      assert.deepEqual(Object.keys(cat).sort(), Object.keys(en).sort(), `Phase 4: ${loc}.json has exactly the same keys as en.json (parity)`);
+      assertSourceKeysPresent(cat, loc);
       assert.equal(cat['brand.marker'], 'YO', `Phase 4: ${loc} keeps the YO brand marker`);
       assert.equal(cat['menu.file'], expected.menuFile, `Phase 4: ${loc} translates the File menu label`);
       assert.equal(cat['login.signIn'], expected.loginSignIn, `Phase 4: ${loc} translates the login sign-in label`);
@@ -7148,11 +7716,144 @@ async function runEditorPreviewSuite() {
     api.i18nSetCatalogForTest('en', {'files.one': '{count} file', 'files.other': '{count} files'});
     assert.equal(api.tPlural('files', 1), '1 file', 'tPlural picks the one category');
     assert.equal(api.tPlural('files', 3), '3 files', 'tPlural picks the other category');
+    api.i18nSetCatalogForTest('ar', {
+      'files.zero': 'AR zero {count}',
+      'files.one': 'AR one {count}',
+      'files.two': 'AR two {count}',
+      'files.few': 'AR few {count}',
+      'files.many': 'AR many {count}',
+      'files.other': 'AR other {count}',
+      'relative.compact.minute.zero': 'AR minute zero {count}',
+      'relative.compact.minute.one': 'AR minute one {count}',
+      'relative.compact.minute.two': 'AR minute two {count}',
+      'relative.compact.minute.few': 'AR minute few {count}',
+      'relative.compact.minute.many': 'AR minute many {count}',
+      'relative.compact.minute.other': 'AR minute other {count}',
+    });
+    api.setActiveLocaleForTest('ar');
+    assert.deepEqual(
+      [0, 1, 2, 3, 11, 100].map(count => api.tPlural('files', count)),
+      ['AR zero 0', 'AR one 1', 'AR two 2', 'AR few 3', 'AR many 11', 'AR other 100'],
+      'tPlural uses every Arabic cardinal category',
+    );
+    assert.equal(api.sessionFileRelativeTimeText(1000, 1120), 'AR minute two 2', 'Finder/Differ compact ages use the shared Arabic plural selector');
+    api.i18nSetCatalogForTest('fr', {'files.other': 'FR other {count}'});
+    api.setActiveLocaleForTest('fr');
+    assert.equal(api.tPlural('files', 1), 'FR other 1', 'active other precedes the exact English fallback');
+    api.i18nSetCatalogForTest('de', {});
+    api.setActiveLocaleForTest('de');
+    assert.equal(api.tPlural('files', 1), '1 file', 'English exact precedes English other when the active locale has no family');
+    assert.equal(api.tPlural('files', 3), '3 files', 'English other is the final plural-family fallback');
     api.i18nSetCatalogForTest('en', {x: 'English'});
     api.i18nSetCatalogForTest('zz', {x: 'Zzz'});
     api.setActiveLocaleForTest('zz');
     assert.equal(api.t('x'), 'Zzz', 'active locale wins over the en fallback');
     assert.equal(api.t('y'), 'y', 'missing-in-active falls through en to the key');
+  });
+
+  test('plural families use the shared selector instead of direct one/other branches', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    assert.ok(source.includes("tPlural('dialog.delete', deletePaths.length"), 'delete confirmation uses tPlural');
+    assert.ok(source.includes("tPlural('status.deleted', deletePaths.length"), 'delete status uses tPlural');
+    assert.equal(/t\(['"](?:dialog\.delete|status\.deleted)\.(?:one|other)/.test(source), false, 'delete flows have no parallel singular/plural classifier');
+  });
+
+  test('shared locale registries resolve menu, pane, YO!info, and preview labels lazily', () => {
+    const api = loadYolomux('', ['1']);
+    const localeA = {
+      'notify.delivery.inApp.label': 'In-app A',
+      'notify.delivery.inApp.help': 'In-app help A',
+      'notify.delivery.system.label': 'System A ({platform})',
+      'notify.delivery.system.help': 'System help A: {permission}',
+      'notify.permission.denied': 'Denied A',
+      'info.dimension.tab': 'Tab A',
+      'info.preset.tabTmuxWindow.label': 'Preset A',
+      'info.preset.tabTmuxWindow.title': 'Preset title A',
+      'preview.unsupported.archive': 'Archive fallback A',
+      'fs.error.notDirectory': '{path} directory error A',
+    };
+    const localeB = {
+      'notify.delivery.inApp.label': 'In-app B',
+      'notify.delivery.inApp.help': 'In-app help B',
+      'notify.delivery.system.label': 'System B ({platform})',
+      'notify.delivery.system.help': 'System help B: {permission}',
+      'notify.permission.denied': 'Denied B',
+      'info.dimension.tab': 'Tab B',
+      'info.preset.tabTmuxWindow.label': 'Preset B',
+      'info.preset.tabTmuxWindow.title': 'Preset title B',
+      'preview.unsupported.archive': 'Archive fallback B',
+      'fs.error.notDirectory': '{path} directory error B',
+    };
+    api.i18nSetCatalogForTest('locale-a', localeA);
+    api.i18nSetCatalogForTest('locale-b', localeB);
+
+    const notificationSurfaces = () => {
+      const viewMenu = api.appMenuTree().find(menu => menu.id === 'view');
+      const alertMenu = viewMenu.items.find(item => item.type === 'submenu'
+        && item.items?.some(child => child.className === 'notification-delivery-in-app'));
+      assert.ok(alertMenu, 'View > Alert contains the shared notification delivery commands');
+      return {
+        inApp: alertMenu.items.find(item => item.className === 'notification-delivery-in-app'),
+        system: alertMenu.items.find(item => item.className === 'notification-delivery-system'),
+        preferencesHtml: api.preferencesPanelHtmlForTest(''),
+      };
+    };
+    const assertLocalizedSurfaces = suffix => {
+      const surfaces = notificationSurfaces();
+      assert.equal(surfaces.inApp.label, `In-app ${suffix}`, `View > Alert resolves the in-app label for locale ${suffix}`);
+      assert.equal(surfaces.inApp.detail, `In-app help ${suffix}`, `View > Alert resolves the in-app help for locale ${suffix}`);
+      assert.equal(surfaces.system.label, `System ${suffix} (PC)`, `View > Alert resolves the platform system label for locale ${suffix}`);
+      assert.equal(surfaces.system.detail, `System help ${suffix}: Denied ${suffix}`, `View > Alert resolves the permission help for locale ${suffix}`);
+      for (const value of [surfaces.inApp.label, surfaces.inApp.detail, surfaces.system.label, surfaces.system.detail]) {
+        assert.ok(surfaces.preferencesHtml.includes(value), `Preferences reuses the same notification descriptor text: ${value}`);
+      }
+      const tabDimension = api.infoGroupDimensions().find(definition => definition.key === 'tab');
+      const tabPreset = api.infoGroupingPresetsForTest().find(definition => definition.key === 'tab-tmux-window');
+      assert.equal(tabDimension.label, `Tab ${suffix}`, `YO!info resolves dimension labelKey for locale ${suffix}`);
+      assert.equal(tabPreset.label, `Preset ${suffix}`, `YO!info resolves preset labelKey for locale ${suffix}`);
+      assert.equal(tabPreset.title, `Preset title ${suffix}`, `YO!info resolves preset titleKey for locale ${suffix}`);
+    };
+
+    const archiveRenderer = api.previewRendererForPath('/tmp/archive.zip');
+    assert.equal(archiveRenderer.fallbackTitleKey, 'preview.unsupported.archive', 'preview registry stores a fallback locale key instead of translated text');
+    api.setFileQuickOpenErrorForTest({
+      error: 'raw English filesystem error',
+      user_message: {key: 'fs.error.notDirectory', params: {path: '/tmp/example'}, fallback: 'raw English filesystem error'},
+    });
+    api.setActiveLocaleForTest('locale-a');
+    assertLocalizedSurfaces('A');
+    assert.equal(api.t(archiveRenderer.fallbackTitleKey), 'Archive fallback A', 'preview fallback key resolves in the first active locale');
+    assert.equal(api.commandPaletteItems().find(item => item.disabled && item.run === null)?.detail, '/tmp/example directory error A', 'command-palette filesystem errors resolve their descriptor at render time');
+    api.setActiveLocaleForTest('locale-b');
+    assertLocalizedSurfaces('B');
+    assert.equal(api.t(archiveRenderer.fallbackTitleKey), 'Archive fallback B', 'the same preview fallback key resolves after a runtime locale change');
+    assert.equal(api.commandPaletteItems().find(item => item.disabled && item.run === null)?.detail, '/tmp/example directory error B', 'an open command-palette filesystem error relocalizes without another request');
+    assert.equal(api.commandPaletteItems().some(item => String(item.detail || '').includes('raw English filesystem error')), false, 'the raw filesystem diagnostic does not replace the localized command-palette error');
+
+    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/list?path='), 'command-palette path listing preserves shared filesystem error descriptors');
+    assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/search?root='), 'command-palette indexed search preserves shared filesystem error descriptors');
+
+    assert.deepStrictEqual(
+      canonical(api.TAB_TYPES.filter(type => typeof type.relocalize === 'function').map(type => type.key)),
+      canonical(api.TAB_TYPES.map(type => type.key)),
+      'every registered pane type owns one relocalization hook',
+    );
+    const layoutStateSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    const preferencesSource = fs.readFileSync('static_src/js/yolomux/82_preferences_panel.js', 'utf8');
+    assert.ok(/function notificationDeliveryItems\(\)[\s\S]*notificationDeliveryDescriptors\(\)\.map/.test(layoutStateSource), 'View > Alert consumes the shared notification delivery descriptors');
+    assert.ok(/notificationDeliveryDescriptors\(\)\.map\(\(\{channel, label, help\}\)/.test(preferencesSource), 'Preferences consumes the same notification delivery descriptors');
+
+    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/const infoDimensionDefs[\s\S]*labelKey:\s*'info\.dimension\.tab'[\s\S]*function localizedInfoDefinition[\s\S]*label:\s*t\(definition\.labelKey\)/.test(infoSource), 'YO!info dimension definitions store locale keys and resolve labels only when read');
+    assert.ok(/const infoPresetDefs[\s\S]*titleKey:\s*'info\.preset\.tabTmuxWindow\.title'[\s\S]*function localizedInfoDefinition[\s\S]*title:\s*t\(definition\.titleKey\)/.test(infoSource), 'YO!info preset definitions store locale keys and resolve titles only when read');
+
+    const previewRegistrySource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/94_preview_renderers.js', 'utf8');
+    assert.ok(/id:\s*'unsupported-archive'[\s\S]*fallbackTitleKey:\s*'preview\.unsupported\.archive'/.test(previewRegistrySource), 'preview fallback definitions store locale keys');
+    assert.ok(/function renderUnsupportedPreviewInto[\s\S]*renderer\?\.fallbackTitleKey \? t\(renderer\.fallbackTitleKey\) : t\('preview\.unsupported\.default'\)/.test(previewSource), 'unsupported preview fallback text resolves from the active locale at render time');
+    assert.ok(/const previewZoomActions[\s\S]*labelKey:\s*'preview\.zoom\.fit\.label'[\s\S]*titleKey:\s*'preview\.zoom\.in'/.test(previewSource), 'preview zoom actions store label/title locale keys');
+    assert.ok(/function previewZoomButton\(action\)[\s\S]*action\.labelKey \? t\(action\.labelKey\)[\s\S]*action\.titleKey \? t\(action\.titleKey\)/.test(previewSource), 'preview zoom labels and titles resolve from the active locale when controls are built');
   });
 
   test('t@7620', () => {
@@ -7180,6 +7881,9 @@ async function runEditorPreviewSuite() {
       'pref.editorScheme.group.dark',
       'pref.notifications.throttle_seconds.label',
       'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
+      'pref.file_explorer.root_mode.fixed', 'finder.toolbar.syncLabel',
+      'pref.file_explorer.image_open_mode.sameTab', 'pref.file_explorer.image_open_mode.newTab',
+      'unit.line.other',
       'pref.yoagent.backend.label', 'pref.yoagent.claude_model.label',
       'pref.yoagent.codex_model.label', 'pref.yolo.dry_run.label',
     ]) {
@@ -7191,6 +7895,9 @@ async function runEditorPreviewSuite() {
     ]) {
       assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
     }
+    const legacyCollapsedHtml = api.preferencesPanelHtmlForTest('', ['General']);
+    assert.ok(/class="preferences-section collapsed" data-preference-section="general"/.test(legacyCollapsedHtml), 'legacy localized section titles migrate to stable IDs');
+    assert.equal(legacyCollapsedHtml.includes('data-preference-section="General"'), false, 'localized section titles are never persisted as DOM identity');
   });
 
   test('t@7654', () => {
@@ -7205,8 +7912,9 @@ async function runEditorPreviewSuite() {
     assert.ok(selectHtml.indexOf('value="zh-Hant"') < selectHtml.indexOf('value="zh-Hans"'), 'Traditional Chinese is listed before Simplified');
     for (const locale of ['zh-Hant', 'zh-Hans']) {
       const catalog = JSON.parse(fs.readFileSync(`static/locales/${locale}.json`, 'utf8'));
-      // Same key set as English (the build enforces this; assert it here too).
-      assert.deepStrictEqual(new Set(Object.keys(catalog)), new Set(Object.keys(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')))), `${locale} has the same keys as en`);
+      for (const key of Object.keys(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')))) {
+        assert.ok(Object.hasOwn(catalog, key), `${locale} includes source key ${key}`);
+      }
       api.i18nSetCatalogForTest(locale, catalog);
       api.setActiveLocaleForTest(locale);
       const zhHtml = api.preferencesPanelHtmlForTest('');
@@ -7263,7 +7971,7 @@ async function runEditorPreviewSuite() {
         assert.equal(/[A-Za-z]/.test(catalog[k]), false, `${locale} ${k} has no Latin "YO" leak`);
         assert.ok(catalog[k].startsWith(glyph), `${locale} ${k} leads with the localized brand glyph`);
       }
-      const yoloSectionStart = zhHtml.indexOf(`data-preference-section="${catalog['pref.section.yolo']}"`);
+      const yoloSectionStart = zhHtml.indexOf('data-preference-section="yolo"');
       const yoloSectionEnd = zhHtml.indexOf('data-preference-section="', yoloSectionStart + 1);
       const yoloSectionHtml = zhHtml.slice(yoloSectionStart, yoloSectionEnd >= 0 ? yoloSectionEnd : undefined);
       assert.ok(yoloSectionStart >= 0, `${locale} can isolate the localized YOLO Preferences section`);
@@ -7501,7 +8209,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function writePanePopoutDocument\(popoutWindow, options = \{\}\)[\s\S]*currentStylesheetHref\('yolomux\.css'\)[\s\S]*doc\.write/.test(source), 'generic pane pop-outs share one same-origin document writer with copied stylesheet/theme variables');
     assert.ok(/function panePopoutVariableStyle\(\)[\s\S]*name\?\.startsWith\?\.\('--'\)[\s\S]*root\.getPropertyValue\(name\)/.test(source), 'generic pane pop-outs copy current CSS variables instead of hard-coding per-pane theme values');
     assert.ok(/function openPanePopout\(item\)[\s\S]*tabTypeForItem\(item\)[\s\S]*window\.open\(`\/pane-popout\?item=\$\{encodeURIComponent\(item\)\}`/.test(source), 'generic pane pop-out opens a same-origin detached pane shell');
-    assert.ok(/function panePopoutDisabledReason\(item\)[\s\S]*isTmuxSession\(item\)[\s\S]*live terminal\/transcript popout is disabled in phase 1[\s\S]*popoutDisabledReason/.test(source), 'unsupported live or interactive pane pop-outs carry an explicit phase-1 disabled reason');
+    assert.ok(/function panePopoutDisabledReason\(item\)[\s\S]*isTmuxSession\(item\)[\s\S]*t\('pane\.popout\.disabledTerminal'\)[\s\S]*popoutDisabledReason/.test(source), 'unsupported live or interactive pane pop-outs carry an explicit localized phase-1 disabled reason');
     assert.ok(source.includes("window.open(`/preview-popout?path=${encodeURIComponent(path)}`"), 'preview pop-out opens a same-origin URL instead of about:blank');
     assert.ok(/'editor-popout-preview': \(\) => \{[\s\S]*if \(openFilePreviewPopout\(path, panel\)\) \{[\s\S]*setFileEditorViewMode\(path, 'edit', item\);[\s\S]*renderFileEditorPanel\(panel, item\);/.test(source), 'pressing Pop-out opens the preview window and returns the in-pane editor to Edit mode');
     assert.ok(/function openFilePreviewPopout\(path, panel = null\)[\s\S]*return true;[\s\S]*return false;/.test(source), 'preview pop-out open path reports whether a pop-out was actually opened or focused');
@@ -7545,7 +8253,7 @@ async function runEditorPreviewSuite() {
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
     assert.ok(/canPopout:\s*true,[\s\S]*popoutRenderer:\s*item => panePopoutPanelSnapshot\(item\)/.test(bootstrapSource), 'YO!info and YO!stats declare snapshot popout support in TAB_TYPES');
-    assert.ok(/key:\s*'preferences'[\s\S]*popoutDisabledReason:\s*'interactive Preferences popout is disabled in phase 1'/.test(bootstrapSource) && /key:\s*'files'[\s\S]*popoutDisabledReason:\s*'interactive Finder\/Tabber popout is disabled in phase 1'/.test(bootstrapSource), 'interactive non-snapshot panes declare explicit phase-1 disabled popout reasons');
+    assert.ok(/key:\s*'preferences'[\s\S]*popoutDisabledReason:\s*\(\) => t\('pane\.popout\.interactiveDisabled', \{name: t\('tab\.preferences'\)\}\)/.test(bootstrapSource) && /key:\s*'files'[\s\S]*popoutDisabledReason:\s*\(\) => t\('pane\.popout\.interactiveDisabled', \{name: fileExplorerLabel\(\)\}\)/.test(bootstrapSource), 'interactive non-snapshot panes share the localized phase-1 disabled-reason owner');
     assert.ok(/canPopout:\s*item =>[\s\S]*editorPreviewModeAvailable/.test(bootstrapSource) && /openPopout:\s*item =>[\s\S]*openFilePreviewPopout/.test(bootstrapSource), 'file editor popout capability routes through the existing preview popout');
     assert.ok(/dockviewHeaderActionsHtml\(item\)[\s\S]*popout:\s*paneCanPopout\(item\)/.test(dockviewSource), 'Dockview header actions show the popout control only for canPopout tab types');
     assert.ok(/button\.dataset\.panePopout[\s\S]*openPanePopout\(button\.dataset\.panePopout \|\| item\)/.test(dockviewSource), 'Dockview popout button dispatches through the shared openPanePopout helper');
@@ -7569,23 +8277,11 @@ async function runEditorPreviewSuite() {
     api.setActiveLocaleForTest('en');
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
-    const expectedOrder = [
-      api.t('pref.section.general'),
-      api.t('pref.section.appearance'),
-      api.t('pref.section.terminal_editor'),
-      api.t('pref.section.notifications'),
-      api.fileExplorerLabel(),
-      api.t('pref.section.uploads'),
-      api.t('pref.section.performance'),
-      api.t('pref.section.github'),
-      api.t('pref.section.yoagent'),
-      api.t('pref.section.share'),
-      api.t('pref.section.yolo'),
-    ];
+    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'performance', 'github', 'yoagent', 'share', 'yolo'];
     assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections render in the grouped order');
-    const yoagentIndex = sectionOrder.indexOf(api.t('pref.section.yoagent'));
-    const shareIndex = sectionOrder.indexOf(api.t('pref.section.share'));
-    const yoloIndex = sectionOrder.indexOf(api.t('pref.section.yolo'));
+    const yoagentIndex = sectionOrder.indexOf('yoagent');
+    const shareIndex = sectionOrder.indexOf('share');
+    const yoloIndex = sectionOrder.indexOf('yolo');
     assert.deepStrictEqual([yoagentIndex, shareIndex, yoloIndex], [sectionOrder.length - 3, sectionOrder.length - 2, sectionOrder.length - 1], 'YO!agent, YO!share, and YOLO sections stay adjacent at the end; YO!info has no standalone Preferences settings');
     const sectionHtml = title => {
       const start = html.indexOf(`data-preference-section="${title}"`);
@@ -7593,19 +8289,19 @@ async function runEditorPreviewSuite() {
       const next = html.indexOf('data-preference-section="', start + 1);
       return next >= 0 ? html.slice(start, next) : html.slice(start);
     };
-    assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update"'), 'server-version reload prompt is in Notifications');
-    assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update_auto"'), 'server-version auto-reload is in Notifications');
-    assert.equal(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check toggle is removed from Notifications');
-    assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="updates.notify_level"'), 'origin/main update notification threshold is in Notifications');
-    const shareHtml = sectionHtml(api.t('pref.section.share'));
+    assert.ok(sectionHtml('notifications').includes('data-setting-path="general.reload_on_update"'), 'server-version reload prompt is in Notifications');
+    assert.ok(sectionHtml('notifications').includes('data-setting-path="general.reload_on_update_auto"'), 'server-version auto-reload is in Notifications');
+    assert.equal(sectionHtml('notifications').includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check toggle is removed from Notifications');
+    assert.ok(sectionHtml('notifications').includes('data-setting-path="updates.notify_level"'), 'origin/main update notification threshold is in Notifications');
+    const shareHtml = sectionHtml('share');
     assert.ok(shareHtml.includes('data-setting-path="share.ttl_seconds"'), 'YO!share Preferences exposes the default share lifetime');
     assert.ok(shareHtml.includes('data-setting-path="share.max_viewers"'), 'YO!share Preferences exposes the default viewer cap');
     assert.ok(shareHtml.includes('data-setting-path="share.read_only"'), 'YO!share Preferences exposes the read-only default');
     assert.ok(/type="radio"[^>]*value="http"[^>]*data-setting-path="share\.scheme"[\s\S]*type="radio"[^>]*value="https"[^>]*data-setting-path="share\.scheme"/.test(shareHtml), 'YO!share Preferences exposes http/https protocol defaults');
-    assert.equal(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="general.reload_on_update_auto"'), false, 'server-version auto-reload no longer lives in Performance');
-    assert.equal(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check no longer lives in Performance');
-    assert.equal(sectionHtml(api.t('pref.section.yoagent')).includes('data-setting-path="yoagent.refresh_interval_seconds"'), false, 'YO!agent Preferences no longer exposes the background transcript-summary interval');
-    const appearanceHtml = sectionHtml(api.t('pref.section.appearance'));
+    assert.equal(sectionHtml('performance').includes('data-setting-path="general.reload_on_update_auto"'), false, 'server-version auto-reload no longer lives in Performance');
+    assert.equal(sectionHtml('performance').includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check no longer lives in Performance');
+    assert.equal(sectionHtml('yoagent').includes('data-setting-path="yoagent.refresh_interval_seconds"'), false, 'YO!agent Preferences no longer exposes the background transcript-summary interval');
+    const appearanceHtml = sectionHtml('appearance');
     assert.ok(appearanceHtml.includes('Global appearance'), 'Appearance shows the renamed Global appearance field');
     assert.ok(appearanceHtml.includes('Theme color'), 'Appearance shows the renamed Theme color field');
     assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
@@ -7647,12 +8343,12 @@ async function runEditorPreviewSuite() {
     assert.ok(/data-setting-path="appearance\.inactive_pane_opacity"[^>]*data-setting-type="range"[^>]*min="0"[^>]*max="100"/.test(appearanceHtml), 'Inactive pane opacity renders as a 0-100 Appearance slider');
     const appearancePaths = [...appearanceHtml.matchAll(/data-setting-path="([^"]+)"/g)].map(match => match[1]);
     assert.equal(appearancePaths.at(-1), 'appearance.date_time_hour_cycle', '12-hour / 24-hour Date/time clock is the last Appearance item');
-    const terminalEditorHtml = sectionHtml(api.t('pref.section.terminal_editor'));
+    const terminalEditorHtml = sectionHtml('terminal_editor');
     assert.ok(terminalEditorHtml.includes('data-setting-path="appearance.terminal_theme"'), 'Terminal / Editor follows Appearance and owns terminal/editor-specific controls');
     assert.equal(terminalEditorHtml.includes('data-setting-path="appearance.editor_cursor_color"'), false, 'Cursor color moved out of Terminal / Editor into Appearance');
     assert.ok(/data-setting-path="appearance\.terminal_font_size"[\s\S]*data-setting-path="appearance\.editor_font_size"[\s\S]*data-setting-path="appearance\.preview_font_size"[\s\S]*data-setting-path="terminal_editor\.scrollback"/.test(terminalEditorHtml), 'Terminal / Editor groups Terminal, Editor, and Preview font sizes together before scrollback');
-    assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.default_layout"'), false, 'Default layout no longer lives in General');
-    assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
+    assert.equal(sectionHtml('general').includes('data-setting-path="general.default_layout"'), false, 'Default layout no longer lives in General');
+    assert.equal(sectionHtml('general').includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
     // the GitHub section carries the watched-PRs list field.
     assert.ok(html.includes('data-setting-path="github.watched_prs"'), 'the GitHub section has the watched_prs list field');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_ring_opacity.help'], 'Percent, 5–100. This is the ring drawn over the ACTIVE content edge; lower values make the green/red pane ring fainter.', 'Pane ring opacity help describes the ACTIVE content-edge ring');

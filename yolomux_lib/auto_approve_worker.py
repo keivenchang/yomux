@@ -24,6 +24,7 @@ from .common import AUTO_APPROVE_LOCK_DIR
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import truncate_text
+from .locales import message_fields
 from .types import AutoApproveState
 
 # stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
@@ -56,6 +57,17 @@ def auto_approve_lock_message(owner: dict[str, Any] | None) -> str:
     if pid:
         return f"locked by another YOLOmux pid {pid}"
     return "locked by another YOLOmux"
+
+
+def auto_approve_lock_message_fields(field: str, owner: dict[str, Any] | None) -> dict[str, Any]:
+    raw_message = auto_approve_lock_message(owner)
+    pid = owner.get("pid") if owner else None
+    root = owner.get("project_root") if owner else None
+    if pid and root:
+        return message_fields(field, "yolo.status.lockedPidRoot", raw_message, {"pid": pid, "root": root})
+    if pid:
+        return message_fields(field, "yolo.status.lockedPid", raw_message, {"pid": pid})
+    return message_fields(field, "yolo.status.locked", raw_message)
 
 
 def auto_approve_lock_owner_payload(target: str, owner_extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -161,7 +173,10 @@ class AutoApproveWorker:
         self.started_at = time.time()
         self.approved = 0
         self.blocked = 0
-        self.last_action = "starting"
+        initial_message = message_fields("last_action", "yolo.status.starting", "starting")
+        self.last_action = str(initial_message["last_action"])
+        self.last_action_key = str(initial_message["last_action_key"])
+        self.last_action_params = dict(initial_message["last_action_params"])
         self.error: str | None = None
         self.last_hash = ""
         self.last_hash_at = 0.0
@@ -176,7 +191,7 @@ class AutoApproveWorker:
         acquired, owner = self.process_lock.acquire()
         if not acquired:
             self.lock_owner = owner
-            self.update(error=auto_approve_lock_message(owner), last_action="locked by another YOLOmux")
+            self.update(error=auto_approve_lock_message(owner), **auto_approve_lock_message_fields("last_action", owner))
             return False, owner
         self.thread.start()
         return True, None
@@ -201,6 +216,8 @@ class AutoApproveWorker:
                 "approved": self.approved,
                 "blocked": self.blocked,
                 "last_action": self.last_action,
+                "last_action_key": self.last_action_key,
+                "last_action_params": dict(self.last_action_params),
                 "error": self.error,
                 "started_at": self.started_at,
                 "lock_owner": self.lock_owner,
@@ -215,9 +232,23 @@ class AutoApproveWorker:
             for key, value in values.items():
                 setattr(self, key, value)
 
-    def emit_event(self, event_type: str, message: str, **details: Any) -> None:
+    def update_last_action(self, key: str, fallback: str, **params: Any) -> None:
+        self.update(**message_fields("last_action", key, fallback, params))
+
+    def emit_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        message_key: str = "",
+        message_params: dict[str, Any] | None = None,
+        **details: Any,
+    ) -> None:
         if self.event_callback is None:
             return
+        if message_key:
+            details["message_key"] = message_key
+            details["message_params"] = dict(message_params or {})
         try:
             self.event_callback(self.target, event_type, message, details)
         except EXPECTED_EVENT_CALLBACK_ERRORS as exc:
@@ -230,7 +261,8 @@ class AutoApproveWorker:
             idle_since: float | None = None
             max_interval = max(AUTO_APPROVE_IDLE_MAX_INTERVAL_SECONDS, self.interval)
             ramp_duration = AUTO_APPROVE_IDLE_RAMP_SECONDS
-            self.update(last_action="watching", lock_owner=self.process_lock.owner)
+            self.update(lock_owner=self.process_lock.owner)
+            self.update_last_action("yolo.status.watching", "watching")
 
             while not self.stop_event.is_set():
                 try:
@@ -247,8 +279,14 @@ class AutoApproveWorker:
                         wait_for = self.interval + t * (max_interval - self.interval)
                     self.stop_event.wait(wait_for)
                 except EXPECTED_AUTO_APPROVE_ERRORS as exc:
-                    self.update(error=str(exc), last_action="auto approve error")
-                    self.emit_event("worker_error", "auto approve error", error=str(exc))
+                    self.update(error=str(exc))
+                    self.update_last_action("yolo.status.autoApproveError", "auto approve error")
+                    self.emit_event(
+                        "worker_error",
+                        "auto approve error",
+                        message_key="yolo.status.autoApproveError",
+                        error=str(exc),
+                    )
                     self.stop_event.wait(max_interval)
         finally:
             self.process_lock.release()
@@ -258,21 +296,27 @@ class AutoApproveWorker:
             try:
                 should_capture = self.capture_gate(self.target)
             except EXPECTED_AUTO_APPROVE_ERRORS as exc:
-                self.update(error=str(exc), last_action="tmux activity gate error")
+                self.update(error=str(exc))
+                self.update_last_action("yolo.status.activityGateError", "tmux activity gate error")
                 should_capture = True
             if should_capture is False:
-                self.update(last_action="idle; tmux activity quiet")
+                self.update_last_action("yolo.status.activityQuiet", "idle; tmux activity quiet")
                 return False
 
         visible_text = module.tmux_capture_pane(self.target, visible_only=True)
         if visible_text is None:
             self.missing_capture_count += 1
             if self.missing_capture_count >= AUTO_APPROVE_MISSING_CAPTURE_LIMIT:
-                self.update(last_action="session vanished; auto approve stopped")
-                self.emit_event("worker_stopped", "auto approve stopped because the tmux session vanished", failures=self.missing_capture_count)
+                self.update_last_action("yolo.status.sessionVanished", "session vanished; auto approve stopped")
+                self.emit_event(
+                    "worker_stopped",
+                    "auto approve stopped because the tmux session vanished",
+                    message_key="events.message.yolo.sessionVanished",
+                    failures=self.missing_capture_count,
+                )
                 self.stop_event.set()
             else:
-                self.update(last_action="failed to capture pane")
+                self.update_last_action("yolo.status.captureFailed", "failed to capture pane")
             return False
         self.missing_capture_count = 0
         self.capture_gate_observed = True
@@ -285,7 +329,7 @@ class AutoApproveWorker:
             self.last_hash_at = 0.0
             self.last_blocked_hash = ""
             self.pending_prompt = False
-            self.update(last_action="question visible; waiting for manual answer")
+            self.update_last_action("yolo.status.questionVisible", "question visible; waiting for manual answer")
             return False
         prompt_type = str(approval_state.get("approval_type") or prompt_state.get("type") or "")
         if not prompt_type or not approval_state.get("approval_visible"):
@@ -294,7 +338,10 @@ class AutoApproveWorker:
             self.last_blocked_hash = ""
             self.pending_prompt = False
             reason = str(prompt_state.get("reason") or prompt_state.get("negative_reason") or state.screen.get("text") or "")
-            self.update(last_action=f"idle; {reason}" if reason else "idle")
+            if reason:
+                self.update_last_action("yolo.status.idleReason", f"idle; {reason}", reason=reason)
+            else:
+                self.update_last_action("yolo.status.idle", "idle")
             return False
         self.pending_prompt = True
 
@@ -304,19 +351,27 @@ class AutoApproveWorker:
         selected_option = selected_value if isinstance(selected_value, int) else 0
         prompt_source = str(approval_state.get("source") or prompt_state.get("source") or "pane")
         if not prompt_state.get("yes_selected") and selected_option <= 0:
-            self.update(last_action="prompt found, no selectable approval option is highlighted")
+            self.update_last_action(
+                "yolo.status.noSelectableApproval",
+                "prompt found, no selectable approval option is highlighted",
+            )
             return False
 
         current_hash = str(approval_state.get("prompt_hash") or prompt_state.get("hash") or "")
         now = time.monotonic()
         if current_hash == self.last_blocked_hash:
-            self.update(last_action="blocked prompt still visible; waiting for manual action")
+            self.update_last_action("yolo.status.blockedPromptVisible", "blocked prompt still visible; waiting for manual action")
             return False
         if current_hash == self.last_hash and now - self.last_hash_at < module.PROMPT_RETRY_SECONDS:
-            self.update(last_action="approved prompt still visible; waiting before retry")
+            self.update_last_action("yolo.status.approvedPromptVisible", "approved prompt still visible; waiting before retry")
             return False
         if current_hash == self.last_hash:
-            self.update(last_action=f"approved prompt still visible after {module.PROMPT_RETRY_SECONDS:g}s; retrying")
+            seconds = f"{module.PROMPT_RETRY_SECONDS:g}"
+            self.update_last_action(
+                "yolo.status.approvedPromptRetry",
+                f"approved prompt still visible after {seconds}s; retrying",
+                seconds=seconds,
+            )
 
         if prompt_type == "bash":
             command_value = approval_state.get("command") or prompt_state.get("command")
@@ -325,7 +380,7 @@ class AutoApproveWorker:
         if prompt_type in {"file", "plan", "tool"}:
             rule_input = str(approval_state.get("rule_input_text") or prompt_state.get("text") or "")
             return self.handle_non_bash_prompt(module, rule_input, current_hash, action, prompt_type, selected_option, prompt_source=prompt_source)
-        self.update(last_action=f"unknown prompt type: {prompt_type}")
+        self.update_last_action("yolo.status.unknownPromptType", f"unknown prompt type: {prompt_type}", promptType=prompt_type)
         return False
 
     def classify_pane_state(self, module: Any, visible_text: str) -> tuple[AgentPaneState, str]:
@@ -372,7 +427,12 @@ class AutoApproveWorker:
         if selected_option > 0 and can_verify:
             current_option = module.selected_prompt_option(module.tmux_capture_pane(self.target, visible_only=True) or "")
             if current_option > 0 and current_option != selected_option:
-                self.update(last_action=f"approval option moved from {selected_option} to {current_option}; waiting for next capture")
+                self.update_last_action(
+                    "yolo.status.approvalOptionMoved",
+                    f"approval option moved from {selected_option} to {current_option}; waiting for next capture",
+                    fromOption=selected_option,
+                    toOption=current_option,
+                )
                 return False
         # walk the highlight to the target, then RE-VERIFY it landed there before pressing
         # Enter — the menu can redraw/move during the ~0.6s relative walk, so confirm the FINAL state
@@ -384,7 +444,13 @@ class AutoApproveWorker:
             module.tmux_move_to_option(self.target, option, selected_option)
             confirmed = module.selected_prompt_option(module.tmux_capture_pane(self.target, visible_only=True) or "")
             if confirmed != option:
-                self.update(last_action=f"approval highlight is {confirmed or 'none'}, expected {option} after move; not confirming")
+                actual = confirmed or "none"
+                self.update_last_action(
+                    "yolo.status.approvalHighlightMismatch",
+                    f"approval highlight is {actual}, expected {option} after move; not confirming",
+                    actual=actual,
+                    expected=option,
+                )
                 return False
             if self.stop_event.is_set():
                 return False
@@ -422,8 +488,12 @@ class AutoApproveWorker:
             "prompt_type": "bash",
             "action": rule_action,
             "rule_name": decision.get("rule_name") or "unknown",
+            "rule_name_key": decision.get("rule_name_key") or "",
+            "rule_name_params": decision.get("rule_name_params") or {},
             "risk": yolo_rules.normalize_risk(decision.get("risk")),
             "ruleset_source": decision.get("source") or "",
+            "ruleset_source_key": decision.get("source_key") or "",
+            "ruleset_source_params": decision.get("source_params") or {},
             "ruleset_path": decision.get("path") or "",
             "dry_run": decision.get("dry_run") is True,
             "would_action": decision.get("would_action") or "",
@@ -440,10 +510,14 @@ class AutoApproveWorker:
             self.last_blocked_hash = ""
             self.approved += 1
             verb = "declined" if rule_action == "decline" else "approved"
-            self.update(last_action=f"{verb} bash: {desc}")
+            message_key = "yolo.status.declinedBash" if rule_action == "decline" else "yolo.status.approvedBash"
+            message_params = {"description": desc}
+            self.update_last_action(message_key, f"{verb} bash: {desc}", **message_params)
             self.emit_event(
                 "approval_approved",
                 f"{verb} bash: {desc}",
+                message_key=message_key,
+                message_params=message_params,
                 **details,
             )
             self.stop_event.wait(3.0)
@@ -456,23 +530,39 @@ class AutoApproveWorker:
             self.blocked += 1
             if decision.get("would_action"):
                 last_action = f"dry-run would {decision['would_action']} bash: {desc}"
+                last_action_key = "yolo.status.dryRunBash"
+                last_action_params = {"action": decision["would_action"], "description": desc}
             elif rule_action == "block":
                 last_action = f"blocked bash: {desc}"
+                last_action_key = "yolo.status.blockedBash"
+                last_action_params = {"description": desc}
             elif rule_action == "notify":
                 last_action = f"notified bash: {desc}"
+                last_action_key = "yolo.status.notifiedBash"
+                last_action_params = {"description": desc}
             elif rule_action == "off":
                 last_action = f"YOLO off by rule: {desc}"
+                last_action_key = "yolo.status.offByRuleBash"
+                last_action_params = {"description": desc}
             else:
                 last_action = f"asked for manual bash approval: {desc}"
-            self.update(last_action=last_action)
+                last_action_key = "yolo.status.manualBash"
+                last_action_params = {"description": desc}
+            self.update_last_action(last_action_key, last_action, **last_action_params)
             self.emit_event(
                 "approval_blocked",
                 last_action,
+                message_key=last_action_key,
+                message_params=last_action_params,
                 **details,
             )
             return True
 
-        self.update(last_action=f"unknown YOLO action {rule_action}; waiting for manual approval")
+        self.update_last_action(
+            "yolo.status.unknownAction",
+            f"unknown YOLO action {rule_action}; waiting for manual approval",
+            action=rule_action,
+        )
         return False
 
     def approve_prompt(self, module: Any, current_hash: str, action: str | None, prompt_type: str, selected_option: int = 1, prompt_source: str = "pane") -> bool:
@@ -483,11 +573,18 @@ class AutoApproveWorker:
         self.last_blocked_hash = ""
         self.approved += 1
         opt_label = "option2" if action == "option2" else "option1"
-        self.update(last_action=f"approved {prompt_type}: {opt_label}")
+        self.update_last_action(
+            "yolo.status.approvedPrompt",
+            f"approved {prompt_type}: {opt_label}",
+            promptType=prompt_type,
+            option=opt_label,
+        )
         risk = "edit" if prompt_type == "file" else "unknown"
         self.emit_event(
             "approval_approved",
             f"approved {prompt_type}: {opt_label}",
+            message_key="yolo.status.approvedPrompt",
+            message_params={"promptType": prompt_type, "option": opt_label},
             prompt_type=prompt_type,
             risk=risk,
             action=opt_label,
@@ -505,8 +602,12 @@ class AutoApproveWorker:
             "prompt_type": prompt_type,
             "action": rule_action,
             "rule_name": decision.get("rule_name") or "unknown",
+            "rule_name_key": decision.get("rule_name_key") or "",
+            "rule_name_params": decision.get("rule_name_params") or {},
             "risk": yolo_rules.normalize_risk(decision.get("risk")),
             "ruleset_source": decision.get("source") or "",
+            "ruleset_source_key": decision.get("source_key") or "",
+            "ruleset_source_params": decision.get("source_params") or {},
             "ruleset_path": decision.get("path") or "",
             "dry_run": decision.get("dry_run") is True,
             "would_action": decision.get("would_action") or "",
@@ -522,15 +623,39 @@ class AutoApproveWorker:
             self.last_blocked_hash = ""
             self.approved += 1
             verb = "declined" if rule_action == "decline" else "approved"
-            self.update(last_action=f"{verb} {prompt_type}: {decision.get('rule_name') or 'rule'}")
-            self.emit_event("approval_approved", f"{verb} {prompt_type}", **details)
+            rule_name = decision.get("rule_name") or "rule"
+            rule_name_param = yolo_rules.decision_rule_name_descriptor(decision)
+            message_key = "yolo.status.declinedPromptRule" if rule_action == "decline" else "yolo.status.approvedPromptRule"
+            event_message_key = "events.message.yolo.declinedPrompt" if rule_action == "decline" else "events.message.yolo.approvedPromptType"
+            self.update_last_action(
+                message_key,
+                f"{verb} {prompt_type}: {rule_name}",
+                promptType=prompt_type,
+                ruleName=rule_name_param,
+            )
+            self.emit_event(
+                "approval_approved",
+                f"{verb} {prompt_type}",
+                message_key=event_message_key,
+                message_params={"promptType": prompt_type},
+                **details,
+            )
             self.stop_event.wait(3.0)
             return True
         self.last_hash = current_hash
         self.last_hash_at = time.monotonic()
         self.last_blocked_hash = current_hash
         self.blocked += 1
-        last_action = f"{rule_action} {prompt_type}: {decision.get('rule_name') or 'rule'}"
-        self.update(last_action=last_action)
-        self.emit_event("approval_blocked", last_action, **details)
+        rule_name = decision.get("rule_name") or "rule"
+        rule_name_param = yolo_rules.decision_rule_name_descriptor(decision)
+        last_action = f"{rule_action} {prompt_type}: {rule_name}"
+        last_action_params = {"action": rule_action, "promptType": prompt_type, "ruleName": rule_name_param}
+        self.update_last_action("yolo.status.rulePrompt", last_action, **last_action_params)
+        self.emit_event(
+            "approval_blocked",
+            last_action,
+            message_key="events.message.yolo.rulePrompt",
+            message_params=last_action_params,
+            **details,
+        )
         return True

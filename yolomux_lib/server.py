@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import html
 import json
+import logging
 import math
 import os
 import pty
@@ -69,7 +70,11 @@ from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
 from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
 from .settings import SUMMARY_DEFAULT_LOOKBACK_SECONDS
+from .locales import resolve_locale_preference
+from .locales import user_message_payload
 from .web import html_page
+from .web import html_lang_dir_attrs
+from .web import server_string
 from .web import static_asset_path
 from .web import static_content_type
 from .websocket import make_ws_frame
@@ -79,6 +84,8 @@ from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import start_agent_auth_status_refresh
 
+
+logger = logging.getLogger(__name__)
 
 PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
@@ -1014,7 +1021,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not host or "\r" in host or "\n" in host:
             host = self.server.server_name_with_port()
         location = f"https://{host}{self.path or '/'}"
-        body = f"Use HTTPS for this YOLOmux server: {location}\n".encode("utf-8")
+        body = https_redirect_body(location, resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
         self.send_response(HTTPStatus.PERMANENT_REDIRECT)
         self.send_header("Location", location)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1131,7 +1138,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not record:
             return False
         if self.share_record_at_viewer_cap(record):
-            self.write_text("share viewer limit reached\n", status=HTTPStatus.FORBIDDEN)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(server_string(locale, "share.error.viewerLimitReached") + "\n", status=HTTPStatus.FORBIDDEN)
             return True
         sessions = self.share_record_sessions_for_handler(record)
         if not sessions:
@@ -1142,6 +1150,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             dev=getattr(self.server, 'dev', False),
             dangerously_yolo=self.server.app.dangerously_yolo,
             share=self.share_bootstrap_payload(record),
+            accept_language=self.headers.get("Accept-Language", ""),
         ))
         return True
 
@@ -1190,7 +1199,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             payload = build_payload()
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         self.write_json(payload)
 
@@ -1201,7 +1210,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             data, mime = filesystem.read_raw(raw_path, max_bytes=self.file_transfer_max_bytes())
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime)
@@ -1222,7 +1231,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             archive_file, archive_size = filesystem.zip_directory(raw_path, max_bytes=self.file_transfer_max_bytes())
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         mime = "application/zip"
         try:
@@ -1253,17 +1262,27 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
         if not raw_path.lower().endswith((".html", ".htm")):
-            self.write_json(error_payload("path must be an HTML file", path=raw_path, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "path must be an HTML file",
+                    message_key="fs.error.htmlFileRequired",
+                    message_params={"path": raw_path},
+                    path=raw_path,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         try:
             payload = filesystem.read_file(raw_path)
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         source = html.escape(str(payload.get("content", "")), quote=True)
-        title = html.escape(Path(raw_path).name or "HTML preview")
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(Path(raw_path).name or server_string(locale, "preview.htmlTitle"))
         body = f"""<!doctype html>
-<html>
+<html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
   <title>{title}</title>
@@ -1281,9 +1300,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_preview_popout_placeholder(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
-        title = html.escape(f"{Path(raw_path).name or 'Preview'} preview")
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(server_string(locale, "preview.popout.title", name=Path(raw_path).name or server_string(locale, "tab.preview")))
         body = f"""<!doctype html>
-<html>
+<html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1296,9 +1316,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_pane_popout_placeholder(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_item = qs.get("item", [""])[0]
-        title = html.escape(f"{raw_item or 'YOLOmux'} popout")
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(server_string(locale, "pane.popout.title", name=raw_item or server_string(locale, "app.documentTitle")))
         body = f"""<!doctype html>
-<html>
+<html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1330,13 +1351,28 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             length = int(length_text)
         except (TypeError, ValueError):
-            return None, error_payload(missing_message if not length_text else invalid_message, status=missing_status if not length_text else invalid_status), missing_status if not length_text else invalid_status
+            missing = not length_text
+            status = missing_status if missing else invalid_status
+            return None, error_payload(
+                missing_message if missing else invalid_message,
+                message_key="request.error.contentLengthRequired" if missing else "request.error.contentLengthInvalid",
+                status=status,
+            ), status
         if length < 0 or (length == 0 and not allow_empty):
-            return None, error_payload(empty_message, status=empty_status), empty_status
+            return None, error_payload(
+                empty_message,
+                message_key="request.error.contentLengthInvalid",
+                status=empty_status,
+            ), empty_status
         if length > max_length:
             if close_on_too_large:
                 self.close_connection = True
-            return None, error_payload(too_large_message, status=too_large_status), too_large_status
+            return None, error_payload(
+                too_large_message,
+                message_key="request.error.contentTooLarge",
+                message_params={"max": max_length},
+                status=too_large_status,
+            ), too_large_status
         return self.rfile.read(length), None, HTTPStatus.OK
 
     def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
@@ -1360,16 +1396,39 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return {}
         try:
             text = (body or b"").decode("utf-8")
-        except UnicodeDecodeError:
-            self.write_json(error_payload("request body must be utf-8 JSON", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        except UnicodeDecodeError as exc:
+            self.write_json(
+                error_payload(
+                    "request body must be utf-8 JSON",
+                    message_key="request.error.jsonUtf8",
+                    diagnostic=exc,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return None
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
-            self.write_json(error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "invalid JSON",
+                    message_key="request.error.invalidJson",
+                    diagnostic=exc,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return None
         if not isinstance(payload, dict):
-            self.write_json(error_payload("request body must be a JSON object", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "request body must be a JSON object",
+                    message_key="request.error.jsonObject",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return None
         return payload
 
@@ -1384,13 +1443,30 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             try:
                 expected_mtime = int(expected_mtime)
             except (TypeError, ValueError):
-                self.write_json(error_payload("expected_mtime must be an integer", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+                self.write_json(
+                    error_payload(
+                        "expected_mtime must be an integer",
+                        message_key="request.error.integer",
+                        message_params={"field": "expected_mtime"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    ),
+                    status=HTTPStatus.BAD_REQUEST,
+                )
                 return
         if yolo_rules.is_rules_file_path(raw_path):
             try:
                 yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
             except (ValueError, yaml.YAMLError) as exc:
-                self.write_json(error_payload(f"YOLO rules invalid: {exc}", path=raw_path, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+                self.write_json(
+                    error_payload(
+                        "YOLO rules are invalid",
+                        message_key="yolo.error.invalidRules",
+                        diagnostic=exc,
+                        path=raw_path,
+                        status=HTTPStatus.BAD_REQUEST,
+                    ),
+                    status=HTTPStatus.BAD_REQUEST,
+                )
                 return
             self.write_filesystem_json(
                 raw_path,
@@ -1509,10 +1585,26 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         requests = payload.get("requests", [])
         if not isinstance(requests, list):
-            self.write_json(error_payload("requests must be a list", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "requests must be a list",
+                    message_key="request.error.list",
+                    message_params={"field": "requests"},
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         if len(requests) > MAX_FS_BATCH_REQUESTS:
-            self.write_json(error_payload(f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items",
+                    message_key="request.error.tooManyItems",
+                    message_params={"field": "requests", "max": MAX_FS_BATCH_REQUESTS},
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         responses = []
         op_counts: dict[str, int] = {}
@@ -1520,7 +1612,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         for index, item in enumerate(requests):
             request_id = item.get("id", index) if isinstance(item, dict) else index
             if not isinstance(item, dict):
-                responses.append({"id": request_id, "ok": False, "status": 400, "error": "request must be an object"})
+                responses.append(error_payload(
+                    "request must be an object",
+                    message_key="request.error.object",
+                    message_params={"field": "request"},
+                    id=request_id,
+                    ok=False,
+                    status=HTTPStatus.BAD_REQUEST,
+                ))
                 continue
             op = str(item.get("type", item.get("op", "")) or "")
             raw_path = str(item.get("path", "") or "")
@@ -1528,12 +1627,20 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if raw_path and len(path_samples) < 8:
                 path_samples.append(raw_path)
             if op not in {"list", "info"}:
-                responses.append({"id": request_id, "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": raw_path})
+                responses.append(error_payload(
+                    "unsupported fs batch operation",
+                    message_key="request.error.unsupportedFsBatchOperation",
+                    message_params={"operation": op},
+                    id=request_id,
+                    ok=False,
+                    status=HTTPStatus.BAD_REQUEST,
+                    path=raw_path,
+                ))
                 continue
             try:
                 result = filesystem.list_directory(raw_path) if op == "list" else filesystem.path_info(raw_path)
             except FilesystemError as exc:
-                responses.append({"id": request_id, "ok": False, "status": exc.status, "error": str(exc), "path": raw_path})
+                responses.append(exc.payload(id=request_id, ok=False, path=raw_path))
                 continue
             responses.append({"id": request_id, "ok": True, "status": 200, "payload": result})
         response_payload = {"responses": responses}
@@ -1567,9 +1674,19 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             event = json.loads((body or b"").decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            return error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
+            return error_payload(
+                "invalid JSON",
+                message_key="request.error.invalidJson",
+                diagnostic=exc,
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
         if not isinstance(event, dict):
-            return error_payload("event must be an object", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
+            return error_payload(
+                "event must be an object",
+                message_key="request.error.object",
+                message_params={"field": "event"},
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
         return self.server.app.client_event(event)
 
     def file_transfer_max_bytes(self) -> int:
@@ -1585,11 +1702,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         upload_max_bytes = self.file_transfer_max_bytes()
         body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
         if error is not None:
-            return {"session": session, "error": str(error.get("error") or "")}, status
+            return {**error, "session": session}, status
         try:
             files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
         except ValueError as exc:
-            return {"session": session, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+            return error_payload(
+                "invalid upload data",
+                message_key="upload.error.invalidMultipart",
+                diagnostic=exc,
+                session=session,
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
         if editor_path or base_dir:
             return self.server.app.upload_editor_files(files, editor_path=editor_path, base_dir=base_dir)
         return self.server.app.upload_files(session, files)
@@ -1607,7 +1730,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         if parsed.path == "/":
-            data = html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo).encode("utf-8")
+            data = html_page(
+                self.server.app.sessions,
+                self.auth_identity().role,
+                dev=getattr(self.server, 'dev', False),
+                dangerously_yolo=self.server.app.dangerously_yolo,
+                accept_language=self.headers.get("Accept-Language", ""),
+            ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -1679,7 +1808,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         session = str(query_one(qs, "session", "") or "")
         messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
         payload, status = self.server.app.transcript_tail(session, MAX_TRANSCRIPT_TAIL_LINES)
@@ -1689,7 +1818,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         path_text = payload.get("path")
         text = payload.get("text")
         if not isinstance(path_text, str) or not isinstance(text, str):
-            self.write_json(error_payload("missing transcript text", session=session, status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+            diagnostic = "missing transcript text"
+            self.write_json(
+                {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)},
+                status=HTTPStatus.NOT_FOUND,
+            )
             return
 
         path = Path(path_text)
@@ -1723,7 +1856,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         default_lookback = int(summary_settings.get("lookback_seconds") or SUMMARY_DEFAULT_LOOKBACK_SECONDS)
         lookback_seconds, error = parse_query_int(qs, "lookback", default_lookback, max_value=24 * 3600)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         availability_error = self.codex_summary_availability_error(summary_settings)
         if availability_error:
@@ -1736,7 +1869,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         prompt = payload.get("prompt")
         if not isinstance(prompt, str):
-            self.write_json({"session": session, "error": "missing Codex prompt"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            diagnostic = "missing Codex prompt"
+            self.write_json(
+                {"session": session, **user_message_payload("summary.error.missingPrompt", diagnostic)},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
             return
 
         self.send_response(HTTPStatus.OK)
@@ -1756,36 +1893,53 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "summary_started",
             "AI summary started",
             {"lookback_seconds": lookback_seconds, "model": summary_settings["codex_model"]},
+            message_key="events.message.summary.started",
         )
         try:
             self.write_sse_json("meta", meta)
             self.run_codex_summary(prompt, summary_settings)
-            self.server.app.log_event(session, "summary_finished", "AI summary finished", {"model": summary_settings["codex_model"]})
+            self.server.app.log_event(
+                session,
+                "summary_finished",
+                "AI summary finished",
+                {"model": summary_settings["codex_model"]},
+                message_key="events.message.summary.finished",
+            )
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
-            self.server.app.log_event(session, "summary_disconnected", "AI summary stream disconnected", {})
+            self.server.app.log_event(
+                session,
+                "summary_disconnected",
+                "AI summary stream disconnected",
+                {},
+                message_key="events.message.summary.disconnected",
+            )
             return
 
     def codex_summary_availability_error(self, summary_settings: dict[str, Any]) -> dict[str, Any] | None:
         provider = str(summary_settings.get("backend") or "").strip().lower()
         if provider != "codex":
+            diagnostic = "AI summary provider is disabled"
             return {
-                "error": "AI summary provider is disabled",
+                **user_message_payload("summary.error.providerDisabled", diagnostic),
                 "provider": provider or "disabled",
             }
         status = agent_auth_status()
         codex_status = status.get("codex") if isinstance(status, dict) else {}
         codex_status = codex_status if isinstance(codex_status, dict) else {}
         if not codex_status.get("installed"):
+            diagnostic = "Codex summary provider is unavailable because the codex CLI is not on PATH"
             return {
-                "error": "Codex summary provider is unavailable because the codex CLI is not on PATH",
+                **user_message_payload("summary.error.codexUnavailable", diagnostic),
                 "provider": "codex",
                 "login_command": AGENT_LOGIN_COMMANDS["codex"],
             }
         if not codex_status.get("logged_in"):
+            command = AGENT_LOGIN_COMMANDS["codex"]
+            diagnostic = f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{command}`."
             return {
-                "error": f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{AGENT_LOGIN_COMMANDS['codex']}`.",
+                **user_message_payload("summary.error.codexLoginRequired", diagnostic, command=command),
                 "provider": "codex",
-                "login_command": AGENT_LOGIN_COMMANDS["codex"],
+                "login_command": command,
             }
         return None
 
@@ -1810,20 +1964,23 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 start_new_session=True,
             )
             if process.stdin is None or process.stdout is None:
-                self.write_sse_json("summary_error", {"error": "failed to open Codex pipes"})
+                diagnostic = "failed to open Codex pipes"
+                self.write_sse_json("summary_error", user_message_payload("summary.error.openPipes", diagnostic))
                 return
             process.stdin.write(prompt.encode("utf-8"))
             process.stdin.close()
             self.stream_codex_process(process, timeout_seconds=summary_settings.get("timeout_seconds"))
         except OSError as exc:
-            self.write_sse_json("summary_error", {"error": str(exc)})
+            diagnostic = str(exc)
+            self.write_sse_json("summary_error", user_message_payload("summary.error.runtime", diagnostic, error=diagnostic))
         finally:
             if process is not None:
                 terminate_process_group(process)
 
     def stream_codex_process(self, process: subprocess.Popen[bytes], timeout_seconds: Any = SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS) -> None:
         if process.stdout is None:
-            self.write_sse_json("summary_error", {"error": "missing Codex stdout"})
+            diagnostic = "missing Codex stdout"
+            self.write_sse_json("summary_error", user_message_payload("summary.error.missingStdout", diagnostic))
             return
         fd = process.stdout.fileno()
         buffer = ""
@@ -1837,7 +1994,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         while True:
             now = time.monotonic()
             if now > deadline:
-                self.write_sse_json("summary_error", {"error": "Codex summary timed out"})
+                diagnostic = "Codex summary timed out"
+                self.write_sse_json("summary_error", user_message_payload("summary.error.timedOut", diagnostic))
                 return
             running = process.poll() is None
             timeout = 0.2 if running else 0.0
@@ -1882,7 +2040,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if event_kind == "completed":
             return
         if event_kind == "error":
-            self.write_sse_json("summary_error", {"error": json.dumps(event, ensure_ascii=False)})
+            diagnostic = json.dumps(event, ensure_ascii=False)
+            self.write_sse_json("summary_error", user_message_payload("summary.stream.failed", diagnostic))
             return
 
         text = codex_event_text(event)
@@ -1946,12 +2105,21 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def write_static_asset(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
         if path is None:
-            self.write_text(f"missing static asset: {asset}\n", status=HTTPStatus.NOT_FOUND)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetMissing", asset=asset) + "\n",
+                status=HTTPStatus.NOT_FOUND,
+            )
             return
         try:
             data = path.read_bytes()
         except OSError as exc:
-            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            logger.warning("failed to read static asset %s: %s", asset, exc)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
             return
         body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
@@ -1979,7 +2147,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             data = path.read_bytes()
         except OSError as exc:
-            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            logger.warning("failed to read static asset %s: %s", asset, exc)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
             return
         body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
@@ -2019,7 +2192,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         # app. Centralized so the bad-int response stays uniform; make_result(value) -> (payload, status).
         value, error = parse_query_int(qs, name, default, max_value=max_value)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         self.write_app_result(make_result(value))
 
@@ -2028,7 +2201,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         # response and cap in one path so the three handlers cannot drift.
         value, error = parse_query_float(qs, name, default, max_value=max_value)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         self.write_app_result(make_result(value))
 
@@ -2501,6 +2674,10 @@ TLS_FIRST_BYTES = {0x16, 0x80}
 HTTP_METHOD_PREFIXES = (b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"TRACE ", b"CONNECT ")
 
 
+def https_redirect_body(location: str, locale: str = "en") -> bytes:
+    return (server_string(locale, "server.useHttps", location=location) + "\n").encode("utf-8")
+
+
 def parse_http_request_target(request_bytes: bytes) -> tuple[str, str]:
     text = request_bytes.decode("iso-8859-1", errors="replace")
     lines = text.splitlines()
@@ -2519,7 +2696,7 @@ def parse_http_request_target(request_bytes: bytes) -> tuple[str, str]:
 def https_redirect_response(request_bytes: bytes, fallback_host: str) -> bytes:
     host, target = parse_http_request_target(request_bytes)
     location = f"https://{host or fallback_host}{target}"
-    body = f"Use HTTPS for this YOLOmux server: {location}\n".encode("utf-8")
+    body = https_redirect_body(location)
     headers = [
         b"HTTP/1.1 308 Permanent Redirect",
         f"Location: {location}".encode("utf-8"),

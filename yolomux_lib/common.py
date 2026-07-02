@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from . import auth as _auth
 from .cache import MISS as cache_MISS
+from .locales import user_message_payload
 from .tmux_utils import list_tmux_session_names
 from .tmux_utils import run_cmd
 from .tmux_utils import unique_session_names
@@ -91,16 +92,36 @@ def yolomux_dev_bundle_revision() -> str:
 
 class ErrorPayload(TypedDict, total=False):
     error: str
+    user_message: dict[str, Any]
+    diagnostic: str
     path: str
     session: str
     status: int
 
 
-def error_payload(error: str, **fields: Any) -> ErrorPayload:
-    payload: ErrorPayload = {"error": str(error)}
-    for key, value in fields.items():
+def error_payload(
+    error: object,
+    *,
+    message_key: str = "",
+    message_params: dict[str, Any] | None = None,
+    diagnostic: object = "",
+    **fields: Any,
+) -> ErrorPayload:
+    """Return one structured user-message shape while preserving raw diagnostic context.
+
+    Typed request/filesystem errors pass their known fields explicitly through their own ``payload()``
+    methods. Plain-string callers retain their raw fallback until they are assigned a catalog key.
+    """
+    fallback = str(error)
+    key = str(message_key or "")
+    params = message_params or {}
+    raw_diagnostic = diagnostic
+    payload: ErrorPayload = user_message_payload(key, fallback, **dict(params or {}))
+    if raw_diagnostic:
+        payload["diagnostic"] = str(raw_diagnostic)
+    for field_name, value in fields.items():
         if value is not None:
-            payload[key] = int(value) if key == "status" else value
+            payload[field_name] = int(value) if field_name == "status" else value
     return payload
 MAIN_BRANCHES = {"main", "master"}
 METADATA_CACHE_TTL_SECONDS = 300

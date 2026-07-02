@@ -739,7 +739,7 @@ function applyLayoutUrlPreferencesSeed(preferences = {}) {
   if (!preferences || typeof preferences !== 'object') return;
   if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
   if (Array.isArray(preferences.collapsedSections)) {
-    collapsedPreferenceSections = new Set(layoutUrlStringArray(preferences.collapsedSections, 200));
+    setCollapsedPreferenceSections(layoutUrlStringArray(preferences.collapsedSections, 200), {sections: preferenceSections()});
   }
   if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
 }
@@ -1359,16 +1359,16 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: '', priority: 0, attention: true},
-  'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  [STATE_KEY.needsInput]: {label: 'Needs input', short: '', priority: 1, attention: true},
-  [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
-  disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
-  'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
-  'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
-  [STATE_KEY.working]: {label: 'Working', short: '', priority: 6, attention: false},
-  [STATE_KEY.idle]: {label: 'Idle', short: '', priority: 7, attention: false},
-  done: {label: 'Done', short: '', priority: 8, attention: false},
+  [STATE_KEY.needsApproval]: {hasShort: false, priority: 0, attention: true},
+  'yolo-approval': {hasShort: true, priority: 0, attention: false},
+  [STATE_KEY.needsInput]: {hasShort: false, priority: 1, attention: true},
+  [STATE_KEY.blocked]: {hasShort: true, priority: 2, attention: true},
+  disconnected: {hasShort: true, priority: 3, attention: true},
+  'tests-running': {hasShort: true, priority: 4, attention: false},
+  'ready-review': {hasShort: true, priority: 5, attention: false},
+  [STATE_KEY.working]: {hasShort: false, priority: 6, attention: false},
+  [STATE_KEY.idle]: {hasShort: false, priority: 7, attention: false},
+  done: {hasShort: false, priority: 8, attention: false},
 };
 const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
@@ -1383,7 +1383,7 @@ function stateDef(key) {
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
   const resolvedKey = stateDefs[key] ? key : STATE_KEY.idle;
   const base = stateDefs[resolvedKey];
-  return {...base, label: t(`state.${resolvedKey}`), short: base.short ? t(`state.short.${resolvedKey}`) : ''};
+  return {...base, label: t(`state.${resolvedKey}`), short: base.hasShort ? t(`state.short.${resolvedKey}`) : ''};
 }
 
 function attentionAcknowledgementKey(parts = []) {
@@ -1584,7 +1584,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     .toLowerCase();
   const pr = info?.project?.pull_request;
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
-  const checksState = String(pr?.checks?.state || '').toLowerCase();
+  const checksState = pullRequestCiState(pr);
 
   if (terminalDisconnected(session) || (!info && terminals.has(session))) {
     return stateValue('disconnected', stateReason('terminalConnectionClosed'));
@@ -1648,7 +1648,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
     return stateValue('tests-running', stateReason('testsActive'));
   }
-  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && (prStatus.includes('passing') || checksState === 'success')) {
+  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && checksState === 'passing') {
     return stateValue('ready-review', stateReason('prChecksPassing'));
   }
   if (/done|completed|complete|finished|success/.test(agentText)) {
@@ -1888,8 +1888,8 @@ function tmuxSignalAgentPanesForSession(session) {
 function tmuxSignalPaneModeLabels(pane) {
   const labels = [];
   if (pane?.in_mode === true || String(pane?.mode || '').trim()) labels.push(String(pane?.mode || 'copy-mode'));
-  if (pane?.input_off === true) labels.push('read-only');
-  if (pane?.synchronized === true) labels.push('sync');
+  if (pane?.input_off === true) labels.push(t('common.readOnly'));
+  if (pane?.synchronized === true) labels.push(t('tmux.mode.sync'));
   return labels;
 }
 
@@ -1903,16 +1903,16 @@ function tmuxSignalWindowClientNames(windowRecord) {
 function tmuxSignalWindowPresenceText(windowRecord) {
   const count = Math.max(0, Math.round(Number(windowRecord?.active_clients ?? tmuxSignalWindowClientNames(windowRecord).length) || 0));
   if (count <= 0) return '';
-  return `${count} ${count === 1 ? 'viewer' : 'viewers'}`;
+  return tPlural('tmux.viewer', count);
 }
 
 function tmuxSignalDeadText(pane) {
   if (pane?.dead !== true) return '';
   const status = pane?.dead_status;
   const signal = pane?.dead_signal;
-  if (status !== null && status !== undefined && status !== '') return `agent exited (status ${status})`;
-  if (signal !== null && signal !== undefined && signal !== '') return `agent exited (signal ${signal})`;
-  return 'agent exited';
+  if (status !== null && status !== undefined && status !== '') return stateReason('tmuxAgentExitedStatus', {status});
+  if (signal !== null && signal !== undefined && signal !== '') return stateReason('tmuxAgentExitedSignal', {signal});
+  return stateReason('tmuxAgentExited');
 }
 
 function tmuxSignalPaneTitle(pane) {
@@ -1928,7 +1928,7 @@ function tmuxSignalAgentStateForSession(session) {
   const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
   const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
   if (actionRequiredPane) {
-    return stateValue(STATE_KEY.needsInput, 'tmux agent action required', {tmuxSignal: 'action-required'});
+    return stateValue(STATE_KEY.needsInput, stateReason('tmuxActionRequired'), {tmuxSignal: 'action-required'});
   }
   const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
   if (!panes.length) return null;
@@ -1937,11 +1937,11 @@ function tmuxSignalAgentStateForSession(session) {
   const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
   const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
   if (bellWindow) {
-    return stateValue(STATE_KEY.needsInput, 'tmux bell alert', {tmuxSignal: 'bell'});
+    return stateValue(STATE_KEY.needsInput, stateReason('tmuxBellAlert'), {tmuxSignal: 'bell'});
   }
   const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
   if (quietWindow && livePanes.length) {
-    return stateValue('done', 'tmux silence alert: agent quiet', {tmuxSignal: 'silence', showBadge: true});
+    return stateValue('done', stateReason('tmuxSilenceAlert'), {tmuxSignal: 'silence', showBadge: true});
   }
   if (!livePanes.length && deadPanes.length) {
     return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
@@ -1949,8 +1949,8 @@ function tmuxSignalAgentStateForSession(session) {
   const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
   if (runningPane) {
     const command = tmuxSignalPaneCommand(runningPane);
-    const mode = runningPane?.alternate_on === true ? 'alternate screen' : 'process';
-    return stateValue(STATE_KEY.working, `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
+    const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
+    return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
   }
   return null;
 }
@@ -2078,13 +2078,15 @@ function updateDocumentTitle() {
   const count = runningAgentCount();
   if (count > 0) {
     documentTitleIdleSinceMs = null;
-    document.title = `YOLOmux [${count} running]`;
+    document.title = t('document.title.running', {count});
     return;
   }
   const now = documentTitleNowMs();
   if (documentTitleIdleSinceMs === null) documentTitleIdleSinceMs = now;
   const idleMinutes = documentTitleIdleMinutes(now);
-  document.title = idleMinutes ? `YOLOmux (idle for ${idleMinutes} min)` : 'YOLOmux [idle]';
+  document.title = idleMinutes
+    ? t('document.title.idleFor', {minutes: idleMinutes})
+    : t('document.title.idle');
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
@@ -2205,7 +2207,7 @@ function globalActivityStatusLineHtml() {
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
   parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
 
@@ -2227,8 +2229,8 @@ function createTopbarActivityStatus() {
   button.type = 'button';
   button.id = 'topbarActivity';
   button.className = 'topbar-activity topbar-status-surface';
-  button.title = 'Open Tabber for cross-session AI activity';
-  button.setAttribute('aria-label', 'Open Tabber for AI activity across all sessions');
+  button.title = t('topbar.activity.title');
+  button.setAttribute('aria-label', t('topbar.activity.aria'));
   button.onclick = () => openTabberActivityOverview();
   return button;
 }
@@ -2249,18 +2251,18 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
   if (!activeSummaries.length) return '';
   const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
   const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
-  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(state)}</span></span>`;
+  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(t(`backgroundOwner.role.${state}`))}</span></span>`;
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
   const lines = [
-    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || 'this server'}`,
-    indexSummary.ownerLabel ? `IDX leader: ${indexSummary.ownerLabel}` : '',
-    statsSummary.ownerLabel ? `STATS leader: ${statsSummary.ownerLabel}` : '',
-    sessionSummary.ownerLabel ? `SESS leader: ${sessionSummary.ownerLabel}` : '',
-    indexSummary.status ? `Index status: ${indexSummary.status}` : '',
-    statsSummary.status ? `YO!stats status: ${statsSummary.status}` : '',
-    sessionSummary.status ? `Session files status: ${sessionSummary.status}` : '',
+    t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
+    indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
+    statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
+    sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
+    indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
+    statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
+    sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
     indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');
@@ -2347,8 +2349,8 @@ function createTopbarOwnerStatus() {
   button.type = 'button';
   button.id = 'topbarOwnerStatus';
   button.className = 'topbar-owner-status topbar-status-surface';
-  button.title = 'Refresh connected server ownership status';
-  button.setAttribute('aria-label', 'Connected server ownership status');
+  button.title = t('backgroundOwner.refresh');
+  button.setAttribute('aria-label', t('backgroundOwner.aria'));
   button.onclick = () => {
     if (typeof refreshBackgroundOwnerStatus === 'function') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
@@ -2369,11 +2371,11 @@ function updateTopbarOwnerStatus() {
   const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
   if (summaries.length) {
     const [indexSummary, statsSummary, sessionSummary] = summaries;
-    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || 'Refresh connected server ownership status';
+    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || t('backgroundOwner.refresh');
   } else if (backgroundOwnerStatusError) {
-    node.title = backgroundOwnerStatusError;
+    node.title = userMessageText(backgroundOwnerStatusError, t('common.requestFailed'));
   } else {
-    node.title = 'Refresh connected server ownership status';
+    node.title = t('backgroundOwner.refresh');
   }
 }
 
@@ -2559,11 +2561,40 @@ function notificationSystemPermission() {
   return 'Notification' in window ? Notification.permission : 'unsupported';
 }
 
-function notificationDeliveryItems() {
+function notificationDeliveryDescriptors() {
+  const permission = notificationSystemPermission();
+  const permissionLabel = t(`notify.permission.${permission}`);
   return [
-    menuCommand('In YOLOmux', () => setNotificationDelivery('inApp', !notificationDeliveryEnabled('inApp')), {checked: notificationDeliveryEnabled('inApp'), keepOpen: true, renderMenu: false, className: 'notification-delivery-in-app', detail: 'Show notification popups in YOLOmux.'}),
-    menuCommand('System notifications', () => setNotificationDelivery('system', !notificationDeliveryEnabled('system')), {checked: notificationDeliveryEnabled('system'), keepOpen: true, renderMenu: false, className: 'notification-delivery-system', detail: `Browser permission: ${notificationSystemPermission()}`, disabled: notificationSystemPermission() === 'unsupported'}),
+    {
+      channel: 'inApp',
+      label: t('notify.delivery.inApp.label'),
+      help: t('notify.delivery.inApp.help'),
+      className: 'notification-delivery-in-app',
+      disabled: false,
+    },
+    {
+      channel: 'system',
+      label: t('notify.delivery.system.label', {platform: isMacPlatform() ? 'macOS' : 'PC'}),
+      help: t('notify.delivery.system.help', {permission: permissionLabel}),
+      className: 'notification-delivery-system',
+      disabled: permission === 'unsupported',
+    },
   ];
+}
+
+function notificationDeliveryItems() {
+  return notificationDeliveryDescriptors().map(descriptor => menuCommand(
+    descriptor.label,
+    () => setNotificationDelivery(descriptor.channel, !notificationDeliveryEnabled(descriptor.channel)),
+    {
+      checked: notificationDeliveryEnabled(descriptor.channel),
+      keepOpen: true,
+      renderMenu: false,
+      className: descriptor.className,
+      detail: descriptor.help,
+      disabled: descriptor.disabled,
+    },
+  ));
 }
 
 let notificationDeliveryPopover = null;
@@ -2597,14 +2628,19 @@ function openNotificationDeliveryPopover() {
 
 function renderNotifyToggle() {
   if (!notifyToggle) return;
-  syncPressedButton(notifyToggle, notificationDeliveryEnabled(), {labelOn: 'Notifications', labelOff: 'Notifications'});
-  notifyToggle.title = `Notifications: In YOLOmux ${notificationDeliveryEnabled('inApp') ? 'on' : 'off'}; system ${notificationDeliveryEnabled('system') ? 'on' : 'off'}`;
+  const label = t('pref.section.notifications');
+  syncPressedButton(notifyToggle, notificationDeliveryEnabled(), {labelOn: label, labelOff: label});
+  notifyToggle.title = t('notify.delivery.summary', {
+    inApp: t(notificationDeliveryEnabled('inApp') ? 'notify.state.on' : 'notify.state.off'),
+    system: t(notificationDeliveryEnabled('system') ? 'notify.state.on' : 'notify.state.off'),
+  });
   notifyToggle.onclick = event => {
     event.preventDefault();
     event.stopPropagation();
     if (notificationDeliveryPopover && !notificationDeliveryPopover.hidden) closeNotificationDeliveryPopover();
     else openNotificationDeliveryPopover();
   };
+  if (notificationDeliveryPopover && !notificationDeliveryPopover.hidden) openNotificationDeliveryPopover();
 }
 
 function refreshNotificationDeliveryMenuChecks() {
@@ -2672,7 +2708,7 @@ function keyboardShortcutCatalog() {
     {section: t('shortcuts.section.app'), items: [
       {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
-      {label: t('share.title'), keys: appShortcutText('K')},
+      {label: t('brand.share'), keys: appShortcutText('K')},
       {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
@@ -2704,7 +2740,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
     ]},
-    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel()}), items: [
+    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel(), differ: t('changes.title')}), items: [
       {label: t('shortcuts.finderDiffer.moveSelection'), keys: '↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.extendSelection'), keys: 'Shift+↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.expandCollapseFolders'), keys: '→ / ←'},
@@ -2743,6 +2779,7 @@ function keyboardLegendStatusSample(kind, text = '●', options = {}) {
 }
 
 function keyboardLegendCatalog() {
+  const yoMarker = esc(t('brand.marker'));
   return [
     {section: t('legend.section.agentStatus'), items: [
       {sampleHtml: keyboardLegendStatusSample('working', '●', {glyph: true}), label: t('legend.shape.working.label'), detail: t('legend.shape.working.detail')},
@@ -2755,7 +2792,7 @@ function keyboardLegendCatalog() {
       {sampleHtml: keyboardLegendStatusSample('attention'), label: t('legend.color.red.label'), detail: t('legend.color.red.detail')},
       {sampleHtml: keyboardLegendStatusSample('merged'), label: t('legend.color.purple.label'), detail: t('legend.color.purple.detail')},
       {sampleHtml: keyboardLegendStatusSample('closed'), label: t('legend.color.gray.label'), detail: t('legend.color.gray.detail')},
-      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: t('legend.color.metadata.label'), detail: t('legend.color.metadata.detail')},
+      {sampleHtml: `<span class="keyboard-legend-meta keyboard-legend-meta-branch">${esc(t('info.field.gitBranch'))}</span>`, label: t('legend.color.metadata.label'), detail: t('legend.color.metadata.detail')},
     ]},
     {section: t('legend.section.icons'), items: [
       {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
@@ -2766,10 +2803,10 @@ function keyboardLegendCatalog() {
       {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: t('legend.icon.pin.label'), detail: t('legend.icon.pin.detail')},
     ]},
     {section: t('legend.section.yo'), items: [
-      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: t('legend.yo.inactive.label'), detail: t('legend.yo.inactive.detail')},
-      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: t('legend.yo.active.label'), detail: t('legend.yo.active.detail')},
-      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: t('legend.yo.working.label'), detail: t('legend.yo.working.detail')},
-      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: t('legend.yo.locked.label'), detail: t('legend.yo.locked.detail')},
+      {sampleHtml: `<span class="session-yolo-marker inactive">${yoMarker}</span>`, label: t('legend.yo.inactive.label'), detail: t('legend.yo.inactive.detail')},
+      {sampleHtml: `<span class="session-yolo-marker active">${yoMarker}</span>`, label: t('legend.yo.active.label'), detail: t('legend.yo.active.detail')},
+      {sampleHtml: `<span class="session-yolo-marker active working">${yoMarker}</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>`, label: t('legend.yo.working.label'), detail: t('legend.yo.working.detail')},
+      {sampleHtml: `<span class="session-yolo-marker locked">${yoMarker}</span>`, label: t('legend.yo.locked.label'), detail: t('legend.yo.locked.detail')},
     ]},
   ];
 }
@@ -2856,12 +2893,28 @@ function ensureKeyboardShortcutsOverlay() {
   return node;
 }
 
+function renderKeyboardShortcutsOverlay(node = keyboardShortcutsNode) {
+  if (!node) return false;
+  const dialog = node.querySelector('.keyboard-shortcuts-dialog');
+  const heading = node.querySelector('.keyboard-shortcuts-head h2');
+  const close = node.querySelector('.keyboard-shortcuts-close');
+  const body = node.querySelector('.keyboard-shortcuts-body');
+  if (dialog) dialog.setAttribute('aria-label', t('shortcuts.title'));
+  if (heading) heading.textContent = t('shortcuts.title');
+  if (close) close.setAttribute('aria-label', t('shortcuts.close'));
+  if (body) body.innerHTML = keyboardShortcutsHtml();
+  return true;
+}
+
+function relocalizeKeyboardShortcutsOverlay() {
+  return renderKeyboardShortcutsOverlay(keyboardShortcutsNode);
+}
+
 function openKeyboardShortcutsOverlay() {
   const node = ensureKeyboardShortcutsOverlay();
   closeAppMenus();
   closeCommandPalette();
-  const body = node.querySelector('.keyboard-shortcuts-body');
-  if (body) body.innerHTML = keyboardShortcutsHtml();
+  renderKeyboardShortcutsOverlay(node);
   node.hidden = false;
   node.classList.add(CLS.open);
   node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
@@ -3036,7 +3089,7 @@ function commandPaletteCommandItems() {
     keybinding: 'Enter',
     run: () => {
       preferencesSearchText = item.label;
-      collapsedPreferenceSections.delete(section.title);
+      collapsedPreferenceSections.delete(section.id);
       writeStoredCollapsedPreferenceSections();
       selectSession(prefsItemId);
       requestAnimationFrame(() => {
@@ -3083,15 +3136,16 @@ function commandPaletteDropActionItems() {
   return dropActionsFor(category, agentKind, paths.length, {pathInserted: false, includeShellForAgents: true})
     .map(action => {
       const needsTerminal = action.kind !== 'server';
+      const label = dropActionDisplayLabel(action);
       return {
-        group: 'File Actions',
+        group: t('palette.group.fileActions'),
         category: 'command',
-        label: action.label,
+        label,
         detail: compactHomePath(path),
         key: `drop-action:${action.id}:${path}`,
         keybinding: 'Enter',
         disabled: needsTerminal && !session,
-        searchFields: ['do something with file', 'file action', action.label, path, compactHomePath(path)],
+        searchFields: [t('palette.group.fileActions'), label, path, compactHomePath(path)],
         run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {session, kind, pathInserted: false})),
       };
     });
@@ -3188,7 +3242,7 @@ function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRo
 function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
   const roots = fileQuickOpenRootsForSearch(root);
   if (roots.length <= 1) return compactHomePath(roots[0] || root || '/');
-  return `${compactHomePath(roots[0])} + ${roots.length - 1} indexed`;
+  return tPlural('palette.scope.indexedRoot', roots.length - 1, {path: compactHomePath(roots[0])});
 }
 
 function fileQuickOpenQueryParts(query = commandPaletteQuery) {
@@ -3288,7 +3342,7 @@ function fileQuickOpenItem(path, options = {}) {
   const cursorReference = cursorStyleFileReference(path, options);
   const detail = cursorReference?.detail || compactHomePath(path);
   return {
-    group: options.group || 'Files',
+    group: options.group || t('palette.group.files'),
     category: 'file',
     label: cursorReference?.label || (isDir ? `${label}/` : label),
     detail,
@@ -3296,7 +3350,7 @@ function fileQuickOpenItem(path, options = {}) {
     path,
     mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
     iconText: isDir ? disclosureTriangleCollapsedGlyph : fileIconFor(label),
-    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
+    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} ${t('editor.mode.split')}`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
     run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
@@ -3322,7 +3376,7 @@ function fileQuickOpenExactPathItem() {
   if (!name || !fileExtensionOf(name)) return null;
   return {
     ...fileQuickOpenItem(path, {group: t('palette.group.files')}),
-    label: previewMediaKindForPath(path) === 'image' ? `Open image ${name}` : `Open ${name}`,
+    label: t(previewMediaKindForPath(path) === 'image' ? 'palette.openImage' : 'palette.openFile', {name}),
     detail: compactHomePath(path),
     key: `exact-file:${path}`,
     keybinding: appShortcutText('Enter'),
@@ -3353,7 +3407,7 @@ function fileQuickOpenOpenFolderItem() {
     iconText: disclosureTriangleCollapsedGlyph,
     keybinding: appShortcutText('Enter'),
     pinTop: true,
-    searchFields: ['open folder', target],
+    searchFields: [t('palette.openFolder', {name: fileExplorerLabel()}), target],
     run: async () => { await openFileExplorerPane(); await openFileExplorerAt(target); },
   };
 }
@@ -3405,7 +3459,7 @@ function fileQuickOpenItems() {
     const isImage = (file.kind || 'file') !== 'dir' && previewMediaKindForPath(path) === 'image';
     if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {
-      group: externalIndexed ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
+      group: externalIndexed ? t('palette.group.indexed', {path: compactHomePath(indexedRoot)}) : t('palette.group.files'),
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
       imageIndex,
@@ -3415,11 +3469,12 @@ function fileQuickOpenItems() {
     }));
   }
   if (fileQuickOpenError) {
+    const errorText = userMessageText(fileQuickOpenError, t('palette.searchFailed'));
     items.push({
       group: t('palette.group.files'),
       label: t('search.failed'),
-      detail: fileQuickOpenError,
-      searchFields: ['search failed', fileQuickOpenError],
+      detail: errorText,
+      searchFields: [t('palette.searchFailed'), errorText],
       disabled: true,
       run: null,
     });
@@ -3646,7 +3701,9 @@ function commandPaletteFinderAliasBonus(item, query, options = {}) {
   if (item?.targetItem !== fileExplorerItemId) return 0;
   const text = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (text.length < 3) return 0;
-  const aliases = ['file', 'files', 'finder', 'file explorer'];
+  const aliases = [t('palette.group.files'), fileExplorerLabel(), 'file', 'files', 'finder', 'file explorer']
+    .map(alias => String(alias || '').trim().toLowerCase().replace(/\s+/g, ' '))
+    .filter(Boolean);
   if (!aliases.some(alias => alias === text || alias.startsWith(text))) return 0;
   return commandPaletteSurface(options) === 'files'
     ? searchRankWeights.finderAliasFilesMode
@@ -3914,9 +3971,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
     if (pathQuery.active) {
-      const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || response.status);
+      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
       if (requestId !== fileQuickOpenRequestId) return;
       fileQuickOpenRoot = payload.path || pathQuery.directory || root;
       const filter = String(pathQuery.filter || '').toLowerCase();
@@ -3937,9 +3992,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
         try {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
           const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
-          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
-          const payload = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(payload.error || response.status);
+          const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           return {ok: true, root: normalizeStoredFileExplorerIndexedDir(payload.root || payload.root_realpath || searchRoot) || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
@@ -3948,8 +4001,14 @@ async function refreshFileQuickOpenCandidates(query = '') {
       if (requestId !== fileQuickOpenRequestId) return;
       const successful = results.filter(result => result.ok);
       if (!successful.length) {
-        const firstError = results.find(result => result.error)?.error || 'search failed';
-        throw new Error(firstError);
+        const firstError = results.find(result => result.error)?.error;
+        if (firstError) throw firstError;
+        const fallback = t('palette.searchFailed');
+        fileQuickOpenError = userMessageSnapshot({
+          error: fallback,
+          user_message: {key: 'palette.searchFailed', params: {}, fallback},
+        });
+        return;
       }
       fileQuickOpenRoot = root;
       fileQuickOpenCandidates = dedupeFileSearchResults(
@@ -3961,7 +4020,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
     if (requestId !== fileQuickOpenRequestId) return;
     if (error?.name === 'AbortError') return;
     fileQuickOpenCandidates = [];
-    fileQuickOpenError = String(error);
+    fileQuickOpenError = error;
   } finally {
     if (requestId === fileQuickOpenRequestId) {
       fileQuickOpenAbortController = null;
@@ -4230,12 +4289,12 @@ function startupHelperNavigationGroup(index, total, showRelativeTip) {
   const group = document.createElement('span');
   group.className = 'startup-helper-nav';
   group.setAttribute('role', 'group');
-  group.setAttribute('aria-label', 'Tip navigation');
+  group.setAttribute('aria-label', t('startupHelper.navigation'));
   group.append(
     startupHelperAction('<', () => showRelativeTip(-1), {
       className: 'startup-helper-nav-button',
-      title: 'Previous tip',
-      ariaLabel: 'Previous tip',
+      title: t('startupHelper.action.previous'),
+      ariaLabel: t('startupHelper.action.previous'),
     }),
     startupHelperAction('>', () => showRelativeTip(1), {
       className: 'startup-helper-nav-button',
@@ -4283,7 +4342,7 @@ function showStartupHelperTip(options = {}) {
     closeStartupHelperToast(node);
     saveSettingsPatch(settingPatch('general.startup_tips', false))
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
   });
   node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
@@ -4317,9 +4376,10 @@ function displayToastContainer(session) {
 function compactNotificationTitle(scope, message, options = {}) {
   const suffix = String(message || '').trim();
   const label = String(scope || '').trim();
+  const product = t('app.documentTitle');
   if (options.inApp === true) return suffix || label;
-  if (!label) return suffix ? `YOLOmux ${suffix}` : 'YOLOmux';
-  return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
+  if (!label) return suffix ? `${product} ${suffix}` : product;
+  return suffix ? `${product}[${label}] ${suffix}` : `${product}[${label}]`;
 }
 
 function sessionNotificationScope(session) {
@@ -4366,7 +4426,7 @@ async function focusAttentionToastTarget(session, state) {
   await selectSession(session, {userInitiated: true});
   const windowIndex = agentWindowIndex(attentionToastAgent(session, state)?.agent);
   if (windowIndex === null) return;
-  tmuxWindow(session, {windowIndex}, `tmux sub-window ${windowIndex}`);
+  tmuxWindow(session, {windowIndex}, t('terminal.window.title', {name: windowIndex}));
 }
 
 function attentionToastLine(session, state) {
@@ -4552,7 +4612,7 @@ function maybeNotifyState(session, state, options = {}) {
 function watchedPrStatusSnapshot(pr) {
   return {
     merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
-    ci: String(pr?.checks?.state || '').toLowerCase(),
+    ci: pullRequestCiState(pr),
     review: String(pr?.review_decision || '').toUpperCase(),
   };
 }

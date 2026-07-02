@@ -21,6 +21,8 @@ from .common import git
 from .common import git_ahead_behind_counts
 from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
+from .locales import message_descriptor
+from .locales import user_message_payload
 from .sessions import claude_transcript_family_paths
 from .sessions import find_recent_codex_transcript
 from .sessions import recent_codex_transcript_candidates
@@ -729,6 +731,19 @@ def validate_diff_refs(repo: Path, from_ref: str, to_ref: str) -> str:
     return ""
 
 
+def diff_ref_issue(message: str, from_ref: str, to_ref: str, repo: str = "") -> dict[str, Any]:
+    """Classify one git-ref diagnostic into the shared localizable descriptor shape."""
+    fallback = str(message or "")
+    params = {"from": from_ref, "to": to_ref, "repo": repo, "error": fallback}
+    if fallback.startswith("unknown FROM ref:"):
+        return message_descriptor("diff.error.unknownFrom", fallback, {"ref": from_ref})
+    if fallback.startswith("unknown TO ref:"):
+        return message_descriptor("diff.error.unknownTo", fallback, {"ref": to_ref})
+    if fallback.startswith("FROM ref must be older than TO ref"):
+        return message_descriptor("diff.error.fromNotOlder", fallback, params)
+    return message_descriptor("diff.error.git", fallback, params)
+
+
 def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[list[str], bool, str]:
     if refs_requested(from_ref, to_ref):
         older, newer = diff_refs(from_ref, to_ref)
@@ -1150,7 +1165,7 @@ def merge_agent_window_lists(*window_lists: list[dict[str, Any]]) -> list[dict[s
     return merged
 
 
-def touched_files_for_info(info: SessionInfo, cutoff: float, warnings: list[str] | None = None) -> dict[str, dict[str, Any]]:
+def touched_files_for_info(info: SessionInfo, cutoff: float, warnings: list[str | dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     touched: dict[str, dict[str, Any]] = {}
     for agent in info.agents:
         if not agent.transcript:
@@ -1161,7 +1176,7 @@ def touched_files_for_info(info: SessionInfo, cutoff: float, warnings: list[str]
             # treating the whole session as failed (the frontend renders payload["errors"] as red blocking
             # rows; warnings are a separate, non-blocking channel).
             if agent.error and warnings is not None:
-                warnings.append(agent.error)
+                warnings.append(message_descriptor("diff.warning.agentDiscovery", agent.error, {"error": agent.error}))
             continue
         transcript = Path(agent.transcript).expanduser()
         transcript_mtime = file_mtime(transcript)
@@ -1273,10 +1288,10 @@ def session_files_payload_for_info(
     cutoff = session_files_cutoff(hours, now)
     refs_active = refs_requested(from_ref, to_ref)
     selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
-    errors: list[str] = []
+    errors: list[str | dict[str, Any]] = []
     # D2: per-agent transcript-discovery problems land here, separate from the blocking `errors` list, so a
     # single inactive agent's missing transcript does not read as a session-level Differ failure.
-    warnings: list[str] = []
+    warnings: list[str | dict[str, Any]] = []
     touched = touched_files_for_info(info, cutoff, warnings)
 
     repos: dict[str, set[str]] = {}
@@ -1305,6 +1320,7 @@ def session_files_payload_for_info(
         repo_refs_active = refs_requested(repo_from, repo_to)
         sel_from, sel_to = diff_refs(repo_from, repo_to) if repo_refs_active else ("", "")
         repo_error = ""
+        repo_error_message = message_descriptor("", "")
         diff_base = "" if repo_refs_active else git_diff_base(repo)
         statuses, status_error = git_name_status(repo, diff_base or None, sel_from or None, sel_to or None)
         if status_error and repo_refs_active and diff_ref_resolution_error(status_error):
@@ -1315,9 +1331,12 @@ def session_files_payload_for_info(
             numstat = git_numstat(repo, fallback_base) if not status_error else {}
             sel_from, sel_to = "", ""
             repo_error = "requested refs not found in this repo; showing default"
+            repo_error_message = message_descriptor("diff.warning.refsFallback", repo_error, {"repo": repo.name})
         elif status_error:
-            errors.append(f"{repo.name}: {status_error}")
+            issue = diff_ref_issue(status_error, sel_from, sel_to, repo.name)
+            errors.append(message_descriptor("diff.error.repo", f"{repo.name}: {status_error}", {"repo": repo.name, "error": issue["fallback"]}))
             repo_error = status_error
+            repo_error_message = issue
             statuses = {}
             numstat = {}
         else:
@@ -1386,6 +1405,8 @@ def session_files_payload_for_info(
             "to_ref": sel_to or "base",
             "error": repo_error,
         }
+        if repo_error_message.get("key") or repo_error_message.get("fallback"):
+            repo_payload["error_message"] = repo_error_message
         repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
         repo_payloads.append(repo_payload)
 
@@ -1452,15 +1473,16 @@ def session_files_payload(
     if session:
         info = infos.get(session)
         if info is None:
-            return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
+            diagnostic = f"unknown session: {session}"
+            return {"session": session, **user_message_payload("status.sessionEnded", diagnostic, session=session)}, HTTPStatus.NOT_FOUND
         payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         return payload, HTTPStatus.OK
 
     files: list[SessionFileEntry] = []
     repos: dict[str, RepoPayload] = {}
     refs_by_repo: dict[str, list[dict[str, Any]]] = {}
-    errors: list[str] = []
-    warnings: list[str] = []
+    errors: list[str | dict[str, Any]] = []
+    warnings: list[str | dict[str, Any]] = []
     for info in infos.values():
         payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         files.extend(payload["files"])
@@ -1478,6 +1500,8 @@ def session_files_payload(
             existing.setdefault("from_ref", repo.get("from_ref", "default"))
             existing.setdefault("to_ref", repo.get("to_ref", "base"))
             existing.setdefault("error", repo.get("error", ""))
+            if "error_message" in repo:
+                existing.setdefault("error_message", repo["error_message"])
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["session"], item["path"]))
     return {
         "session": "",

@@ -622,7 +622,7 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
     assert metrics["entry"]["kind"] == "file", metrics
     assert metrics["missing"] is False, metrics
     assert metrics["network"] is False, metrics
-    assert metrics["lookupError"] == "", metrics
+    assert metrics["lookupError"] is None, metrics
     assert metrics["fsFetches"], metrics
 
 

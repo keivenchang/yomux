@@ -13,14 +13,14 @@ from typing import Any
 from typing import Callable
 
 from ..common import truncate_text
-from .actions import redacted_action_text
 from .backends import strip_yoagent_stream_hidden_thinking
 from .conversation import bounded_auxiliary_lines
 from .conversation import bounded_stream_items
 from .conversation import sanitized_auxiliary_preview
-from .conversation import YOAGENT_AUXILIARY_TOTAL_LIMIT
+from .conversation import YOAGENT_STREAM_ITEMS_LIMIT
 from .conversation import YOAGENT_STREAM_ITEMS_TOTAL_LIMIT
 from .stream_events import ASSISTANT_DELTA
+from .stream_events import APPROVAL_REQUESTED
 from .stream_events import ERROR
 from .stream_events import HIDDEN_WORK_DELTA
 from .stream_events import HIDDEN_WORK_DONE
@@ -30,19 +30,19 @@ from .stream_events import TOOL_CALL_STARTED
 from .stream_events import TURN_DONE
 from .stream_events import USAGE
 from .stream_events import normalize_yoagent_stream_event
-from .stream_events import yoagent_stream_event_auxiliary_line
+from .stream_events import yoagent_stream_event_auxiliary_item
 
 
 YOAGENT_STREAM_STATE_LIMIT = 50
 YOAGENT_STREAM_STATE_PRUNE_COUNT = 10
 
 
-def sanitized_stream_items(value: Any) -> list[dict[str, str]]:
+def sanitized_stream_items(value: Any) -> list[dict[str, Any]]:
     items, _truncated = bounded_stream_items(value)
     return items
 
 
-def copy_stream_items(value: Any) -> list[dict[str, str]]:
+def copy_stream_items(value: Any) -> list[dict[str, Any]]:
     items, _truncated = bounded_stream_items(value)
     return items
 
@@ -67,7 +67,7 @@ class YoagentStreamStateStore:
         *,
         auxiliary_lines: list[str],
         auxiliary_preview: str,
-        stream_items: list[dict[str, str]],
+        stream_items: list[dict[str, Any]],
         auxiliary_done: bool,
         auxiliary_truncated: bool,
         stream_items_sanitized: bool = False,
@@ -153,7 +153,7 @@ class YoagentStreamPublisher:
         events: list[dict[str, Any]] | None = None,
         auxiliary_lines: list[str] | None = None,
         auxiliary_preview: str = "",
-        stream_items: list[dict[str, str]] | None = None,
+        stream_items: list[dict[str, Any]] | None = None,
         hidden_work_active: bool = False,
         tool_active: bool = False,
         auxiliary_done: bool = False,
@@ -221,8 +221,7 @@ class YoagentStreamPublisher:
             "last_content": None,
             "hidden_thinking_removed": False,
             "auxiliary_lines": [],
-            "auxiliary_lines_length": 0,
-            "hidden_work_prefix": "",
+            "hidden_work_descriptor": "",
             "hidden_work_text": "",
             "hidden_work_active": False,
             "tool_active": False,
@@ -233,28 +232,29 @@ class YoagentStreamPublisher:
         }
 
         def publish(events: list[dict[str, Any]], phase: str = "") -> None:
-            lines = state["auxiliary_lines"]
             stream_items = state["stream_items"]
-            lines_truncated = False
             stream_items_truncated = False
-            if state["auxiliary_lines_length"] > YOAGENT_AUXILIARY_TOTAL_LIMIT:
-                while len(lines) > 1 and state["auxiliary_lines_length"] > YOAGENT_AUXILIARY_TOTAL_LIMIT:
-                    state["auxiliary_lines_length"] -= len(lines.pop(0)) + 1
-                    lines_truncated = True
-            if state["stream_items_length"] > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT:
-                while len(stream_items) > 1 and state["stream_items_length"] > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT:
+            if len(stream_items) > YOAGENT_STREAM_ITEMS_LIMIT or state["stream_items_length"] > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT:
+                while len(stream_items) > 1 and (
+                    len(stream_items) > YOAGENT_STREAM_ITEMS_LIMIT
+                    or state["stream_items_length"] > YOAGENT_STREAM_ITEMS_TOTAL_LIMIT
+                ):
                     state["stream_items_length"] -= len(str(stream_items.pop(0).get("text") or "")) + 1
                     stream_items_truncated = True
-            if lines_truncated or stream_items_truncated:
+            if stream_items_truncated:
                 state["auxiliary_truncated"] = True
-                state["auxiliary_lines"] = lines
                 state["stream_items"] = stream_items
             active = bool(state.get("hidden_work_active") or state.get("tool_active"))
             preview_count = 2 if active else 1
-            preview = "\n".join(lines[-preview_count:]) if lines else ""
+            thinking_text = [
+                str(item.get("text") or "")
+                for item in stream_items
+                if item.get("kind") == "thinking" and str(item.get("text") or "").strip()
+            ]
+            preview = "\n".join(thinking_text[-preview_count:]) if thinking_text else ""
             self.store.store_callback_state(
                 stream_id,
-                auxiliary_lines=lines,
+                auxiliary_lines=[],
                 auxiliary_preview=preview,
                 stream_items=stream_items,
                 auxiliary_done=bool(state.get("auxiliary_done")),
@@ -268,7 +268,7 @@ class YoagentStreamPublisher:
                 phase=phase,
                 hidden_thinking_removed=bool(state.get("hidden_thinking_removed")),
                 events=events,
-                auxiliary_lines=lines,
+                auxiliary_lines=[],
                 auxiliary_preview=preview,
                 stream_items=stream_items,
                 hidden_work_active=bool(state.get("hidden_work_active")),
@@ -280,170 +280,75 @@ class YoagentStreamPublisher:
                 stream_items_sanitized=True,
             )
 
-        def hidden_work_prefix(event: dict[str, Any]) -> str:
-            if event.get("summary"):
-                return "thinking summary"
-            if event.get("redacted"):
-                return "redacted thinking"
-            return "thinking"
-
-        def compact_auxiliary_text(value: str) -> str:
-            return " ".join(str(value or "").split())
-
-        def hidden_work_text_is_heartbeat(prefix: str, value: str) -> bool:
-            compact = compact_auxiliary_text(value).lower()
-            if not compact:
-                return False
-            safe_prefix = compact_auxiliary_text(prefix).lower() or "thinking"
-            roots = {safe_prefix, "thinking", "reasoning"}
-            if safe_prefix.endswith("summary"):
-                roots.update({"thinking summary", "reasoning summary"})
-            for root in roots:
-                if compact == root or compact == f"{root}..." or compact.startswith(f"{root}... "):
-                    return True
-            return False
-
-        def hidden_work_auxiliary_line(prefix: str, text: str) -> str:
-            compact = compact_auxiliary_text(text)
-            if not compact:
-                return prefix
-            if compact.lower() == (compact_auxiliary_text(prefix).lower() or "thinking"):
-                return prefix
-            if hidden_work_text_is_heartbeat(prefix, compact):
-                return compact
-            return f"{prefix}: {compact}"
-
-        def append_stream_item(kind: str, text: str, *, merge: bool = True) -> None:
-            safe_kind = str(kind or "").strip().lower()
-            value = redacted_action_text(str(text or ""), None)
-            if safe_kind not in {"assistant", "thinking", "tool"} or not value.strip():
+        def append_stream_item(item: dict[str, Any], *, merge: bool = True) -> None:
+            clean, _truncated = bounded_stream_items([item])
+            if not clean:
                 return
+            next_item = clean[0]
+            safe_kind = str(next_item.get("kind") or "")
+            value = str(next_item.get("text") or "")
             items = state.get("stream_items")
             if not isinstance(items, list):
                 items = []
                 state["stream_items"] = items
-            if merge and items and items[-1].get("kind") == safe_kind:
+            same_descriptor = items and all(
+                items[-1].get(field) == next_item.get(field)
+                for field in ("kind", "eventKind", "labelKey", "labelParams", "toolName")
+            )
+            if merge and same_descriptor:
                 joiner = "" if safe_kind == "assistant" else "\n"
                 previous = str(items[-1].get("text") or "")
-                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": previous + joiner + value}])
-                if not clean:
+                merged, _truncated = bounded_stream_items([{**next_item, "text": previous + joiner + value}])
+                if not merged:
                     return
-                items[-1]["text"] = clean[0]["text"]
-                state["stream_items_length"] += len(clean[0]["text"]) - len(previous)
+                items[-1] = merged[0]
+                state["stream_items_length"] += len(str(merged[0].get("text") or "")) - len(previous)
             else:
-                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": value}])
-                if not clean:
-                    return
-                items.append(clean[0])
-                state["stream_items_length"] += len(clean[0]["text"]) + (1 if len(items) > 1 else 0)
+                items.append(next_item)
+                state["stream_items_length"] += len(value) + (1 if len(items) > 1 else 0)
 
-        def replace_or_append_stream_item(kind: str, text: str) -> None:
-            safe_kind = str(kind or "").strip().lower()
-            value = redacted_action_text(str(text or ""), None)
-            if safe_kind not in {"assistant", "thinking", "tool"} or not value.strip():
+        def replace_or_append_stream_item(item: dict[str, Any]) -> None:
+            clean, _truncated = bounded_stream_items([item])
+            if not clean:
                 return
+            next_item = clean[0]
+            safe_kind = str(next_item.get("kind") or "")
+            value = str(next_item.get("text") or "")
             items = state.get("stream_items")
             if not isinstance(items, list):
                 items = []
                 state["stream_items"] = items
             if items and items[-1].get("kind") == safe_kind:
-                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": value}])
-                if not clean:
-                    return
                 previous = str(items[-1].get("text") or "")
-                items[-1]["text"] = clean[0]["text"]
-                state["stream_items_length"] += len(clean[0]["text"]) - len(previous)
+                items[-1] = next_item
+                state["stream_items_length"] += len(value) - len(previous)
             else:
-                clean, _truncated = bounded_stream_items([{"kind": safe_kind, "text": value}])
-                if not clean:
-                    return
-                items.append(clean[0])
-                state["stream_items_length"] += len(clean[0]["text"]) + (1 if len(items) > 1 else 0)
+                items.append(next_item)
+                state["stream_items_length"] += len(value) + (1 if len(items) > 1 else 0)
 
-        def hidden_work_stream_item_text(event: dict[str, Any]) -> str:
-            prefix = str(state.get("hidden_work_prefix") or hidden_work_prefix(event) or "thinking")
-            raw_text = str(state.get("hidden_work_text") or event.get("text") or "")
-            compact_text = compact_auxiliary_text(raw_text)
-            if raw_text:
-                if hidden_work_text_is_heartbeat(prefix, raw_text):
-                    return compact_text or prefix
-                return f"{prefix}: {raw_text}"
-            if compact_text:
-                return f"{prefix}: {compact_text}"
-            return yoagent_stream_event_auxiliary_line(event)
-
-        def append_clean_auxiliary_line(lines: list[str], value: str) -> None:
-            clean, _truncated = bounded_auxiliary_lines([value])
-            if not clean:
-                return
-            lines.append(clean[0])
-            state["auxiliary_lines_length"] += len(clean[0]) + (1 if len(lines) > 1 else 0)
-
-        def replace_clean_auxiliary_line(lines: list[str], value: str) -> None:
-            clean, _truncated = bounded_auxiliary_lines([value])
-            if not clean:
-                return
-            previous = lines[-1] if lines else ""
-            if lines:
-                lines[-1] = clean[0]
+        def hidden_work_stream_item(event: dict[str, Any]) -> dict[str, Any]:
+            item = yoagent_stream_event_auxiliary_item(event)
+            descriptor = "\0".join((str(item.get("eventKind") or ""), str(item.get("labelKey") or "")))
+            previous_text = str(state.get("hidden_work_text") or "") if descriptor == state.get("hidden_work_descriptor") else ""
+            incoming_text = str(event.get("text") or "")
+            if event.get("heartbeat"):
+                next_text = previous_text
+            elif event.get("snapshot"):
+                next_text = incoming_text
             else:
-                lines.append(clean[0])
-            state["auxiliary_lines_length"] += len(clean[0]) - len(previous) + (1 if not previous and len(lines) > 1 else 0)
-
-        def append_auxiliary_line(event: dict[str, Any]) -> None:
-            line = yoagent_stream_event_auxiliary_line(event)
-            if not line:
-                return
-            event_type = str(event.get("kind") or event.get("event") or "")
-            lines = state.get("auxiliary_lines")
-            if not isinstance(lines, list):
-                lines = []
-                state["auxiliary_lines"] = lines
-            if event_type == HIDDEN_WORK_DELTA:
-                prefix = hidden_work_prefix(event)
-                raw_text = str(event.get("text") or "")
-                compact_text = compact_auxiliary_text(raw_text)
-                if not compact_text:
-                    compact_text = compact_auxiliary_text(line.removeprefix(f"{prefix}:").strip()) or prefix
-                previous_prefix = str(state.get("hidden_work_prefix") or "")
-                if lines and previous_prefix == prefix:
-                    previous_text = str(state.get("hidden_work_text") or "")
-                    incoming_is_heartbeat = hidden_work_text_is_heartbeat(prefix, compact_text)
-                    previous_is_heartbeat = hidden_work_text_is_heartbeat(prefix, previous_text)
-                    if incoming_is_heartbeat and previous_text and not previous_is_heartbeat:
-                        next_text = previous_text
-                    elif incoming_is_heartbeat:
-                        next_text = compact_text
-                    elif event.get("snapshot"):
-                        next_text = raw_text
-                    elif previous_is_heartbeat:
-                        next_text = raw_text
-                    else:
-                        next_text = previous_text + raw_text
-                    state["hidden_work_text"] = next_text
-                    replace_clean_auxiliary_line(lines, hidden_work_auxiliary_line(prefix, next_text))
-                else:
-                    state["hidden_work_prefix"] = prefix
-                    state["hidden_work_text"] = compact_text if hidden_work_text_is_heartbeat(prefix, compact_text) else raw_text
-                    append_clean_auxiliary_line(lines, hidden_work_auxiliary_line(prefix, compact_text))
-            elif event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA, TOOL_CALL_FINISHED}:
-                state["hidden_work_prefix"] = ""
-                state["hidden_work_text"] = ""
-                value = str(line).strip()
-                if value:
-                    append_clean_auxiliary_line(lines, value)
-            else:
-                state["hidden_work_prefix"] = ""
-                state["hidden_work_text"] = ""
-                for part in str(line).splitlines() or [line]:
-                    value = part.strip()
-                    if value:
-                        append_clean_auxiliary_line(lines, value)
+                next_text = previous_text + incoming_text
+            state["hidden_work_descriptor"] = descriptor
+            state["hidden_work_text"] = next_text
+            item["text"] = next_text
+            return item
 
         def callback(event: dict[str, Any]) -> None:
             normalized = normalize_yoagent_stream_event(event, backend=backend)
             event_type = str(normalized.get("kind") or normalized.get("event") or "")
             if event_type == ASSISTANT_DELTA:
+                state["hidden_work_active"] = False
+                state["hidden_work_descriptor"] = ""
+                state["hidden_work_text"] = ""
                 incoming_text = str(normalized.get("text") or "")
                 if normalized.get("snapshot"):
                     state["raw_content"] = incoming_text
@@ -461,45 +366,62 @@ class YoagentStreamPublisher:
                     visible_delta = visible_text
                 elif previous_visible and visible_text.startswith(previous_visible):
                     visible_delta = visible_text[len(previous_visible) :]
-                append_stream_item("assistant", visible_delta)
+                append_stream_item({"kind": "assistant", "text": visible_delta})
                 publish([normalized], phase="answer" if visible_text else "thinking")
                 return
             if event_type == HIDDEN_WORK_DELTA:
                 state["hidden_thinking_removed"] = True
                 state["hidden_work_active"] = True
                 state["auxiliary_done"] = False
-                append_auxiliary_line(normalized)
-                replace_or_append_stream_item("thinking", hidden_work_stream_item_text(normalized))
+                replace_or_append_stream_item(hidden_work_stream_item(normalized))
                 publish([normalized], phase="thinking")
                 return
             if event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA}:
+                if event_type == TOOL_CALL_STARTED:
+                    state["hidden_work_active"] = False
+                    state["hidden_work_descriptor"] = ""
+                    state["hidden_work_text"] = ""
                 state["tool_active"] = True
                 state["auxiliary_done"] = False
-                append_auxiliary_line(normalized)
-                append_stream_item("tool", yoagent_stream_event_auxiliary_line(normalized), merge=False)
+                append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
                 publish([normalized], phase="tool")
+                return
+            if event_type == APPROVAL_REQUESTED:
+                state["hidden_work_active"] = False
+                state["hidden_work_descriptor"] = ""
+                state["hidden_work_text"] = ""
+                state["tool_active"] = False
+                state["auxiliary_done"] = False
+                append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
+                publish([normalized], phase="approval")
                 return
             if event_type in {TOOL_CALL_FINISHED, HIDDEN_WORK_DONE}:
                 if event_type == TOOL_CALL_FINISHED:
                     state["tool_active"] = False
                 if event_type == HIDDEN_WORK_DONE:
                     state["hidden_work_active"] = False
-                append_auxiliary_line(normalized)
+                    state["hidden_work_descriptor"] = ""
+                    state["hidden_work_text"] = ""
                 if event_type == TOOL_CALL_FINISHED:
-                    append_stream_item("tool", yoagent_stream_event_auxiliary_line(normalized), merge=False)
+                    append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
+                elif event_type == HIDDEN_WORK_DONE:
+                    append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
                 publish([normalized], phase="tool" if event_type == TOOL_CALL_FINISHED else "thinking")
                 return
             if event_type == USAGE:
+                append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
                 publish([normalized], phase="usage")
                 return
             if event_type in {TURN_DONE, ERROR}:
                 state["hidden_work_active"] = False
+                state["hidden_work_descriptor"] = ""
+                state["hidden_work_text"] = ""
                 state["tool_active"] = False
                 state["auxiliary_done"] = True
-                append_auxiliary_line(normalized)
+                if event_type == ERROR:
+                    append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
                 publish([normalized], phase="done" if event_type == TURN_DONE else "error")
                 return
-            append_auxiliary_line(normalized)
             publish([normalized], phase=str(normalized.get("native_type") or "event"))
 
         return callback

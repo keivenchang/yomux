@@ -197,13 +197,13 @@ function preferencesStatusPulseExampleHtml() {
 
 function preferenceSections() {
   return [
-    {title: t('pref.section.general'), items: [
+    {id: PREFERENCE_SECTION_IDS.general, title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
       {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: i18nLocaleChoices(), help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
       {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
     ]},
-    {title: t('pref.section.appearance'), items: [
+    {id: PREFERENCE_SECTION_IDS.appearance, title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
       {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: layoutModePreferenceChoices(), help: t('pref.general.default_layout.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 6, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
@@ -222,7 +222,7 @@ function preferenceSections() {
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
       ], help: t('pref.appearance.date_time_hour_cycle.help')},
     ]},
-    {title: t('pref.section.terminal_editor'), items: [
+    {id: PREFERENCE_SECTION_IDS.terminalEditor, title: t('pref.section.terminal_editor'), items: [
       {path: 'appearance.terminal_theme', label: t('pref.appearance.terminal_theme.label'), type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
@@ -236,7 +236,7 @@ function preferenceSections() {
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
       {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
       {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 6, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
-      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
+      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: t('unit.line.other'), help: t('pref.terminal_editor.scrollback.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
       {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'radio', choices: [
@@ -251,9 +251,8 @@ function preferenceSections() {
       {path: 'editor.trim_trailing_whitespace_on_save', label: t('pref.editor.trim_trailing_whitespace_on_save.label'), type: 'boolean', help: t('pref.editor.trim_trailing_whitespace_on_save.help')},
       {path: 'editor.ensure_final_newline_on_save', label: t('pref.editor.ensure_final_newline_on_save.label'), type: 'boolean', help: t('pref.editor.ensure_final_newline_on_save.help')},
     ]},
-    {title: t('pref.section.notifications'), items: [
-      {type: 'notification-delivery', channel: 'inApp', label: 'Notification in YOLOmux', help: 'Show notification popups in YOLOmux.'},
-      {type: 'notification-delivery', channel: 'system', label: `Notification on the System (${isMacPlatform() ? 'macOS' : 'PC'})`, help: `Browser permission: ${notificationSystemPermission()}`},
+    {id: PREFERENCE_SECTION_IDS.notifications, title: t('pref.section.notifications'), items: [
+      ...notificationDeliveryDescriptors().map(({channel, label, help}) => ({type: 'notification-delivery', channel, label, help})),
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'updates.notify_level', label: t('pref.updates.notify_level.label'), type: 'radio', choices: updateNotifyLevelPreferenceChoices(), help: t('pref.updates.notify_level.help')},
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
@@ -264,9 +263,15 @@ function preferenceSections() {
       {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
     ]},
-    {title: fileExplorerLabel(), items: [
-      {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
-      {path: 'file_explorer.image_open_mode', label: t('pref.file_explorer.image_open_mode.label'), type: 'radio', choices: ['same-tab', 'new-tab'], help: t('pref.file_explorer.image_open_mode.help')},
+    {id: PREFERENCE_SECTION_IDS.fileExplorer, title: fileExplorerLabel(), items: [
+      {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: [
+        {value: 'fixed', label: t('pref.file_explorer.root_mode.fixed')},
+        {value: 'sync', label: t('finder.toolbar.syncLabel')},
+      ], help: t('pref.file_explorer.root_mode.help')},
+      {path: 'file_explorer.image_open_mode', label: t('pref.file_explorer.image_open_mode.label'), type: 'radio', choices: [
+        {value: 'same-tab', label: t('pref.file_explorer.image_open_mode.sameTab')},
+        {value: 'new-tab', label: t('pref.file_explorer.image_open_mode.newTab')},
+      ], help: t('pref.file_explorer.image_open_mode.help')},
       {path: 'file_explorer.image_preview_max_px', label: t('pref.file_explorer.image_preview_max_px.label'), type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: t('pref.file_explorer.image_preview_max_px.help')},
       {path: 'file_explorer.quick_access_paths', label: t('pref.file_explorer.quick_access_paths.label'), type: 'list', help: t('pref.file_explorer.quick_access_paths.help')},
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
@@ -275,7 +280,7 @@ function preferenceSections() {
       {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
-    {title: t('pref.section.uploads'), items: [
+    {id: PREFERENCE_SECTION_IDS.uploads, title: t('pref.section.uploads'), items: [
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
       {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
       {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
@@ -284,7 +289,7 @@ function preferenceSections() {
       {path: 'uploads.image_action_order', label: t('pref.uploads.image_action_order.label'), type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true, help: t('pref.uploads.image_action_order.help')},
       {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
     ]},
-    {title: t('pref.section.performance'), items: [
+    {id: PREFERENCE_SECTION_IDS.performance, title: t('pref.section.performance'), items: [
       {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
       {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
@@ -298,10 +303,10 @@ function preferenceSections() {
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
       {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
     ]},
-    {title: t('pref.section.github'), items: [
+    {id: PREFERENCE_SECTION_IDS.github, title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
     ]},
-    {title: t('pref.section.yoagent'), items: [
+    {id: PREFERENCE_SECTION_IDS.yoagent, title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'radio', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
         {value: 'codex', label: t('pref.yoagent.backend.codex')},
@@ -318,13 +323,13 @@ function preferenceSections() {
       {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
       {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
     ]},
-    {title: t('pref.section.share'), items: [
+    {id: PREFERENCE_SECTION_IDS.share, title: t('brand.share'), items: [
       {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
       {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
       {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
       {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
     ]},
-    {id: 'yolo', title: t('pref.section.yolo'), items: [
+    {id: PREFERENCE_SECTION_IDS.yolo, title: t('pref.section.yolo'), items: [
       {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
       {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
       {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
@@ -353,8 +358,8 @@ function preferenceDefault(path) {
 }
 
 function preferenceStatusText() {
-  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: clientSettingsPayload.error});
-  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: yoloRulesPayload.error});
+  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: userMessageText(clientSettingsPayload, clientSettingsPayload.error)});
+  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)});
   return settingsLoadedAgeText();
 }
 
@@ -634,20 +639,22 @@ function preferenceAdvisoryHtml(item, value) {
 
 function preferencesPanelHtml() {
   const query = preferenceSearchNeedle();
-  const sections = preferenceSections()
+  const allSections = preferenceSections();
+  setCollapsedPreferenceSections(collapsedPreferenceSections, {sections: allSections, persist: true});
+  const sections = allSections
     .filter(section => preferenceSectionMatches(section, query))
     .map(section => {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
       const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
-      const collapsed = !query && collapsedPreferenceSections.has(section.title);
-      const sectionIntro = section.id === 'yolo' && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
+      const collapsed = !query && collapsedPreferenceSections.has(section.id);
+      const sectionIntro = section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
         ? preferencesYoloRulesPathHtml()
         : '';
       const rows = `${sectionIntro}${visibleItems.map(item => preferenceControlHtml(item)).join('')}`;
       const count = visibleItems.length;
       return `
-        <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
-          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.title)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+        <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.id)}">
+          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.id)}" aria-expanded="${collapsed ? 'false' : 'true'}">
             ${disclosureTriangleHtml(!collapsed, 'preferences-section-caret')}
             <span class="preferences-section-title">${esc(section.title)}</span>
             <span class="preferences-section-count">${count}</span>
@@ -925,7 +932,7 @@ function bindPreferencesPanel(panel) {
     if (copyText && panel.contains(copyText)) {
       event.preventDefault();
       copyTextToClipboard(copyText.dataset.copyText || '')
-        .then(() => { statusEl.textContent = 'copied text'; })
+        .then(() => { statusEl.textContent = t('status.copiedText'); })
         .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
@@ -940,12 +947,12 @@ function bindPreferencesPanel(panel) {
     if (sectionToggle && panel.contains(sectionToggle)) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
-      const title = sectionToggle.dataset.preferenceSectionToggle || '';
-      if (collapsedPreferenceSections.has(title)) collapsedPreferenceSections.delete(title);
-      else collapsedPreferenceSections.add(title);
+      const sectionId = sectionToggle.dataset.preferenceSectionToggle || '';
+      if (collapsedPreferenceSections.has(sectionId)) collapsedPreferenceSections.delete(sectionId);
+      else collapsedPreferenceSections.add(sectionId);
       writeStoredCollapsedPreferenceSections();
       const section = sectionToggle.closest('[data-preference-section]');
-      const collapsed = collapsedPreferenceSections.has(title);
+      const collapsed = collapsedPreferenceSections.has(sectionId);
       if (section) {
         section.classList.toggle(CLS.collapsed, collapsed);
         sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');

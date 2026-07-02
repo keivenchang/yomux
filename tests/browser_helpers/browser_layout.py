@@ -26,6 +26,7 @@ from yolomux_lib import events as events_module
 from yolomux_lib import settings as settings_module
 from yolomux_lib import yolo_rules as yolo_rules_module
 from yolomux_lib import server_auth
+from yolomux_lib.locales import locale_registry_payload
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
@@ -572,17 +573,17 @@ def codemirror_editor_controls_fixture_html():
                   <div class="cm-panels cm-panels-top">
                     <div class="cm-panel cm-search">
                       <input id="search-field" class="cm-textfield" name="search" value="precedence">
-                      <button class="cm-button" name="next" title="Next match (Enter)">next</button>
-                      <button class="cm-button" name="prev" title="Previous match (Shift+Enter)">previous</button>
-                      <button class="cm-button" name="select">all</button>
-                      <label id="match-label"><input id="match-case" type="checkbox">match case</label>
-                      <label><input type="checkbox">regexp</label>
-                      <label><input type="checkbox">by word</label>
+                      <button class="cm-button" name="next" title="下一项 (Enter)">下一项</button>
+                      <button class="cm-button" name="prev" title="上一项 (Shift+Enter)">上一项</button>
+                      <button class="cm-button" name="select" data-search-label="全部">全部</button>
+                      <label id="match-label"><input id="match-case" type="checkbox">区分大小写</label>
+                      <label><input type="checkbox">正则表达式</label>
+                      <label data-search-label="全字匹配"><input name="word" type="checkbox">全字匹配</label>
                       <button class="cm-dialog-close" type="button">x</button>
                       <br>
-                      <input id="replace-field" class="cm-textfield" name="replace" placeholder="Replace">
-                      <button class="cm-button" name="replace">replace</button>
-                      <button class="cm-button" name="replaceAll">replace all</button>
+                      <input id="replace-field" class="cm-textfield" name="replace" placeholder="替换">
+                      <button class="cm-button" name="replace">替换</button>
+                      <button class="cm-button" name="replaceAll" data-search-label="全部">全部替换</button>
                       <span id="search-count" class="cm-search-count">3/102</span>
                     </div>
                   </div>
@@ -1552,10 +1553,10 @@ def split_seam_fixture_html():
     )
 
 
-def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None):
+def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
-    script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
+    script_uri = runtime_script_uri or (REPO_ROOT / "static" / "yolomux.js").as_uri()
     dockview_css_uri = (REPO_ROOT / "static" / "vendor" / "dockview.css").as_uri()
     dockview_script_uri = (REPO_ROOT / "static" / "vendor" / "dockview-core.noStyle.js").as_uri()
     settings = settings or {}
@@ -1587,6 +1588,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         # the real page inlines the active locale catalog so t() resolves on the first render
         # (the menu bar paints at boot). Mirror that here so the live-boot menu shows real labels.
         "locale": "en",
+        "localeRegistry": locale_registry_payload(),
         "strings": {"en": json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text())},
     }
     if share_bootstrap is not None:

@@ -52,6 +52,21 @@ def test_html_lang_dir_attrs_escapes_and_sets_direction():
     assert '"><' not in attrs
 
 
+def test_server_string_normalizes_locale_before_cached_catalog_lookup(monkeypatch, tmp_path):
+    locale_dir = tmp_path / "locales"
+    locale_dir.mkdir()
+    (locale_dir / "en.json").write_text('{"label": "English"}', encoding="utf-8")
+    (locale_dir / "zh-Hant.json").write_text('{"label": "繁體中文"}', encoding="utf-8")
+    monkeypatch.setattr(web, "STATIC_DIR", tmp_path)
+    web.bootstrap_locale_catalogs.cache_clear()
+    try:
+        assert web.server_string("ZH-hant", "label") == "繁體中文"
+        assert web.server_string("zh-Hant", "label") == "繁體中文"
+        assert web.bootstrap_locale_catalogs.cache_info().hits >= 1
+    finally:
+        web.bootstrap_locale_catalogs.cache_clear()
+
+
 def test_html_page_marks_readonly_role_without_breaking_out():
     # The access role is reflected into the bootstrap payload; a readonly guest renders a valid page.
     bootstrap = _bootstrap_json(web.html_page([], access_role="readonly"))

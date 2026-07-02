@@ -2172,6 +2172,10 @@ async function runLayoutAsyncSuite() {
         stream_id: 'stream-thinking',
         phase: 'delta',
         content: 'partial answer',
+        stream_items: [
+          {kind: 'thinking', text: thinkingLine, labelKey: 'yoagent.stream.thinking', fallback: 'thinking'},
+          {kind: 'tool', text: 'tool output: command: collected files', labelKey: 'yoagent.stream.toolOutput', fallback: 'tool output'},
+        ],
         auxiliary_lines: [thinkingLine, 'tool output: command: collected files'],
         auxiliary_preview: `${thinkingLine}\ntool output: command: collected files`,
         hidden_work_active: true,
@@ -2215,8 +2219,13 @@ async function runLayoutAsyncSuite() {
           role: 'assistant',
           content: 'answer',
           createdAt: '2026-06-20T00:00:00Z',
-          auxiliaryLines: ['thinking... (~200 tokens)'],
-          auxiliaryText: 'thinking... (~200 tokens)',
+          streamItems: [{
+            kind: 'thinking',
+            text: '',
+            labelKey: 'yoagent.stream.thinking',
+            fallback: 'thinking',
+            tokenCount: 200,
+          }],
         }],
       });
       const tokenProgressHtml = api.yoagentChatHtml();
@@ -2224,7 +2233,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(tokenProgressHtml.includes('thinking (2 words)…'), false, 'Claude token-only thinking progress does not use the text word counter');
       assert.equal(tokenProgressHtml.includes('thinking: thinking'), false, 'Claude token-only thinking progress does not duplicate the thinking prefix');
       assert.ok(tokenProgressHtml.includes('did not expose readable thinking text'), 'Claude token-only thinking progress explains why no words are shown');
-      assert.equal(tokenProgressHtml.includes('<pre class="yoagent-auxiliary-stream">thinking... (~200 tokens)</pre>'), false, 'Claude token-only progress is metadata, not fake thinking body text');
+      assert.equal(tokenProgressHtml.includes('<pre class="yoagent-auxiliary-stream">'), false, 'Claude token-only progress is metadata, not fake thinking body text');
     }
 
     {
@@ -2233,13 +2242,16 @@ async function runLayoutAsyncSuite() {
         stream_id: 'stream-multiline-tool',
         phase: 'tool',
         content: 'partial answer',
+        stream_items: [
+          {kind: 'tool', text: 'tool output: command: line 1\nline 2', labelKey: 'yoagent.stream.toolOutput', fallback: 'tool output'},
+        ],
         auxiliary_lines: ['tool output: command: line 1\nline 2'],
         auxiliary_preview: 'tool output: command: line 1\nline 2',
         tool_active: true,
       });
       const html = api.yoagentChatHtml();
       assert.equal(html.includes('Details…'), false, 'multiline tool output continuation lines do not leak into the thinking details preview');
-      assert.ok(html.includes('Tool call'), 'multiline tool output still renders in the Tool call block');
+      assert.ok(html.includes('yoagent-toolcall-details'), 'multiline tool output still renders in the structured tool-call block');
       assert.ok(html.includes('tool output: command: line 1\nline 2'), 'tool-call pre preserves real multiline output');
     }
 
@@ -2480,7 +2492,13 @@ async function runLayoutAsyncSuite() {
       api.setFetchForTest((url, options = {}) => {
         fetchCalls.push({url: String(url), method: options.method || 'GET'});
         if (String(url).startsWith('/api/self-update')) {
-          return Promise.resolve(jsonResponse({ok: true, restarting: true, message: 'updated; restarting now', target: '0.4.18'}));
+          return Promise.resolve(jsonResponse({
+            ok: true,
+            restarting: true,
+            error: 'updated; restarting now',
+            user_message: {key: 'update.result.restarting', params: {}, fallback: 'updated; restarting now'},
+            target: '0.4.18',
+          }));
         }
         if (String(url).startsWith('/api/ping')) return Promise.resolve(jsonResponse({ok: true}));
         return Promise.reject(new Error(`unexpected fetch ${url}`));
@@ -2496,6 +2514,7 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       assert.deepStrictEqual(canonical(fetchCalls[0]), {method: 'POST', url: '/api/self-update'}, 'self-update posts immediately after confirmation');
       assert.ok(toasts.some(item => item.title === 'Installing update...'), 'successful restarting update shows installing status');
+      assert.ok(toasts.some(item => item.lines[0] === 'YOLOmux was updated and is restarting now.'), 'self-update resolves the server descriptor through the active locale instead of showing its raw fallback');
       assert.deepStrictEqual(canonical(api.selfUpdateReloadStateForTest()), {
         attempts: 0,
         deferredToastShown: false,

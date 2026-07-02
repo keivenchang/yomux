@@ -58,25 +58,25 @@ const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
 const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
 const jsDebugGraphAllClientsTotalId = 'all-clients-total';
-const jsDebugGraphOtherClientsAverageLinePattern = 'dash';
+const jsDebugGraphOtherClientsAverageLinePattern = 'dot';
 const jsDebugGraphAllClientsTotalLinePattern = 'dot';
 const jsDebugGraphAllClientsCombinedMetricKey = 'apiSseTotal';
 const jsDebugGraphClientMetrics = Object.freeze([
-  {key: 'api', label: 'API', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
-  {key: 'sse', label: 'SSE', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
-  {key: 'latency', label: 'Client latency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
-  {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
+  {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
+  {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
+  {key: 'latency', labelKey: 'debug.graph.metric.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
+  {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
 const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
 const jsDebugGraphAgentTokenTotalSeriesKey = 'agentTokenTotal';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
-const jsDebugAgentStatusSeriesLabels = Object.freeze({
-  askAgents: 'Attention',
-  workingAgents: 'Working',
-  transitionAgents: 'Transition',
-  idleAgents: 'Idle',
+const jsDebugAgentStatusSeriesLabelKeys = Object.freeze({
+  askAgents: 'debug.graph.status.attention',
+  workingAgents: 'debug.graph.status.working',
+  transitionAgents: 'debug.graph.status.transition',
+  idleAgents: 'debug.graph.status.idle',
 });
 const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   askAgents: bucket => bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0,
@@ -107,19 +107,26 @@ const jsDebugGraphEventResponseBytes = new Map();
 const jsDebugGraphEventRefTimes = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphSeries = Object.freeze([
-  ...jsDebugGraphClientMetrics.map(metric => ({...metric, label: `${metric.label} (this client)`, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
-  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, label: jsDebugAgentStatusSeriesLabels[key], unit: 'count'})),
-  {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
-  {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent', linePattern: 'solid'},
+  ...jsDebugGraphClientMetrics.map(metric => ({...metric, labelKey: 'debug.graph.series.thisClient', metricLabelKey: metric.labelKey, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
+  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
+  {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute'},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
-  {key: 'activity', label: 'Agent status', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'latency', labelKey: 'debug.graph.chart.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
+
+function debugGraphLocalizedLabel(item = {}) {
+  if (!item.labelKey) return String(item.label || '');
+  const params = {...(item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(item.labelKey, params);
+}
 
 function normalizedJsDebugSubTab(value) {
   return value === 'graph' ? 'graph' : 'events';
@@ -1304,11 +1311,11 @@ function debugGraphTokenNumberText(value) {
 }
 
 function debugGraphTokensText(value) {
-  return `${debugGraphTokenNumberText(value)} tokens`;
+  return t('debug.graph.unit.tokens', {count: debugGraphTokenNumberText(value)});
 }
 
 function debugGraphTokensPerMinuteText(value) {
-  return `${debugGraphTokenNumberText(value)} tokens/min`;
+  return t('debug.graph.unit.tokensPerMinute', {count: debugGraphTokenNumberText(value)});
 }
 
 function debugGraphValueText(value, unit) {
@@ -1402,7 +1409,11 @@ function debugRemovalLatencyMetaText() {
   if (typeof terminalRemovalLatencySummary !== 'function') return '';
   const summary = terminalRemovalLatencySummary();
   if (!summary?.count) return '';
-  return `removal last ${debugGraphTerseTimeText(summary.last?.durationMs)} avg ${debugGraphTerseTimeText(summary.averageMs)} n=${summary.count}`;
+  return t('debug.graph.meta.removal', {
+    last: debugGraphTerseTimeText(summary.last?.durationMs),
+    average: debugGraphTerseTimeText(summary.averageMs),
+    count: summary.count,
+  });
 }
 
 function debugClientPerfRows() {
@@ -1435,7 +1446,8 @@ function debugClientPerfHtml() {
   const longTasks = typeof clientPerfLongTaskSummary === 'function' ? clientPerfLongTaskSummary() : {count: 0, averageMs: 0, maxMs: 0};
   const activeAnimations = typeof clientPerfActiveAnimationCount === 'function' ? clientPerfActiveAnimationCount() : 0;
   if (!rows.length && !longTasks.count && !activeAnimations) return '';
-  const header = `Client work | animations ${activeAnimations} | long tasks ${longTasks.count}${longTasks.count ? ` avg ${longTasks.averageMs}ms max ${longTasks.maxMs}ms` : ''}`;
+  const timing = longTasks.count ? t('debug.graph.clientWorkTiming', {average: longTasks.averageMs, max: longTasks.maxMs}) : '';
+  const header = t('debug.graph.clientWork', {animations: activeAnimations, tasks: longTasks.count, timing});
   return `<div class="js-debug-client-perf" data-js-debug-client-perf>
     <div class="js-debug-client-perf-title">${esc(header)}</div>
     <div class="js-debug-client-perf-grid">${rows.map(row => `<div class="js-debug-client-perf-row">${esc(debugClientPerfText(row))}</div>`).join('')}</div>
@@ -1444,18 +1456,18 @@ function debugClientPerfHtml() {
 
 function debugGraphMetaItems() {
   const items = [];
-  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`yolomux.py uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
+  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(t('debug.graph.meta.uptime', {uptime: debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}));
   if (Number.isFinite(jsDebugStatsServerPid)) items.push(`PID=${Math.floor(jsDebugStatsServerPid)}`);
   const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
-  if (rss) items.push(`rss ${rss}`);
-  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(`server seq ${Math.floor(jsDebugStatsServerSequence)}`);
+  if (rss) items.push(t('debug.graph.meta.rss', {rss}));
+  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(t('debug.graph.meta.serverSequence', {sequence: Math.floor(jsDebugStatsServerSequence)}));
   const removalLatency = debugRemovalLatencyMetaText();
   if (removalLatency) items.push(removalLatency);
   if (items.length) {
     const counts = debugEventCounts();
     const uploadedMb = debugGraphTotalMegabytesText(counts.apiRequestBytes);
     const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
-    items.push(`total ${uploadedMb}/${downloadedMb} MB up/down`);
+    items.push(t('debug.graph.meta.totalTraffic', {uploaded: uploadedMb, downloaded: downloadedMb}));
   }
   return items;
 }
@@ -1496,7 +1508,7 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
   if (!agentSeries.length) return agentSeries;
   return [...agentSeries, {
     key: jsDebugGraphAgentTokenTotalSeriesKey,
-    label: 'All agents total',
+    labelKey: 'debug.graph.series.allAgentsTotal',
     unit: 'tokensPerMinute',
     cssKey: 'agentTokenTotal',
     agentTokenSeries: true,
@@ -1519,7 +1531,8 @@ function debugGraphClientMetricSeriesDefs(buckets) {
       return [{
         ...metric,
         key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
-        label: `${metric.label} (other clients avg)`,
+        labelKey: 'debug.graph.series.otherClientsAverage',
+        metricLabelKey: metric.labelKey,
         cssKey: metric.key,
         clientMetric: true,
         metricKey: metric.key,
@@ -1531,7 +1544,7 @@ function debugGraphClientMetricSeriesDefs(buckets) {
   if (!hasAnyClients) return peerAverageSeries;
   return [...peerAverageSeries, {
     key: `client:${jsDebugGraphAllClientsTotalId}:${jsDebugGraphAllClientsCombinedMetricKey}`,
-    label: 'API+SSE (all clients total)',
+    labelKey: 'debug.graph.series.allClientsApiSseTotal',
     unit: 'countPerSecond',
     cssKey: jsDebugGraphAllClientsCombinedMetricKey,
     chartMetricKey: 'api',
@@ -1539,7 +1552,7 @@ function debugGraphClientMetricSeriesDefs(buckets) {
     clientId: jsDebugGraphAllClientsTotalId,
     clientAggregate: 'allClientsApiSseTotal',
     clientLinePattern: jsDebugGraphAllClientsTotalLinePattern,
-    color: 'var(--js-debug-api-sse-total-series)',
+    color: 'var(--bad)',
   }];
 }
 
@@ -1552,14 +1565,15 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
       processes.set(processId, String(process?.label || processId));
     }
   }
-  if (!processes.size) return [{key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent', linePattern: 'solid'}];
+  if (!processes.size) return [{key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid'}];
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
   return [...processes.entries()]
     .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
     .map(([processId, label], index) => ({
       key: `cpu:${processId}`,
-      label: `${label} CPU %`,
+      labelKey: 'debug.graph.series.processCpu',
+      labelParams: {process: label},
       unit: 'percent',
       cssKey: 'cpu',
       chartMetricKey: 'cpu',
@@ -1575,6 +1589,7 @@ function debugGraphSeriesData(buckets) {
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
   const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
+    const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
     const hasDataValues = buckets.map(bucket => debugGraphSeriesBucketHasData(bucket, def));
     const sampleValues = values.filter((_value, index) => hasDataValues[index]);
@@ -1584,12 +1599,12 @@ function debugGraphSeriesData(buckets) {
     const current = sampleValues.length ? sampleValues[sampleValues.length - 1] : 0;
     const movingAverageSamples = Number(def.movingAverageSamples || 0);
     const movingAverageValues = movingAverageSamples > 0 ? debugGraphMovingAverageValues(sampleValues, movingAverageSamples) : [];
-    return {...def, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
+    return {...localizedDef, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
   });
 }
 
 function debugGraphScaleControlsHtml() {
-  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.tab.graph'))} bucket size">
+  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.graph.control.bucketSize'))}">
     ${jsDebugGraphScaleOptions.map(seconds => {
       const active = seconds === jsDebugGraphScaleSeconds;
       return `<button type="button" class="js-debug-scale-button${active ? ' active' : ''}" data-js-debug-scale="${seconds}" aria-pressed="${active ? 'true' : 'false'}">${seconds}s</button>`;
@@ -1605,11 +1620,11 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
   return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
-    <span class="js-debug-range-label" data-js-debug-range-label>${esc(zoomed ? 'Zoom' : jsDebugGraphRangeLabel(activeRange, nowMs))}</span>
-    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.tab.graph'))} time range">
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(zoomed ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs))}</span>
+    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
     <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
-    ${zoomed ? '<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>Reset</button>' : ''}
+    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('debug.graph.control.reset'))}</button>` : ''}
   </div>`;
 }
 
@@ -1708,7 +1723,7 @@ function debugGraphDisconnectedRectsHtml(buckets, domain) {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
-    const title = `Bad connection: no data collected for ${debugGraphTerseTimeText(range.disconnectedMs)}`;
+    const title = t('debug.graph.badConnection', {duration: debugGraphTerseTimeText(range.disconnectedMs)});
     return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(title)}</title></rect>`;
   }).join('');
 }
@@ -1894,7 +1909,8 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
   if (sampleCount <= 0) return '';
   const points = debugGraphPolylinePoints(series.movingAverageValues || [], series.movingAverageTimes || [], chartMax, domain);
   if (!points) return '';
-  return `<polyline class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-line--moving-average'))}" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)} ${sampleCount}-sample moving average</title></polyline>`;
+  const title = t('debug.graph.movingAverage', {label: series.label, count: sampleCount});
+  return `<polyline class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-line--moving-average'))}" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(title)}</title></polyline>`;
 }
 
 function debugGraphInteractionOverlayHtml() {
@@ -2047,6 +2063,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
 }
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
+  const groupLabel = debugGraphLocalizedLabel(group);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true);
@@ -2062,11 +2079,11 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const displayedTokenSum = group.dynamicAgentTokens === true ? debugGraphAgentTokenDisplayedSum(buckets) : null;
   const displayedTokenSumHtml = displayedTokenSum === null
     ? ''
-    : `<span class="js-debug-chart-summary" data-js-debug-displayed-token-sum="${esc(displayedTokenSum)}">(sum of tokens from displayed = ${esc(debugGraphTokenNumberText(displayedTokenSum))})</span>`;
+    : `<span class="js-debug-chart-summary" data-js-debug-displayed-token-sum="${esc(displayedTokenSum)}">${esc(t('debug.graph.sumDisplayedTokens', {count: debugGraphTokenNumberText(displayedTokenSum)}))}</span>`;
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
-        <span class="js-debug-chart-title">${esc(group.label)}</span>
+        <span class="js-debug-chart-title">${esc(groupLabel)}</span>
         ${displayedTokenSumHtml}
       </div>
       ${debugGraphLegendHtml(legendSeries)}
@@ -2074,7 +2091,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
     <div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
       <div class="js-debug-plot">
-        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(group.label)}" preserveAspectRatio="none">
+        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
@@ -2382,6 +2399,10 @@ function debugPanelHtml() {
       <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
     </div>
     <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`;
+}
+
+function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
+  return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
 }
 
 function createDebugPanel() {

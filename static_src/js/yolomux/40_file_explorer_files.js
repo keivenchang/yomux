@@ -37,7 +37,7 @@ async function openFileExplorerAt(path, options = {}) {
   if (!entries) {
     const error = currentFileExplorerListError(root);
     if (error) setFileExplorerPathDisplay(root, {error});
-    if (showPendingRoot) renderFileExplorerTreeStatus(error || `Cannot open ${root}`, {root, error: true});
+    if (showPendingRoot) renderFileExplorerTreeStatus(error || t('preview.openFailed', {path: root}), {root, error: true});
     return false;
   }
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
@@ -144,14 +144,18 @@ function clearFileExplorerListError(path = '') {
 
 function setFileExplorerListError(path, error, status = 0) {
   const root = normalizeDirectoryPath(path || '');
-  fileExplorerPathError = error || '';
-  fileExplorerLastListError = root && error ? {path: root, status, error, network: !status} : null;
+  const source = error?.payload && typeof error.payload === 'object' ? error.payload : error;
+  const fallback = String(error?.message || error || '');
+  fileExplorerPathError = userMessageText(source, fallback);
+  fileExplorerLastListError = root && fileExplorerPathError
+    ? {path: root, status, source, fallback, network: !status}
+    : null;
 }
 
 function currentFileExplorerListError(path) {
   const root = normalizeDirectoryPath(path || '');
   return root && normalizeDirectoryPath(fileExplorerLastListError?.path || '') === root
-    ? fileExplorerLastListError.error || ''
+    ? userMessageText(fileExplorerLastListError.source, fileExplorerLastListError.fallback)
     : '';
 }
 
@@ -222,7 +226,7 @@ function settleFileExplorerFsBatchItem(item, response) {
     item.resolve(response.payload || {});
     return;
   }
-  const error = new Error(response?.error || `fs ${item.type} failed`);
+  const error = new Error(userMessageText(response, t('common.requestFailed')));
   error.status = Number(response?.status) || 0;
   error.payload = response || {};
   item.reject(error);
@@ -241,7 +245,7 @@ async function flushFileExplorerFsBatch() {
     });
     const responses = new Map((payload.responses || []).map(response => [response.id, response]));
     for (const item of items) {
-      settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: 'missing fs batch response'});
+      settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: t('common.requestFailed')});
     }
   } catch (_) {
     await Promise.all(items.map(settleFileExplorerFsBatchItemFallback));
@@ -280,10 +284,11 @@ async function fetchDirectory(path, options = {}) {
       return entries;
     } catch (err) {
       const status = Number(err?.status) || 0;
+      const openFailed = t('preview.openFailed', {path: root});
       fileExplorerPathError = status
-        ? err.message || `Cannot open ${root} (${status})`
-        : `Cannot open ${root}: ${err}`;
-      setFileExplorerListError(root, fileExplorerPathError, status);
+        ? err.message || `${openFailed} (${status})`
+        : `${openFailed}: ${err}`;
+      setFileExplorerListError(root, err, status);
       console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       return null;
     }
@@ -365,8 +370,8 @@ function fileEntryStatusFromWatchFilePayload(item) {
   const path = String(item?.path || signature[0] || '');
   if (!path) return {path: '', entry: null, missing: false, error: '', network: false};
   const kind = String(signature[1] || '');
-  if (kind === 'missing') return {path, entry: null, missing: true, error: `path not found: ${path}`, network: false};
-  if (kind !== 'file' && kind !== 'dir') return {path, entry: null, missing: false, error: `invalid file signature: ${path}`, network: false};
+  if (kind === 'missing') return {path, entry: null, missing: true, error: t('common.pathNotFound', {path}), network: false};
+  if (kind !== 'file' && kind !== 'dir') return {path, entry: null, missing: false, error: t('finder.invalidFileSignature', {path}), network: false};
   const mtime = Number(signature[2]) || 0;
   const size = Number(signature[3]);
   return {
@@ -661,7 +666,7 @@ function renderQuickAccessInto(container) {
     button.type = 'button';
     button.className = 'file-explorer-quick-access-button';
     button.textContent = displayQuickAccessPath(path);
-    button.title = `Open ${path}`;
+    button.title = t('finder.quickAccess.openPath', {path});
     button.dataset.quickPath = path;
     syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
     button.addEventListener('click', event => {
@@ -1197,18 +1202,29 @@ function restoreCommittedFileExplorerRootDisplay() {
   }
 }
 
+function repoBranchDisplayText(repo) {
+  return repo?.branch || t('git.detached');
+}
+
 function repoInfoSummary(repo) {
   if (!repo?.root) return '';
-  const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${Number(repo.dirty_count)} dirty` : '';
-  const ahead = Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? `, ${Number(repo.ahead)} ahead` : '';
-  const behind = Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? `, ${Number(repo.behind)} behind` : '';
-  const branch = repo.branch || 'detached';
+  const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${t('git.dirty', {count: Number(repo.dirty_count)})}` : '';
+  const ahead = Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? `, ${t('git.ahead', {count: Number(repo.ahead)})}` : '';
+  const behind = Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? `, ${t('git.behind', {count: Number(repo.behind)})}` : '';
+  const branch = repoBranchDisplayText(repo);
   return `${repo.name || basenameOf(repo.root)} (${branch}${dirty}${ahead}${behind})`;
 }
 
 function setFileExplorerRepoSummary(path, repo, error = '') {
   const summary = error ? '' : repoInfoSummary(repo);
-  const title = error || (repo?.root ? [`repo: ${repo.root}`, `branch: ${repo.branch || 'unknown'}`, repo.upstream ? `upstream: ${repo.upstream}` : '', Number.isFinite(Number(repo.dirty_count)) ? `dirty files: ${repo.dirty_count}` : '', Number(repo.ahead) ? `ahead: ${repo.ahead}` : '', Number(repo.behind) ? `behind: ${repo.behind}` : ''].filter(Boolean).join('\n') : '');
+  const title = error || (repo?.root ? [
+    `${t('popover.repo')}: ${repo.root}`,
+    `${t('popover.branch')}: ${repoBranchDisplayText(repo)}`,
+    repo.upstream ? `↗ ${repo.upstream}` : '',
+    Number.isFinite(Number(repo.dirty_count)) ? t('git.dirty', {count: repo.dirty_count}) : '',
+    Number(repo.ahead) ? t('git.ahead', {count: repo.ahead}) : '',
+    Number(repo.behind) ? t('git.behind', {count: repo.behind}) : '',
+  ].filter(Boolean).join('\n') : '');
   for (const node of document.querySelectorAll('.file-explorer-repo-summary')) {
     node.textContent = summary;
     node.hidden = !summary;
@@ -1247,12 +1263,12 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
 function repoInfoPopoverHtml(repo) {
   if (!repo?.root) return '';
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
-  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repo.branch || 'detached')}</div>`);
+  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repoBranchDisplayText(repo))}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
-  if (Number(repo.ahead) > 0) stat.push(`${Number(repo.ahead)} ahead`);
-  if (Number(repo.behind) > 0) stat.push(`${Number(repo.behind)} behind`);
-  if (Number.isFinite(Number(repo.dirty_count))) stat.push(`${Number(repo.dirty_count)} dirty`);
+  if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
+  if (Number(repo.behind) > 0) stat.push(t('git.behind', {count: Number(repo.behind)}));
+  if (Number.isFinite(Number(repo.dirty_count))) stat.push(t('git.dirty', {count: Number(repo.dirty_count)}));
   if (stat.length) rows.push(`<div class="file-tree-repo-popover-stat">${esc(stat.join(' · '))}</div>`);
   rows.push(`<div class="file-tree-repo-popover-path">${esc(repo.root)}</div>`);
   return rows.join('');
@@ -1862,7 +1878,7 @@ function fileTreeRepoBranch(path) {
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
   if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
-  return repo.branch || 'detached';
+  return repoBranchDisplayText(repo);
 }
 
 // Compact ahead/behind/dirty markers for a repo dir's inline annotation, read from cached repo info.
@@ -2132,15 +2148,15 @@ function fileTreeGitStatusBadgeClass(status) {
 function gitStatusBadgeTitle(status) {
   const key = normalizeGitStatus(status);
   const labels = {
-    M: 'modified',
-    A: 'added',
-    D: 'deleted',
-    T: 'touched by AI transcript',
-    '?': 'untracked',
-    U: 'untracked',
-    S: 'staged',
-    R: 'renamed',
-    C: 'copied',
+    M: t('git.status.modified'),
+    A: t('git.status.added'),
+    D: t('git.status.deleted'),
+    T: t('git.status.transcriptTouched'),
+    '?': t('git.status.untracked'),
+    U: t('git.status.untracked'),
+    S: t('git.status.staged'),
+    R: t('git.status.renamed'),
+    C: t('git.status.copied'),
   };
   return labels[key] ? `${key}: ${labels[key]}` : '';
 }
@@ -3190,7 +3206,7 @@ function fileExplorerIndexBadgeText(path) {
 function fileExplorerIndexBadgeTitle(path) {
   if (!fileExplorerDirectoryIsIndexed(path)) return '';
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
-  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+  return t(fileExplorerIndexStatus.get(normalized) === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
 }
 
 // Warm the backend index for a root (kicks the build) and track building/ready; polls while
@@ -3307,7 +3323,10 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (indexed) {
     const ancestor = fileExplorerIndexedAncestor(normalized);
     if (ancestor) {
-      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already indexed by ${compactHomePath(ancestor)}`;
+      if (statusEl) statusEl.textContent = t('finder.index.alreadyIndexedBy', {
+        path: compactHomePath(normalized),
+        ancestor: compactHomePath(ancestor),
+      });
       return;
     }
     fileExplorerIndexedDirs.add(normalized);
@@ -3331,7 +3350,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (!applyingIndexedDirsSetting) persistIndexedDirsSetting(indexed ? {add: normalized} : {remove: normalized});
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
-    statusEl.textContent = indexed ? `indexed ${compactHomePath(normalized)}` : `removed index ${compactHomePath(normalized)}`;
+    statusEl.textContent = t(indexed ? 'finder.index.added' : 'finder.index.removed', {path: compactHomePath(normalized)});
   }
 }
 
@@ -3842,7 +3861,7 @@ function renderTabberTree(groupsEl) {
   const {entries, entriesByDir} = buildTabberTree();
   const collapsedSet = tabberCollapsedPathsForTree(entries, entriesByDir);
   if (!entries.length) {
-    groupsEl.innerHTML = '<div class="changes-empty">No open tmux sessions</div>';
+    groupsEl.innerHTML = `<div class="changes-empty">${esc(t('tabber.empty'))}</div>`;
     return;
   }
   let container = groupsEl.querySelector(':scope > .file-tree[data-tabber-tree]');
@@ -4114,7 +4133,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
-  row.classList.toggle('tabber-status-long', data.type === 'window' && (/^working for/.test(String(data.dateText || '')) || Boolean(data.dateHtml)));
+  const agentState = String(data.agentStatus?.state || STATE_KEY.idle);
+  row.classList.toggle('tabber-status-long', data.type === 'window'
+    && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)));
   row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
@@ -4129,7 +4150,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const titleParts = [
     label,
     description && description !== label ? description : '',
-    data.branchText ? `branch: ${data.branchText}` : '',
+    data.branchText ? `${t('popover.branch')}: ${data.branchText}` : '',
     data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
   const titleText = titleParts.join('\n');
@@ -4141,7 +4162,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     : data.type === 'window'
       ? tabberWindowButtonHtml(renderData, label)
     : data.type === 'loading'
-      ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
+      ? `<span class="tabber-loading-label">${esc(data.label || stripTrailingEllipsisText(t('common.loading')))}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
   updateFileTreeRowContents(row, icon, label, {
     iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),

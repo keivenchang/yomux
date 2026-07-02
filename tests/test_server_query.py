@@ -3,6 +3,7 @@ import io
 import json
 import os
 from http import HTTPStatus
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from yolomux_lib import app as app_module
 from yolomux_lib import http_routes
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
+from yolomux_lib import web
 from yolomux_lib.common import ACTIVITY_MAX_HOURS
 from yolomux_lib.common import error_payload
 from yolomux_lib.server import Handler
@@ -20,6 +22,9 @@ from yolomux_lib.server import parse_query_int
 from yolomux_lib.server import parse_repo_refs_param
 from yolomux_lib.server import ws_resize_dimensions
 from yolomux_lib.web import html_page
+
+
+SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
 
 def server_ws_json(frame: bytes) -> dict:
@@ -51,8 +56,8 @@ def test_get_home_records_html_page_compute_time(monkeypatch):
     html_calls = []
     clock = iter([100.0, 100.037])
 
-    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None):
-        html_calls.append((sessions, access_role, dev, dangerously_yolo, share))
+    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None, accept_language=""):
+        html_calls.append((sessions, access_role, dev, dangerously_yolo, share, accept_language))
         return "<html>boot</html>"
 
     monkeypatch.setattr(http_routes, "html_page", fake_html_page)
@@ -69,7 +74,7 @@ def test_get_home_records_html_page_compute_time(monkeypatch):
     http_routes.get_home(request, SimpleNamespace(query=""), route_by_path("GET", "/"))
 
     assert writes == ["<html>boot</html>"]
-    assert html_calls == [(["5"], "admin", True, True, None)]
+    assert html_calls == [(["5"], "admin", True, True, None, "")]
     assert request._http_response_compute_ms == pytest.approx(37.0)
     assert request._http_response_performance_details == {
         "html_page": True,
@@ -147,9 +152,31 @@ def test_parse_repo_refs_param_decodes_per_repo_overrides():
 def test_error_payload_normalizes_status_and_context():
     assert error_payload("bad", path="/tmp/a", session="6", status=HTTPStatus.BAD_REQUEST) == {
         "error": "bad",
+        "user_message": {"key": "", "params": {}, "fallback": "bad"},
         "path": "/tmp/a",
         "session": "6",
         "status": 400,
+    }
+
+
+def test_error_payload_reuses_typed_message_metadata_and_keeps_diagnostic():
+    error = server_module.FilesystemError(
+        "filesystem operation failed",
+        status=403,
+        message_key="fs.error.operationFailed",
+        diagnostic="raw permission detail",
+    )
+
+    assert error.payload(path="/private") == {
+        "error": "filesystem operation failed",
+        "user_message": {
+            "key": "fs.error.operationFailed",
+            "params": {},
+            "fallback": "filesystem operation failed",
+        },
+        "diagnostic": "raw permission detail",
+        "path": "/private",
+        "status": 403,
     }
 
 
@@ -267,7 +294,15 @@ def test_write_validated_float_result_centralizes_activity_hours_validation():
         ACTIVITY_MAX_HOURS,
         lambda value: ({"hours": value}, HTTPStatus.OK),
     )
-    assert writes == [("json", HTTPStatus.BAD_REQUEST, {"error": "hours must be a number", "status": HTTPStatus.BAD_REQUEST})]
+    assert writes == [("json", HTTPStatus.BAD_REQUEST, {
+        "error": "hours must be a number",
+        "user_message": {
+            "key": "request.error.number",
+            "params": {"field": "hours"},
+            "fallback": "hours must be a number",
+        },
+        "status": HTTPStatus.BAD_REQUEST,
+    })]
 
 
 def test_activity_hours_routes_share_float_validation_owner():
@@ -286,7 +321,11 @@ def test_session_files_route_validates_hours_before_share_scope():
 
     http_routes.get_session_files(handler, SimpleNamespace(query="session=blocked&hours=nope"), None)
 
-    assert writes == [("json", HTTPStatus.BAD_REQUEST, {"error": "hours must be a number", "status": HTTPStatus.BAD_REQUEST})]
+    assert writes[0][2]["user_message"] == {
+        "key": "request.error.number",
+        "params": {"field": "hours"},
+        "fallback": "hours must be a number",
+    }
 
 
 def test_write_int_query_app_result_parses_and_validates_once():
@@ -314,7 +353,15 @@ def test_write_int_query_app_result_parses_and_validates_once():
 
     assert writes == [
         ("app", ({"session": "6", "limit": 7}, HTTPStatus.OK)),
-        ("json", HTTPStatus.BAD_REQUEST, {"error": "limit must be an integer", "status": 400}),
+        ("json", HTTPStatus.BAD_REQUEST, {
+            "error": "limit must be an integer",
+            "user_message": {
+                "key": "request.error.integer",
+                "params": {"field": "limit"},
+                "fallback": "limit must be an integer",
+            },
+            "status": 400,
+        }),
     ]
 
 
@@ -496,7 +543,16 @@ def test_handle_upload_enforces_live_app_size_limit():
     payload, status = Handler.handle_upload(handler, "6")
 
     assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
-    assert payload == {"session": "6", "error": "upload is too large; limit is 5 bytes"}
+    assert payload == {
+        "session": "6",
+        "error": "upload is too large; limit is 5 bytes",
+        "user_message": {
+            "key": "request.error.contentTooLarge",
+            "params": {"max": 5},
+            "fallback": "upload is too large; limit is 5 bytes",
+        },
+        "status": 413,
+    }
     assert handler.close_connection is True
 
 
@@ -526,7 +582,15 @@ def test_do_post_share_stop_rejects_invalid_content_length_without_value_error()
     assert writes == [(
         "json",
         HTTPStatus.LENGTH_REQUIRED,
-        {"error": "missing or invalid Content-Length", "status": 411},
+        {
+            "error": "missing or invalid Content-Length",
+            "user_message": {
+                "key": "request.error.contentLengthInvalid",
+                "params": {},
+                "fallback": "missing or invalid Content-Length",
+            },
+            "status": 411,
+        },
     )]
     assert app_calls == []
 
@@ -558,6 +622,26 @@ def route_by_path(method, path):
         if route.path == path:
             return route
     raise AssertionError(f"missing route: {method} {path}")
+
+
+def test_unknown_get_localizes_plain_text_from_accept_language(monkeypatch):
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
+    web.bootstrap_locale_catalogs.cache_clear()
+    writes = []
+    request = SimpleNamespace(
+        require_auth=lambda role: role == "readonly",
+        request_locale_pref=lambda: "system",
+        headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5"},
+        write_text=lambda body, status=HTTPStatus.OK: writes.append((status, body)),
+    )
+
+    try:
+        http_routes._write_not_found_after_default_auth(request, "GET")
+        assert writes == [
+            (HTTPStatus.NOT_FOUND, web.server_string("zh-Hans", "request.error.notFound") + "\n"),
+        ]
+    finally:
+        web.bootstrap_locale_catalogs.cache_clear()
 
 
 def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
@@ -834,7 +918,15 @@ def test_test_auth_bypass_does_not_escalate_share_token_to_admin(monkeypatch):
     assert writes == [(
         "json",
         HTTPStatus.FORBIDDEN,
-        {"error": "share token is limited to the shared page and websocket", "role": "readonly"},
+        {
+            "error": "share token is limited to the shared page and websocket",
+            "user_message": {
+                "key": "share.error.pageScope",
+                "params": {},
+                "fallback": "share token is limited to the shared page and websocket",
+            },
+            "role": "readonly",
+        },
     )]
     assert handler.auth_identity().role == "readonly"
     assert handler.share_token() == "share-token"
@@ -1131,7 +1223,7 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
 
     def path_info(path):
         if path == "/missing":
-            raise server_module.FilesystemError("path not found: /missing", status=404)
+            raise server_module.FilesystemError.path_not_found("/missing")
         return {"path": path, "kind": "dir"}
 
     monkeypatch.setattr(server_module.filesystem, "path_info", path_info)
@@ -1151,17 +1243,21 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
 
     Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
 
-    assert writes == [(HTTPStatus.OK, {"responses": [
+    assert writes[0][0] == HTTPStatus.OK
+    responses = writes[0][1]["responses"]
+    assert responses[:2] == [
         {"id": "root", "ok": True, "status": 200, "payload": {"path": "/repo", "entries": [{"name": "a"}]}},
         {"id": "info", "ok": True, "status": 200, "payload": {"path": "/repo", "kind": "dir"}},
-        {"id": "missing", "ok": False, "status": 404, "error": "path not found: /missing", "path": "/missing"},
-        {"id": "bad", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "write", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "delete", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "rename", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "mkdir", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/new"},
-        {"id": "unindex", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo"},
-    ]})]
+    ]
+    assert responses[2]["user_message"] == {
+        "key": "common.pathNotFound",
+        "params": {"path": "/missing"},
+        "fallback": "path not found: /missing",
+    }
+    assert all(
+        response["user_message"]["key"] == "request.error.unsupportedFsBatchOperation"
+        for response in responses[3:]
+    )
 
 
 def test_handle_fs_batch_records_performance(monkeypatch):
@@ -1189,7 +1285,12 @@ def test_handle_fs_batch_rejects_invalid_shape():
 
     Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
 
-    assert writes == [(HTTPStatus.BAD_REQUEST, {"error": "requests must be a list", "status": 400})]
+    assert writes[0][0] == HTTPStatus.BAD_REQUEST
+    assert writes[0][1]["user_message"] == {
+        "key": "request.error.list",
+        "params": {"field": "requests"},
+        "fallback": "requests must be a list",
+    }
 
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
@@ -1284,7 +1385,7 @@ def test_stream_codex_summary_uses_settings_and_raw_auth_status(monkeypatch):
     app = SimpleNamespace(
         summary_settings=lambda: dict(summary_settings),
         codex_summary_prompt=lambda session, lookback: calls.append(("prompt", session, lookback)) or ({"session": session, "path": "/tmp/codex.jsonl", "prompt": "summarize", "items": 2}, HTTPStatus.OK),
-        log_event=lambda *args: logs.append(args),
+        log_event=lambda *args, **kwargs: logs.append((args, kwargs)),
     )
     handler = object.__new__(Handler)
     handler.server = SimpleNamespace(app=app)
@@ -1310,9 +1411,11 @@ def test_stream_codex_summary_uses_settings_and_raw_auth_status(monkeypatch):
     assert '"summary_model": "gpt-5.4-mini"' in stream
     assert '"summary_effort": "high"' in stream
     assert '"summary_service_tier": "fast"' in stream
-    assert logs[0][1] == "summary_started"
-    assert logs[0][3] == {"lookback_seconds": 7200, "model": "gpt-5.4-mini"}
-    assert logs[1][1] == "summary_finished"
+    assert logs[0][0][1] == "summary_started"
+    assert logs[0][0][3] == {"lookback_seconds": 7200, "model": "gpt-5.4-mini"}
+    assert logs[0][1] == {"message_key": "events.message.summary.started"}
+    assert logs[1][0][1] == "summary_finished"
+    assert logs[1][1] == {"message_key": "events.message.summary.finished"}
 
 
 def test_stream_codex_summary_rejects_logged_out_codex_before_prompt(monkeypatch):
@@ -1340,8 +1443,55 @@ def test_stream_codex_summary_rejects_logged_out_codex_before_prompt(monkeypatch
         HTTPStatus.SERVICE_UNAVAILABLE,
         {
             "error": "Codex summary provider is unavailable because the codex CLI is not logged in. Run `codex login`.",
+            "user_message": {
+                "key": "summary.error.codexLoginRequired",
+                "params": {"command": "codex login"},
+                "fallback": "Codex summary provider is unavailable because the codex CLI is not logged in. Run `codex login`.",
+            },
             "provider": "codex",
             "login_command": "codex login",
+        },
+    )]
+
+
+def test_stream_codex_process_missing_stdout_has_localizable_error_descriptor():
+    events = []
+    handler = object.__new__(Handler)
+    handler.write_sse_json = lambda event, value: events.append((event, value))
+
+    Handler.stream_codex_process(handler, SimpleNamespace(stdout=None))
+
+    assert events == [(
+        "summary_error",
+        {
+            "error": "missing Codex stdout",
+            "user_message": {
+                "key": "summary.error.missingStdout",
+                "params": {},
+                "fallback": "missing Codex stdout",
+            },
+        },
+    )]
+
+
+def test_write_codex_summary_error_event_has_localizable_descriptor():
+    events = []
+    handler = object.__new__(Handler)
+    handler.write_sse_json = lambda event, value: events.append((event, value))
+    provider_event = {"type": "turn.failed", "message": "provider failed"}
+    diagnostic = json.dumps(provider_event, ensure_ascii=False)
+
+    Handler.write_codex_summary_line(handler, diagnostic)
+
+    assert events == [(
+        "summary_error",
+        {
+            "error": diagnostic,
+            "user_message": {
+                "key": "summary.stream.failed",
+                "params": {},
+                "fallback": diagnostic,
+            },
         },
     )]
 

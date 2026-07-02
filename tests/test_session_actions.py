@@ -31,12 +31,25 @@ def make_app(sessions: list[str]) -> TmuxWebtermApp:
     app.share_tokens_lock = threading.RLock()
     app.refresh_sessions = lambda *args, **kwargs: []
     app.set_persisted_auto_session = lambda _session, _enabled: None
-    app.log_event = lambda session, event_type, message, details=None: {
-        "session": session,
-        "event_type": event_type,
-        "message": message,
-        "details": details or {},
-    }
+    def log_event(
+        session,
+        event_type,
+        message,
+        details=None,
+        *,
+        message_key="",
+        message_params=None,
+    ):
+        return {
+            "session": session,
+            "event_type": event_type,
+            "message": message,
+            "details": details or {},
+            "message_key": message_key,
+            "message_params": message_params or {},
+        }
+
+    app.log_event = log_event
     return app
 
 

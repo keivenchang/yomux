@@ -92,7 +92,7 @@ def test_invalid_user_skill_reports_errors_without_loading(tmp_path):
     assert not any(item["name"] == "bad skill" for item in payload["skills"])
     errors = " ".join(item["error"] for item in payload["errors"])
     assert "name must match" in errors
-    assert "unknown tools: not_a_tool" in errors
+    assert "Unknown tools: not_a_tool." in errors
 
 
 def test_parse_skill_text_validates_enabled_and_timeout():
@@ -105,8 +105,8 @@ def test_parse_skill_text_validates_enabled_and_timeout():
 
     assert skill is None
     assert [item["error"] for item in errors] == [
-        "enabled must be true or false",
-        "default_timeout_minutes must be between 1 and 1440",
+        "enabled must be true or false.",
+        "default_timeout_minutes must be between 1 and 1440.",
     ]
 
 
@@ -156,6 +156,6 @@ def test_user_skill_file_writes_reject_bad_paths_and_invalid_yaml(tmp_path):
     except ValueError as exc:
         message = str(exc)
         assert "name must match" in message
-        assert "unknown tools" in message
+        assert "Unknown tools" in message
     else:
         raise AssertionError("invalid skill YAML must be rejected")

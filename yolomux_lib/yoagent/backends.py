@@ -25,11 +25,13 @@ from ..common import YOAGENT_CLAUDE_SUMMARY_MODEL
 from ..common import codex_exec_argv
 from ..common import codex_runtime_env
 from ..common import truncate_text
+from ..locales import message_descriptor
 from ..transcripts import codex_event_text
 from ..web import server_string
 from ..workdir import AGENT_LOGIN_COMMANDS
 from ..workdir import agent_auth_status
 from . import conversation as yoagent_conversation
+from .preferences import yoagent_text
 from .transports import ClaudeStreamJsonTransport
 from .transports import CodexAppServerSession
 
@@ -69,25 +71,39 @@ def strip_yoagent_stream_hidden_thinking(text: str) -> tuple[str, bool]:
     return cleaned.strip(), bool(count or close_count)
 
 
-def yoagent_response_details(response: dict[str, Any]) -> str:
-    timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
+def yoagent_response_detail_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return locale-neutral response diagnostics for client-side rendering."""
     cli = response.get("cli") if isinstance(response.get("cli"), dict) else {}
-    lines: list[str] = []
+    rows: list[dict[str, Any]] = []
     backend_used = str(response.get("backend_used") or response.get("backend") or "").strip()
     if backend_used:
-        lines.append(f"- backend: `{backend_used}`")
+        rows.append(message_descriptor("yoagent.details.backend", f"backend: `{backend_used}`", {"backend": backend_used}))
     response_ms = yoagent_response_ms(response)
     if response_ms is not None:
-        lines.append(f"- response time: `{response_ms / 1000:.3f}s` (`{response_ms:.1f}ms`)")
+        params = {"seconds": f"{response_ms / 1000:.3f}", "milliseconds": f"{response_ms:.1f}"}
+        rows.append(message_descriptor("yoagent.details.responseTime", f"response time: `{params['seconds']}s` (`{params['milliseconds']}ms`)", params))
     elapsed_ms = cli.get("elapsed_ms")
     if isinstance(elapsed_ms, (int, float)):
-        lines.append(f"- model CLI time: `{float(elapsed_ms) / 1000:.3f}s`")
+        params = {"seconds": f"{float(elapsed_ms) / 1000:.3f}"}
+        rows.append(message_descriptor("yoagent.details.modelCliTime", f"model CLI time: `{params['seconds']}s`", params))
     transport = str(cli.get("transport") or "").strip()
     if transport == "codex-app-server":
-        warm_state = "warm reuse" if cli.get("process_reused") else "cold start" if cli.get("process_started") else "ready"
-        thread_state = "thread resumed" if cli.get("thread_resumed") else "thread started" if cli.get("thread_started") else "thread reused"
-        lines.append(f"- Codex transport: `{warm_state}`, `{thread_state}`")
-        timing_parts: list[str] = []
+        process_key, process_fallback = (
+            ("yoagent.details.codexProcess.warmReuse", "Codex process: `warm reuse`")
+            if cli.get("process_reused")
+            else ("yoagent.details.codexProcess.coldStart", "Codex process: `cold start`")
+            if cli.get("process_started")
+            else ("yoagent.details.codexProcess.ready", "Codex process: `ready`")
+        )
+        rows.append(message_descriptor(process_key, process_fallback))
+        thread_key, thread_fallback = (
+            ("yoagent.details.codexThread.resumed", "Codex thread: `resumed`")
+            if cli.get("thread_resumed")
+            else ("yoagent.details.codexThread.started", "Codex thread: `started`")
+            if cli.get("thread_started")
+            else ("yoagent.details.codexThread.reused", "Codex thread: `reused`")
+        )
+        rows.append(message_descriptor(thread_key, thread_fallback))
         for key, label in (
             ("thread_ready_ms", "thread ready"),
             ("turn_start_ack_ms", "turn ack"),
@@ -97,22 +113,28 @@ def yoagent_response_details(response: dict[str, Any]) -> str:
         ):
             value = cli.get(key)
             if isinstance(value, (int, float)):
-                timing_parts.append(f"{label} {float(value):.1f}ms")
-        if timing_parts:
-            lines.append(f"- Codex timing: `{'; '.join(timing_parts)}`")
+                milliseconds = f"{float(value):.1f}"
+                rows.append(message_descriptor(f"yoagent.details.codexTiming.{key}", f"{label}: `{milliseconds}ms`", {"milliseconds": milliseconds}))
     prompt_chars = cli.get("prompt_chars")
     if isinstance(prompt_chars, int):
-        lines.append(f"- prompt size: `{prompt_chars}` chars")
+        rows.append(message_descriptor("yoagent.details.promptSize", f"prompt size: `{prompt_chars}` chars", {"count": prompt_chars}))
     if "resumed" in cli:
-        lines.append(f"- model session: `{'resumed' if cli.get('resumed') else 'seeded'}`")
+        key = "yoagent.details.modelSession.resumed" if cli.get("resumed") else "yoagent.details.modelSession.seeded"
+        fallback = "model session: `resumed`" if cli.get("resumed") else "model session: `seeded`"
+        rows.append(message_descriptor(key, fallback))
     if cli.get("context_changed"):
-        lines.append("- activity context changed before this model call")
+        rows.append(message_descriptor("yoagent.details.activityContextChanged", "activity context changed before this model call"))
     fallback_reason = str(response.get("fallback_reason") or "").strip()
     if fallback_reason:
-        lines.append(f"- fallback reason: {fallback_reason}")
+        reason_descriptor = message_descriptor(
+            str(response.get("fallback_reason_key") or ""),
+            fallback_reason,
+            response.get("fallback_reason_params") if isinstance(response.get("fallback_reason_params"), dict) else {},
+        )
+        rows.append(message_descriptor("yoagent.details.fallbackReason", f"fallback reason: {fallback_reason}", {"reason": reason_descriptor}))
     if response.get("hidden_thinking_removed"):
-        lines.append("- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought")
-    return "\n".join(lines)
+        rows.append(message_descriptor("yoagent.details.hiddenThinking", "raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought"))
+    return rows
 
 
 def yoagent_response_ms(response: dict[str, Any]) -> float | None:
@@ -123,16 +145,32 @@ def yoagent_response_ms(response: dict[str, Any]) -> float | None:
     return None
 
 
-def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
+def yoagent_cli_fallback_descriptor(backend: str, error: str) -> dict[str, Any]:
     text = truncate_text(" ".join(str(error or "").split()), 600)
     if not text:
-        return ""
-    if not yoagent_cli_auth_failure(text):
-        return text
+        return message_descriptor("", "")
     label = "Claude CLI" if backend == "claude" else "Codex CLI" if backend == "codex" else f"{backend} CLI"
+    if not yoagent_cli_auth_failure(text):
+        return message_descriptor(
+            "yoagent.error.backendFailed",
+            f"The {label} backend failed; showing the activity context.",
+            {"backend": label},
+        )
     # Use the canonical login command (verified `claude auth login`, not `claude login`).
     login_command = AGENT_LOGIN_COMMANDS.get(backend, f"{backend} login")
-    return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
+    return message_descriptor(
+        "det.noBackend.noCredentials",
+        f"The {label} backend is not logged in; showing the activity context. Run `{login_command}`, then chat.",
+        {"provider": label, "command": f"`{login_command}`"},
+    )
+
+
+def yoagent_cli_fallback_reason(backend: str, error: str, locale: str = "en") -> str:
+    descriptor = yoagent_cli_fallback_descriptor(backend, error)
+    key = str(descriptor.get("key") or "")
+    if not key:
+        return ""
+    return server_string(locale, key, **descriptor["params"])
 
 
 def yoagent_language_directive(locale: str) -> str:
@@ -285,9 +323,14 @@ class YoagentBackendsMixin:
         return "", result.error or "codex app-server completed without a final agent message", captured_session_id, status
 
 
-    def run_yoagent_direct_prompt_backend(self, backend: str, prompt: str, settings: dict[str, Any] | None = None) -> tuple[str, str, dict[str, Any]]:
+    def run_yoagent_direct_prompt_backend(self, backend: str, prompt: str, settings: dict[str, Any] | None = None, locale: str = "en") -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
-            return "", f"unknown backend: {backend}", {}
+            error = f"unknown backend: {backend}"
+            return "", yoagent_cli_fallback_reason(backend, error, locale), {
+                "backend": backend,
+                "error": error,
+                "fallback_reason_message": yoagent_cli_fallback_descriptor(backend, error),
+            }
         started = time.monotonic()
         current_settings = settings or self.yoagent_settings()
         if backend == "codex":
@@ -298,13 +341,17 @@ class YoagentBackendsMixin:
             answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model, effort=claude_effort)
             tools = CLAUDE_STREAM_JSON_DEFAULT_TOOLS
             permission_mode = CLAUDE_STREAM_JSON_PERMISSION_MODE
-        return answer, self.deps.yoagent_cli_fallback_reason(backend, error), {
+        status = {
             "backend": backend,
             "prompt_chars": len(prompt),
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "direct": True,
             **({"tools": tools, "permission_mode": permission_mode, "external_tools_enabled": True} if backend == "claude" else {}),
         }
+        if error:
+            status["error"] = error
+            status["fallback_reason_message"] = yoagent_cli_fallback_descriptor(backend, error)
+        return answer, yoagent_cli_fallback_reason(backend, error, locale), status
 
 
     def run_yoagent_cli_backend(
@@ -321,7 +368,12 @@ class YoagentBackendsMixin:
         require_external_tools: bool = False,
     ) -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
-            return "", f"unknown backend: {backend}", {}
+            error = f"unknown backend: {backend}"
+            return "", yoagent_cli_fallback_reason(backend, error, locale), {
+                "backend": backend,
+                "error": error,
+                "fallback_reason_message": yoagent_cli_fallback_descriptor(backend, error),
+            }
 
         with self.yoagent_cli_lock:
             state = self.yoagent_cli_sessions.get(backend, {})
@@ -388,7 +440,7 @@ class YoagentBackendsMixin:
             answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event, tools=tools, permission_mode=permission_mode)
             backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None, "external_tools_enabled": True, "tools": tools, "permission_mode": permission_mode}
         elapsed_ms = round((time.monotonic() - started) * 1000)
-        fallback_reason = self.deps.yoagent_cli_fallback_reason(backend, error)
+        fallback_reason = yoagent_cli_fallback_reason(backend, error, locale)
         status = {
             **backend_status,
             "backend": backend,
@@ -404,6 +456,9 @@ class YoagentBackendsMixin:
             "session_id": next_session_id or None,
             "per_server": True,
         }
+        if error:
+            status["error"] = error
+            status["fallback_reason_message"] = yoagent_cli_fallback_descriptor(backend, error)
         with self.yoagent_cli_lock:
             if answer and next_session_id and not (backend == "codex" and require_external_tools):
                 self.yoagent_cli_sessions[backend] = {

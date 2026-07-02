@@ -1654,13 +1654,7 @@ function dockviewPaneTabHtml(item) {
 }
 
 function dockviewTabAriaLabel(item) {
-  if (isFileEditorItem(item)) {
-    const missing = openFileIsMissing(fileItemPath(item)) ? ' missing on disk' : '';
-    return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
-  }
-  const type = tabTypeForItem(item);
-  if (type) return itemLabel(item);
-  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMeta.sessions?.[item], 140)}`.trim();
+  return paneTabAriaLabel(item);
 }
 
 function dockviewRefreshTabs() {

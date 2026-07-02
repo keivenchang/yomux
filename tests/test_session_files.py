@@ -58,7 +58,7 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
         "diff_tracked",
         "uploaded",
     } <= set(SessionFileEntry.__annotations__)
-    assert {"from_ref", "to_ref", "error", "ahead", "behind"} <= set(RepoPayload.__annotations__)
+    assert {"from_ref", "to_ref", "error", "error_message", "ahead", "behind"} <= set(RepoPayload.__annotations__)
     assert {"hours", "warnings", "cache", "error", "refreshing_elsewhere"} <= set(SessionFilesPayload.__annotations__)
 
     assert get_type_hints(session_files.session_file_entry)["return"] is SessionFileEntry
@@ -1031,7 +1031,11 @@ def test_session_files_payload_demotes_missing_transcript_to_per_agent_warning(t
     assert payload["errors"] == []
 
     # It is surfaced as a non-blocking, per-agent warning instead.
-    assert payload["warnings"] == ["codex transcript not found by process fd or cwd"]
+    assert payload["warnings"] == [{
+        "key": "diff.warning.agentDiscovery",
+        "params": {"error": "codex transcript not found by process fd or cwd"},
+        "fallback": "codex transcript not found by process fd or cwd",
+    }]
 
 
 def test_git_status_parses_renames_and_tab_paths(tmp_path):
@@ -1481,6 +1485,34 @@ def test_session_files_payload_reports_invalid_ref_order(tmp_path):
 
     assert payload["files"] == []
     assert payload["errors"] == []
+    assert payload["repos"][0]["error_message"] == {
+        "key": "diff.warning.refsFallback",
+        "params": {"repo": "repo"},
+        "fallback": "requested refs not found in this repo; showing default",
+    }
+
+    aggregate, status = session_files.session_files_payload(
+        None,
+        {"s1": info, "s2": info},
+        hours=24,
+        from_ref=newer,
+        to_ref=older,
+    )
+    assert status == HTTPStatus.OK
+    assert aggregate["repos"][0]["error_message"] == payload["repos"][0]["error_message"]
+
+
+def test_diff_ref_issue_uses_one_structured_classifier():
+    assert session_files.diff_ref_issue("unknown FROM ref: missing", "missing", "current") == {
+        "key": "diff.error.unknownFrom",
+        "params": {"ref": "missing"},
+        "fallback": "unknown FROM ref: missing",
+    }
+    assert session_files.diff_ref_issue("unknown TO ref: future", "HEAD", "future") == {
+        "key": "diff.error.unknownTo",
+        "params": {"ref": "future"},
+        "fallback": "unknown TO ref: future",
+    }
 
 
 def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path):

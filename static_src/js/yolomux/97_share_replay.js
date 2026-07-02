@@ -616,7 +616,7 @@ function shareReplayResetMirrorRootAttributes(root, attrs = {}) {
   root.dataset.shareReplayRoot = 'true';
   root.dataset.shareReplayInert = 'true';
   root.setAttribute('role', 'presentation');
-  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('aria-label', shareReplayMirrorLabel());
   root.setAttribute('tabindex', '-1');
   shareReplayApplyAttributes(root, attrs, {preserveRoot: true});
 }
@@ -677,7 +677,7 @@ function shareReplayPrepareTerminalPlaceholderElement(element, entry = {}) {
     element.dataset.shareTerminalPlaceholderId = entry.placeholderId;
   }
   element.setAttribute?.('role', 'presentation');
-  element.setAttribute?.('aria-label', `Shared terminal ${entry.session}`);
+  element.setAttribute?.('aria-label', t('share.replay.sharedTerminalAria', {session: entry.session}));
   return element;
 }
 
@@ -1839,7 +1839,7 @@ function shareAutoApproveStateSnapshot() {
       target: String(state.target || session),
       enabled: state.enabled === true,
       locked: state.locked === true,
-      last_action: String(state.last_action || ''),
+      ...structuredMessageSnapshot(state, 'last_action'),
       last_screen_sig: String(state.last_screen_sig || ''),
       screen: state.screen && typeof state.screen === 'object'
         ? {
@@ -2406,7 +2406,7 @@ function applySharePreferencesState(preferences = {}) {
   if (!preferences || typeof preferences !== 'object') return;
   if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
   if (Array.isArray(preferences.collapsedSections)) {
-    collapsedPreferenceSections = new Set(shareStringArray(preferences.collapsedSections, 200));
+    setCollapsedPreferenceSections(shareStringArray(preferences.collapsedSections, 200), {sections: preferenceSections()});
   }
   if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
   renderPreferencesPanels({force: true});
@@ -2724,6 +2724,21 @@ function shareScrollElementForPayload(payload = {}) {
   return null;
 }
 
+function applyShareScrollDescriptorPosition(descriptor, top, left) {
+  if (!descriptor) return false;
+  if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
+    descriptor.term.scrollToLine(top);
+    return true;
+  }
+  if (!descriptor.element) return false;
+  descriptor.element.scrollTop = top;
+  descriptor.element.scrollLeft = left;
+  // Setting scrollTop before CodeMirror's first measure can leave its virtual viewport at the old
+  // rows without emitting another scroll event. Force the same editor view to consume the host offset.
+  if (descriptor.kind === 'editor') descriptor.panel?._cmView?.requestMeasure?.();
+  return true;
+}
+
 function applyShareScrollState(payload = {}) {
   if (!payload || typeof payload !== 'object') return;
   const target = String(payload.target || '');
@@ -2743,14 +2758,7 @@ function applyShareScrollState(payload = {}) {
   const previous = applyingShareRemoteScroll;
   applyingShareRemoteScroll = true;
   try {
-    if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
-      descriptor.term.scrollToLine(top);
-      return;
-    }
-    if (descriptor.element) {
-      descriptor.element.scrollTop = top;
-      descriptor.element.scrollLeft = left;
-    }
+    applyShareScrollDescriptorPosition(descriptor, top, left);
     if (descriptor.kind === 'editor' && descriptor.panel?._cmView) {
       const view = descriptor.panel._cmView;
       const docLength = view.state?.doc?.length || 0;
@@ -3436,7 +3444,7 @@ function shareReplayHealthDiagnostics() {
 }
 
 function shareDebugTextForClipboard(report = shareDebugReports[shareDebugReports.length - 1] || null) {
-  const fallback = shareReplayShellActive ? shareReplayHealthDiagnostics() : {message: 'No share debug diagnostics recorded yet'};
+  const fallback = shareReplayShellActive ? shareReplayHealthDiagnostics() : {message: t('share.debug.noDiagnostics')};
   return JSON.stringify(shareRedactDiagnosticValue(report || fallback), null, 2);
 }
 

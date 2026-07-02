@@ -255,7 +255,7 @@ function pruneSmallLayoutSlots() {
   if (!candidate) return;
   const moved = paneTabs(candidate.slot);
   applyLayoutSlots(layoutWithoutSlot(candidate.slot), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout: not enough room` : '',
+    message: moved.length ? t('layout.status.hiddenNoRoom', {items: moved.map(itemLabel).join(', ')}) : '',
   });
 }
 
@@ -551,14 +551,15 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
   html = `${pinnedTabIconHtml(item)}${html}`;
   if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
+    const closeLabel = isEditor
+      ? t('finder.close', {name: itemLabel(item)})
+      : t('finder.hideFromLayout', {name: itemLabel(item)});
     const controlKind = isEditor ? 'close' : 'minimize';
     html += toolbarButtonHtml({
       className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
       action: 'pane-tab-close',
       dataset: {paneTabClose: ''},
-      title: closeTitle,
+      title: closeLabel,
       ariaLabel: closeLabel,
     });
   }
@@ -623,9 +624,7 @@ function createPaneTab(side, item, displayContext = {}) {
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isEditor
-    ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
-    : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', paneTabAriaLabel(item));
   tab.addEventListener('pointerdown', event => {
     dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
     dragTimingMark('pointerdown');
@@ -685,6 +684,16 @@ function createPaneTab(side, item, displayContext = {}) {
   return tab;
 }
 
+function paneTabAriaLabel(item) {
+  if (isFileEditorItem(item)) {
+    const missing = openFileIsMissing(fileItemPath(item)) ? ` ${t('filetab.missingTitle')}` : '';
+    return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
+  }
+  const type = tabTypeForItem(item);
+  if (type) return itemLabel(item);
+  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMeta.sessions?.[item], 140)}`.trim();
+}
+
 function beginPaneTabRename(tab, session) {
   if (isFileEditorItem(session)) {
     beginFileTabRename(tab, session);
@@ -707,7 +716,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   const currentName = basenameOf(path);
-  const nextName = window.prompt(`Rename ${currentName}`, currentName);
+  const nextName = window.prompt(t('rename.title', {name: currentName}), currentName);
   if (nextName === null) return;
   renameFileTreePath(path, entry, nextName);
 }
@@ -1367,12 +1376,12 @@ function schedulePanelDetailsFit(panel) {
 }
 
 function terminalTabDisplayLabel(session, info) {
-  return 'Term';
+  return t('tab.terminal.short');
 }
 
 function terminalTabDetailLabel(session, info) {
   const label = terminalProcessLabel(session, info);
-  return label || 'Term';
+  return label || t('tab.terminal.short');
 }
 
 function terminalTabLabel(session, info) {
@@ -1384,7 +1393,7 @@ function terminalTabLabel(session, info) {
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalTabDetailLabel(session, info)}`;
+  return t('terminal.tab.title', {name: terminalTabDetailLabel(session, info)});
 }
 
 function terminalProcessLabel(session, info) {
@@ -1394,7 +1403,7 @@ function terminalProcessLabel(session, info) {
   if (agent?.command) return processLabelFromCommand(agent.command);
   if (agent?.kind) return agent.kind;
   if (pane?.command) return pane.command;
-  return 'Term';
+  return t('tab.terminal.short');
 }
 
 function terminalDisplayPaneForWindowIndex(info, windowIndex) {
@@ -1770,7 +1779,7 @@ function tmuxWindowDisplayName(pane) {
   const name = String(pane?.window_name || '').trim();
   if (name) return name;
   const inferred = processLabelFromCommand(pane?.command || '');
-  return String(inferred || '').trim() || `window ${pane?.window ?? ''}`.trim() || 'window';
+  return String(inferred || '').trim() || t('terminal.window.unnamed', {index: pane?.window ?? ''});
 }
 
 function tmuxWindowProcessPid(pane) {
@@ -1780,7 +1789,7 @@ function tmuxWindowProcessPid(pane) {
 
 function tmuxWindowPidText(pid) {
   const value = Number(pid);
-  return Number.isFinite(value) && value > 0 ? `(pid=${Math.floor(value)})` : '';
+  return Number.isFinite(value) && value > 0 ? t('terminal.window.pid', {pid: Math.floor(value)}) : '';
 }
 
 function tmuxWindowDisplayLabel(name, pid) {
@@ -1956,11 +1965,11 @@ function handleWindowStepButtonClick(event) {
     } else if (typeof acknowledgeAgentWindowActivity === 'function') {
       acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
     }
-    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);
+    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, t('terminal.window.title', {name: label}));
     return;
   }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
-  const label = button.dataset.windowDir === 'prev' ? 'previous tmux sub-window' : 'next tmux sub-window';
+  const label = button.dataset.windowDir === 'prev' ? t('terminal.window.previous') : t('terminal.window.next');
   tmuxWindow(button.dataset.windowSession, key, label);
 }
 
@@ -2087,7 +2096,49 @@ function runHistoryAgentLabel(row) {
 function runHistoryPrLabel(row) {
   const pr = row?.pr && typeof row.pr === 'object' ? row.pr : null;
   if (!pr?.number) return '';
-  return `${t('searchHistory.pr')} #${pr.number}${pr.state ? ` ${pr.state}` : ''}`;
+  const status = pullRequestStatusDisplay(pr);
+  return `${t('searchHistory.pr')} #${pr.number}${status ? ` ${status}` : ''}`;
+}
+
+function runHistoryStateLabel(value) {
+  const state = String(value || '');
+  if (state && stateDefs[state]) return stateDef(state).label;
+  if (state === 'waiting') return t('searchHistory.runState.waiting');
+  return t('common.unknown');
+}
+
+const SEARCH_HISTORY_SOURCE_KEYS = Object.freeze({
+  event: 'searchHistory.source.event',
+  session_summary: 'searchHistory.source.sessionSummary',
+  rolling_summary: 'searchHistory.source.rollingSummary',
+  global_summary: 'searchHistory.source.globalSummary',
+});
+const SEARCH_HISTORY_SOURCE_BY_LEGACY_KIND = Object.freeze({
+  event: 'event',
+  summary: 'session_summary',
+  global_summary: 'global_summary',
+});
+
+function searchHistorySourceLabel(result) {
+  const kind = String(result?.kind || '');
+  const source = String(result?.source || SEARCH_HISTORY_SOURCE_BY_LEGACY_KIND[kind] || '');
+  const key = SEARCH_HISTORY_SOURCE_KEYS[source];
+  return key ? t(key) : t('common.result');
+}
+
+function searchHistoryErrorText(payload) {
+  if (!payload) return '';
+  const message = structuredMessageText(payload, 'message');
+  if (message) return message;
+  return userMessageText(payload, String(payload?.error || payload?.message || payload));
+}
+
+function searchHistoryPanelErrors() {
+  const payloadErrors = Array.isArray(runHistoryPayload?.errors) ? runHistoryPayload.errors : [];
+  return [searchHistoryError, runHistoryError, ...payloadErrors]
+    .filter(Boolean)
+    .map(searchHistoryErrorText)
+    .filter(Boolean);
 }
 
 function runHistoryMetaParts(row) {
@@ -2098,7 +2149,7 @@ function runHistoryMetaParts(row) {
     runHistoryAgentLabel(row),
     started ? `${t('searchHistory.started')}: ${started}` : '',
     ended ? `${t('searchHistory.ended')}: ${ended}` : '',
-    row?.final_state ? `${t('searchHistory.finalState')}: ${row.final_state}` : '',
+    row?.final_state ? `${t('searchHistory.finalState')}: ${runHistoryStateLabel(row.final_state)}` : '',
     runHistoryPrLabel(row),
   ].filter(Boolean);
 }
@@ -2107,11 +2158,13 @@ function searchHistoryResultHtml(result, index) {
   const target = result?.target && typeof result.target === 'object' ? result.target : {};
   const session = target.session || result?.session || '';
   const time = searchHistoryTimeLabel(result?.timestamp);
-  const meta = [session, result?.kind || result?.source || '', time].filter(Boolean).join(' · ');
+  const meta = [session, searchHistorySourceLabel(result), time].filter(Boolean).join(' · ');
+  const title = structuredMessageText(result, 'title') || t('common.result');
+  const snippet = structuredMessageText(result, 'snippet');
   return `<button type="button" class="search-history-result" data-search-result-index="${index}">
     <span class="search-history-row-meta">${esc(meta)}</span>
-    <span class="search-history-row-title">${esc(result?.title || result?.kind || t('searchHistory.result'))}</span>
-    <span class="search-history-row-snippet">${esc(result?.snippet || '')}</span>
+    <span class="search-history-row-title">${esc(title)}</span>
+    <span class="search-history-row-snippet">${esc(snippet)}</span>
   </button>`;
 }
 
@@ -2146,12 +2199,13 @@ function runHistoryRowsHtml() {
 
 function searchHistoryPanelStatusText() {
   if (searchHistoryLoading || runHistoryLoading) return t('common.loading');
-  if (searchHistoryError || runHistoryError) return searchHistoryError || runHistoryError;
+  const [error] = searchHistoryPanelErrors();
+  if (error) return error;
   return t('searchHistory.detail');
 }
 
 function searchHistoryPanelHtml() {
-  const errors = [searchHistoryError, runHistoryError].filter(Boolean);
+  const errors = searchHistoryPanelErrors();
   const errorHtml = errors.length ? `<div class="search-history-error">${esc(errors.join(' · '))}</div>` : '';
   return `
     <form class="search-history-search" data-search-history-form>
@@ -2184,12 +2238,14 @@ function renderSearchHistoryPanels() {
 
 async function refreshRunHistoryData() {
   runHistoryLoading = true;
-  runHistoryError = '';
+  runHistoryError = null;
   renderSearchHistoryPanels();
   try {
     runHistoryPayload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
   } catch (error) {
-    runHistoryError = String(error?.payload?.error || error?.message || error);
+    runHistoryError = error?.payload && typeof error.payload === 'object'
+      ? error.payload
+      : {error: String(error?.message || error)};
   } finally {
     runHistoryLoading = false;
     renderSearchHistoryPanels();
@@ -2199,7 +2255,7 @@ async function refreshRunHistoryData() {
 
 async function runSearchHistoryQuery(query = searchHistoryQuery) {
   searchHistoryQuery = String(query || '').trim();
-  searchHistoryError = '';
+  searchHistoryError = null;
   if (!searchHistoryQuery) {
     searchHistoryPayload = {query: '', results: []};
     renderSearchHistoryPanels();
@@ -2210,7 +2266,9 @@ async function runSearchHistoryQuery(query = searchHistoryQuery) {
   try {
     searchHistoryPayload = await apiFetchJson(`/api/search?q=${encodeURIComponent(searchHistoryQuery)}`, {cache: 'no-store'});
   } catch (error) {
-    searchHistoryError = String(error?.payload?.error || error?.message || error);
+    searchHistoryError = error?.payload && typeof error.payload === 'object'
+      ? error.payload
+      : {error: String(error?.message || error)};
   } finally {
     searchHistoryLoading = false;
     renderSearchHistoryPanels();

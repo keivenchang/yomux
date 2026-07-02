@@ -458,6 +458,14 @@ def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket
                 BACKGROUND_ROLE_SESSION_FILES,
                 "Session-files background refresh started",
                 webapp.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": "1"}, cache_key=raw_cache_key),
+                message_key="events.message.backgroundRefresh.started",
+                message_params={
+                    "target": {
+                        "key": "backgroundOwner.sessionFiles",
+                        "params": {},
+                        "fallback": "Session files",
+                    },
+                },
             )
             if event:
                 events.append(event)
@@ -474,6 +482,8 @@ def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket
     assert "cache_key_hash" in first_details
     assert "cache_key" not in first_details
     assert repr(raw_cache_key) not in json.dumps(events, sort_keys=True)
+    assert all(event["message_key"] == "events.message.backgroundRefresh.started" for event in events)
+    assert all(event["message_params"]["target"]["key"] == "backgroundOwner.sessionFiles" for event in events)
 
 
 def test_background_owner_status_reports_required_counters(tmp_path):

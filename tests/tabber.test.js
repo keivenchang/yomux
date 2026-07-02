@@ -892,7 +892,7 @@ async function runTabberSuite() {
     api.handleDropDragOver(event);
     assert.equal(event.dataTransfer.dropEffect, 'move');
     assert.ok(target.classList.contains('drop-preview-middle'), 'pane swap previews the whole target pane, not an edge subpane');
-    assert.equal(target.dataset.dropLabel, 'swap');
+    assert.equal(target.dataset.dropLabel, 'Swap', 'pane swap preview uses the localized English catalog label');
     assert.equal(api.paneSwapAllowed('left', 'right'), true, 'similarly sized panes can swap whole pane tab stacks');
 
     assert.equal(api.swapPaneSlots('left', 'right'), true);
@@ -1411,7 +1411,7 @@ async function runTabberSuite() {
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(css), false, 'Tabber status balls do not inherit the surface-specific icon size path');
     assert.ok(/\.file-tree-row\.tabber-row \.file-tree-date\s*\{[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(css), 'Tabber keeps the recency column reserved at narrow widths');
     assert.ok(/\.file-tree-date\s*\{[\s\S]*font-size:\s*max\(var\(--ui-font-size-2xs\), calc\(var\(--file-explorer-font-size\) - 1px\)\)[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC7: recency/status text uses a larger row-scale font and end ellipsis');
-    assert.ok(/row\.classList\.toggle\('tabber-status-long', data\.type === 'window' && \(\s*\/\^working for\/\.test\(String\(data\.dateText \|\| ''\)\) \|\| Boolean\(data\.dateHtml\)\)\)/.test(source), 'SC1: Tabber marks long working/attention status rows without affecting plain ago rows');
+    assert.ok(/const agentState = String\(data\.agentStatus\?\.state \|\| STATE_KEY\.idle\);[\s\S]*row\.classList\.toggle\('tabber-status-long', data\.type === 'window'[\s\S]*agentWindowIsWorkingState\(agentState\)[\s\S]*agentWindowIsAttentionState\(agentState\)/.test(source), 'SC1: Tabber classifies long working/attention rows from semantic state, independent of translated display text');
     assert.ok(/\.file-tree-row\.tabber-row\.tabber-status-long \.file-tree-date\s*\{[\s\S]*display:\s*block[\s\S]*flex:\s*0 1 auto[\s\S]*text-align:\s*start[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC1/SC2: long Tabber statuses fit content and truncate at the end, not from the leading edge');
     assert.equal(/@container[\s\S]*tabber-row \.file-tree-date[\s\S]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
     assert.ok(/function tabberActivityVisibleConsumer\(\)[\s\S]*fileExplorerMode === 'tabber'[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'Tabber activity polling only marks visible Tabber panes as subscribers');
@@ -1926,10 +1926,37 @@ async function runTabberSuite() {
     assert.ok(source.includes("boolSetting('uploads.suggestion_autorun', false)"), 'read-only shell autorun is Preference-gated');
     assert.ok(source.includes("storageSet(dropActionLastKey(category), actionId)"), 'chosen drop actions are remembered per category');
     assert.ok(source.includes("apiFetchJson('/api/drop-action/run'"), 'server-side actions use the /api/drop-action/run endpoint');
-    assert.ok(source.includes("appendContextMenuButton(menu, 'Copy image'"), 'Finder/Differ image context menus expose Copy image');
+    assert.ok(source.includes("appendContextMenuButton(menu, t('contextmenu.copyImage')"), 'Finder/Differ image context menus expose localized Copy image');
     assert.ok(source.includes('function commandPaletteDropActionItems()'), 'command palette reuses the drop-action registry for active file actions');
     assert.ok(source.includes("path: 'uploads.custom_actions'") && source.includes("path: 'uploads.suggestion_autorun'") && source.includes("path: 'uploads.image_action_order'"), 'Uploads Preferences expose custom actions, image ordering, and autorun');
   }
+
+  await testAsync('drop-action status reuses the localized display label', async () => {
+    const api = loadYolomux('', ['1']);
+    api.i18nSetCatalogForTest('fr', {
+      'drop.action.imgDescribe': 'Décrire l’image',
+      'status.insertedDropAction': 'inséré {name}',
+    });
+    api.setActiveLocaleForTest('fr');
+    const sent = [];
+    api.registerTerminalForTest('1', {focus() {}}, {
+      readyState: 1,
+      send(payload) { sent.push(JSON.parse(payload)); },
+    });
+    const action = api.dropSuggestionsFor('image', 'claude', 1, {pathInserted: true})
+      .find(item => item.id === 'img-describe');
+    assert.ok(action, 'localized status fixture uses the shared image-action registry');
+    await api.runDropActionForTest(action, {
+      session: '1',
+      paths: ['/tmp/image.png'],
+      category: 'image',
+      agentKind: 'claude',
+      pathInserted: true,
+      kind: 'file',
+    });
+    assert.equal(sent.length, 1, 'drop action inserts through the normal terminal path');
+    assert.equal(api.statusHtmlForTest(), '<span class="ok">inséré Décrire l’image</span>', 'drop-action status uses dropActionDisplayLabel instead of the canonical English label');
+  });
 }
 
 module.exports = {runTabberSuite};

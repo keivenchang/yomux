@@ -667,18 +667,11 @@ def transcript_items_from_raw_line(raw_line: str) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     for block in blocks:
         block_role = block["role"] if block["role"] != "message" else entry_type or "message"
-        header = block_role
-        meta = []
-        if timestamp:
-            meta.append(str(timestamp))
-        if cwd:
-            meta.append(str(cwd))
-        if meta:
-            header = f"{header} ({', '.join(meta)})"
         items.append(
             {
                 "role": block_role,
-                "header": header,
+                "timestamp": str(timestamp or ""),
+                "cwd": str(cwd or ""),
                 "text": block["text"],
             }
         )
@@ -712,7 +705,11 @@ def transcript_blocks_from_payload(payload: Any, entry_type: str) -> list[dict[s
     return []
 
 def format_transcript_item(item: dict[str, str]) -> str:
-    return f"{item['header']}\n{item['text']}"
+    role = str(item.get("role") or "message")
+    meta = [str(item.get(key) or "") for key in ("timestamp", "cwd")]
+    metadata = ", ".join(value for value in meta if value)
+    header = f"{role} ({metadata})" if metadata else role
+    return f"{header}\n{item.get('text') or ''}"
 
 def trim_prompt_text(text: str, max_chars: int) -> tuple[str, bool]:
     if len(text) <= max_chars:

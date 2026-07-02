@@ -60,7 +60,7 @@ function panelControlsHtml(session, options = {}) {
   const readonlyAttrs = label => ` type="button" disabled title="${esc(t('tab.adminRequiredFor', {name: label}))}" aria-label="${esc(label)}"`;
   const tabAttrs = (name, label = '') => {
     if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs('YO!summary');
+    if (readOnlyMode && name === 'summary') return readonlyAttrs(t('brand.tab.summary'));
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
@@ -95,6 +95,23 @@ function virtualPanelControlsHtml(session, options = {}) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
           ${paneFrameControlsHtml(session, {actions: false, close: false, ...options})}
         </div>`;
+}
+
+function relocalizeVirtualPanelChrome(panel, label = '') {
+  if (!panel) return false;
+  panel.querySelectorAll('.pane-tabs[role="tablist"]').forEach(tablist => tablist.setAttribute('aria-label', t('pane.tabs.aria')));
+  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
+    button.title = t('pane.minimize');
+    button.setAttribute('aria-label', t('pane.minimize'));
+  });
+  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
+    button.title = t('pane.expand');
+    button.setAttribute('aria-label', t('pane.expand'));
+  });
+  const labelNode = panel.querySelector('.panel-session-label .session-button-dir');
+  if (labelNode && label) labelNode.textContent = label;
+  if (typeof syncPanelDetailsToggleState === 'function') syncPanelDetailsToggleState(panel);
+  return true;
 }
 
 function panelActiveTabName(session) {
@@ -171,14 +188,14 @@ function createPanel(session) {
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
-          <div id="summary-context-${session}" class="summary-context">${esc(t('summary.loadingContext'))}</div>
-          <div id="summary-${session}" class="summary-preview markdown-body">${esc(t('summary.emptyPrompt'))}</div>
+          <div id="summary-context-${session}" class="summary-context" data-locale-text-key="summary.loadingContext">${esc(t('summary.loadingContext'))}</div>
+          <div id="summary-${session}" class="summary-preview markdown-body" data-locale-text-key="summary.emptyPrompt">${esc(t('summary.emptyPrompt'))}</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('events.title'))}</div>
-          <div id="events-${session}" class="event-list">${esc(t('events.loading'))}</div>
+          <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
       </div>`;
   bindPanelShell(panel, session);
@@ -205,13 +222,7 @@ function syncTranscriptMetaLoadingUi() {
     metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
     metaRefreshButton.disabled = transcriptMetaLoading;
     metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
-    if (transcriptMetaLoading) {
-      metaRefreshButton.title = t('info.loadingRepo');
-      metaRefreshButton.setAttribute('aria-label', t('info.loadingRepo'));
-    } else {
-      refreshMetaButtonTitle();
-      metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
-    }
+    refreshMetaButtonChrome();
   }
   document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
 }
@@ -237,8 +248,8 @@ function backgroundServerLabel(record, fallback = '') {
   return [
     endpoint,
     root,
-    Number.isFinite(pid) && pid > 0 ? `pid ${Math.trunc(pid)}` : '',
-  ].filter(Boolean).join(' · ') || 'this server';
+    Number.isFinite(pid) && pid > 0 ? t('backgroundOwner.pid', {pid: Math.trunc(pid)}) : '',
+  ].filter(Boolean).join(' · ') || t('backgroundOwner.thisServer');
 }
 
 function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPayload, options = {}) {
@@ -309,7 +320,7 @@ async function refreshBackgroundOwnerStatus(options = {}) {
       const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
       return applyBackgroundOwnerStatusPayload(payload, options);
     } catch (error) {
-      backgroundOwnerStatusError = String(error?.payload?.error || error?.message || error);
+      backgroundOwnerStatusError = userMessageSnapshot(error);
       backgroundOwnerStatusLoading = false;
       if (options.render !== false) renderInfoPanel();
       if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
@@ -519,7 +530,7 @@ function linkYoagentSessionCodeReferences(container) {
     const link = document.createElement('a');
     link.href = `?yoagent-session=${encodeURIComponent(session)}`;
     link.className = 'yoagent-session-link';
-    link.title = `Open tmux session ${session}`;
+    link.title = t('yoagent.openSession', {session});
     code.replaceWith(link);
     link.appendChild(code);
   });
@@ -606,34 +617,42 @@ const infoDefaultGrouping = Object.freeze(['tab', 'path', 'tmux-window']);
 const infoDefaultSort = Object.freeze({key: 'date', dir: 'desc'});
 const infoSearchMaxLength = 240;
 const infoSortDefs = Object.freeze([
-  {key: 'name', dir: 'asc', value: 'name:asc', label: 'A-Z'},
-  {key: 'name', dir: 'desc', value: 'name:desc', label: 'Z-A'},
-  {key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'},
-  {key: 'date', dir: 'asc', value: 'date:asc', label: 'oldest'},
+  {key: 'name', dir: 'asc', value: 'name:asc', labelKey: 'finder.sort.az'},
+  {key: 'name', dir: 'desc', value: 'name:desc', labelKey: 'finder.sort.za'},
+  {key: 'date', dir: 'desc', value: 'date:desc', labelKey: 'finder.sort.newest'},
+  {key: 'date', dir: 'asc', value: 'date:asc', labelKey: 'finder.sort.oldest'},
 ]);
 const infoDimensionDefs = Object.freeze([
-  {key: 'tab', label: 'Tab'},
-  {key: 'tmux-window', label: 'tmux sub-window'},
-  {key: 'ai', label: 'AI'},
-  {key: 'path', label: 'Path'},
-  {key: 'branch', label: 'Branch'},
-  {key: 'linear', label: 'Linear'},
-  {key: 'pr', label: 'PR'},
+  {key: 'tab', labelKey: 'info.dimension.tab'},
+  {key: 'tmux-window', labelKey: 'info.field.tmuxSubWindow'},
+  {key: 'ai', labelKey: 'info.dimension.ai'},
+  {key: 'path', labelKey: 'yoagent.action.row.path'},
+  {key: 'branch', labelKey: 'info.dimension.branch'},
+  {key: 'linear', labelKey: 'info.field.linear'},
+  {key: 'pr', labelKey: 'searchHistory.pr'},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-tmux-window', label: 'Tab > tmux-window', title: 'Tab, then tmux sub-window', grouping: ['tab', 'tmux-window']},
-  {key: 'tab-path', label: 'Tab > Path > tmux-window', title: 'Tab, then path, then tmux sub-window', grouping: ['tab', 'path', 'tmux-window']},
-  {key: 'path-branch', label: 'Path > Branch', title: 'Path, then branch', grouping: ['path', 'branch']},
-  {key: 'linear-pr', label: 'Linear > PR', title: 'Linear, then PR', grouping: ['linear', 'pr']},
-  {key: 'pr-branch', label: 'PR > Branch', title: 'PR, then branch', grouping: ['pr', 'branch']},
+  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
+  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['path', 'branch']},
+  {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
+  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['pr', 'branch']},
 ]);
 let infoGrouping = readStoredInfoGrouping();
 let infoSort = readStoredInfoSort();
 let infoSearch = '';
 const infoCollapsedGroupKeys = new Set();
 
+function localizedInfoDefinition(definition) {
+  return {
+    ...definition,
+    ...(definition.labelKey ? {label: t(definition.labelKey)} : {}),
+    ...(definition.titleKey ? {title: t(definition.titleKey)} : {}),
+  };
+}
+
 function infoGroupDimensions() {
-  return infoDimensionDefs.map(dimension => ({...dimension}));
+  return infoDimensionDefs.map(localizedInfoDefinition);
 }
 
 function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
@@ -654,15 +673,15 @@ function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
   return infoDimensionDefs
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
-    .map(dimension => ({...dimension}));
+    .map(localizedInfoDefinition);
 }
 
 function infoSortFields() {
-  return infoSortDefs.map(def => ({...def}));
+  return infoSortDefs.map(localizedInfoDefinition);
 }
 
 function infoGroupingPresets() {
-  return infoPresetDefs.map(preset => ({...preset, grouping: preset.grouping.slice()}));
+  return infoPresetDefs.map(preset => ({...localizedInfoDefinition(preset), grouping: preset.grouping.slice()}));
 }
 
 function normalizeInfoGrouping(value, options = {}) {
@@ -858,8 +877,8 @@ function infoRecordTmuxWindowIndex(record = {}) {
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
-  if (!infoRecordHasAi(record)) return 'No tmux sub-window';
-  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || 'tmux sub-window';
+  if (!infoRecordHasAi(record)) return t('info.missing.tmuxSubWindow');
+  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxSubWindow');
 }
 
 function infoRecordTmuxWindowKey(record = {}) {
@@ -871,7 +890,7 @@ function infoRecordTmuxWindowKey(record = {}) {
 }
 
 function infoDimensionValue(record, dimension) {
-  const fallback = {key: 'none', label: 'None', title: ''};
+  const fallback = {key: 'none', label: t('info.group.none'), title: ''};
   if (!record || !dimension) return fallback;
   if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
   if (dimension === 'tmux-window') return {key: infoRecordTmuxWindowKey(record), label: infoRecordTmuxWindowLabel(record), title: record.tmuxWindowTitle || record.aiTitle || infoRecordTmuxWindowLabel(record), sortValue: infoRecordNumericSortValue(record, 'tmux-window')};
@@ -908,21 +927,29 @@ function infoRowPrNumber(row = {}) {
 
 function infoRelationshipRecords(rows = infoBranchRows()) {
   const records = [];
-  const noTab = {session: '', label: 'No tab / no AI', title: 'No tab or AI associated with this branch', kind: '', window: '', tabLabel: 'No tab', aiLabel: 'No AI'};
+  const noTab = {
+    session: '',
+    label: t('info.missing.tabAndAi'),
+    title: t('info.missing.tabOrAiForBranch'),
+    kind: '',
+    window: '',
+    tabLabel: t('info.missing.tab'),
+    aiLabel: t('info.missing.ai'),
+  };
   for (const row of Array.isArray(rows) ? rows : []) {
     const directTabAgents = Array.isArray(row?.tabAgents) && row.tabAgents.length ? row.tabAgents : [];
     const pathTabAgents = Array.isArray(row?.pathTabAgents) && row.pathTabAgents.length ? row.pathTabAgents : [];
     const tabAgents = directTabAgents.length ? directTabAgents : (pathTabAgents.length ? pathTabAgents : [noTab]);
     for (const agent of tabAgents) {
       const session = String(agent?.session || '');
-      const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || 'No tab');
+      const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || t('info.missing.tab'));
       const aiLabel = String(agent?.aiLabel || infoTabAgentAiLabel(agent));
       const aiKind = String(agent?.kind || '');
       const tmuxWindowIndex = String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? '');
       const tmuxWindowKey = tmuxWindowIndex
         ? `${session || 'no-tab'}:${tmuxWindowIndex}:${aiLabel}`
         : '__no_tmux_window__';
-      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? 'No tmux sub-window' : aiLabel;
+      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxSubWindow') : aiLabel;
       const path = String(row?.path || '');
       const branch = String(row?.branch || '');
       const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
@@ -960,17 +987,17 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tmuxWindowLabel,
         tmuxWindowTitle: String(agent?.title || tmuxWindowLabel),
         pathKey: infoNormalizedPath(path) || '__no_path__',
-        pathLabel: String(row?.pathLabel || compactHomePath(path) || 'No path'),
-        pathTitle: String(row?.pathTitle || path || 'No path'),
+        pathLabel: String(row?.pathLabel || compactHomePath(path) || t('info.missing.path')),
+        pathTitle: String(row?.pathTitle || path || t('info.missing.path')),
         pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
         pathActivitySource: String(row?.pathActivitySource || ''),
         branchKey: branch || '__no_branch__',
-        branchLabel: branch || 'No branch',
-        branchTitle: branch || 'No branch',
-        branchHtml: row?.branchHtml || esc(branch || 'No branch'),
+        branchLabel: branch || t('info.missing.branch'),
+        branchTitle: branch || t('info.missing.branch'),
+        branchHtml: row?.branchHtml || esc(branch || t('info.missing.branch')),
         prKey: prCompactLabel || prKeyLabel || '__no_pr__',
-        prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || 'No PR',
-        prTitle: prDisplayLabel || prCompactLabel || 'No PR',
+        prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || t('info.missing.pr'),
+        prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
         prNumber: Number.isFinite(prNumber) ? prNumber : null,
         prUrl: String(row?.prUrl || ''),
         prClass: String(row?.prClass || ''),
@@ -980,8 +1007,8 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         prCiClass: String(row?.prCiClass || ''),
         prHtml: infoPrCellHtml(row) || '',
         linearKey: linearLabel || '__no_linear__',
-        linearLabel: linearLabel || 'No Linear',
-        linearTitle: String(row?.linearTitle || linearLabel || 'No Linear'),
+        linearLabel: linearLabel || t('info.missing.linear'),
+        linearTitle: String(row?.linearTitle || linearLabel || t('info.missing.linear')),
         linearHtml: infoLinearCellHtml(row) || '',
         linearItems: Array.isArray(row?.linearItems) ? row.linearItems.slice(0, 20) : [],
         desc: String(row?.desc || ''),
@@ -1258,7 +1285,7 @@ function infoGroupTree(records = infoRelationshipRecords(), grouping = infoGroup
     for (const record of sortedItems) {
       const value = infoDimensionValue(record, dimension);
       const key = String(value.key || value.label || 'none');
-      if (!groups.has(key)) groups.set(key, {type: 'group', dimension, key, label: String(value.label || 'None'), title: String(value.title || value.label || ''), sortValue: value.sortValue, count: 0, records: [], children: []});
+      if (!groups.has(key)) groups.set(key, {type: 'group', dimension, key, label: String(value.label || t('info.group.none')), title: String(value.title || value.label || ''), sortValue: value.sortValue, count: 0, records: [], children: []});
       const group = groups.get(key);
       if (!Number.isFinite(Number(group.sortValue)) && Number.isFinite(Number(value.sortValue))) group.sortValue = value.sortValue;
       group.count += 1;
@@ -1358,31 +1385,6 @@ function infoPullRequestLifecycleClass(pr) {
   if (status === 'draft' || pr.draft) return 'pr-status-draft';
   if (status === 'closed') return 'pr-status-closed';
   return 'pr-status-open';
-}
-
-function infoPullRequestCiText(pr) {
-  if (!pr?.number || infoPullRequestLifecycleClass(pr) === 'pr-status-merged') return '';
-  const checks = pr.checks && typeof pr.checks === 'object' ? pr.checks : null;
-  const checkState = String(checks?.state || checks?.status_label || checks?.conclusion || '').trim();
-  const checkSummary = String(checks?.summary || '').trim();
-  if (checkState && checkState.toLowerCase() !== 'unknown') {
-    const label = checkSummary || checkState;
-    return /^ci\b/i.test(label) ? label : `CI ${label}`;
-  }
-  const status = String(pr?.status_label || '').trim();
-  if (!status || /^(open|merged|closed|draft)$/i.test(status)) return '';
-  if (!/(ci|fail|pend|pass|error|queued|running|success)/i.test(status)) return '';
-  const display = pullRequestStatusDisplay(pr) || status;
-  return /^ci\b/i.test(display) ? display : `CI ${display}`;
-}
-
-function infoPullRequestCiClass(pr) {
-  const checks = pr?.checks && typeof pr.checks === 'object' ? pr.checks : null;
-  const state = String(checks?.state || checks?.status_label || checks?.conclusion || pr?.status_label || '').toLowerCase();
-  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
-  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
-  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
-  return pullRequestCiStatusClass(pr);
 }
 
 function infoStatusBadgeHtml(record, text, className, options = {}) {
@@ -1640,7 +1642,7 @@ function infoRecordPathActivityMetaHtml(record) {
   const timestamp = Number(record?.pathActivityTs || 0);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
   const text = relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - timestamp));
-  const title = `Latest repository path activity: ${text}`;
+  const title = t('info.meta.latestPathActivity', {time: text});
   return `<span class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta" title="${esc(title)}">${esc(text)}</span>`;
 }
 
@@ -1681,16 +1683,18 @@ function infoTreeHiddenDimensions(ancestors, dimension) {
   return Array.from(new Set([...(Array.isArray(ancestors) ? ancestors : []), dimension].filter(Boolean)));
 }
 
-function infoDimensionCountNoun(key, count) {
-  const plural = count !== 1;
-  if (key === 'tab') return plural ? 'tabs' : 'tab';
-  if (key === 'tmux-window') return plural ? 'tmux sub-windows' : 'tmux sub-window';
-  if (key === 'ai') return 'AI';
-  if (key === 'path') return plural ? 'paths' : 'path';
-  if (key === 'branch') return plural ? 'branches' : 'branch';
-  if (key === 'pr') return plural ? 'PRs' : 'PR';
-  if (key === 'linear') return plural ? 'Linear issues' : 'Linear issue';
-  return plural ? 'items' : 'item';
+const infoDimensionCountKeys = Object.freeze({
+  tab: 'common.tabs',
+  'tmux-window': 'info.count.tmuxWindow',
+  ai: 'info.count.ai',
+  path: 'info.count.path',
+  branch: 'info.count.branch',
+  pr: 'info.count.pr',
+  linear: 'info.count.linear',
+});
+
+function infoDimensionCountText(key, count) {
+  return tPlural(infoDimensionCountKeys[key] || 'info.count.item', count);
 }
 
 function infoGroupLabelHtml(group = {}) {
@@ -1706,11 +1710,11 @@ function infoGroupLabelHtml(group = {}) {
   }
   if (group.dimension === 'pr') {
     const html = infoRecordPrDescHtml(representative);
-    return `<span class="info-tree-group-label info-tree-group-label-pr">${html || 'None'}</span>`;
+    return `<span class="info-tree-group-label info-tree-group-label-pr">${html || esc(t('info.group.none'))}</span>`;
   }
   if (group.dimension === 'linear') {
     const html = infoRecordLinearDescHtml(representative);
-    return `<span class="info-tree-group-label info-tree-group-label-linear">${html || 'None'}</span>`;
+    return `<span class="info-tree-group-label info-tree-group-label-linear">${html || esc(t('info.group.none'))}</span>`;
   }
   if (group.dimension === 'tab') {
     const tabHtml = infoRecordTabValueHtml(representative, {
@@ -1728,7 +1732,7 @@ function infoGroupChildCountHtml(group = {}) {
   const directChildGroups = Array.isArray(group.children) ? group.children.filter(child => child?.type === 'group') : [];
   if (directChildGroups.length <= 1) return '';
   const dimension = directChildGroups[0]?.dimension || '';
-  return `<span class="info-tree-group-child-count">(${esc(`${directChildGroups.length} ${infoDimensionCountNoun(dimension, directChildGroups.length)}`)})</span>`;
+  return `<span class="info-tree-group-child-count">(${esc(infoDimensionCountText(dimension, directChildGroups.length))})</span>`;
 }
 
 function infoGroupDimensionLabel(key) {
@@ -1766,7 +1770,7 @@ function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ance
 }
 
 function infoDimensionLabel(key) {
-  return infoDimensionDefs.find(dimension => dimension.key === key)?.label || key;
+  return infoGroupDimensions().find(dimension => dimension.key === key)?.label || key;
 }
 
 function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGrouping, sort = infoSort) {
@@ -1839,7 +1843,7 @@ function renderInfoPanelMeasured(node, options = {}) {
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      commitInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
+      commitInfoContent(`<div class="info-empty info-tree-empty">${localizedHtml('info.search.noMatches', {query: infoSearch.trim()})}</div>`);
       return;
     }
     if (transcriptMetaLoading) {
@@ -1847,7 +1851,7 @@ function renderInfoPanelMeasured(node, options = {}) {
       return;
     }
     if (transcriptMetaLoadError) {
-      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
+      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetadataLoadErrorText())}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
@@ -1880,14 +1884,18 @@ function infoPathLabel(git) {
   const label = compactHomePath(path);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return label;
-  return `${label} (worktree of ${compactHomePath(parent)})`;
+  return infoWorktreeText(label, compactHomePath(parent));
 }
 
 function infoPathTitle(git) {
   const path = infoGitRoot(git);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return path;
-  return `${path} (worktree of ${parent})`;
+  return infoWorktreeText(path, parent);
+}
+
+function infoWorktreeText(name, root) {
+  return t('popover.worktreeOf', {name, root});
 }
 
 function infoGitRoot(git) {
@@ -2011,12 +2019,12 @@ function infoSourceWindowRowsForBranch(source, branch, options = {}) {
 
 function infoTabAgentLabel(session, agent = null) {
   const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
-  if (!agent) return `${tabLabel} / no AI`;
+  if (!agent) return t('info.tabAgent.withoutAi', {tab: tabLabel});
   return `${tabLabel} / ${infoTabAgentAiLabel(agent)}`;
 }
 
 function infoTabAgentAiLabel(agent = null) {
-  if (!agent) return 'no AI';
+  if (!agent) return t('info.missing.ai');
   if (agent.aiLabel) return String(agent.aiLabel);
   if (agent.label && String(agent.label).includes(' / ')) return String(agent.label).split(' / ').slice(1).join(' / ') || 'AI';
   const agentLabel = typeof agentWindowCanonicalLabel === 'function'
@@ -2027,7 +2035,7 @@ function infoTabAgentAiLabel(agent = null) {
 
 function infoAgentKindLabel(value) {
   const kind = String(value || '').trim();
-  return kind || 'No AI';
+  return kind || t('info.missing.ai');
 }
 
 function infoTabAgentEntry(session, agent = null) {
@@ -2037,7 +2045,7 @@ function infoTabAgentEntry(session, agent = null) {
   const label = infoTabAgentLabel(session, agent);
   const title = agent
     ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
-    : `${label} · no Claude/Codex tmux sub-window detected`;
+    : `${label} · ${t('info.missing.tmuxSubWindow')}`;
   return {
     session: String(session || ''),
     label,
@@ -2184,8 +2192,9 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
   const prLifecycleText = prValue?.number ? infoPullRequestLifecycleText(prValue) : '';
   const prLifecycleClass = prValue?.number ? infoPullRequestLifecycleClass(prValue) : '';
-  const prCiText = prValue?.number ? infoPullRequestCiText(prValue) : '';
-  const prCiClass = prCiText ? infoPullRequestCiClass(prValue) : '';
+  const prCiStatus = prValue?.number ? pullRequestCiStatus(prValue) : null;
+  const prCiText = prCiStatus?.text || '';
+  const prCiClass = prCiStatus?.className || '';
   const linearTitle = linearSourceItems.length
     ? linearSourceItems.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
     : linearIds.join(' ');
@@ -2376,7 +2385,7 @@ function bindPanelControls(panel, session) {
   delegate(panel, 'click', '[data-tmux-status-toggle]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    void cycleTmuxStatusMode(button.dataset.tmuxStatusToggle).catch(error => statusErr(String(error?.message || error)));
+    void cycleTmuxStatusMode(button.dataset.tmuxStatusToggle).catch(error => statusErr(userMessageText(error, t('common.requestFailed'))));
   });
   delegate(panel, 'click', '[data-tab]', (_event, button) => {
     const currentName = button.dataset.tabName;
@@ -2463,6 +2472,7 @@ function hasUploadableDrag(event) {
 
 function bindFileUpload(panel, session) {
   if (readOnlyMode) return;
+  panel.dataset.fileDropLabel = t('drop.uploadOverlay');
   panel.addEventListener('dragenter', event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
@@ -2491,6 +2501,12 @@ function bindFileUpload(panel, session) {
     // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
     const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
     uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
+  });
+}
+
+function relocalizeFileUploadDropLabels() {
+  document.querySelectorAll?.('.panel[data-file-drop-label]').forEach(panel => {
+    panel.dataset.fileDropLabel = t('drop.uploadOverlay');
   });
 }
 
@@ -2766,9 +2782,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
-    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
-    statusErr(esc(message));
-    showFileTransferError(message, {session});
+    showFileTransferError(error, {session, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -2798,9 +2812,7 @@ async function uploadEditorFiles(editorTarget, fileList) {
     syncPasteCountersFromPayload(payload);
     insertEditorPasteUploadReferences(editorTarget, payload.files || []);
   } catch (error) {
-    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
-    statusErr(esc(message));
-    showFileTransferError(message, {item: focusedPanelItem});
+    showFileTransferError(error, {item: focusedPanelItem, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -2958,23 +2970,37 @@ const tmuxWindowReadbackMaxAttempts = 6;
 const terminalTmuxWindowRepeatMs = 900;
 const terminalTmuxWindowRepeatBySession = new Map();
 
-function terminalTmuxPrefixWindowShortcut(key) {
+const terminalTmuxWindowShortcutDefs = Object.freeze({
+  n: {labelKey: 'terminal.window.next', repeatable: true},
+  p: {labelKey: 'terminal.window.previous', repeatable: true},
+  l: {labelKey: 'terminal.window.last', requireChanged: true, prefixOnly: true},
+  w: {labelKey: 'terminal.window.chooser', requireChanged: true, prefixOnly: true},
+  "'": {labelKey: 'terminal.window.prompt', requireChanged: true, prefixOnly: true},
+  f: {labelKey: 'terminal.window.find', requireChanged: true, prefixOnly: true},
+});
+
+function terminalTmuxWindowShortcut(key, options = {}) {
   const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
-  if (value === 'l') return {label: 'last tmux sub-window', requireChanged: true};
-  if (value === 'w') return {label: 'tmux sub-window chooser', requireChanged: true};
-  if (value === "'") return {label: 'tmux sub-window prompt', requireChanged: true};
-  if (value === 'f') return {label: 'tmux find sub-window', requireChanged: true};
-  if (/^[0-9]$/.test(value)) return {label: `tmux sub-window ${value}`, windowIndex: value};
+  const definition = terminalTmuxWindowShortcutDefs[value];
+  if (definition && (!definition.prefixOnly || options.includePrefixOnly === true)) {
+    return {
+      label: t(definition.labelKey),
+      ...(definition.repeatable ? {repeatable: true} : {}),
+      ...(definition.requireChanged ? {requireChanged: true} : {}),
+    };
+  }
+  if (options.includeNumbers === true && /^[0-9]$/.test(value)) {
+    return {label: t('terminal.window.title', {name: value}), windowIndex: value};
+  }
   return null;
 }
 
+function terminalTmuxPrefixWindowShortcut(key) {
+  return terminalTmuxWindowShortcut(key, {includePrefixOnly: true, includeNumbers: true});
+}
+
 function terminalTmuxAltWindowShortcut(key) {
-  const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
-  return null;
+  return terminalTmuxWindowShortcut(key);
 }
 
 function tmuxWindowSignalReadbackUrl(session) {
@@ -3460,7 +3486,7 @@ function tmuxWindow(session, key, label) {
         } else {
           reconcileTmuxWindowActiveIndexOverride(session, transcriptMeta.sessions?.[session], {sequence});
         }
-        statusErr(localizedHtml('terminal.window.failed', {error: error.message || error}));
+        statusErr(esc(userMessageText(error, t('terminal.window.failed', {error: error.message || error}))));
       });
     return;
   }
@@ -3673,7 +3699,7 @@ function startTerminal(session) {
   }
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
-    container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
+    container.innerHTML = `<pre class="terminal-error">${esc(t('terminal.xtermLoadFailed'))}</pre>`;
     statusErr(localizedHtml('status.xtermUnavailable'));
     return;
   }
@@ -3821,7 +3847,7 @@ async function setAutoApprove(session, enabled) {
         scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
-      statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
+      statusErr(esc(userMessageText(error, t('status.yoloApprovalFailedDefault'))));
       return;
     }
     statusErr(localizedHtml('status.yoloRequestFailed', {error}));
@@ -3940,7 +3966,7 @@ function autoApproveOwnerLabel(payload) {
   const owner = payload?.lock_owner || {};
   const pid = owner.pid ? `pid ${owner.pid}` : '';
   const root = owner.project_root || '';
-  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || t('yolo.ownerFallback');
+  return [pid, root].filter(Boolean).join(' ') || structuredMessageText(payload, 'last_action', t('yolo.ownerFallback'));
 }
 
 function renderAutoApproveButtons() {
@@ -3962,7 +3988,8 @@ function renderAutoApproveButton(session, payload) {
     button.classList.toggle('working', working);
     button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = t('brand.marker');
-    const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
+    const actionText = structuredMessageText(payload, 'last_action');
+    const action = actionText ? t('yolo.actionSuffix', {action: actionText}) : '';
     const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
     const buttonLabel = enabled
       ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
@@ -3981,6 +4008,7 @@ function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));
   if (!node) return;
+  delete node.dataset.localeTextKey;
   if (readOnlyMode) {
     node.textContent = t('transcript.adminRequired');
     statusErr(`${esc(t('transcript.adminStatus'))}`);
@@ -3990,7 +4018,7 @@ function startSummaryStream(session) {
   // (coalesced to one render per frame) so the panel shows formatted markdown,
   // not raw `##`/`**`/backticks. The leading `[codex]` status lines render as
   // plain paragraphs, then the model's markdown summary renders properly.
-  let raw = 'Starting structured Codex summary for the last hour…\n\n';
+  let raw = `${t('summary.stream.starting')}\n\n`;
   let renderScheduled = false;
   const renderSummary = () => {
     renderScheduled = false;
@@ -4010,15 +4038,20 @@ function startSummaryStream(session) {
   source.addEventListener('meta', event => {
     const payload = safeJsonParse(event.data, null);
     if (!payload) return;
-    const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
+    const fallback = t(payload.fallback ? 'summary.stream.source.recentTail' : 'summary.stream.source.lastHour');
     const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
-    appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
-    if (payload.summary_model) appendSummary(`[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`);
-    appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
+    appendSummary(`${t('summary.stream.summarizing', {source: fallback, focus: payload.focus_root || session})}\n`);
+    if (payload.summary_model) {
+      appendSummary(`${t('summary.stream.model', {
+        model: payload.summary_model,
+        effort: payload.summary_effort || t('summary.stream.effortDefault'),
+      })}\n`);
+    }
+    appendSummary(`${tPlural('summary.stream.projectInventory', projectCount)}\n\n`);
   });
   source.addEventListener('log', event => {
     const payload = safeJsonParse(event.data, null);
-    if (payload?.text) appendSummary(`[codex] ${payload.text}\n`);
+    if (payload?.text) appendSummary(`${t('summary.stream.log', {text: payload.text})}\n`);
   });
   source.addEventListener('delta', event => {
     const payload = safeJsonParse(event.data, null);
@@ -4028,13 +4061,13 @@ function startSummaryStream(session) {
     // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
     // — an unguarded JSON.parse throw here would leak the EventSource.
     const payload = safeJsonParse(event.data, null);
-    appendSummary(`\n[error] ${payload?.error || 'summary failed'}\n`);
+    appendSummary(`\n${t('summary.stream.error', {error: userMessageText(payload, t('summary.stream.failed'))})}\n`);
     stopSummaryStream(session);
   });
   source.addEventListener('done', event => {
     const payload = safeJsonParse(event.data, null);
     if (payload?.return_code && payload.return_code !== 0) {
-      appendSummary(`\n[codex exited ${payload.return_code}]\n`);
+      appendSummary(`\n${t('summary.stream.exited', {code: payload.return_code})}\n`);
     }
     stopSummaryStream(session);
   });
@@ -4092,6 +4125,18 @@ function hideUpdateBadge() {
   if (!badge) return;
   badge.hidden = true;
   delete badge.dataset.updateTarget;
+  renderUpdateBadgeChrome();
+}
+
+function renderUpdateBadgeChrome() {
+  const badge = document.querySelector('[data-update-badge]');
+  if (!badge) return;
+  const target = String(badge.dataset.updateTarget || selfUpdateAvailableTarget || '').trim();
+  badge.textContent = t('update.badgeLabel');
+  badge.setAttribute('aria-label', t('update.badgeAria'));
+  badge.title = badge.hidden
+    ? t('update.badgeTitle')
+    : t('update.badgeAvailable', {target: target ? ` (${target})` : ''});
 }
 
 function markSelfUpdateReloadPending(target = '') {
@@ -4114,20 +4159,20 @@ function selfUpdateOwnsServerVersion(serverVersion) {
 
 function selfUpdateReloadDeferredReason() {
   for (const file of openFiles.values()) {
-    if (file?.dirty) return 'unsaved edits';
+    if (file?.dirty) return t('update.defer.unsavedEdits');
   }
   const active = document.activeElement;
   if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
-    return 'active typing';
+    return t('update.defer.activeTyping');
   }
-  return 'current activity';
+  return t('update.defer.currentActivity');
 }
 
 function showSelfUpdateReloadDeferredToast() {
   if (selfUpdateReloadDeferredToastShown) return;
   selfUpdateReloadDeferredToastShown = true;
-  showToast('Software Update', [
-    `Reload deferred because of ${selfUpdateReloadDeferredReason()}. YOLOmux will reload when it is safe.`,
+  showToast(t('update.softwareTitle'), [
+    t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()}),
   ], {className: 'attention-alert toast toast-update'});
 }
 
@@ -4155,14 +4200,14 @@ async function pollSelfUpdateReload() {
   if (!selfUpdateReloadPending) return false;
   selfUpdateReloadAttempts += 1;
   try {
-    const res = await fetch(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
-    if (res && res.ok !== false) return maybeReloadAfterSelfUpdate();
+    await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
+    return maybeReloadAfterSelfUpdate();
   } catch (_error) {
     // The old process may already be gone. Keep polling until the replacement server answers.
   }
   if (selfUpdateReloadAttempts >= selfUpdateReloadMaxAttempts) {
     selfUpdateReloadPending = false;
-    showToast('Software Update', ['Update installed, but YOLOmux did not answer after restart. Reload when it is reachable.']);
+    showToast(t('update.softwareTitle'), [t('update.restartTimeout')]);
     return false;
   }
   scheduleSelfUpdateReloadPoll();
@@ -4240,7 +4285,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     reconcileTmuxWindowMetadataFromAgentWindows(session, autoApproveStates.get(session));
   }
   transcriptMetaLoaded = true;
-  transcriptMetaLoadError = '';
+  transcriptMetaLoadError = null;
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
   maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
   applyAgentAvailabilityPayload(transcriptMeta);
@@ -4266,14 +4311,11 @@ async function applySessionMetadataPayload(payload, options = {}) {
       updateTranscriptPathRow(session, agent.transcript);
       if (options.refreshContext === false) continue;
       if (typeof transcriptPreviewPaneIsActive === 'function' && !transcriptPreviewPaneIsActive(session)) continue;
-      preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\n${t('transcript.loadingRecentContext')}`;
+      clearTranscriptContextLoadError(preview);
+      preview.textContent = `${t('transcript.meta', {sessionId: agent.session_id || '', status: agent.status || ''})}\n\n${t('transcript.loadingRecentContext')}`;
       refreshTranscriptPreview(session, preview, {preserveScroll: false});
-    } else if (agent?.error) {
-      updateTranscriptPathRow(session, '', agent.error);
-      preview.textContent = agent.error;
     } else {
-      updateTranscriptPathRow(session, '', t('transcript.noAgentFound'));
-      preview.textContent = t('transcript.noAgentFound');
+      relocalizeTranscriptPanelStatus(session);
     }
   }
   renderPaneTabStrips();
@@ -4292,7 +4334,7 @@ function applyTranscriptsPayload(payload, options = {}) {
 async function refreshSessionMetadata(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
-  transcriptMetaLoadError = '';
+  transcriptMetaLoadError = null;
   syncTranscriptMetaLoadingUi();
   renderInfoPanel();
   transcriptMetaRefreshPromise = (async () => {
@@ -4307,13 +4349,9 @@ async function refreshSessionMetadata(options = {}) {
         refreshActivity: options.refreshActivity !== false,
       });
     } catch (error) {
-      transcriptMetaLoadError = String(error);
+      transcriptMetaLoadError = userMessageSnapshot(error, {key: 'transcript.lookupFailed', params: {}, fallback: ''});
       for (const session of activeSessions.filter(isTmuxSession)) {
-        const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(transcriptDomId(session));
-        if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
-        updateTranscriptPathRow(session, '', 'transcript lookup failed');
-        if (preview) preview.textContent = `transcript lookup failed: ${error}`;
+        renderTranscriptMetadataLoadError(session);
       }
     } finally {
       transcriptMetaLoading = false;
@@ -4485,25 +4523,120 @@ function refreshTrackedSessionChrome(session) {
 
 function refreshActivePanelHeaders() {
   for (const session of activeSessions.filter(isTmuxSession)) {
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    relocalizeTerminalPanelChrome(session);
   }
 }
 
 function renderSummaryContext(session, info, agent) {
   const node = document.getElementById(`summary-context-${session}`);
   if (!node) return;
+  delete node.dataset.localeTextKey;
   node.innerHTML = summaryContextHtml(session, info, agent);
 }
 
-function transcriptPathRowHtml(path, fallback = 'no transcript path') {
-  if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
-  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: 'Copy transcript path'})}`;
+function relocalizeTerminalPanelChrome(session) {
+  const panel = document.getElementById(panelDomId(session));
+  if (!panel) return false;
+  relocalizeVirtualPanelChrome(panel);
+  const terminalTab = panel.querySelector('.terminal-tab');
+  if (terminalTab) {
+    const info = transcriptMeta.sessions?.[session];
+    const title = terminalTabTitle(session, info);
+    terminalTab.textContent = terminalTabLabel(session, info);
+    terminalTab.title = title;
+    terminalTab.setAttribute('aria-label', title);
+  }
+  panel.querySelectorAll('.pane-actions').forEach(button => {
+    button.title = t('pane.actions');
+    button.setAttribute('aria-label', t('pane.actions'));
+  });
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  panel.querySelectorAll('[data-locale-text-key]').forEach(node => {
+    node.textContent = t(node.dataset.localeTextKey);
+  });
+  const statusToggle = panel.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
+  if (statusToggle) statusToggle.outerHTML = tmuxStatusToggleHtml(session);
+  const transcriptHead = panel.querySelector(`#transcript-pane-${cssEscape(session)} .transcript-head`);
+  if (transcriptHead) transcriptHead.textContent = t('tab.transcript');
+  const summaryHead = panel.querySelector(`#summary-pane-${cssEscape(session)} .transcript-head`);
+  if (summaryHead) summaryHead.textContent = t('menu.tmux.aiTranscript', {session: sessionLabel(session)});
+  const eventsHead = panel.querySelector(`#events-pane-${cssEscape(session)} .transcript-head`);
+  if (eventsHead) eventsHead.textContent = t('events.title');
+  relocalizeTranscriptPanelStatus(session);
+  return true;
 }
 
-function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
+function transcriptPathRowHtml(path, fallback = '') {
+  if (!path) return `<span class="transcript-path-missing">${esc(fallback || t('transcript.noPath'))}</span>`;
+  return `<span class="transcript-path-label">${esc(t('transcript.path'))}</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: t('transcript.copyPath')})}`;
+}
+
+function updateTranscriptPathRow(session, path, fallback = '') {
   const row = document.getElementById(`transcript-path-${session}`);
   if (!row) return;
   row.innerHTML = transcriptPathRowHtml(path, fallback);
+}
+
+function transcriptMetadataLoadErrorText() {
+  return userMessageText(transcriptMetaLoadError, t('transcript.lookupFailed'));
+}
+
+function transcriptAgentErrorText(agent) {
+  return structuredMessageText(agent, 'error', String(agent?.error || t('transcript.noAgentFound')));
+}
+
+function transcriptContextLoadErrorText(error) {
+  return t('transcript.contextLoadFailed', {error: userMessageText(error, t('common.requestFailed'))});
+}
+
+function clearTranscriptContextLoadError(preview) {
+  if (!preview) return;
+  delete preview._transcriptContextLoadError;
+  preview.querySelector?.('.transcript-context-error')?.remove?.();
+}
+
+function renderTranscriptContextLoadError(preview) {
+  if (!preview) return;
+  const error = preview._transcriptContextLoadError;
+  const existing = preview.querySelector?.('.transcript-context-error');
+  if (!error) {
+    existing?.remove?.();
+    return;
+  }
+  const html = `<div class="transcript-item system transcript-context-error"><div class="transcript-text">${esc(transcriptContextLoadErrorText(error))}</div></div>`;
+  if (existing) existing.outerHTML = html;
+  else preview.insertAdjacentHTML?.('beforeend', html);
+}
+
+function renderTranscriptMetadataLoadError(session) {
+  const meta = document.getElementById(`meta-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
+  const error = transcriptMetadataLoadErrorText();
+  if (meta) meta.innerHTML = `<span class="err">${esc(t('transcript.lookupFailed'))}</span>`;
+  updateTranscriptPathRow(session, '', t('transcript.lookupFailed'));
+  if (preview) {
+    clearTranscriptContextLoadError(preview);
+    preview.textContent = t('transcript.lookupFailedWithError', {error});
+  }
+}
+
+function relocalizeTranscriptPanelStatus(session) {
+  const preview = document.getElementById(transcriptDomId(session));
+  if (!preview) return;
+  if (transcriptMetaLoadError) {
+    renderTranscriptMetadataLoadError(session);
+    return;
+  }
+  const info = transcriptMeta.sessions?.[session];
+  const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+  if (agent?.transcript) {
+    renderTranscriptContextLoadError(preview);
+    return;
+  }
+  clearTranscriptContextLoadError(preview);
+  const message = agent?.error ? transcriptAgentErrorText(agent) : t('transcript.noAgentFound');
+  updateTranscriptPathRow(session, '', message);
+  preview.textContent = message;
 }
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
@@ -4513,7 +4646,8 @@ async function refreshTranscriptPreview(session, preview, options = {}) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
   } catch (error) {
-    preview.textContent += `\n\ncontext load failed: ${error}`;
+    preview._transcriptContextLoadError = userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: ''});
+    renderTranscriptContextLoadError(preview);
   }
 }
 
@@ -4574,6 +4708,7 @@ function renderTranscriptItems(container, path, items, options = {}) {
   const oldTop = container.scrollTop;
   const oldHeight = container.scrollHeight;
   const blocks = items.map(item => transcriptItemHtml(item));
+  delete container._transcriptContextLoadError;
   container.innerHTML = blocks.join('');
   if (shouldScrollBottom) {
     requestAnimationFrame(() => {
@@ -4606,23 +4741,35 @@ function appendTranscriptItems(container, items) {
 
 function transcriptItemHtml(item) {
   const role = normalizeRole(item.role);
+  const roleKeys = {
+    assistant: 'transcript.role.assistant',
+    user: 'transcript.role.user',
+    tool_use: 'transcript.role.toolUse',
+    tool_result: 'transcript.role.toolResult',
+    summary: 'transcript.role.summary',
+    system: 'transcript.role.system',
+  };
+  const roleLabel = t(roleKeys[role] || 'transcript.role.message');
+  const meta = [item.timestamp, item.cwd].map(value => String(value || '')).filter(Boolean).join(', ');
+  const header = meta ? t('transcript.itemHeader', {role: roleLabel, meta}) : roleLabel;
   return `<div class="transcript-item ${role}">
-    <div class="transcript-role">${esc(item.header || role)}</div>
+    <div class="transcript-role">${esc(header)}</div>
     <div class="transcript-text">${esc(item.text || '')}</div>
   </div>`;
 }
 
 function eventItemHtml(event) {
   const details = event.details && typeof event.details === 'object' ? event.details : {};
+  const message = structuredMessageText(event, 'message');
   const detailText = Object.entries(details)
     .filter(([, value]) => value != null && value !== '')
     .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(',') : value}`)
     .join(' · ');
-  const title = detailText ? `${event.message || ''}\n${detailText}` : event.message || '';
+  const title = detailText ? `${message}\n${detailText}` : message;
   return `<div class="event-item" title="${esc(title)}">
     <span class="event-time">${esc(formatEventTime(event.time))}</span>
-    <span class="event-type">${esc(event.type || 'event')}</span>
-    <span class="event-message">${esc(event.message || '')}${detailText ? ` · ${esc(detailText)}` : ''}</span>
+    <span class="event-type">${esc(event.type || t('events.typeFallback'))}</span>
+    <span class="event-message">${esc(message)}${detailText ? ` · ${esc(detailText)}` : ''}</span>
   </div>`;
 }
 
@@ -4641,18 +4788,19 @@ function formatEventTime(value) {
 async function refreshEventLog(session) {
   const node = document.getElementById(`events-${session}`);
   if (!node) return;
+  delete node.dataset.localeTextKey;
   try {
     const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
     const events = Array.isArray(payload.events) ? payload.events : [];
     node.innerHTML = events.length
       ? events.slice().reverse().map(eventItemHtml).join('')
-      : '<div class="event-empty">no events yet</div>';
+      : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
   } catch (error) {
     if (error?.status) {
-      node.innerHTML = `<div class="event-empty">${esc(error.payload?.error || 'failed to load events')}</div>`;
+      node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
       return;
     }
-    node.innerHTML = `<div class="event-empty">failed to load events: ${esc(error)}</div>`;
+    node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
   }
 }
 
@@ -4932,22 +5080,21 @@ function updateActionButton(label, onClick) {
 async function triggerSelfUpdate(_event = null, ownerToast = null) {
   const dry = updateDryRunEnabled();
   const confirmed = window.confirm(dry
-    ? 'Dry run: simulate installing a YOLOmux update? Nothing is pulled and the server is not restarted.'
-    : 'Install the latest YOLOmux update and restart now?');
+    ? t('update.confirmDryRun')
+    : t('update.confirmInstall'));
   if (!confirmed) return;
   const target = String(ownerToast?.dataset?.updateTarget || selfUpdateAvailableTarget || '').trim();
   dismissUpdateAvailableToasts(ownerToast);
   hideUpdateBadge();
   try {
-    const res = await fetch(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
-    const data = await res.json().catch(() => ({}));
-    const title = data.ok ? (data.restarting ? 'Installing update...' : 'Software Update') : 'Update failed';
-    showToast(title, [data.message || (data.ok ? 'done' : 'see server logs')]);
+    const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
+    const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
+    showToast(title, [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))]);
     if (data.ok && data.restarting) {
       startSelfUpdateReloadPolling(data.target || data.version || target);
     }
   } catch (error) {
-    showToast('Update failed', [String(error)]);
+    showToast(t('update.failed'), [userMessageText(error, t('update.seeServerLogs'))]);
   }
 }
 
@@ -4961,13 +5108,14 @@ function applyUpdateAvailable(status) {
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;
-    badge.title = `YOLOmux update available${status.target ? ` (${status.target})` : ''} - click to update now`;
     if (target) badge.dataset.updateTarget = target;
+    else delete badge.dataset.updateTarget;
+    renderUpdateBadgeChrome();
   }
-  const node = showToast('YOLOmux update available', [
-    `A new YOLOmux update is available${status.target ? ` (${status.target})` : ''}.`,
+  const node = showToast(t('update.availableTitle'), [
+    t('update.availableBody', {target: status.target ? ` (${status.target})` : ''}),
   ], {
-    actions: [updateActionButton('Update Now', triggerSelfUpdate)],
+    actions: [updateActionButton(t('update.now'), triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
   });
@@ -4976,16 +5124,22 @@ function applyUpdateAvailable(status) {
 
 async function checkForUpdateOnce() {
   try {
-    const res = await fetch(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
-    if (!res.ok) return;  // readonly (403) or unavailable
-    const status = await res.json();
+    const status = await apiFetchJson(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
     if (status && status.available) applyUpdateAvailable(status);
   } catch (_error) { /* offline / transient — the hourly push will retry */ }
 }
 
+function yoagentJobNotificationTitle(notification = {}) {
+  return structuredMessageText(notification, 'title', t('brand.tab.agent'));
+}
+
+function yoagentJobNotificationBody(notification = {}) {
+  return structuredMessageText(notification, 'body', '').trim();
+}
+
 function maybeNotifyYoagentJob(notification = {}) {
-  const title = String(notification.title || 'YO!agent');
-  const body = String(notification.body || '').trim();
+  const title = yoagentJobNotificationTitle(notification);
+  const body = yoagentJobNotificationBody(notification);
   if (!body || !notificationDeliveryEnabled()) return;
   const session = String(notification.session || '').trim();
   const tag = `yoagent-job:${session || 'global'}:${body}`;
@@ -5281,27 +5435,51 @@ function installDevAutoReload() {
     if (serverRevision && bootRevision && serverRevision !== bootRevision) location.reload();
   });
   source.addEventListener('reload', () => {
-    statusOk('dev: bundle changed — reloading');
+    statusOk(localizedHtml('status.devBundleReloading'));
     location.reload();
   });
 }
 
 async function showContext(session) {
   const modal = document.getElementById('modal');
-  const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
   modal.classList.remove('about-open', 'share-open');
-  title.textContent = t('transcript.tailTitle', {session: sessionLabel(session)});
   body.innerHTML = '';
-  body.textContent = t('common.loading');
+  modal.dataset.modalKind = 'context';
+  modal.dataset.modalSession = session;
+  body.dataset.localeTextKey = 'common.loading';
   modal.classList.add(CLS.open);
+  relocalizeModalChrome();
   const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+  delete body.dataset.localeTextKey;
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
   } else {
     body.textContent = JSON.stringify(payload, null, 2);
   }
   scheduleSharePopupLayerPublish();
+}
+
+function relocalizeModalChrome(options = {}) {
+  const modal = document.getElementById('modal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+  const close = document.getElementById('closeModal');
+  const closeLabel = t('common.close');
+  if (close) {
+    close.title = closeLabel;
+    close.setAttribute('aria-label', closeLabel);
+  }
+  if (!modal || options.content === false || !modal.classList.contains(CLS.open)) return Boolean(modal);
+  if (modal.classList.contains('about-open')) {
+    showAboutModal();
+    return true;
+  }
+  if (modal.classList.contains('share-open')) return relocalizeShareModal();
+  if (modal.dataset.modalKind !== 'context') return true;
+  if (title) title.textContent = t('transcript.tailTitle', {session: sessionLabel(modal.dataset.modalSession || '')});
+  if (body?.dataset.localeTextKey) body.textContent = t(body.dataset.localeTextKey);
+  return true;
 }
 
 function globalShortcutTargetAllowsAppAction(target) {
@@ -5384,7 +5562,7 @@ function toggleFileExplorerShortcut() {
     rememberFileExplorerOpenIntent(true);
     applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
       prune: false,
-      message: `${fileExplorerLabel()} restored`,
+      message: t('layout.status.restored', {item: fileExplorerLabel()}),
     });
     fileExplorerShortcutRestoreSlots = null;
     return;
@@ -5406,9 +5584,7 @@ function handleFocusedTerminalCopyShortcut(event) {
 }
 
 if (refreshMeta) {
-  refreshMeta.textContent = t('meta.refresh');
-  refreshMeta.setAttribute('aria-label', t('meta.refreshAria'));
-  refreshMetaButtonTitle();
+  refreshMetaButtonChrome();
   refreshMeta.onclick = refreshAll;
 }
 if (tabMetaToggle) {

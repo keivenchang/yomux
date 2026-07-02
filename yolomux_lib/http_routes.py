@@ -22,13 +22,35 @@ from .common import SUMMARY_LOOKBACK_SECONDS
 from .common import auth_setup_required
 from .common import error_payload
 from .common import parse_bool
+from .locales import resolve_locale_preference
 from .web import html_page
+from .web import server_string
 from .web import static_content_type
 
 
 RouteRole = str | Callable[[Any, Any], str]
 RouteHandler = Callable[[Any, Any, "Route"], bool | None]
 PUBLIC = "public"
+
+
+class RequestValidationError(str):
+    """String-compatible validation detail carrying the shared message descriptor fields."""
+
+    def __new__(cls, fallback: str, message_key: str, **message_params: Any):
+        value = super().__new__(cls, fallback)
+        value.message_key = message_key
+        value.message_params = message_params
+        value.diagnostic = ""
+        return value
+
+    def payload(self, *, status: int = HTTPStatus.BAD_REQUEST) -> dict[str, Any]:
+        return error_payload(
+            self,
+            message_key=self.message_key,
+            message_params=self.message_params,
+            diagnostic=self.diagnostic,
+            status=status,
+        )
 
 
 @dataclass(frozen=True)
@@ -73,9 +95,18 @@ def parse_query_int(
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        return None, f"{name} must be an integer"
+        return None, RequestValidationError(
+            f"{name} must be an integer",
+            "request.error.integer",
+            field=name,
+        )
     if value < min_value:
-        return None, f"{name} must be at least {min_value}"
+        return None, RequestValidationError(
+            f"{name} must be at least {min_value}",
+            "request.error.minimum",
+            field=name,
+            min=min_value,
+        )
     if max_value is not None:
         value = min(value, max_value)
     return value, ""
@@ -93,11 +124,24 @@ def parse_query_float(
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return None, f"{name} must be a number"
+        return None, RequestValidationError(
+            f"{name} must be a number",
+            "request.error.number",
+            field=name,
+        )
     if not math.isfinite(value):
-        return None, f"{name} must be finite"
+        return None, RequestValidationError(
+            f"{name} must be finite",
+            "request.error.finite",
+            field=name,
+        )
     if value < min_value:
-        return None, f"{name} must be at least {min_value:g}"
+        return None, RequestValidationError(
+            f"{name} must be at least {min_value:g}",
+            "request.error.minimum",
+            field=name,
+            min=f"{min_value:g}",
+        )
     if max_value is not None:
         value = min(value, max_value)
     return value, ""
@@ -196,11 +240,15 @@ def _write_not_found_after_default_auth(request: Any, method: str) -> None:
     if method.upper() == "GET":
         if not request.require_auth("readonly"):
             return
-        request.write_text("not found\n", status=HTTPStatus.NOT_FOUND)
+        locale = resolve_locale_preference(request.request_locale_pref(), request.headers.get("Accept-Language", ""))
+        request.write_text(server_string(locale, "request.error.notFound") + "\n", status=HTTPStatus.NOT_FOUND)
         return
     if not request.require_auth("admin"):
         return
-    request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+    request.write_json(
+        error_payload("not found", message_key="request.error.notFound", status=HTTPStatus.NOT_FOUND),
+        status=HTTPStatus.NOT_FOUND,
+    )
 
 
 def _json_body(request: Any, route: Route, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
@@ -251,7 +299,7 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     qs = parse_qs(parsed.query)
     since, error = parse_query_int(qs, "since", 0, min_value=0)
     if error:
-        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        request.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
     client_id = (qs.get("client_id") or qs.get("client") or [""])[0]
     token_consumer = query_bool(qs, "token_consumer") or query_bool(qs, "tokens")
@@ -259,7 +307,8 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     token_resolution, token_resolution_error = parse_query_int(qs, "token_resolution", 0, min_value=0)
     history_start, history_start_error = parse_query_int(qs, "history_start", 0, min_value=0)
     if token_since_error or token_resolution_error or history_start_error:
-        request.write_json(error_payload(token_since_error or token_resolution_error or history_start_error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        request_error = token_since_error or token_resolution_error or history_start_error
+        request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
     request.write_json(request.server.app.stats_sample_payload(
         since=since or 0,
@@ -291,7 +340,10 @@ def get_update_status(request: Any, parsed: Any, route: Route) -> None:
 def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
     del route
     if not getattr(request.server, "dev", False):
-        request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+        request.write_json(
+            error_payload("not found", message_key="request.error.notFound", status=HTTPStatus.NOT_FOUND),
+            status=HTTPStatus.NOT_FOUND,
+        )
         return
     request.stream_dev_reload(str(query_one(parse_qs(parsed.query), "bundle_revision", "") or ""))
 
@@ -312,6 +364,7 @@ def get_home(request: Any, parsed: Any, route: Route) -> None:
         dev=getattr(request.server, "dev", False),
         dangerously_yolo=request.server.app.dangerously_yolo,
         share=request.share_bootstrap_payload(share_record) if share_record else None,
+        accept_language=getattr(request, "headers", {}).get("Accept-Language", ""),
     )
     compute_ms = (time.perf_counter() - started) * 1000
     setattr(request, "_http_response_compute_ms", compute_ms)
@@ -565,7 +618,11 @@ def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
                 scoped_sessions = share_sessions
             blocked = [session for session in scoped_sessions if session not in share_sessions]
             if blocked:
-                return error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), HTTPStatus.FORBIDDEN
+                return error_payload(
+                    "share token is scoped to a different session",
+                    message_key="share.error.sessionScope",
+                    status=HTTPStatus.FORBIDDEN,
+                ), HTTPStatus.FORBIDDEN
         return request.server.app.session_files_batch_payload(scoped_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
 
     request.write_validated_float_result(qs, "hours", 24.0, ACTIVITY_MAX_HOURS, make_result)
@@ -583,7 +640,11 @@ def get_session_files(request: Any, parsed: Any, route: Route) -> None:
 
     def make_result(hours: float) -> tuple[Any, HTTPStatus]:
         if share_sessions and session not in share_sessions:
-            return error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), HTTPStatus.FORBIDDEN
+            return error_payload(
+                "share token is scoped to a different session",
+                message_key="share.error.sessionScope",
+                status=HTTPStatus.FORBIDDEN,
+            ), HTTPStatus.FORBIDDEN
         return request.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
 
     request.write_validated_float_result(
@@ -810,7 +871,14 @@ def post_share_debug_profile(request: Any, parsed: Any, route: Route) -> None:
         return
     token = request.share_token()
     if not token:
-        request.write_json(error_payload("share token required", status=HTTPStatus.UNAUTHORIZED), status=HTTPStatus.UNAUTHORIZED)
+        request.write_json(
+            error_payload(
+                "share token required",
+                message_key="share.error.tokenRequired",
+                status=HTTPStatus.UNAUTHORIZED,
+            ),
+            status=HTTPStatus.UNAUTHORIZED,
+        )
         return
     client_ip = request.client_address[0] if isinstance(request.client_address, tuple) and request.client_address else ""
     request.write_app_result(request.server.app.record_share_debug_profile(

@@ -151,6 +151,7 @@ if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.
 }
 let activeShare = null;
 let activeShares = [];
+let shareCreateErrorPayload = null;
 let shareHostSockets = new Map();
 let shareHostQueues = new Map();
 let shareMirrorEpoch = 1;
@@ -237,8 +238,6 @@ const tabMetaToggle = (() => {
   button.className = 'tab-meta-toggle';
   button.type = 'button';
   button.textContent = '#';
-  button.title = 'Hide tab metadata';
-  button.setAttribute('aria-label', 'Hide tab metadata');
   button.setAttribute('aria-pressed', 'true');
   return button;
 })();
@@ -333,9 +332,13 @@ const TERMINAL_THEMES = {
     brightWhite: '#ffffff',
   },
 };
+function yolomuxEditorSchemeLabel(mode) {
+  return `${t('app.documentTitle')} ${t(`pref.appearance.theme.${mode}`)}`;
+}
+
 const EDITOR_SCHEMES = {
   dark: {
-    id: 'dark', label: 'YOLOmux Dark', dark: true,
+    id: 'dark', get label() { return yolomuxEditorSchemeLabel('dark'); }, dark: true,
     bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(96, 165, 250, 0.38)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
     syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ffffff', emphasis: '#ffffff', invalid: '#ff6673'},
@@ -384,7 +387,7 @@ const EDITOR_SCHEMES = {
     diff: {addFg: '#116329', removeFg: '#82071e'},
   },
   'yolomux-light': {
-    id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
+    id: 'yolomux-light', get label() { return yolomuxEditorSchemeLabel('light'); }, dark: false,
     bg: '#ffffff', fg: '#000000', cursor: '#000000', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f7fb',
     gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
     syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#0451a5', number: '#098658', function: '#267f2e', type: '#008080', variable: '#5f3b00', tag: '#800000', heading: '#000000', headingBg: '#ffffff', link: '#0451a5', inlineCode: '#a31515', inlineCodeBg: '#f3f3f3', inlineCodeBorder: '#d4d4d4', atom: '#0000ff', property: '#5f3b00', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
@@ -489,13 +492,13 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.srt': 'text',
     '.vtt': 'text',
   }},
-  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Image format is recognized but not previewable in this browser', mimeByExtension: {
+  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
     '.tif': 'image/tiff',
     '.tiff': 'image/tiff',
     '.heic': 'image/heic',
     '.heif': 'image/heif',
   }},
-  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Document format is recognized but not safely previewable', mimeByExtension: {
+  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
     '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.ppt': 'application/vnd.ms-powerpoint',
@@ -503,7 +506,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.xls': 'application/vnd.ms-excel',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   }},
-  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Data format is recognized but needs an external viewer', mimeByExtension: {
+  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
     '.sqlite': 'application/vnd.sqlite3',
     '.sqlite3': 'application/vnd.sqlite3',
     '.db': 'application/vnd.sqlite3',
@@ -511,7 +514,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.arrow': 'application/vnd.apache.arrow.file',
     '.feather': 'application/vnd.apache.arrow.file',
   }},
-  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Archive preview is not expanded in YOLOmux', mimeByExtension: {
+  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
     '.zip': 'application/zip',
     '.tar': 'application/x-tar',
     '.gz': 'application/gzip',
@@ -615,6 +618,42 @@ let preferencesResetConfirmVisible = false;
 const preferencesScrollRenderDeferMs = 200;
 let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
+const PREFERENCE_SECTION_IDS = Object.freeze({
+  general: 'general',
+  appearance: 'appearance',
+  terminalEditor: 'terminal_editor',
+  notifications: 'notifications',
+  fileExplorer: 'file_explorer',
+  uploads: 'uploads',
+  performance: 'performance',
+  github: 'github',
+  yoagent: 'yoagent',
+  share: 'share',
+  yolo: 'yolo',
+});
+const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
+  PREFERENCE_SECTION_IDS.general,
+  PREFERENCE_SECTION_IDS.appearance,
+  PREFERENCE_SECTION_IDS.performance,
+  PREFERENCE_SECTION_IDS.notifications,
+  PREFERENCE_SECTION_IDS.terminalEditor,
+  PREFERENCE_SECTION_IDS.fileExplorer,
+  PREFERENCE_SECTION_IDS.uploads,
+]);
+const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
+  General: PREFERENCE_SECTION_IDS.general,
+  Appearance: PREFERENCE_SECTION_IDS.appearance,
+  Performance: PREFERENCE_SECTION_IDS.performance,
+  Notifications: PREFERENCE_SECTION_IDS.notifications,
+  'Terminal / Editor': PREFERENCE_SECTION_IDS.terminalEditor,
+  'File Explorer': PREFERENCE_SECTION_IDS.fileExplorer,
+  Finder: PREFERENCE_SECTION_IDS.fileExplorer,
+  'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
+  GitHub: PREFERENCE_SECTION_IDS.github,
+  'YO!agent': PREFERENCE_SECTION_IDS.yoagent,
+  'YO!share': PREFERENCE_SECTION_IDS.share,
+  YOLO: PREFERENCE_SECTION_IDS.yolo,
+});
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 const changesFolderAutoCollapsed = new Set();
@@ -978,13 +1017,14 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
       const path = fileItemPath(item);
       return Boolean(path && editorPreviewModeAvailable(path, openFiles.get(path)));
     },
-    popoutDisabledReason: item => fileItemPath(item)
-      ? 'file editor popout needs a preview-capable file'
-      : 'file editor popout needs a file path',
+    popoutDisabledReason: item => t(fileItemPath(item)
+      ? 'pane.popout.filePreviewRequired'
+      : 'pane.popout.filePathRequired'),
     openPopout: item => {
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
@@ -1016,6 +1056,10 @@ const TAB_TYPES = [
     renderAttached: () => {
       renderInfoPanel();
     },
+    relocalize: (_item, panel) => {
+      renderInfoPanel({force: true});
+      relocalizeInfoPanelChrome(panel);
+    },
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1041,9 +1085,13 @@ const TAB_TYPES = [
       loadYoagentJobs({silent: true, scrollBottom: true});
       prewarmYoagent({scrollBottom: true});
     },
+    relocalize: (_item, panel, options = {}) => {
+      renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
+      relocalizeYoagentPanelChrome(panel);
+    },
     className: () => 'yoagent',
     icon: 'yoagent',
-    popoutDisabledReason: 'interactive YO!agent popout is disabled in phase 1',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: yoagentTabLabel()}),
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1060,9 +1108,10 @@ const TAB_TYPES = [
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
     rowHtml: (item, options) => fileExplorerPaneTabHtml(item, options),
     createPanel: () => createFileExplorerPanel(),
+    relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer',
     icon: 'finder',
-    popoutDisabledReason: 'interactive Finder/Tabber popout is disabled in phase 1',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: fileExplorerLabel()}),
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1080,9 +1129,10 @@ const TAB_TYPES = [
     rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
     createPanel: () => createSearchHistoryPanel(),
     renderAttached: () => loadSearchHistoryPanelData({silent: true}),
+    relocalize: (_item, panel) => renderSearchHistoryPanel(panel),
     className: () => 'search-history-item',
     icon: 'document',
-    popoutDisabledReason: 'interactive Search & Runs popout is disabled in phase 1',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: searchHistoryTabLabel()}),
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
@@ -1099,7 +1149,8 @@ const TAB_TYPES = [
     detail: () => compactHomePath(settingsConfigPath()),
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
-    popoutDisabledReason: 'interactive Preferences popout is disabled in phase 1',
+    relocalize: () => renderPreferencesPanels({force: true}),
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('tab.preferences')}),
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1123,6 +1174,10 @@ const TAB_TYPES = [
     renderAttached: () => {
       enableDebugMode();
       renderDebugPanels();
+    },
+    relocalize: (_item, panel) => {
+      renderDebugPanels({force: true});
+      relocalizeDebugPanelChrome(panel);
     },
     className: () => 'debug-item',
     icon: 'tab-meta',
@@ -1277,7 +1332,7 @@ let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
 let transcriptMetaLoading = false;
 let transcriptMetaLoaded = false;
-let transcriptMetaLoadError = '';
+let transcriptMetaLoadError = null;
 let transcriptMetaRefreshPromise = null;
 let infoPanelRenderPending = false;
 let infoPanelLastRenderSignature = '';
@@ -1315,7 +1370,7 @@ let yoagentStreamingMessages = new Map();
 let yoagentActiveChatRequest = null;
 let yoagentChatQueue = [];
 let yoagentChatQueueSerial = 0;
-let yoagentError = '';
+let yoagentError = null;
 let yoagentDraft = '';
 let yoagentHistoryCursor = null;
 let yoagentHistoryDraft = '';
@@ -1326,10 +1381,10 @@ let yoagentStartupInfoVisible = false;
 let searchHistoryQuery = '';
 let searchHistoryPayload = {query: '', results: []};
 let searchHistoryLoading = false;
-let searchHistoryError = '';
+let searchHistoryError = null;
 let runHistoryPayload = {runs: []};
 let runHistoryLoading = false;
-let runHistoryError = '';
+let runHistoryError = null;
 const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
 const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
 let notificationDelivery = {...notificationDeliveryDefaults};
@@ -1481,8 +1536,45 @@ const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs;
 // This partial loads right after the bootstrap (00) and before everything else (10+), so all code
 // can call t(). Keys are dotted ids (e.g. pref.appearance.theme.label); values may hold {tokens}.
 
-let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.locale) ? String(bootstrap.locale) : 'en';
-const i18nFallbackLocale = 'en';
+function i18nRegistryFromBootstrap() {
+  const boot = typeof bootstrap === 'object' && bootstrap ? bootstrap : {};
+  const raw = boot.localeRegistry && typeof boot.localeRegistry === 'object' ? boot.localeRegistry : {};
+  const seen = new Set();
+  const locales = (Array.isArray(raw.locales) ? raw.locales : []).map(item => {
+    const source = item && typeof item === 'object' ? item : {};
+    const id = String(source.id || '').trim();
+    if (!id || seen.has(id.toLowerCase())) return null;
+    seen.add(id.toLowerCase());
+    return {
+      id,
+      endonym: String(source.endonym || id),
+      direction: String(source.direction || '').toLowerCase() === 'rtl' ? 'rtl' : 'ltr',
+    };
+  }).filter(Boolean);
+  const byCasefold = new Map(locales.map(spec => [spec.id.toLowerCase(), spec.id]));
+  const bootLocale = String(boot.locale || '').trim();
+  const catalogLocale = Object.keys(boot.strings && typeof boot.strings === 'object' ? boot.strings : {})[0] || '';
+  const fallbackCandidate = String(raw.fallback || '').trim();
+  const fallback = byCasefold.get(fallbackCandidate.toLowerCase()) || locales[0]?.id || bootLocale || catalogLocale;
+  const pseudo = String(raw.pseudo || '').trim();
+  const systemPreference = String(raw.systemPreference || '').trim();
+  const allowed = new Map([...byCasefold, ...(pseudo ? [[pseudo.toLowerCase(), pseudo]] : [])]);
+  const systemCandidate = String(raw.systemLocale || '').trim();
+  const systemLocale = allowed.get(systemCandidate.toLowerCase()) || fallback;
+  return {fallback, pseudo, systemPreference, systemLocale, locales, allowed};
+}
+
+const i18nLocaleRegistry = i18nRegistryFromBootstrap();
+const i18nFallbackLocale = i18nLocaleRegistry.fallback;
+function i18nNormalizeLocale(value, options = {}) {
+  const text = String(value || '').trim();
+  if (options.allowSystem === true && text.toLowerCase() === i18nLocaleRegistry.systemPreference.toLowerCase()) {
+    return i18nLocaleRegistry.systemPreference;
+  }
+  return i18nLocaleRegistry.allowed.get(text.toLowerCase()) || i18nFallbackLocale;
+}
+
+let i18nActiveLocale = i18nNormalizeLocale(typeof bootstrap === 'object' && bootstrap ? bootstrap.locale : '');
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
 let i18nApplyLocaleRequestId = 0;
 // seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
@@ -1523,7 +1615,10 @@ function tPlural(key, count, params) {
   const number = Number(count) || 0;
   let category = 'other';
   try { category = new Intl.PluralRules(i18nActiveLocale).select(number); } catch (_) {}
-  const value = i18nResolve(`${key}.${category}`) ?? i18nResolve(`${key}.other`);
+  const value = i18nCatalogValue(i18nActiveLocale, `${key}.${category}`)
+    ?? i18nCatalogValue(i18nActiveLocale, `${key}.other`)
+    ?? i18nCatalogValue(i18nFallbackLocale, `${key}.${category}`)
+    ?? i18nCatalogValue(i18nFallbackLocale, `${key}.other`);
   return i18nInterpolate(value == null ? String(key) : value, {...(params || {}), count: number});
 }
 
@@ -1604,14 +1699,14 @@ function i18nSetCatalogForTest(locale, catalog) {
 }
 
 async function i18nLoadCatalog(locale) {
-  if (!locale) return null;
-  if (i18nCatalogs.has(locale)) return i18nCatalogs.get(locale);
+  const normalized = i18nNormalizeLocale(locale);
+  if (i18nCatalogs.has(normalized)) return i18nCatalogs.get(normalized);
   try {
-    const response = await fetch(`/static/locales/${encodeURIComponent(locale)}.json`, {cache: 'no-store'});
+    const response = await fetch(`/static/locales/${encodeURIComponent(normalized)}.json`, {cache: 'no-store'});
     if (!response.ok) return null;
     const data = await response.json();
     if (data && typeof data === 'object' && !Array.isArray(data)) {
-      i18nCatalogs.set(locale, data);
+      i18nCatalogs.set(normalized, data);
       return data;
     }
   } catch (_) {}
@@ -1622,7 +1717,10 @@ async function i18nLoadCatalog(locale) {
 // the localized surfaces. Safe to call before the render functions exist (guarded).
 async function applyLocale(locale) {
   const requestId = ++i18nApplyLocaleRequestId;
-  const next = String(locale || i18nFallbackLocale);
+  const next = i18nNormalizeLocale(locale);
+  if (typeof preferenceSections === 'function' && typeof setCollapsedPreferenceSections === 'function') {
+    setCollapsedPreferenceSections(collapsedPreferenceSections, {sections: preferenceSections(), persist: true});
+  }
   await i18nLoadCatalog(i18nFallbackLocale);
   if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
   if (requestId !== i18nApplyLocaleRequestId) return;
@@ -1637,84 +1735,67 @@ async function applyLocale(locale) {
   if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
 }
 
-// The real (non-pseudo) locales that ship a catalog, in product-priority order. 'system' resolves
-// against navigator.language to one of these. Add new locales here as their catalogs ship.
+// The real (non-pseudo) locales in the Python registry's product-priority order.
 function i18nSupportedLocales() {
-  return ['en', 'zh-Hant', 'zh-Hans', 'ja', 'ko', 'es', 'de', 'fr', 'it', 'pt-BR', 'pl', 'nl', 'he', 'ar', 'ru', 'hi', 'vi', 'th', 'tr'];
+  return i18nLocaleRegistry.locales.map(spec => spec.id);
 }
 
-// Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
 function i18nIsRtl(locale) {
-  const base = String(locale || '').toLowerCase().split('-')[0];
-  return base === 'ar' || base === 'he' || base === 'fa' || base === 'ur';
+  const normalized = i18nNormalizeLocale(locale);
+  return i18nLocaleRegistry.locales.find(spec => spec.id === normalized)?.direction === 'rtl';
 }
 
-// The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
-// script (never translated); 'system'/pseudo are localized. en-XA stays last as the QA pseudo-locale.
+// The language-switcher choices (Preferences picker + topbar switcher) project the Python registry.
 function i18nLocaleChoices() {
-  return [
-    {value: 'system', label: t('pref.general.language.system')},
-    {value: 'en', label: 'English'},
-    {value: 'zh-Hant', label: '繁體中文'},
-    {value: 'zh-Hans', label: '简体中文'},
-    {value: 'ja', label: '日本語'},
-    {value: 'ko', label: '한국어'},
-    {value: 'es', label: 'Español'},
-    {value: 'de', label: 'Deutsch'},
-    {value: 'fr', label: 'Français'},
-    {value: 'it', label: 'Italiano'},
-    {value: 'pt-BR', label: 'Português (BR)'},
-    {value: 'pl', label: 'Polski'},
-    {value: 'nl', label: 'Nederlands'},
-    {value: 'he', label: 'עברית'},
-    {value: 'ar', label: 'العربية'},
-    {value: 'ru', label: 'Русский'},
-    {value: 'hi', label: 'हिन्दी'},
-    {value: 'vi', label: 'Tiếng Việt'},
-    {value: 'th', label: 'ไทย'},
-    {value: 'tr', label: 'Türkçe'},
-    {value: 'en-XA', label: t('pref.general.language.pseudo')},
+  const choices = [
+    {value: i18nLocaleRegistry.systemPreference, label: t('pref.general.language.system')},
+    ...i18nLocaleRegistry.locales.map(spec => ({value: spec.id, label: spec.endonym})),
   ];
+  if (i18nLocaleRegistry.pseudo) choices.push({value: i18nLocaleRegistry.pseudo, label: t('pref.general.language.pseudo')});
+  return choices;
 }
 
-// Resolve a `general.language` pref to a concrete locale. "system" matches navigator.language against
-// the locales that ship a catalog: zh-TW/HK/MO/Hant -> zh-Hant, other zh-* -> zh-Hans, else by language
-// prefix, falling back to en.
+// Resolve a `general.language` pref through the server-resolved registry value.
 function resolveLocalePref(pref) {
-  const value = String(pref || 'system');
-  if (value !== 'system') return value;
-  const nav = (typeof navigator === 'object' && navigator && navigator.language) ? String(navigator.language).toLowerCase() : 'en';
-  if (nav.startsWith('zh')) return /hant|\b(tw|hk|mo)\b|-tw|-hk|-mo/.test(nav) ? 'zh-Hant' : 'zh-Hans';
-  for (const loc of i18nSupportedLocales()) {
-    const base = loc.toLowerCase().split('-')[0];
-    if (nav === loc.toLowerCase() || nav === base || nav.startsWith(base + '-')) return loc;
+  const value = String(pref || i18nLocaleRegistry.systemPreference);
+  const normalized = i18nNormalizeLocale(value, {allowSystem: true});
+  return normalized === i18nLocaleRegistry.systemPreference ? i18nLocaleRegistry.systemLocale : normalized;
+}
+
+const localeGlobalSurfaceHooks = Object.freeze([
+  options => typeof renderSessionButtons === 'function' && renderSessionButtons({force: true}),
+  options => typeof renderTabMetaToggle === 'function' && renderTabMetaToggle(),
+  options => typeof renderPaneTabStrips === 'function' && renderPaneTabStrips(),
+  options => typeof refreshActivePanelHeaders === 'function' && refreshActivePanelHeaders(),
+  options => typeof relocalizeKeyboardShortcutsOverlay === 'function' && relocalizeKeyboardShortcutsOverlay(),
+  options => typeof refreshOpenEventLogs === 'function' && refreshOpenEventLogs(),
+  options => options.localeChange === true && typeof refreshActivitySummary === 'function'
+    && refreshActivitySummary({force: true, silent: true, localeChange: true}),
+  options => typeof renderTopbarStaticChrome === 'function' && renderTopbarStaticChrome(),
+  options => typeof renderNotifyToggle === 'function' && renderNotifyToggle(),
+  options => typeof renderBrandWordmark === 'function' && renderBrandWordmark(),
+  options => typeof renderUpdateBadgeChrome === 'function' && renderUpdateBadgeChrome(),
+  options => typeof updateDocumentTitle === 'function' && updateDocumentTitle(),
+  options => typeof renderTransportWarning === 'function' && renderTransportWarning(),
+  options => typeof refreshMetaButtonChrome === 'function' && refreshMetaButtonChrome(),
+  options => typeof relocalizeModalChrome === 'function' && relocalizeModalChrome(),
+  options => typeof renderFileExplorerChangesPanels === 'function' && renderFileExplorerChangesPanels({force: true}),
+  options => typeof relocalizeFileUploadDropLabels === 'function' && relocalizeFileUploadDropLabels(),
+]);
+
+function relocalizeMountedPanels(options = {}) {
+  if (!(panelNodes instanceof Map)) return;
+  for (const [item, panel] of [...panelNodes.entries()]) {
+    const relocalize = tabTypeForItem(item)?.relocalize;
+    if (typeof relocalize === 'function') relocalize(item, panel, options);
   }
-  return 'en';
 }
 
 function rerenderForLocale(options = {}) {
-  // force-re-render EVERY localized surface so a language switch repaints the open UI on
-  // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
-  // the active-control guard (the language <select> is the active control when the switch fires).
-  if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
-  if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});  // rebuilds the app menu bar
-  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
-  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
-  if (typeof relocalizeYoagentPanelChrome === 'function') relocalizeYoagentPanelChrome();
-  if (typeof renderInfoPanel === 'function') renderInfoPanel();
-  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
-  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
-  if (typeof relocalizeYoagentPanelChrome === 'function') relocalizeYoagentPanelChrome();
-  if (options.localeChange === true && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true, silent: true, localeChange: true});
-  if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
-  if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();
-  // The Finder diff panel localizes its title, FROM/TO, session/sort, and Refresh strings in the panel
-  // head. Force-re-render it so a language switch repaints the head in the new locale.
-  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-  // The Finder's toolbar chrome (root/dates/sort labels) is baked into the panel at creation time, so the
-  // body re-renders above never touch it — rebuild the Finder panel from source so a language switch
-  // repaints its buttons too (the bug where switching to Hebrew left the toolbar in the previous locale).
-  if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
+  // Mounted panel types own their relocalization path through TAB_TYPES. Global chrome lives in the
+  // separate registry below, so adding a surface cannot require another bespoke branch here.
+  relocalizeMountedPanels(options);
+  localeGlobalSurfaceHooks.forEach(run => run(options));
 }
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
@@ -1754,7 +1835,7 @@ async function apiFetchJson(url, options = {}) {
   const response = await apiFetch(url, options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
     error.status = response.status;
     error.statusText = response.statusText || '';
     error.payload = payload || {};
@@ -1779,7 +1860,7 @@ async function apiFetchJsonQuiet(url, options = {}) {
   const response = await fetch(url, requestOptions);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
     error.status = response.status;
     error.statusText = response.statusText || '';
     error.payload = payload || {};
@@ -1787,6 +1868,78 @@ async function apiFetchJsonQuiet(url, options = {}) {
     throw error;
   }
   return payload;
+}
+
+function messageDescriptorText(descriptor, fallback = '') {
+  const value = descriptor && typeof descriptor === 'object' ? descriptor : {};
+  const key = String(value.key || '').trim();
+  if (key) {
+    const template = i18nResolve(key);
+    if (template !== null) {
+      const rawParams = value.params && typeof value.params === 'object' ? value.params : {};
+      const params = Object.fromEntries(Object.entries(rawParams).map(([name, param]) => [
+        name,
+        param && typeof param === 'object' && ('key' in param || 'fallback' in param)
+          ? messageDescriptorText(param)
+          : param,
+      ]));
+      return i18nInterpolate(template, params);
+    }
+  }
+  return String(value.fallback || fallback || '');
+}
+
+function messageFieldDescriptor(value, field = 'message') {
+  const source = value && typeof value === 'object' ? value : {};
+  const name = String(field || 'message');
+  const params = source[`${name}_params`];
+  return {
+    key: String(source[`${name}_key`] || ''),
+    params: params && typeof params === 'object' ? params : {},
+    fallback: String(source[name] || ''),
+  };
+}
+
+function structuredMessageText(value, field = 'message', fallback = '') {
+  return messageDescriptorText(messageFieldDescriptor(value, field), fallback);
+}
+
+function structuredMessageSnapshot(value, field = 'message') {
+  const descriptor = messageFieldDescriptor(value, field);
+  const name = String(field || 'message');
+  return {
+    [name]: descriptor.fallback,
+    [`${name}_key`]: descriptor.key,
+    [`${name}_params`]: {...descriptor.params},
+  };
+}
+
+function userMessageText(value, fallback = '') {
+  const source = value && typeof value === 'object' ? value : {};
+  const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
+  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
+  return messageDescriptorText(descriptor, payload.error || source.message || fallback || '');
+}
+
+function userMessageSnapshot(value, fallback = '') {
+  const source = value && typeof value === 'object' ? value : {};
+  const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
+  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
+  const fallbackDescriptor = fallback && typeof fallback === 'object' ? fallback : {};
+  const fallbackText = typeof fallback === 'object' ? String(fallbackDescriptor.fallback || '') : String(fallback || '');
+  const key = String(descriptor.key || fallbackDescriptor.key || '');
+  const rawParams = descriptor.key ? descriptor.params : fallbackDescriptor.params;
+  const params = rawParams && typeof rawParams === 'object' ? rawParams : {};
+  const sourceText = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+  const rawFallback = String(payload.error || source.message || sourceText || fallbackText || '');
+  return {
+    error: rawFallback,
+    user_message: {
+      key,
+      params: {...params},
+      fallback: String(descriptor.fallback || rawFallback),
+    },
+  };
 }
 
 function clientPushCanSupplyData() {
@@ -2842,7 +2995,22 @@ function writeStoredEditorLineNumbers(value) {
 }
 
 function defaultCollapsedPreferenceSections() {
-  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads/Downloads']);
+  return new Set(DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS);
+}
+
+function normalizeCollapsedPreferenceSections(values, sections = []) {
+  const validIds = new Set(Object.values(PREFERENCE_SECTION_IDS));
+  const legacyTitleIds = new Map(Object.entries(LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE));
+  for (const section of sections) {
+    const id = String(section?.id || '');
+    const title = String(section?.title || '');
+    if (validIds.has(id) && title) legacyTitleIds.set(title, id);
+  }
+  return new Set(Array.from(values || [], value => {
+    const text = String(value || '');
+    if (validIds.has(text)) return text;
+    return legacyTitleIds.get(text) || '';
+  }).filter(Boolean));
 }
 
 function readStoredCollapsedPreferenceSections() {
@@ -2851,7 +3019,7 @@ function readStoredCollapsedPreferenceSections() {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
-    return new Set(parsed.filter(item => typeof item === 'string' && item));
+    return normalizeCollapsedPreferenceSections(parsed);
   } catch (_) {
     return defaultCollapsedPreferenceSections();
   }
@@ -2859,6 +3027,17 @@ function readStoredCollapsedPreferenceSections() {
 
 function writeStoredCollapsedPreferenceSections() {
   storageSet(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
+}
+
+function setCollapsedPreferenceSections(values, options = {}) {
+  const previousIds = Array.from(collapsedPreferenceSections || []);
+  const next = normalizeCollapsedPreferenceSections(values, options.sections || []);
+  const nextIds = Array.from(next);
+  collapsedPreferenceSections = next;
+  if (options.persist === true && (previousIds.length !== nextIds.length || previousIds.some((id, index) => id !== nextIds[index]))) {
+    writeStoredCollapsedPreferenceSections();
+  }
+  return collapsedPreferenceSections;
 }
 
 function cleanDiffRef(value, fallback = '') {
@@ -3074,8 +3253,10 @@ function globalThemeIsDark(mode = globalThemeMode) {
 
 function globalThemeLabel(mode = globalThemeMode) {
   const normalized = normalizeGlobalThemeMode(mode);
-  if (normalized === 'system') return `System (${resolvedGlobalThemeMode(mode)})`;
-  return normalized === 'dark' ? 'Dark' : 'Light';
+  if (normalized === 'system') return t('pref.appearance.theme.systemResolved', {
+    resolved: t(`pref.appearance.theme.${resolvedGlobalThemeMode(mode)}`),
+  });
+  return t(`pref.appearance.theme.${normalized}`);
 }
 
 function nextGlobalThemeMode(mode = globalThemeMode) {
@@ -3177,8 +3358,8 @@ function syncPressedButton(button, active, options = {}) {
 
 function syncFileExplorerHiddenButton(button) {
   syncPressedButton(button, fileExplorerShowHidden, {
-    labelOn: 'Hide dotfiles (.*)',
-    labelOff: 'Show hidden files (dotfiles)',
+    labelOn: t('finder.toolbar.hideHidden'),
+    labelOff: t('finder.toolbar.hidden'),
   });
 }
 
@@ -3251,8 +3432,8 @@ function renderTabMetaToggle() {
   document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
   if (!tabMetaToggle) return;
   syncPressedButton(tabMetaToggle, tabMetaVisible, {
-    labelOn: 'Hide tab metadata',
-    labelOff: 'Show tab metadata',
+    labelOn: t('menu.view.tabMeta.hide'),
+    labelOff: t('menu.view.tabMeta.show'),
   });
 }
 
@@ -3684,7 +3865,7 @@ function renderTransportWarning() {
   const port = location.port || '9998';
   const selfSigned = `python3 yolomux.py --port ${port} --self-signed`;
   const cert = `python3 yolomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;
-  httpsWarning.dataset.tip = `No HTTPS. Highly recommend that you restart with ${selfSigned}. Or use ${cert}.`;
+  httpsWarning.dataset.tip = t('app.noHttpsDetail', {selfSigned, cert});
   httpsWarning.setAttribute('aria-label', httpsWarning.dataset.tip);
   httpsWarning.tabIndex = 0;
 }
@@ -4403,7 +4584,7 @@ async function copyTextToClipboard(text) {
   textarea.select();
   const copied = document.execCommand?.('copy') === true;
   textarea.remove();
-  if (!copied) throw new Error('clipboard copy is unavailable');
+  if (!copied) throw new Error(t('common.clipboardUnavailable'));
 }
 
 function copyTextToClipboardViaCopyEvent(text) {
@@ -5079,7 +5260,7 @@ async function copyTmuxSelectionToClipboard(session, term = null, container = nu
       statusEl.textContent = error.message || t('status.nothingSelected');
       return false;
     }
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    statusErr(esc(userMessageText(error, t('status.copyFailed', {error}))));
     return false;
   } finally {
     clearTerminalVisibleSelection(session, term, container, 'copy-tmux-selection');
@@ -5090,7 +5271,7 @@ async function fetchTmuxSelectionText(session) {
   const payload = await apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'});
   const text = payload?.copied ? String(payload.text || '') : '';
   if (!text) {
-    const error = new Error(payload?.error === 'tmux copy mode is not active' ? t('status.nothingSelected') : (payload?.error || t('status.nothingSelected')));
+    const error = new Error(userMessageText(payload, t('status.nothingSelected')));
     error.noClipboardText = true;
     throw error;
   }
@@ -6082,7 +6263,7 @@ function applyLayoutUrlPreferencesSeed(preferences = {}) {
   if (!preferences || typeof preferences !== 'object') return;
   if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
   if (Array.isArray(preferences.collapsedSections)) {
-    collapsedPreferenceSections = new Set(layoutUrlStringArray(preferences.collapsedSections, 200));
+    setCollapsedPreferenceSections(layoutUrlStringArray(preferences.collapsedSections, 200), {sections: preferenceSections()});
   }
   if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
 }
@@ -6702,16 +6883,16 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: '', priority: 0, attention: true},
-  'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  [STATE_KEY.needsInput]: {label: 'Needs input', short: '', priority: 1, attention: true},
-  [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
-  disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
-  'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
-  'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
-  [STATE_KEY.working]: {label: 'Working', short: '', priority: 6, attention: false},
-  [STATE_KEY.idle]: {label: 'Idle', short: '', priority: 7, attention: false},
-  done: {label: 'Done', short: '', priority: 8, attention: false},
+  [STATE_KEY.needsApproval]: {hasShort: false, priority: 0, attention: true},
+  'yolo-approval': {hasShort: true, priority: 0, attention: false},
+  [STATE_KEY.needsInput]: {hasShort: false, priority: 1, attention: true},
+  [STATE_KEY.blocked]: {hasShort: true, priority: 2, attention: true},
+  disconnected: {hasShort: true, priority: 3, attention: true},
+  'tests-running': {hasShort: true, priority: 4, attention: false},
+  'ready-review': {hasShort: true, priority: 5, attention: false},
+  [STATE_KEY.working]: {hasShort: false, priority: 6, attention: false},
+  [STATE_KEY.idle]: {hasShort: false, priority: 7, attention: false},
+  done: {hasShort: false, priority: 8, attention: false},
 };
 const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
@@ -6726,7 +6907,7 @@ function stateDef(key) {
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
   const resolvedKey = stateDefs[key] ? key : STATE_KEY.idle;
   const base = stateDefs[resolvedKey];
-  return {...base, label: t(`state.${resolvedKey}`), short: base.short ? t(`state.short.${resolvedKey}`) : ''};
+  return {...base, label: t(`state.${resolvedKey}`), short: base.hasShort ? t(`state.short.${resolvedKey}`) : ''};
 }
 
 function attentionAcknowledgementKey(parts = []) {
@@ -6927,7 +7108,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     .toLowerCase();
   const pr = info?.project?.pull_request;
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
-  const checksState = String(pr?.checks?.state || '').toLowerCase();
+  const checksState = pullRequestCiState(pr);
 
   if (terminalDisconnected(session) || (!info && terminals.has(session))) {
     return stateValue('disconnected', stateReason('terminalConnectionClosed'));
@@ -6991,7 +7172,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
     return stateValue('tests-running', stateReason('testsActive'));
   }
-  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && (prStatus.includes('passing') || checksState === 'success')) {
+  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && checksState === 'passing') {
     return stateValue('ready-review', stateReason('prChecksPassing'));
   }
   if (/done|completed|complete|finished|success/.test(agentText)) {
@@ -7231,8 +7412,8 @@ function tmuxSignalAgentPanesForSession(session) {
 function tmuxSignalPaneModeLabels(pane) {
   const labels = [];
   if (pane?.in_mode === true || String(pane?.mode || '').trim()) labels.push(String(pane?.mode || 'copy-mode'));
-  if (pane?.input_off === true) labels.push('read-only');
-  if (pane?.synchronized === true) labels.push('sync');
+  if (pane?.input_off === true) labels.push(t('common.readOnly'));
+  if (pane?.synchronized === true) labels.push(t('tmux.mode.sync'));
   return labels;
 }
 
@@ -7246,16 +7427,16 @@ function tmuxSignalWindowClientNames(windowRecord) {
 function tmuxSignalWindowPresenceText(windowRecord) {
   const count = Math.max(0, Math.round(Number(windowRecord?.active_clients ?? tmuxSignalWindowClientNames(windowRecord).length) || 0));
   if (count <= 0) return '';
-  return `${count} ${count === 1 ? 'viewer' : 'viewers'}`;
+  return tPlural('tmux.viewer', count);
 }
 
 function tmuxSignalDeadText(pane) {
   if (pane?.dead !== true) return '';
   const status = pane?.dead_status;
   const signal = pane?.dead_signal;
-  if (status !== null && status !== undefined && status !== '') return `agent exited (status ${status})`;
-  if (signal !== null && signal !== undefined && signal !== '') return `agent exited (signal ${signal})`;
-  return 'agent exited';
+  if (status !== null && status !== undefined && status !== '') return stateReason('tmuxAgentExitedStatus', {status});
+  if (signal !== null && signal !== undefined && signal !== '') return stateReason('tmuxAgentExitedSignal', {signal});
+  return stateReason('tmuxAgentExited');
 }
 
 function tmuxSignalPaneTitle(pane) {
@@ -7271,7 +7452,7 @@ function tmuxSignalAgentStateForSession(session) {
   const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
   const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
   if (actionRequiredPane) {
-    return stateValue(STATE_KEY.needsInput, 'tmux agent action required', {tmuxSignal: 'action-required'});
+    return stateValue(STATE_KEY.needsInput, stateReason('tmuxActionRequired'), {tmuxSignal: 'action-required'});
   }
   const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
   if (!panes.length) return null;
@@ -7280,11 +7461,11 @@ function tmuxSignalAgentStateForSession(session) {
   const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
   const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
   if (bellWindow) {
-    return stateValue(STATE_KEY.needsInput, 'tmux bell alert', {tmuxSignal: 'bell'});
+    return stateValue(STATE_KEY.needsInput, stateReason('tmuxBellAlert'), {tmuxSignal: 'bell'});
   }
   const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
   if (quietWindow && livePanes.length) {
-    return stateValue('done', 'tmux silence alert: agent quiet', {tmuxSignal: 'silence', showBadge: true});
+    return stateValue('done', stateReason('tmuxSilenceAlert'), {tmuxSignal: 'silence', showBadge: true});
   }
   if (!livePanes.length && deadPanes.length) {
     return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
@@ -7292,8 +7473,8 @@ function tmuxSignalAgentStateForSession(session) {
   const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
   if (runningPane) {
     const command = tmuxSignalPaneCommand(runningPane);
-    const mode = runningPane?.alternate_on === true ? 'alternate screen' : 'process';
-    return stateValue(STATE_KEY.working, `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
+    const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
+    return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
   }
   return null;
 }
@@ -7421,13 +7602,15 @@ function updateDocumentTitle() {
   const count = runningAgentCount();
   if (count > 0) {
     documentTitleIdleSinceMs = null;
-    document.title = `YOLOmux [${count} running]`;
+    document.title = t('document.title.running', {count});
     return;
   }
   const now = documentTitleNowMs();
   if (documentTitleIdleSinceMs === null) documentTitleIdleSinceMs = now;
   const idleMinutes = documentTitleIdleMinutes(now);
-  document.title = idleMinutes ? `YOLOmux (idle for ${idleMinutes} min)` : 'YOLOmux [idle]';
+  document.title = idleMinutes
+    ? t('document.title.idleFor', {minutes: idleMinutes})
+    : t('document.title.idle');
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
@@ -7548,7 +7731,7 @@ function globalActivityStatusLineHtml() {
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
   parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
 
@@ -7570,8 +7753,8 @@ function createTopbarActivityStatus() {
   button.type = 'button';
   button.id = 'topbarActivity';
   button.className = 'topbar-activity topbar-status-surface';
-  button.title = 'Open Tabber for cross-session AI activity';
-  button.setAttribute('aria-label', 'Open Tabber for AI activity across all sessions');
+  button.title = t('topbar.activity.title');
+  button.setAttribute('aria-label', t('topbar.activity.aria'));
   button.onclick = () => openTabberActivityOverview();
   return button;
 }
@@ -7592,18 +7775,18 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
   if (!activeSummaries.length) return '';
   const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
   const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
-  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(state)}</span></span>`;
+  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(t(`backgroundOwner.role.${state}`))}</span></span>`;
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
   const lines = [
-    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || 'this server'}`,
-    indexSummary.ownerLabel ? `IDX leader: ${indexSummary.ownerLabel}` : '',
-    statsSummary.ownerLabel ? `STATS leader: ${statsSummary.ownerLabel}` : '',
-    sessionSummary.ownerLabel ? `SESS leader: ${sessionSummary.ownerLabel}` : '',
-    indexSummary.status ? `Index status: ${indexSummary.status}` : '',
-    statsSummary.status ? `YO!stats status: ${statsSummary.status}` : '',
-    sessionSummary.status ? `Session files status: ${sessionSummary.status}` : '',
+    t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
+    indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
+    statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
+    sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
+    indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
+    statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
+    sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
     indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');
@@ -7690,8 +7873,8 @@ function createTopbarOwnerStatus() {
   button.type = 'button';
   button.id = 'topbarOwnerStatus';
   button.className = 'topbar-owner-status topbar-status-surface';
-  button.title = 'Refresh connected server ownership status';
-  button.setAttribute('aria-label', 'Connected server ownership status');
+  button.title = t('backgroundOwner.refresh');
+  button.setAttribute('aria-label', t('backgroundOwner.aria'));
   button.onclick = () => {
     if (typeof refreshBackgroundOwnerStatus === 'function') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
@@ -7712,11 +7895,11 @@ function updateTopbarOwnerStatus() {
   const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
   if (summaries.length) {
     const [indexSummary, statsSummary, sessionSummary] = summaries;
-    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || 'Refresh connected server ownership status';
+    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || t('backgroundOwner.refresh');
   } else if (backgroundOwnerStatusError) {
-    node.title = backgroundOwnerStatusError;
+    node.title = userMessageText(backgroundOwnerStatusError, t('common.requestFailed'));
   } else {
-    node.title = 'Refresh connected server ownership status';
+    node.title = t('backgroundOwner.refresh');
   }
 }
 
@@ -7902,11 +8085,40 @@ function notificationSystemPermission() {
   return 'Notification' in window ? Notification.permission : 'unsupported';
 }
 
-function notificationDeliveryItems() {
+function notificationDeliveryDescriptors() {
+  const permission = notificationSystemPermission();
+  const permissionLabel = t(`notify.permission.${permission}`);
   return [
-    menuCommand('In YOLOmux', () => setNotificationDelivery('inApp', !notificationDeliveryEnabled('inApp')), {checked: notificationDeliveryEnabled('inApp'), keepOpen: true, renderMenu: false, className: 'notification-delivery-in-app', detail: 'Show notification popups in YOLOmux.'}),
-    menuCommand('System notifications', () => setNotificationDelivery('system', !notificationDeliveryEnabled('system')), {checked: notificationDeliveryEnabled('system'), keepOpen: true, renderMenu: false, className: 'notification-delivery-system', detail: `Browser permission: ${notificationSystemPermission()}`, disabled: notificationSystemPermission() === 'unsupported'}),
+    {
+      channel: 'inApp',
+      label: t('notify.delivery.inApp.label'),
+      help: t('notify.delivery.inApp.help'),
+      className: 'notification-delivery-in-app',
+      disabled: false,
+    },
+    {
+      channel: 'system',
+      label: t('notify.delivery.system.label', {platform: isMacPlatform() ? 'macOS' : 'PC'}),
+      help: t('notify.delivery.system.help', {permission: permissionLabel}),
+      className: 'notification-delivery-system',
+      disabled: permission === 'unsupported',
+    },
   ];
+}
+
+function notificationDeliveryItems() {
+  return notificationDeliveryDescriptors().map(descriptor => menuCommand(
+    descriptor.label,
+    () => setNotificationDelivery(descriptor.channel, !notificationDeliveryEnabled(descriptor.channel)),
+    {
+      checked: notificationDeliveryEnabled(descriptor.channel),
+      keepOpen: true,
+      renderMenu: false,
+      className: descriptor.className,
+      detail: descriptor.help,
+      disabled: descriptor.disabled,
+    },
+  ));
 }
 
 let notificationDeliveryPopover = null;
@@ -7940,14 +8152,19 @@ function openNotificationDeliveryPopover() {
 
 function renderNotifyToggle() {
   if (!notifyToggle) return;
-  syncPressedButton(notifyToggle, notificationDeliveryEnabled(), {labelOn: 'Notifications', labelOff: 'Notifications'});
-  notifyToggle.title = `Notifications: In YOLOmux ${notificationDeliveryEnabled('inApp') ? 'on' : 'off'}; system ${notificationDeliveryEnabled('system') ? 'on' : 'off'}`;
+  const label = t('pref.section.notifications');
+  syncPressedButton(notifyToggle, notificationDeliveryEnabled(), {labelOn: label, labelOff: label});
+  notifyToggle.title = t('notify.delivery.summary', {
+    inApp: t(notificationDeliveryEnabled('inApp') ? 'notify.state.on' : 'notify.state.off'),
+    system: t(notificationDeliveryEnabled('system') ? 'notify.state.on' : 'notify.state.off'),
+  });
   notifyToggle.onclick = event => {
     event.preventDefault();
     event.stopPropagation();
     if (notificationDeliveryPopover && !notificationDeliveryPopover.hidden) closeNotificationDeliveryPopover();
     else openNotificationDeliveryPopover();
   };
+  if (notificationDeliveryPopover && !notificationDeliveryPopover.hidden) openNotificationDeliveryPopover();
 }
 
 function refreshNotificationDeliveryMenuChecks() {
@@ -8015,7 +8232,7 @@ function keyboardShortcutCatalog() {
     {section: t('shortcuts.section.app'), items: [
       {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
-      {label: t('share.title'), keys: appShortcutText('K')},
+      {label: t('brand.share'), keys: appShortcutText('K')},
       {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
@@ -8047,7 +8264,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
     ]},
-    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel()}), items: [
+    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel(), differ: t('changes.title')}), items: [
       {label: t('shortcuts.finderDiffer.moveSelection'), keys: '↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.extendSelection'), keys: 'Shift+↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.expandCollapseFolders'), keys: '→ / ←'},
@@ -8086,6 +8303,7 @@ function keyboardLegendStatusSample(kind, text = '●', options = {}) {
 }
 
 function keyboardLegendCatalog() {
+  const yoMarker = esc(t('brand.marker'));
   return [
     {section: t('legend.section.agentStatus'), items: [
       {sampleHtml: keyboardLegendStatusSample('working', '●', {glyph: true}), label: t('legend.shape.working.label'), detail: t('legend.shape.working.detail')},
@@ -8098,7 +8316,7 @@ function keyboardLegendCatalog() {
       {sampleHtml: keyboardLegendStatusSample('attention'), label: t('legend.color.red.label'), detail: t('legend.color.red.detail')},
       {sampleHtml: keyboardLegendStatusSample('merged'), label: t('legend.color.purple.label'), detail: t('legend.color.purple.detail')},
       {sampleHtml: keyboardLegendStatusSample('closed'), label: t('legend.color.gray.label'), detail: t('legend.color.gray.detail')},
-      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: t('legend.color.metadata.label'), detail: t('legend.color.metadata.detail')},
+      {sampleHtml: `<span class="keyboard-legend-meta keyboard-legend-meta-branch">${esc(t('info.field.gitBranch'))}</span>`, label: t('legend.color.metadata.label'), detail: t('legend.color.metadata.detail')},
     ]},
     {section: t('legend.section.icons'), items: [
       {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
@@ -8109,10 +8327,10 @@ function keyboardLegendCatalog() {
       {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: t('legend.icon.pin.label'), detail: t('legend.icon.pin.detail')},
     ]},
     {section: t('legend.section.yo'), items: [
-      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: t('legend.yo.inactive.label'), detail: t('legend.yo.inactive.detail')},
-      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: t('legend.yo.active.label'), detail: t('legend.yo.active.detail')},
-      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: t('legend.yo.working.label'), detail: t('legend.yo.working.detail')},
-      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: t('legend.yo.locked.label'), detail: t('legend.yo.locked.detail')},
+      {sampleHtml: `<span class="session-yolo-marker inactive">${yoMarker}</span>`, label: t('legend.yo.inactive.label'), detail: t('legend.yo.inactive.detail')},
+      {sampleHtml: `<span class="session-yolo-marker active">${yoMarker}</span>`, label: t('legend.yo.active.label'), detail: t('legend.yo.active.detail')},
+      {sampleHtml: `<span class="session-yolo-marker active working">${yoMarker}</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>`, label: t('legend.yo.working.label'), detail: t('legend.yo.working.detail')},
+      {sampleHtml: `<span class="session-yolo-marker locked">${yoMarker}</span>`, label: t('legend.yo.locked.label'), detail: t('legend.yo.locked.detail')},
     ]},
   ];
 }
@@ -8199,12 +8417,28 @@ function ensureKeyboardShortcutsOverlay() {
   return node;
 }
 
+function renderKeyboardShortcutsOverlay(node = keyboardShortcutsNode) {
+  if (!node) return false;
+  const dialog = node.querySelector('.keyboard-shortcuts-dialog');
+  const heading = node.querySelector('.keyboard-shortcuts-head h2');
+  const close = node.querySelector('.keyboard-shortcuts-close');
+  const body = node.querySelector('.keyboard-shortcuts-body');
+  if (dialog) dialog.setAttribute('aria-label', t('shortcuts.title'));
+  if (heading) heading.textContent = t('shortcuts.title');
+  if (close) close.setAttribute('aria-label', t('shortcuts.close'));
+  if (body) body.innerHTML = keyboardShortcutsHtml();
+  return true;
+}
+
+function relocalizeKeyboardShortcutsOverlay() {
+  return renderKeyboardShortcutsOverlay(keyboardShortcutsNode);
+}
+
 function openKeyboardShortcutsOverlay() {
   const node = ensureKeyboardShortcutsOverlay();
   closeAppMenus();
   closeCommandPalette();
-  const body = node.querySelector('.keyboard-shortcuts-body');
-  if (body) body.innerHTML = keyboardShortcutsHtml();
+  renderKeyboardShortcutsOverlay(node);
   node.hidden = false;
   node.classList.add(CLS.open);
   node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
@@ -8379,7 +8613,7 @@ function commandPaletteCommandItems() {
     keybinding: 'Enter',
     run: () => {
       preferencesSearchText = item.label;
-      collapsedPreferenceSections.delete(section.title);
+      collapsedPreferenceSections.delete(section.id);
       writeStoredCollapsedPreferenceSections();
       selectSession(prefsItemId);
       requestAnimationFrame(() => {
@@ -8426,15 +8660,16 @@ function commandPaletteDropActionItems() {
   return dropActionsFor(category, agentKind, paths.length, {pathInserted: false, includeShellForAgents: true})
     .map(action => {
       const needsTerminal = action.kind !== 'server';
+      const label = dropActionDisplayLabel(action);
       return {
-        group: 'File Actions',
+        group: t('palette.group.fileActions'),
         category: 'command',
-        label: action.label,
+        label,
         detail: compactHomePath(path),
         key: `drop-action:${action.id}:${path}`,
         keybinding: 'Enter',
         disabled: needsTerminal && !session,
-        searchFields: ['do something with file', 'file action', action.label, path, compactHomePath(path)],
+        searchFields: [t('palette.group.fileActions'), label, path, compactHomePath(path)],
         run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {session, kind, pathInserted: false})),
       };
     });
@@ -8531,7 +8766,7 @@ function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRo
 function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
   const roots = fileQuickOpenRootsForSearch(root);
   if (roots.length <= 1) return compactHomePath(roots[0] || root || '/');
-  return `${compactHomePath(roots[0])} + ${roots.length - 1} indexed`;
+  return tPlural('palette.scope.indexedRoot', roots.length - 1, {path: compactHomePath(roots[0])});
 }
 
 function fileQuickOpenQueryParts(query = commandPaletteQuery) {
@@ -8631,7 +8866,7 @@ function fileQuickOpenItem(path, options = {}) {
   const cursorReference = cursorStyleFileReference(path, options);
   const detail = cursorReference?.detail || compactHomePath(path);
   return {
-    group: options.group || 'Files',
+    group: options.group || t('palette.group.files'),
     category: 'file',
     label: cursorReference?.label || (isDir ? `${label}/` : label),
     detail,
@@ -8639,7 +8874,7 @@ function fileQuickOpenItem(path, options = {}) {
     path,
     mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
     iconText: isDir ? disclosureTriangleCollapsedGlyph : fileIconFor(label),
-    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
+    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} ${t('editor.mode.split')}`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
     run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
@@ -8665,7 +8900,7 @@ function fileQuickOpenExactPathItem() {
   if (!name || !fileExtensionOf(name)) return null;
   return {
     ...fileQuickOpenItem(path, {group: t('palette.group.files')}),
-    label: previewMediaKindForPath(path) === 'image' ? `Open image ${name}` : `Open ${name}`,
+    label: t(previewMediaKindForPath(path) === 'image' ? 'palette.openImage' : 'palette.openFile', {name}),
     detail: compactHomePath(path),
     key: `exact-file:${path}`,
     keybinding: appShortcutText('Enter'),
@@ -8696,7 +8931,7 @@ function fileQuickOpenOpenFolderItem() {
     iconText: disclosureTriangleCollapsedGlyph,
     keybinding: appShortcutText('Enter'),
     pinTop: true,
-    searchFields: ['open folder', target],
+    searchFields: [t('palette.openFolder', {name: fileExplorerLabel()}), target],
     run: async () => { await openFileExplorerPane(); await openFileExplorerAt(target); },
   };
 }
@@ -8748,7 +8983,7 @@ function fileQuickOpenItems() {
     const isImage = (file.kind || 'file') !== 'dir' && previewMediaKindForPath(path) === 'image';
     if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {
-      group: externalIndexed ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
+      group: externalIndexed ? t('palette.group.indexed', {path: compactHomePath(indexedRoot)}) : t('palette.group.files'),
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
       imageIndex,
@@ -8758,11 +8993,12 @@ function fileQuickOpenItems() {
     }));
   }
   if (fileQuickOpenError) {
+    const errorText = userMessageText(fileQuickOpenError, t('palette.searchFailed'));
     items.push({
       group: t('palette.group.files'),
       label: t('search.failed'),
-      detail: fileQuickOpenError,
-      searchFields: ['search failed', fileQuickOpenError],
+      detail: errorText,
+      searchFields: [t('palette.searchFailed'), errorText],
       disabled: true,
       run: null,
     });
@@ -8989,7 +9225,9 @@ function commandPaletteFinderAliasBonus(item, query, options = {}) {
   if (item?.targetItem !== fileExplorerItemId) return 0;
   const text = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (text.length < 3) return 0;
-  const aliases = ['file', 'files', 'finder', 'file explorer'];
+  const aliases = [t('palette.group.files'), fileExplorerLabel(), 'file', 'files', 'finder', 'file explorer']
+    .map(alias => String(alias || '').trim().toLowerCase().replace(/\s+/g, ' '))
+    .filter(Boolean);
   if (!aliases.some(alias => alias === text || alias.startsWith(text))) return 0;
   return commandPaletteSurface(options) === 'files'
     ? searchRankWeights.finderAliasFilesMode
@@ -9257,9 +9495,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
     if (pathQuery.active) {
-      const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || response.status);
+      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
       if (requestId !== fileQuickOpenRequestId) return;
       fileQuickOpenRoot = payload.path || pathQuery.directory || root;
       const filter = String(pathQuery.filter || '').toLowerCase();
@@ -9280,9 +9516,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
         try {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
           const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
-          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
-          const payload = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(payload.error || response.status);
+          const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           return {ok: true, root: normalizeStoredFileExplorerIndexedDir(payload.root || payload.root_realpath || searchRoot) || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
@@ -9291,8 +9525,14 @@ async function refreshFileQuickOpenCandidates(query = '') {
       if (requestId !== fileQuickOpenRequestId) return;
       const successful = results.filter(result => result.ok);
       if (!successful.length) {
-        const firstError = results.find(result => result.error)?.error || 'search failed';
-        throw new Error(firstError);
+        const firstError = results.find(result => result.error)?.error;
+        if (firstError) throw firstError;
+        const fallback = t('palette.searchFailed');
+        fileQuickOpenError = userMessageSnapshot({
+          error: fallback,
+          user_message: {key: 'palette.searchFailed', params: {}, fallback},
+        });
+        return;
       }
       fileQuickOpenRoot = root;
       fileQuickOpenCandidates = dedupeFileSearchResults(
@@ -9304,7 +9544,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
     if (requestId !== fileQuickOpenRequestId) return;
     if (error?.name === 'AbortError') return;
     fileQuickOpenCandidates = [];
-    fileQuickOpenError = String(error);
+    fileQuickOpenError = error;
   } finally {
     if (requestId === fileQuickOpenRequestId) {
       fileQuickOpenAbortController = null;
@@ -9573,12 +9813,12 @@ function startupHelperNavigationGroup(index, total, showRelativeTip) {
   const group = document.createElement('span');
   group.className = 'startup-helper-nav';
   group.setAttribute('role', 'group');
-  group.setAttribute('aria-label', 'Tip navigation');
+  group.setAttribute('aria-label', t('startupHelper.navigation'));
   group.append(
     startupHelperAction('<', () => showRelativeTip(-1), {
       className: 'startup-helper-nav-button',
-      title: 'Previous tip',
-      ariaLabel: 'Previous tip',
+      title: t('startupHelper.action.previous'),
+      ariaLabel: t('startupHelper.action.previous'),
     }),
     startupHelperAction('>', () => showRelativeTip(1), {
       className: 'startup-helper-nav-button',
@@ -9626,7 +9866,7 @@ function showStartupHelperTip(options = {}) {
     closeStartupHelperToast(node);
     saveSettingsPatch(settingPatch('general.startup_tips', false))
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
   });
   node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
@@ -9660,9 +9900,10 @@ function displayToastContainer(session) {
 function compactNotificationTitle(scope, message, options = {}) {
   const suffix = String(message || '').trim();
   const label = String(scope || '').trim();
+  const product = t('app.documentTitle');
   if (options.inApp === true) return suffix || label;
-  if (!label) return suffix ? `YOLOmux ${suffix}` : 'YOLOmux';
-  return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
+  if (!label) return suffix ? `${product} ${suffix}` : product;
+  return suffix ? `${product}[${label}] ${suffix}` : `${product}[${label}]`;
 }
 
 function sessionNotificationScope(session) {
@@ -9709,7 +9950,7 @@ async function focusAttentionToastTarget(session, state) {
   await selectSession(session, {userInitiated: true});
   const windowIndex = agentWindowIndex(attentionToastAgent(session, state)?.agent);
   if (windowIndex === null) return;
-  tmuxWindow(session, {windowIndex}, `tmux sub-window ${windowIndex}`);
+  tmuxWindow(session, {windowIndex}, t('terminal.window.title', {name: windowIndex}));
 }
 
 function attentionToastLine(session, state) {
@@ -9895,7 +10136,7 @@ function maybeNotifyState(session, state, options = {}) {
 function watchedPrStatusSnapshot(pr) {
   return {
     merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
-    ci: String(pr?.checks?.state || '').toLowerCase(),
+    ci: pullRequestCiState(pr),
     review: String(pr?.review_decision || '').toUpperCase(),
   };
 }
@@ -10245,10 +10486,10 @@ function topbarVersionTitle() {
   const sha = aboutCommitShaText();
   const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
-  if (sha) lines.push(`SHA: ${sha}`);
-  if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
-  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(`Commits: ${commitCount}`);
-  return lines.join('\n') || 'SHA unknown';
+  if (sha) lines.push(t('menu.help.about.sha', {sha}));
+  if (bootstrap.versionCommitTime) lines.push(t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}));
+  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(t('menu.help.about.commits', {count: commitCount}));
+  return lines.join('\n') || t('menu.help.about.shaUnknown');
 }
 
 function topbarServerStartedAtMs() {
@@ -10260,7 +10501,7 @@ function topbarServerStartedAtMs() {
 
 function topbarDurationText(seconds) {
   const remaining = Math.max(0, Math.floor(Number(seconds) || 0));
-  if (remaining < 1) return 'under 1 second';
+  if (remaining < 1) return t('duration.underOneSecond');
   const units = [
     ['day', 86400],
     ['hour', 3600],
@@ -10304,13 +10545,9 @@ function showAboutModal() {
   const modal = document.getElementById('modal');
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
-  const close = document.getElementById('closeModal');
   if (!modal || !title || !body) return;
   title.textContent = t('menu.help.about');
-  if (close) {
-    close.title = t('common.close');
-    close.setAttribute('aria-label', t('common.close'));
-  }
+  relocalizeModalChrome({content: false});
   modal.classList.add('about-open');
   const version = bootstrap.version || '';
   const sha = aboutCommitShaText();
@@ -10485,10 +10722,10 @@ function applyAndSaveGlobalTheme(next) {
   renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
-      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
+      statusEl.textContent = t('status.themeChanged', {theme: globalThemeLabel(next)});
     })
     .catch(error => {
-      statusErr(localizedHtml('status.themeSaveFailed', {error}));
+      statusErr(localizedHtml('status.themeSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
       refreshSettings({force: true});
     });
 }
@@ -10503,12 +10740,12 @@ function cycleGlobalThemeSetting() {
 }
 
 function yoloRuleStatusDetail() {
-  const source = yoloRulesPayload.source || 'unknown';
+  const source = structuredMessageText(yoloRulesPayload, 'source', t('common.unknown'));
   const count = Number(yoloRulesPayload.rule_count || 0);
   const countText = tPlural('menu.yolo.ruleCount', count);
   const dryRun = yoloRulesPayload.dry_run ? t('menu.yolo.dryRunSuffix') : '';
   return yoloRulesPayload.error
-    ? t('menu.yolo.errorDetail', {error: yoloRulesPayload.error})
+    ? t('menu.yolo.errorDetail', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)})
     : t('menu.yolo.statusDetail', {source, rules: countText, dryRun});
 }
 
@@ -10534,10 +10771,11 @@ async function reloadYoloRules() {
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
+    const errorText = userMessageText(payload, payload.error || '');
     statusEl.innerHTML = payload.error
-      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: payload.error})}</span>`
+      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: errorText})}</span>`
       : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
-    showToast(t('status.yoloToastTitle'), payload.error || yoloRuleStatusDetail(), {level});
+    showToast(t('status.yoloToastTitle'), errorText || yoloRuleStatusDetail(), {level});
   } catch (error) {
     statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
@@ -10955,7 +11193,7 @@ function appMenuTree() {
           detail: appShortcutText('P', {shift: true}),
         })],
         [
-          menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
+          menuCommand(t('menu.help.version', {version: bootstrap.version || ''}).trim(), null, {
             disabled: true,
             detail: bootstrap.versionCommitTime ? t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}) : '',
           }),
@@ -11061,7 +11299,21 @@ function renderSessionButtonsMeasured(options = {}) {
 function renderBrandWordmark() {
   for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
   for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
+  for (const brand of document.querySelectorAll('.brand-title')) {
+    brand.setAttribute('aria-label', t('brand.aria', {version: bootstrap.version || ''}));
+  }
   updateBrandTitles();
+}
+
+function renderTopbarStaticChrome() {
+  sessionButtons?.setAttribute('aria-label', t('app.menusAria'));
+  if (latencyMeter) latencyMeter.title = t('app.latencyTitle');
+  if (logoutButton) {
+    const label = t('menu.file.logout');
+    logoutButton.textContent = label;
+    logoutButton.title = label;
+    logoutButton.setAttribute('aria-label', label);
+  }
 }
 
 function createAppMenuBar() {
@@ -11136,7 +11388,7 @@ function createTopbarSearch() {
 function createTopbarLanguageSwitcher() {
   const pref = String(initialSetting('general.language', 'system'));
   const choices = i18nLocaleChoices();
-  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: 'Auto'};
+  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: t('pref.general.language.system')};
   const wrapper = createAppMenu({
     id: 'language',
     label: active.label,
@@ -11151,7 +11403,7 @@ function createTopbarLanguageSwitcher() {
         scheduleShareAppearancePublish();
         if (readOnlyMode) return;
         saveSettingsPatch(settingPatch('general.language', value))
-          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
       },
     })),
   });
@@ -11360,10 +11612,10 @@ function createAppMenuNumberSetting(item) {
     saveSettingsPatch(settingPatch(item.path, next))
       .then(() => {
         renderPreferencesPanels();
-        statusEl.textContent = `saved ${item.path}`;
+        statusEl.textContent = t('status.settingSaved', {path: item.path});
       })
       .catch(error => {
-        statusErr(localizedHtml('status.settingsSaveFailed', {error}));
+        statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
         refreshSettings({force: true});
       });
   });
@@ -11698,7 +11950,7 @@ async function openFileExplorerAt(path, options = {}) {
   if (!entries) {
     const error = currentFileExplorerListError(root);
     if (error) setFileExplorerPathDisplay(root, {error});
-    if (showPendingRoot) renderFileExplorerTreeStatus(error || `Cannot open ${root}`, {root, error: true});
+    if (showPendingRoot) renderFileExplorerTreeStatus(error || t('preview.openFailed', {path: root}), {root, error: true});
     return false;
   }
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
@@ -11805,14 +12057,18 @@ function clearFileExplorerListError(path = '') {
 
 function setFileExplorerListError(path, error, status = 0) {
   const root = normalizeDirectoryPath(path || '');
-  fileExplorerPathError = error || '';
-  fileExplorerLastListError = root && error ? {path: root, status, error, network: !status} : null;
+  const source = error?.payload && typeof error.payload === 'object' ? error.payload : error;
+  const fallback = String(error?.message || error || '');
+  fileExplorerPathError = userMessageText(source, fallback);
+  fileExplorerLastListError = root && fileExplorerPathError
+    ? {path: root, status, source, fallback, network: !status}
+    : null;
 }
 
 function currentFileExplorerListError(path) {
   const root = normalizeDirectoryPath(path || '');
   return root && normalizeDirectoryPath(fileExplorerLastListError?.path || '') === root
-    ? fileExplorerLastListError.error || ''
+    ? userMessageText(fileExplorerLastListError.source, fileExplorerLastListError.fallback)
     : '';
 }
 
@@ -11883,7 +12139,7 @@ function settleFileExplorerFsBatchItem(item, response) {
     item.resolve(response.payload || {});
     return;
   }
-  const error = new Error(response?.error || `fs ${item.type} failed`);
+  const error = new Error(userMessageText(response, t('common.requestFailed')));
   error.status = Number(response?.status) || 0;
   error.payload = response || {};
   item.reject(error);
@@ -11902,7 +12158,7 @@ async function flushFileExplorerFsBatch() {
     });
     const responses = new Map((payload.responses || []).map(response => [response.id, response]));
     for (const item of items) {
-      settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: 'missing fs batch response'});
+      settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: t('common.requestFailed')});
     }
   } catch (_) {
     await Promise.all(items.map(settleFileExplorerFsBatchItemFallback));
@@ -11941,10 +12197,11 @@ async function fetchDirectory(path, options = {}) {
       return entries;
     } catch (err) {
       const status = Number(err?.status) || 0;
+      const openFailed = t('preview.openFailed', {path: root});
       fileExplorerPathError = status
-        ? err.message || `Cannot open ${root} (${status})`
-        : `Cannot open ${root}: ${err}`;
-      setFileExplorerListError(root, fileExplorerPathError, status);
+        ? err.message || `${openFailed} (${status})`
+        : `${openFailed}: ${err}`;
+      setFileExplorerListError(root, err, status);
       console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       return null;
     }
@@ -12026,8 +12283,8 @@ function fileEntryStatusFromWatchFilePayload(item) {
   const path = String(item?.path || signature[0] || '');
   if (!path) return {path: '', entry: null, missing: false, error: '', network: false};
   const kind = String(signature[1] || '');
-  if (kind === 'missing') return {path, entry: null, missing: true, error: `path not found: ${path}`, network: false};
-  if (kind !== 'file' && kind !== 'dir') return {path, entry: null, missing: false, error: `invalid file signature: ${path}`, network: false};
+  if (kind === 'missing') return {path, entry: null, missing: true, error: t('common.pathNotFound', {path}), network: false};
+  if (kind !== 'file' && kind !== 'dir') return {path, entry: null, missing: false, error: t('finder.invalidFileSignature', {path}), network: false};
   const mtime = Number(signature[2]) || 0;
   const size = Number(signature[3]);
   return {
@@ -12322,7 +12579,7 @@ function renderQuickAccessInto(container) {
     button.type = 'button';
     button.className = 'file-explorer-quick-access-button';
     button.textContent = displayQuickAccessPath(path);
-    button.title = `Open ${path}`;
+    button.title = t('finder.quickAccess.openPath', {path});
     button.dataset.quickPath = path;
     syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
     button.addEventListener('click', event => {
@@ -12858,18 +13115,29 @@ function restoreCommittedFileExplorerRootDisplay() {
   }
 }
 
+function repoBranchDisplayText(repo) {
+  return repo?.branch || t('git.detached');
+}
+
 function repoInfoSummary(repo) {
   if (!repo?.root) return '';
-  const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${Number(repo.dirty_count)} dirty` : '';
-  const ahead = Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? `, ${Number(repo.ahead)} ahead` : '';
-  const behind = Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? `, ${Number(repo.behind)} behind` : '';
-  const branch = repo.branch || 'detached';
+  const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${t('git.dirty', {count: Number(repo.dirty_count)})}` : '';
+  const ahead = Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? `, ${t('git.ahead', {count: Number(repo.ahead)})}` : '';
+  const behind = Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? `, ${t('git.behind', {count: Number(repo.behind)})}` : '';
+  const branch = repoBranchDisplayText(repo);
   return `${repo.name || basenameOf(repo.root)} (${branch}${dirty}${ahead}${behind})`;
 }
 
 function setFileExplorerRepoSummary(path, repo, error = '') {
   const summary = error ? '' : repoInfoSummary(repo);
-  const title = error || (repo?.root ? [`repo: ${repo.root}`, `branch: ${repo.branch || 'unknown'}`, repo.upstream ? `upstream: ${repo.upstream}` : '', Number.isFinite(Number(repo.dirty_count)) ? `dirty files: ${repo.dirty_count}` : '', Number(repo.ahead) ? `ahead: ${repo.ahead}` : '', Number(repo.behind) ? `behind: ${repo.behind}` : ''].filter(Boolean).join('\n') : '');
+  const title = error || (repo?.root ? [
+    `${t('popover.repo')}: ${repo.root}`,
+    `${t('popover.branch')}: ${repoBranchDisplayText(repo)}`,
+    repo.upstream ? `↗ ${repo.upstream}` : '',
+    Number.isFinite(Number(repo.dirty_count)) ? t('git.dirty', {count: repo.dirty_count}) : '',
+    Number(repo.ahead) ? t('git.ahead', {count: repo.ahead}) : '',
+    Number(repo.behind) ? t('git.behind', {count: repo.behind}) : '',
+  ].filter(Boolean).join('\n') : '');
   for (const node of document.querySelectorAll('.file-explorer-repo-summary')) {
     node.textContent = summary;
     node.hidden = !summary;
@@ -12908,12 +13176,12 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
 function repoInfoPopoverHtml(repo) {
   if (!repo?.root) return '';
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
-  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repo.branch || 'detached')}</div>`);
+  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repoBranchDisplayText(repo))}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
-  if (Number(repo.ahead) > 0) stat.push(`${Number(repo.ahead)} ahead`);
-  if (Number(repo.behind) > 0) stat.push(`${Number(repo.behind)} behind`);
-  if (Number.isFinite(Number(repo.dirty_count))) stat.push(`${Number(repo.dirty_count)} dirty`);
+  if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
+  if (Number(repo.behind) > 0) stat.push(t('git.behind', {count: Number(repo.behind)}));
+  if (Number.isFinite(Number(repo.dirty_count))) stat.push(t('git.dirty', {count: Number(repo.dirty_count)}));
   if (stat.length) rows.push(`<div class="file-tree-repo-popover-stat">${esc(stat.join(' · '))}</div>`);
   rows.push(`<div class="file-tree-repo-popover-path">${esc(repo.root)}</div>`);
   return rows.join('');
@@ -13523,7 +13791,7 @@ function fileTreeRepoBranch(path) {
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
   if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
-  return repo.branch || 'detached';
+  return repoBranchDisplayText(repo);
 }
 
 // Compact ahead/behind/dirty markers for a repo dir's inline annotation, read from cached repo info.
@@ -13793,15 +14061,15 @@ function fileTreeGitStatusBadgeClass(status) {
 function gitStatusBadgeTitle(status) {
   const key = normalizeGitStatus(status);
   const labels = {
-    M: 'modified',
-    A: 'added',
-    D: 'deleted',
-    T: 'touched by AI transcript',
-    '?': 'untracked',
-    U: 'untracked',
-    S: 'staged',
-    R: 'renamed',
-    C: 'copied',
+    M: t('git.status.modified'),
+    A: t('git.status.added'),
+    D: t('git.status.deleted'),
+    T: t('git.status.transcriptTouched'),
+    '?': t('git.status.untracked'),
+    U: t('git.status.untracked'),
+    S: t('git.status.staged'),
+    R: t('git.status.renamed'),
+    C: t('git.status.copied'),
   };
   return labels[key] ? `${key}: ${labels[key]}` : '';
 }
@@ -14851,7 +15119,7 @@ function fileExplorerIndexBadgeText(path) {
 function fileExplorerIndexBadgeTitle(path) {
   if (!fileExplorerDirectoryIsIndexed(path)) return '';
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
-  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+  return t(fileExplorerIndexStatus.get(normalized) === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
 }
 
 // Warm the backend index for a root (kicks the build) and track building/ready; polls while
@@ -14968,7 +15236,10 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (indexed) {
     const ancestor = fileExplorerIndexedAncestor(normalized);
     if (ancestor) {
-      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already indexed by ${compactHomePath(ancestor)}`;
+      if (statusEl) statusEl.textContent = t('finder.index.alreadyIndexedBy', {
+        path: compactHomePath(normalized),
+        ancestor: compactHomePath(ancestor),
+      });
       return;
     }
     fileExplorerIndexedDirs.add(normalized);
@@ -14992,7 +15263,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (!applyingIndexedDirsSetting) persistIndexedDirsSetting(indexed ? {add: normalized} : {remove: normalized});
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
-    statusEl.textContent = indexed ? `indexed ${compactHomePath(normalized)}` : `removed index ${compactHomePath(normalized)}`;
+    statusEl.textContent = t(indexed ? 'finder.index.added' : 'finder.index.removed', {path: compactHomePath(normalized)});
   }
 }
 
@@ -15503,7 +15774,7 @@ function renderTabberTree(groupsEl) {
   const {entries, entriesByDir} = buildTabberTree();
   const collapsedSet = tabberCollapsedPathsForTree(entries, entriesByDir);
   if (!entries.length) {
-    groupsEl.innerHTML = '<div class="changes-empty">No open tmux sessions</div>';
+    groupsEl.innerHTML = `<div class="changes-empty">${esc(t('tabber.empty'))}</div>`;
     return;
   }
   let container = groupsEl.querySelector(':scope > .file-tree[data-tabber-tree]');
@@ -15775,7 +16046,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
-  row.classList.toggle('tabber-status-long', data.type === 'window' && (/^working for/.test(String(data.dateText || '')) || Boolean(data.dateHtml)));
+  const agentState = String(data.agentStatus?.state || STATE_KEY.idle);
+  row.classList.toggle('tabber-status-long', data.type === 'window'
+    && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)));
   row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
@@ -15790,7 +16063,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const titleParts = [
     label,
     description && description !== label ? description : '',
-    data.branchText ? `branch: ${data.branchText}` : '',
+    data.branchText ? `${t('popover.branch')}: ${data.branchText}` : '',
     data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
   const titleText = titleParts.join('\n');
@@ -15802,7 +16075,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     : data.type === 'window'
       ? tabberWindowButtonHtml(renderData, label)
     : data.type === 'loading'
-      ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
+      ? `<span class="tabber-loading-label">${esc(data.label || stripTrailingEllipsisText(t('common.loading')))}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
   updateFileTreeRowContents(row, icon, label, {
     iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
@@ -16842,6 +17115,20 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
   return acknowledgeStoppedTransition();
 }
 
+function agentWindowActivityLabel(agentKey, state, acknowledged = false) {
+  const kind = agentWindowKind(agentKey);
+  const stateKey = agentWindowStateKey(state);
+  const status = stateKey === 'cooldown'
+    ? t('state.cooldown')
+    : stateKey === 'active'
+      ? t('state.active')
+      : stateDef(stateKey).label;
+  return t('state.agentStatus', {
+    agent: agentLabel(kind),
+    status: acknowledged ? t('state.statusAcknowledged', {status}) : status,
+  });
+}
+
 function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return null;
@@ -16864,7 +17151,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: acknowledgementVisualTone,
       icon: '●',
-      label: `${agentLabel(kind)} acknowledged`,
+      label: agentWindowActivityLabel(kind, acknowledgementVisualTone === 'attention' ? STATE_KEY.needsInput : 'cooldown', true),
       pulseActive: false,
       transitionPulseActive: false,
       acknowledged: false,
@@ -16895,7 +17182,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: 'attention',
       icon: '●',
-      label: `${agentLabel(kind)} ${acknowledged ? 'acknowledged' : t('state.needs-input')}`,
+      label: agentWindowActivityLabel(kind, STATE_KEY.needsInput, acknowledged),
       pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
@@ -16914,7 +17201,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: STATE_KEY.working,
       icon: '●',
-      label: `${agentLabel(kind)} ${t('state.working')}`,
+      label: agentWindowActivityLabel(kind, STATE_KEY.working),
       pulseActive: true,
       transitionPulseActive: true,
     };
@@ -16939,7 +17226,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: 'cooldown',
       icon: '●',
-      label: `${agentLabel(kind)} stopped${acknowledged ? ' acknowledged' : ''}`,
+      label: agentWindowActivityLabel(kind, 'cooldown', acknowledged),
       pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(cooldownTransitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(cooldownTransitionStartedAt, nowSeconds),
       acknowledged,
@@ -16947,7 +17234,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       ...(acknowledging ? acknowledgementTiming : {}),
     };
   }
-  if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
+  if (current) return {state: 'active', icon: '', label: agentWindowActivityLabel(kind, 'active')};
   return null;
 }
 
@@ -17232,22 +17519,22 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
     : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
   const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
     ? options.openInNewTabActions
-    : [{label: options.openInNewTabLabel || 'Open in new tab', action: openInNewTab}];
+    : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
   const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
   for (const action of openInNewTabActions) {
     const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
-    appendContextMenuButton(menu, label || 'Open in new tab', action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
   }
-  appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
-  appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
-  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyImage'), () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
+  appendContextMenuButton(menu, t('contextmenu.download'), () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   if (entry?.kind === 'dir') {
-    appendContextMenuButton(menu, 'Zip & download', () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
+    appendContextMenuButton(menu, t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
   }
-  appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
-  appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
-  appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
+  appendContextMenuButton(menu, t(fileExplorerDirectoryIsIndexed(fullPath) ? 'contextmenu.disallowIndex' : 'contextmenu.allowIndex'), () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
+  appendContextMenuButton(menu, t('contextmenu.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
   fileContextMenu.open(menu, x, y);
 }
 
@@ -17276,7 +17563,7 @@ async function copyFilePath(path, label) {
   const text = String(path || '');
   try {
     await copyTextToClipboard(text);
-    statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
+    statusEl.textContent = t(label === 'relative' ? 'status.copiedRelativePath' : 'status.copiedPath');
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
   }
@@ -17285,17 +17572,21 @@ async function copyFilePath(path, label) {
 async function copyImageFileToClipboard(path) {
   if (!globalThis.ClipboardItem || !navigator?.clipboard?.write) {
     await copyFilePath(path, 'path');
-    statusEl.textContent = 'image clipboard unavailable; copied path';
+    statusEl.textContent = t('status.imageClipboardUnavailable');
     return;
   }
   try {
     const response = await apiFetch(rawFileUrl(path), {cache: 'no-store'});
+    if (!response.ok) {
+      await showFileTransferResponseError(response, t('status.copyFailed', {error: t('common.requestFailed')}));
+      return;
+    }
     const blob = await response.blob();
     const type = blob.type || 'image/png';
     await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
-    statusEl.textContent = `copied image ${basenameOf(path)}`;
+    statusEl.textContent = t('status.copiedImage', {name: basenameOf(path)});
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    showFileTransferError(error, {fallback: t('status.copyFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -17335,8 +17626,9 @@ function fileTransferToastContainer(options = {}) {
   return displayToastContainer(options.session || options.item || focusedPanelItem || fileExplorerItemId);
 }
 
-function showFileTransferError(message, options = {}) {
-  const text = String(message || t('fileTransfer.failed')).trim();
+function showFileTransferError(error, options = {}) {
+  const primitiveFallback = typeof error === 'string' || typeof error === 'number' ? String(error) : '';
+  const text = userMessageText(error, primitiveFallback || options.fallback || t('fileTransfer.failed')).trim();
   statusErr(esc(text));
   showToast(t('fileTransfer.failedTitle'), [text], {
     container: fileTransferToastContainer(options),
@@ -17344,52 +17636,48 @@ function showFileTransferError(message, options = {}) {
   });
 }
 
-async function transferErrorMessageFromResponse(response, fallback = '') {
+async function showFileTransferResponseError(response, fallback = '', options = {}) {
   const payload = await response.json().catch(() => ({}));
-  return payload?.error || response.statusText || fallback || `HTTP ${response.status}`;
+  showFileTransferError(payload, {...options, fallback: fallback || response.statusText || `HTTP ${response.status}`});
 }
 
 async function triggerFileDownload(path) {
   if (!path) return;
   const label = basenameOf(path) || path;
-  statusEl.textContent = `downloading ${label}...`;
-  let response;
+  statusEl.textContent = t('fileTransfer.downloading', {name: label});
   try {
-    response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+    const response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+    if (!response.ok) {
+      await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
+      return;
+    }
+    const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
+    const blob = await response.blob();
+    saveBlobDownload(blob, filename);
+    statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
   } catch (error) {
-    showFileTransferError(error?.message || String(error));
-    return;
+    showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
   }
-  if (!response.ok) {
-    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
-    return;
-  }
-  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
-  const blob = await response.blob();
-  saveBlobDownload(blob, filename);
-  statusEl.textContent = `download started: ${filename}`;
 }
 
 async function triggerFolderZipDownload(path) {
   if (!path) return;
   const label = basenameOf(path) || path;
-  statusEl.textContent = `zipping ${label}...`;
-  let response;
+  statusEl.textContent = t('fileTransfer.zipping', {name: label});
   try {
-    response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+    const response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+    if (!response.ok) {
+      await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
+      return;
+    }
+    const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
+    const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
+    const blob = await response.blob();
+    saveBlobDownload(blob, filename);
+    statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
   } catch (error) {
-    showFileTransferError(error?.message || String(error));
-    return;
+    showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
   }
-  if (!response.ok) {
-    showFileTransferError(await transferErrorMessageFromResponse(response, `download failed: ${label}`));
-    return;
-  }
-  const fallbackName = `${basenameOf(path) || 'folder'}.zip`;
-  const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackName);
-  const blob = await response.blob();
-  saveBlobDownload(blob, filename);
-  statusEl.textContent = `download started: ${filename}`;
 }
 
 function copyCurrentFileExplorerPath() {
@@ -17407,7 +17695,7 @@ async function createFileExplorerFile() {
     statusErr(localizedHtml('status.readOnlyCreateFiles'));
     return;
   }
-  const name = window.prompt('New file name');
+  const name = window.prompt(t('dialog.newFileName'));
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
@@ -17416,7 +17704,7 @@ async function createFileExplorerFile() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path, content: ''}),
     });
-    statusEl.textContent = `created ${basenameOf(path)}`;
+    statusEl.textContent = t('status.created', {name: basenameOf(path)});
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
@@ -17429,7 +17717,7 @@ async function createFileExplorerFolder() {
     statusErr(localizedHtml('status.readOnlyCreateFolders'));
     return;
   }
-  const name = window.prompt('New folder name');
+  const name = window.prompt(t('dialog.newFolderName'));
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
@@ -17438,7 +17726,7 @@ async function createFileExplorerFolder() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path}),
     });
-    statusEl.textContent = `created ${basenameOf(path)}`;
+    statusEl.textContent = t('status.created', {name: basenameOf(path)});
     await refreshFileExplorerTrees();
   } catch (error) {
     statusErr(localizedHtml('status.newFolderFailed', {error}));
@@ -17621,10 +17909,12 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     return;
   }
   const deletePaths = compactNestedPaths(paths || fileTreeActionPaths(fullPath));
-  const kind = entry.kind === 'dir' ? 'directory and all contents' : 'file';
-  const confirmText = deletePaths.length === 1
-    ? `Delete ${kind}?\n${deletePaths[0]}`
-    : `Delete ${deletePaths.length} selected items?\n${deletePaths.join('\n')}`;
+  const kind = t(entry.kind === 'dir' ? 'dialog.delete.kindDirectory' : 'dialog.delete.kindFile');
+  const confirmText = tPlural('dialog.delete', deletePaths.length, {
+    kind,
+    path: deletePaths[0],
+    paths: deletePaths.join('\n'),
+  });
   if (!window.confirm(confirmText)) return;
   if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
   try {
@@ -17642,7 +17932,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     }
     for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
-    statusEl.textContent = deletePaths.length === 1 ? `deleted ${basenameOf(deletePaths[0])}` : `deleted ${deletePaths.length} items`;
+    statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
     await refreshFileExplorerTrees();
     if (typeof fetchSessionFiles === 'function') {
       await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -17686,11 +17976,11 @@ async function confirmLargeDirectoryDeletes(deletePaths, primaryPath, primaryEnt
       count = Number(payload?.files);
     } catch (error) {
       console.warn('directory delete count failed', path, error);
-      if (!window.confirm(`Could not count files in this directory, CONFIRM delete?\n${path}`)) return false;
+      if (!window.confirm(t('dialog.delete.countFailed', {path}))) return false;
       continue;
     }
     if (!Number.isFinite(count) || count <= 5) continue;
-    if (!window.confirm(`You have ${Math.round(count)} files in this directory, CONFIRM?\n${path}`)) return false;
+    if (!window.confirm(t('dialog.delete.largeDirectory', {count: Math.round(count), path}))) return false;
   }
   return true;
 }
@@ -17928,7 +18218,7 @@ function beginFileTreeRename(row, fullPath, entry) {
   const input = document.createElement('input');
   input.className = 'file-tree-rename-input';
   input.value = currentName;
-  input.setAttribute('aria-label', `Rename ${currentName}`);
+  input.setAttribute('aria-label', t('contextmenu.renameNamed', {name: currentName}));
   nameNode.replaceChildren(input);
   let finished = false;
   let commitInFlight = false;
@@ -17998,7 +18288,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       if (path === fullPath) renameOpenFilePath(path, newPath);
       else if (path.startsWith(`${fullPath}/`)) renameOpenFilePath(path, `${newPath}${path.slice(fullPath.length)}`);
     }
-    statusEl.textContent = `renamed ${currentName} to ${trimmed}`;
+    statusEl.textContent = t('status.renamed', {oldName: currentName, newName: trimmed});
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
@@ -18167,22 +18457,8 @@ function joinAndNormalize(base, rel) {
   return (isAbs ? '/' : '') + out.join('/');
 }
 
-function apiErrorMessage(error, fallback) {
-  const status = Number(error?.status || error?.payload?.status) || 0;
-  const message = String(
-    error?.payload?.error
-    || error?.error
-    || error?.message
-    || (typeof error === 'string' ? error : '')
-    || fallback
-    || 'request failed'
-  );
-  if (!status || /\bHTTP\b|\bstatus\b/i.test(message) || message.includes(String(status))) return message;
-  return `${message} (HTTP ${status})`;
-}
-
 function fileInspectionErrorMessage(error, path) {
-  return apiErrorMessage(error, `Cannot inspect ${path}`);
+  return userMessageText(error, t('preview.openFailed', {path}));
 }
 
 async function fetchFileEntry(path) {
@@ -18197,20 +18473,20 @@ async function fetchFileEntryStatus(path) {
     return {
       entry: null,
       missing: error?.status === 404,
-      error: fileInspectionErrorMessage(error, path),
+      error: fileErrorMessageSnapshot(error?.source || error, 'preview.openFailed', {path}),
       network: error?.network === true,
     };
   }
   const name = basenameOf(path);
   const entry = entries.find(entry => entry.name === name) || null;
-  return {entry, missing: !entry, error: entry ? '' : `path not found: ${path}`, network: false};
+  return {entry, missing: !entry, error: entry ? null : fileErrorMessageSnapshot(null, 'common.pathNotFound', {path}), network: false};
 }
 
 async function fetchFileInfoStatus(path) {
   try {
-    return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: ''};
+    return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: null};
   } catch (error) {
-    return {info: null, error: apiErrorMessage(error, 'failed to inspect file')};
+    return {info: null, error: fileErrorMessageSnapshot(error, 'editor.fileLoadFailed')};
   }
 }
 
@@ -18390,7 +18666,7 @@ function syncFileLayoutItems() {
 }
 
 function showFileOpenError(path, message) {
-  showToast('File open failed', `${path}\n${message}`, {
+  showToast(t('editor.fileOpenFailedTitle'), `${path}\n${message}`, {
     container: displayToastContainer(fileExplorerItemId),
     className: 'attention-alert toast',
   });
@@ -18410,7 +18686,18 @@ function formatFileSize(bytes) {
   return `${amount.toFixed(decimals)} ${units[index]}`;
 }
 
-function tooLargeFileState(size = null, message = '') {
+function fileErrorMessageSnapshot(message, fallbackKey, fallbackParams = {}) {
+  const source = message && typeof message === 'object' ? message : null;
+  const fallback = source ? '' : String(message || '');
+  return userMessageSnapshot(source, {key: fallbackKey, params: {...fallbackParams}, fallback});
+}
+
+function fileErrorText(error, fallbackKey, fallbackParams = {}) {
+  const fallback = t(fallbackKey, fallbackParams);
+  return error && typeof error === 'object' ? userMessageText(error, fallback) : String(error || fallback);
+}
+
+function tooLargeFileState(size = null, message = null) {
   return {
     mtime: 0,
     kind: 'too-large',
@@ -18419,7 +18706,7 @@ function tooLargeFileState(size = null, message = '') {
     dirty: false,
     size,
     maxBytes: MAX_FILE_PREVIEW_BYTES,
-    error: message,
+    error: message ? fileErrorMessageSnapshot(message, 'editor.fileTooLargeDetail') : null,
   };
 }
 
@@ -18457,19 +18744,19 @@ async function sniffedRawPreviewFileState(path, entry = null) {
   return state;
 }
 
-function fileErrorState(message) {
+function fileErrorState(message = null, fallbackKey = 'editor.fileLoadFailed', fallbackParams = {}) {
   return {
     mtime: 0,
     kind: 'error',
     original: '',
     content: '',
     dirty: false,
-    error: String(message || t('editor.fileLoadFailed')),
+    error: fileErrorMessageSnapshot(message, fallbackKey, fallbackParams),
   };
 }
 
-function missingFileState(message = 'file deleted or moved on disk') {
-  const state = fileErrorState(message);
+function missingFileState(message = null) {
+  const state = fileErrorState(message, 'dialog.missingOnDisk');
   state.externalMissing = true;
   return state;
 }
@@ -18490,11 +18777,14 @@ function clearOpenFileExternalState(state) {
 
 function openFileStatus(state) {
   if (!state) return {message: '', level: ''};
-  if (state.externalMissing) return {message: 'deleted on disk; unsaved edits kept', level: 'warn'};
-  if (state.externalError) return {message: `refresh failed; file state unknown: ${state.externalError}`, level: 'warn'};
-  if (state.externalChanged) return {message: state.dirty ? 'changed on disk; unsaved edits kept' : 'changed on disk; reload available', level: 'warn'};
+  if (state.externalMissing) return {message: state.dirty ? `${t('dialog.missingOnDisk')} · ${t('dialog.unsavedChanges')}` : t('dialog.missingOnDisk'), level: 'warn'};
+  if (state.externalError) return {message: `${t('dialog.unableLoadDisk')}: ${fileErrorText(state.externalError, 'editor.refreshFailed')}`, level: 'warn'};
+  if (state.externalChanged) return {message: state.dirty ? t('dialog.staleStatus') : t('dialog.externalTitle'), level: 'warn'};
   if (state.dirty) return {message: t('filetab.modified'), level: ''};
-  if (state.kind === 'text') return {message: `${String(state.original ?? '').length} chars`, level: ''};
+  if (state.kind === 'text') {
+    const count = String(state.original ?? '').length;
+    return {message: tPlural('editor.status.characters', count), level: ''};
+  }
   if (state.kind === 'image') return {message: state.size ? formatFileSize(state.size) : '', level: ''};
   if (state.kind === 'media') return {message: [state.mime || state.mediaKind, state.size ? formatFileSize(state.size) : ''].filter(Boolean).join(' · '), level: ''};
   return {message: '', level: ''};
@@ -18580,7 +18870,7 @@ async function autoSaveFileEditor(path) {
 function truncateDialogText(text, maxChars = 20000) {
   const value = String(text || '');
   if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n\n... truncated ${value.length - maxChars} chars ...`;
+  return `${value.slice(0, maxChars)}\n\n${t('fileCompare.truncated', {count: value.length - maxChars})}`;
 }
 
 function diffDialogLines(text) {
@@ -18719,7 +19009,7 @@ async function showFileConflictCompareDialog(path, panel = null) {
   const state = openFiles.get(path);
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
-  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? t('dialog.missingOnDisk') : String(diskState?.error || t('dialog.unableLoadDisk'));
+  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? t('dialog.missingOnDisk') : fileErrorText(diskState?.error, 'dialog.unableLoadDisk');
   const action = await showFileEditorDecisionDialog({
     title: t('dialog.compareTitle', {name: basenameOf(path)}),
     bodyHtml: fileConflictCompareHtml(state?.content || '', diskText),
@@ -18904,7 +19194,7 @@ async function focusExistingPhysicalFileEditor(requestedPath, existingPath, opti
   renderOpenFilePath(existingPath);
   const panel = panelNodes.get(item);
   if (panel && requestedPath !== existingPath) {
-    setFileEditorPanelStatus(panel, `already open as ${basenameOf(existingPath)}`, 'ok');
+    setFileEditorPanelStatus(panel, t('editor.alreadyOpenAs', {name: basenameOf(existingPath)}), 'ok');
   }
   return item;
 }
@@ -18946,7 +19236,7 @@ function markOpenFileDiffUnavailable(state, error) {
   state.diffWorking = '';
   state.diffLoaded = true;
   state.diffUnavailable = true;
-  state.diffError = String(error || 'diff unavailable');
+  state.diffError = String(error || t('common.notAvailable'));
 }
 
 async function refreshOpenFileDiff(path, options = {}) {
@@ -19100,14 +19390,13 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   } catch (err) {
     const status = Number(err?.status) || 0;
     if (status) {
-      const message = err?.payload?.error || status;
       let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;
       if (!state) {
         state = status === 413
-          ? tooLargeFileState(entry?.size ?? null, String(message))
+          ? tooLargeFileState(entry?.size ?? null, err)
           : status === 404
-            ? missingFileState(String(message))
-            : fileErrorState(message);
+            ? missingFileState(err)
+            : fileErrorState(err);
       }
       await openFilesSetAndShow(fullPath, state, openOptions);
       return item;
@@ -19129,7 +19418,7 @@ async function openFileStateFromDisk(path, entry = null) {
   const fileEntry = fetched.entry;
   if (!fileEntry) {
     if (fetched.missing) return {missing: true};
-    return {state: fileErrorState(fetched.error || 'failed to inspect file')};
+    return {state: fileErrorState(fetched.error)};
   }
   if (Number(fileEntry.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(fileEntry.size));
@@ -19163,14 +19452,13 @@ async function openFileStateFromDisk(path, entry = null) {
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status) {
-      const message = String(error?.payload?.error || status);
       let state = status === 415 ? await sniffedRawPreviewFileState(path, fileEntry) : null;
       if (!state) {
         state = status === 413
-          ? tooLargeFileState(fileEntry.size ?? null, message)
+          ? tooLargeFileState(fileEntry.size ?? null, error)
           : status === 404
-            ? missingFileState(message)
-            : fileErrorState(message);
+            ? missingFileState(error)
+            : fileErrorState(error);
       }
       state.mtime = fileEntryMtime(fileEntry);
       state.size = fileEntry.size ?? null;
@@ -19197,7 +19485,7 @@ function markOpenFileExternalError(path, error) {
   const state = openFiles.get(path);
   if (!state) return;
   clearFileAutosaveTimer(path);
-  state.externalError = String(error || 'refresh failed');
+  state.externalError = fileErrorMessageSnapshot(error, 'editor.refreshFailed');
   renderOpenFilePath(path);
 }
 
@@ -19265,7 +19553,7 @@ async function reloadOpenFileFromDisk(path, options = {}) {
   const state = openFiles.get(path);
   if (!state) return false;
   if (state.dirty && options.force !== true) {
-    const confirmed = window.confirm(`Reload ${basenameOf(path)} from disk and discard unsaved changes?`);
+    const confirmed = window.confirm(t('dialog.externalMessage', {name: basenameOf(path)}));
     if (!confirmed) return false;
   }
   return replaceOpenFileStateFromDisk(path);
@@ -19641,7 +19929,7 @@ function loadCodeMirrorBundleScript(options = {}) {
       script.src = options.force ? `${assetUrl}${separator}retry=${Date.now()}` : assetUrl;
       script.async = true;
       script.onload = () => resolve(window.YOLOmuxCodeMirror || null);
-      script.onerror = () => reject(new Error(`CodeMirror bundle failed to load: ${script.src}`));
+      script.onerror = () => reject(new Error(t('editor.codemirrorBundleLoadFailed', {url: script.src})));
       document.head.appendChild(script);
     });
   }
@@ -19658,12 +19946,12 @@ async function loadCodeMirrorApi() {
         if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
         bundledApi = await loadCodeMirrorBundleScript({force: true});
         if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
-        bundleError = new Error('CodeMirror bundle missing critical exports');
+        bundleError = new Error(t('editor.codemirrorBundleMissingExports'));
       } catch (err) {
         bundleError = err;
       }
-      const suffix = bundleError ? `: ${bundleError}` : '';
-      throw new Error(`CodeMirror local bundle is unavailable or incomplete${suffix}. Check /static/codemirror.js.`);
+      const detail = bundleError?.message || t('common.notAvailable');
+      throw new Error(t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'}));
     })();
   }
   try {
@@ -20264,6 +20552,30 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
 }
 
+function codeMirrorPhraseValues() {
+  return {
+    Find: t('editor.search.find'),
+    Replace: t('editor.search.replace'),
+    next: t('preview.find.next'),
+    previous: t('preview.find.previous'),
+    all: t('editor.search.all'),
+    'match case': t('editor.search.matchCase'),
+    regexp: t('editor.search.regexp'),
+    'by word': t('editor.search.wholeWord'),
+    'whole word short': t('editor.search.wholeWordShort'),
+    replace: t('editor.search.replace'),
+    'replace all': t('editor.search.replaceAll'),
+    close: t('preview.find.close'),
+  };
+}
+
+function codeMirrorLocaleExtensions(api, panel) {
+  const extension = safeCodeMirrorExtension('localized phrases', () => api.EditorState.phrases.of(codeMirrorPhraseValues()));
+  if (!panel || !api.Compartment) return extension;
+  panel._cmLocaleCompartment = panel._cmLocaleCompartment || new api.Compartment();
+  return panel._cmLocaleCompartment.of(extension);
+}
+
 // When you navigate search matches, CodeMirror's default scrollIntoView lands on a far-right horizontal
 // position if the document has any long line (e.g. a padded locale JSON, 276-char line): a match on a
 // SHORT line then sits off-screen left and the editor looks "scrolled all the way to the right" (blank).
@@ -20327,16 +20639,24 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       syncCodeMirrorFindButtonForView(this.view);
       refreshCodeMirrorFindOverview(this.view.dom?.closest?.('.file-editor-panel'));
       if (!panel) return;
+      const phrases = codeMirrorPhraseValues();
       const next = panel.querySelector?.('.cm-button[name="next"]');
       const previous = panel.querySelector?.('.cm-button[name="prev"]');
       if (next) {
-        next.title = 'Next match (Enter)';
-        next.setAttribute('aria-label', 'Next match (Enter)');
+        const title = `${phrases.next} (Enter)`;
+        next.title = title;
+        next.setAttribute('aria-label', title);
       }
       if (previous) {
-        previous.title = 'Previous match (Shift+Enter)';
-        previous.setAttribute('aria-label', 'Previous match (Shift+Enter)');
+        const title = `${phrases.previous} (Shift+Enter)`;
+        previous.title = title;
+        previous.setAttribute('aria-label', title);
       }
+      for (const button of panel.querySelectorAll?.('.cm-button[name="select"], .cm-button[name="replaceAll"]') || []) {
+        button.dataset.searchLabel = phrases.all;
+      }
+      const wordLabel = panel.querySelector?.('label:has(input[name="word"])');
+      if (wordLabel) wordLabel.dataset.searchLabel = phrases['whole word short'];
       let count = panel.querySelector?.('.cm-search-count');
       if (!count) {
         count = document.createElement('span');
@@ -20397,7 +20717,9 @@ function updateCodeMirrorCursorStatus(panel) {
   const column = main.head - line.from + 1;
   const selectedChars = view.state.selection.ranges.reduce((sum, range) => sum + Math.abs(range.to - range.from), 0);
   const selections = view.state.selection.ranges.length;
-  const selectionText = selectedChars ? ` · ${selections} sel · ${selectedChars} chars` : '';
+  const selectionText = selectedChars
+    ? ` · ${tPlural('editor.status.selections', selections)} · ${tPlural('editor.status.selectedChars', selectedChars)}`
+    : '';
   status.textContent = `${line.number}:${column}${selectionText}`;
 }
 
@@ -20480,6 +20802,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     } : null,
   ].filter(Boolean));
   return [
+    codeMirrorLocaleExtensions(api, panel),
     api.history(),
     api.drawSelection(),
     codeMirrorContextMenuSelectionExtension(api),
@@ -20955,8 +21278,9 @@ async function runDropAction(action, context) {
   const shellActionActsAsAgentPrompt = action.kind === 'shell' && context.pathInserted && (context.agentKind === 'claude' || context.agentKind === 'codex');
   const autoEnter = action.kind === 'shell' && action.readOnly === true && !shellActionActsAsAgentPrompt && boolSetting('uploads.suggestion_autorun', false);
   const inserted = insertIntoTerminal(context.session, `${suffix}${autoEnter ? '\r' : ''}`);
+  const displayLabel = dropActionDisplayLabel(action);
   statusEl.innerHTML = inserted
-    ? `<span class="ok">${localizedHtml(autoEnter ? 'status.ranDropAction' : 'status.insertedDropAction', {name: action.label || action.id})}</span>`
+    ? `<span class="ok">${localizedHtml(autoEnter ? 'status.ranDropAction' : 'status.insertedDropAction', {name: displayLabel})}</span>`
     : `<span class="err">${terminalNotConnectedHtml(context.session)}</span>`;
 }
 
@@ -20969,17 +21293,43 @@ async function runServerDropAction(action, paths) {
     });
     showDropActionResult(payload);
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error: error?.payload?.error || error}));
+    statusErr(localizedHtml('status.copyFailed', {error: userMessageText(error, error)}));
   }
 }
 
 function showDropActionResult(payload) {
+  const presentation = dropActionResultPresentation(payload);
   showFileEditorDecisionDialog({
-    title: payload?.title || t('upload.dropActionResultTitle'),
-    bodyHtml: `<div class="drop-action-result"><pre>${esc(payload?.body || payload?.error || '')}</pre></div>`,
+    title: presentation.title,
+    bodyHtml: `<div class="drop-action-result"><pre>${esc(presentation.body)}</pre></div>`,
     actions: [{id: 'close', label: t('common.close')}],
     className: 'drop-action-result-dialog',
   });
+}
+
+function dropActionResultPresentation(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const result = source.result && typeof source.result === 'object' ? source.result : {};
+  const title = structuredMessageText({...result, title: source.title}, 'title', t('upload.dropActionResultTitle'));
+  const blocks = Array.isArray(result.blocks) ? result.blocks : [];
+  const renderedBlocks = blocks.map(block => {
+    const sections = Array.isArray(block?.sections) ? block.sections : [];
+    const renderedSections = sections.map(section => (Array.isArray(section) ? section : [])
+      .map(item => messageDescriptorText({
+        key: item?.key,
+        params: item?.params,
+        fallback: Object.prototype.hasOwnProperty.call(item || {}, 'raw') ? String(item.raw ?? '') : '',
+      }))
+      .filter(Boolean)
+      .join('\n'))
+      .filter(Boolean);
+    const heading = block?.path ? `## ${String(block.path)}` : '';
+    return [heading, ...renderedSections].filter(Boolean).join('\n\n');
+  }).filter(Boolean);
+  return {
+    title,
+    body: renderedBlocks.join('\n\n') || source.body || userMessageText(source),
+  };
 }
 
 let terminalDropSuggestionState = null;
@@ -21614,7 +21964,7 @@ function updateEditorFindButton(button, state, host = null) {
   const visible = state?.kind === 'text';
   button.hidden = !visible;
   button.disabled = false;
-  const label = `Find in file (${appShortcutText('F')})`;
+  const label = t('editor.findInFile', {shortcut: appShortcutText('F')});
   button.title = label;
   button.setAttribute('aria-label', label);
   const previewMode = fileEditorPanelMode(host) === 'preview';
@@ -21661,7 +22011,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   button.disabled = !visible || (!active && loading);
   const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
-  button.textContent = 'Differ';
+  button.textContent = t('changes.title');
 }
 
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
@@ -21706,7 +22056,7 @@ async function closeEditorFind(host = null) {
     syncCodeMirrorFindButtonForView(view);
     return true;
   } catch (error) {
-    setFileEditorPanelStatus(host, `Find unavailable: ${error}`, 'error');
+    setFileEditorPanelStatus(host, t('editor.findUnavailable', {error}), 'error');
   }
   return false;
 }
@@ -22194,10 +22544,15 @@ function refreshActiveTerminalCursor() {
   }
 }
 
-function refreshMetaButtonTitle() {
+function refreshMetaButtonChrome() {
   if (!refreshMeta) return;
+  const loading = transcriptMetaLoading === true;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.title = t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
+  refreshMeta.textContent = t('meta.refresh');
+  refreshMeta.title = loading
+    ? t('info.loadingRepo')
+    : t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
+  refreshMeta.setAttribute('aria-label', loading ? t('info.loadingRepo') : t('meta.refreshAria'));
 }
 
 function applySettingsPayload(payload, options = {}) {
@@ -22276,7 +22631,7 @@ function applySettingsPayload(payload, options = {}) {
   applyTerminalRuntimeSettings();
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
-  refreshMetaButtonTitle();
+  refreshMetaButtonChrome();
   renderPreferencesPanels();
   renderSessionButtons();
   renderPaneTabStrips();
@@ -22319,14 +22674,16 @@ function scheduleDeferredSettingsMetadataRefresh() {
 
 async function refreshSettings(options = {}) {
   try {
-    const response = await apiFetch('/api/settings', {cache: 'no-store'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/settings', {cache: 'no-store'});
     const changed = applySettingsPayload(payload, {force: options.force === true});
     if (changed) refreshYoloRulesStatus({silent: true});
     if (changed && !options.silent) statusEl.textContent = t('status.settingsReloaded');
   } catch (error) {
-    if (!options.silent) statusErr(localizedHtml('status.settingsReloadFailed', {error}));
+    if (!options.silent) {
+      statusErr(localizedHtml('status.settingsReloadFailed', {
+        error: userMessageText(error, t('common.requestFailed')),
+      }));
+    }
   }
 }
 
@@ -22972,7 +23329,7 @@ function defaultBranchHeadPullRequestForGit(info, git) {
     checks: existing.checks || {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
     // (it is in main's history) — so label it MERGED even though we only inferred it from the subject.
-    status_label: existing.status_label || 'merged',
+    status_label: existing.status_label || t('pr.status.merged'),
     source_only: true,
   };
 }
@@ -23096,7 +23453,7 @@ function projectDirName(session, info) {
   const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
   const repo = selectedSessionRepo(session, info);
   const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath;
-  return pathBasename(path) || 'no path';
+  return pathBasename(path) || t('info.missing.path');
 }
 
 function pathBasename(path) {
@@ -23135,14 +23492,15 @@ function filePopoverRows(path, state = {}) {
 function pathCopyButtonHtml(path, options = {}) {
   const className = ['path-copy-button', options.className || ''].filter(Boolean).join(' ');
   const dataAttr = options.dataAttr || 'data-copy-path';
-  const title = options.title || 'Copy path';
+  const title = options.title || t('contextmenu.copyPath');
   return `<button type="button" class="${esc(className)}" ${dataAttr}="${esc(path)}" title="${esc(title)}" aria-label="${esc(options.ariaLabel || title)}"></button>`;
 }
 
 function popoverCopyValueHtml(value, options = {}) {
   const text = String(value || '').trim();
   if (!text) return '';
-  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: options.title || 'Copy', ariaLabel: options.ariaLabel || options.title || 'Copy'})}`;
+  const copyLabel = options.title || t('debug.copy');
+  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: copyLabel, ariaLabel: options.ariaLabel || copyLabel})}`;
 }
 
 function filePopoverPathHtml(path) {
@@ -23219,11 +23577,13 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
   const state = String(agent?.state || STATE_KEY.idle);
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
-    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
+    return Number.isFinite(elapsed) && elapsed >= 0
+      ? t('state.workingFor', {duration: compactElapsedDurationText(elapsed)})
+      : stateDef(STATE_KEY.working).label;
   }
   if (agentWindowIsAttentionState(state)) return sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true});
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
-  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
+  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : stateDef(STATE_KEY.idle).label;
 }
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
@@ -23235,7 +23595,7 @@ function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, cl
 function tmuxSessionDescriptorLabel(label) {
   const text = String(label || '').trim();
   if (/^tmux\s+session\b/i.test(text)) return text;
-  return t('popover.tmuxSession', {label: text});
+  return t('common.tmuxSession', {label: text});
 }
 
 function tmuxWindowDescriptorLabel(label) {
@@ -23333,7 +23693,7 @@ function sessionPopoverWindowMetadataItems(session, info, agentRows) {
 function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null, metadataItems = null) {
   const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
   if (!agents.length) {
-    return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
+    return `<div class="session-agent-list empty"><div class="session-agent-empty">${esc(t('yoagent.emptyPerSession'))}</div></div>`;
   }
   const nowSeconds = Date.now() / 1000;
   const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(session, info, agents);
@@ -23363,6 +23723,13 @@ function windowMetadataBranchHtml(git) {
   return `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
 }
 
+function worktreePopoverValueHtml(worktree) {
+  return esc(t('popover.worktreeOf', {
+    name: worktree?.name || worktree?.path || '',
+    root: worktree?.parent_root || '',
+  }));
+}
+
 function windowMetadataRowsHtml(row) {
   if (!row) return '';
   const git = row.git || {};
@@ -23372,7 +23739,7 @@ function windowMetadataRowsHtml(row) {
   for (const path of displayPaths) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(path)));
   if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
   if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), git.root));
-  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return rows.join('');
@@ -23391,8 +23758,8 @@ function agentTranscriptRowsHtml(agent) {
   if (!transcript) return '';
   const transcriptId = agentTranscriptId(agent);
   const rows = [];
-  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: 'Copy session ID'})));
-  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: 'Copy transcript path'})));
+  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: t('popover.copySessionId')})));
+  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: t('transcript.copyPath')})));
   return rows.join('');
 }
 
@@ -23411,7 +23778,9 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const autoPayload = autoApproveStates.get(session);
   const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
   const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
-  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
+  const agentValue = agentKind
+    ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}`
+    : (autoText || `<span data-locale-text-key="agent.notDetected">${esc(t('agent.notDetected'))}</span>`);
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
   const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
@@ -23429,17 +23798,17 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   if (linear.length) {
     linearValue = linearInlineHtml(linear);
     linearDesc = linearDescriptionsInlineHtml(linear);
-    if (linearValue) rows.push(popoverRow('Linear', linearValue));
+    if (linearValue) rows.push(popoverRow(t('info.field.linear'), linearValue));
     if (linearDesc) rows.push(popoverRow(t('popover.details'), linearDesc));
   }
   if (pr?.number) {
-    rows.push(popoverRow('PR', pullRequestPopoverRowHtml(session, pr)));
+    rows.push(popoverRow(t('searchHistory.pr'), pullRequestPopoverRowHtml(session, pr)));
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (!perWindowMetadata && gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
@@ -23706,7 +24075,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       showFileOpenError(path, error);
     }
   }
-  if (opened) statusOk(`opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}`);
+  if (opened) statusOk(esc(tPlural('status.openedFiles', opened, {name: basenameOf(paths[0])})));
 }
 
 function terminalCurrentPath(session) {
@@ -23826,7 +24195,7 @@ function paneDragPreviewHtml(slot) {
   return `
     <div class="pane-drag-image-frame">
       <div class="pane-drag-image-title">${esc(title)}</div>
-      <div class="pane-drag-image-meta">${esc(count === 1 ? '1 tab' : `${count} tabs`)}</div>
+      <div class="pane-drag-image-meta">${esc(tPlural('common.tabs', count))}</div>
       ${extra ? `<div class="pane-drag-image-tabs">${extra}</div>` : ''}
     </div>`;
 }
@@ -23862,11 +24231,11 @@ function startFileDragPreview(event, paths, entry) {
   const firstPath = normalizedPaths[0] || '';
   const preview = document.createElement('div');
   preview.className = 'file-drag-image drag-image';
-  const title = normalizedPaths.length === 1 ? basenameOf(firstPath) : `${normalizedPaths.length} items`;
+  const title = normalizedPaths.length === 1 ? basenameOf(firstPath) : t('common.items', {count: normalizedPaths.length});
   const pathRows = normalizedPaths.slice(0, 4)
     .map(path => `<div class="file-drag-path">${esc(path)}</div>`)
     .join('');
-  const more = normalizedPaths.length > 4 ? `<div class="file-drag-more">+ ${normalizedPaths.length - 4} more</div>` : '';
+  const more = normalizedPaths.length > 4 ? `<div class="file-drag-more">${esc(t('common.more', {count: normalizedPaths.length - 4}))}</div>` : '';
   preview.innerHTML = `
     <div class="file-drag-main">
       ${fileDragPreviewMedia(firstPath, entry)}
@@ -23940,7 +24309,7 @@ function showDragTimingOverlay(rows) {
     el = document.createElement('pre');
     el.id = 'drag-timing-overlay';
     el.className = 'drag-timing-overlay';
-    el.title = 'drag timing (flag: yolomux.debugDragTiming) — click to select, then copy';
+    el.title = t('debug.dragTimingTitle');
     el.addEventListener('click', () => {
       const range = document.createRange();
       range.selectNodeContents(el);
@@ -24052,7 +24421,7 @@ function fileExplorerHiddenStatusMessage() {
 }
 
 function hiddenFromLayoutStatusMessage(item) {
-  return isFileExplorerItem(item) ? fileExplorerHiddenStatusMessage() : `${itemLabel(item)} hidden from layout`;
+  return isFileExplorerItem(item) ? fileExplorerHiddenStatusMessage() : t('layout.status.hidden', {items: itemLabel(item)});
 }
 
 function removeSessionFromLayout(item, options = {}) {
@@ -24075,7 +24444,7 @@ function removePaneFromLayout(item) {
   if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
   if (typeof closePopoutsForLayoutItem === 'function') moved.forEach(closePopoutsForLayoutItem);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
+    message: moved.length ? t('layout.status.hidden', {items: moved.map(itemLabel).join(', ')}) : '',
   });
 }
 
@@ -24174,7 +24543,7 @@ function minimizePaneFromLayout(item) {
   applyLayoutSlots(next, {
     focusSession: targetActive || targetTabs[0],
     prune: false,
-    message: `${minimizedTabs.map(itemLabel).join(', ')} minimized`,
+    message: t('layout.status.minimized', {items: minimizedTabs.map(itemLabel).join(', ')}),
   });
 }
 
@@ -24214,7 +24583,7 @@ function expandPaneFromLayout(item) {
   applyLayoutSlots(next, {
     focusSession: active,
     prune: false,
-    message: `${itemLabel(active)} expanded`,
+    message: t('layout.status.expanded', {item: itemLabel(active)}),
   });
 }
 
@@ -24234,10 +24603,7 @@ function preferredNonFinderLayoutSlots(finderSlot = null) {
 
 function layoutModeStatusMessage(mode) {
   const normalized = normalizeLayoutMode(mode);
-  if (normalized === 'single') return 'single pane layout';
-  if (normalized === 'split') return 'split layout';
-  if (normalized === 'grid') return 'grid layout';
-  return 'wall layout';
+  return t(`menu.view.layout.${normalized}`);
 }
 
 function applyNonFinderLayoutMode(mode) {
@@ -24498,7 +24864,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
-    message: evicted.length ? `${evicted.map(itemLabel).join(', ')} auto-closed (tab limit ${maxTabsPerPane()})` : '',
+    message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
   });
 }
 
@@ -24945,25 +25311,27 @@ function pullRequestStatusLabel(pr) {
 function pullRequestStatusDisplay(pr) {
   const status = pullRequestStatusLabel(pr);
   if (!status) return '';
+  if (pullRequestIsMerged(pr)) return t('pr.status.merged');
   const key = status.toLowerCase();
   if (key === 'unknown') return '';
-  if (key === 'merged') return t('pr.status.merged');
   if (key === 'draft') return t('pr.status.draft');
   if (key === 'closed') return t('pr.status.closed');
   if (key === 'open') return t('pr.status.open');
-  if (key.includes('failing')) return t('pr.status.failing');
-  if (key.includes('pending')) return t('pr.status.pending');
-  if (key.includes('passing')) return t('pr.status.passing');
+  const ci = pullRequestCiStatus(pr);
+  if (ci) return ci.text;
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
 }
 
 function pullRequestIsMerged(pr) {
-  return pullRequestStatusLabel(pr).toLowerCase() === 'merged';
+  if (!pr) return false;
+  if (pr.merged === true || pr.merged_at) return true;
+  return /\bmerged\b/.test(pullRequestStatusLabel(pr).toLowerCase());
 }
 
 function pullRequestInlineStatusDisplay(pr) {
+  if (pullRequestIsMerged(pr)) return '';
   const key = pullRequestStatusLabel(pr).toLowerCase();
-  if (key === 'merged' || key === 'open') return '';
+  if (key === 'open') return '';
   return pullRequestStatusDisplay(pr);
 }
 
@@ -24972,23 +25340,42 @@ function pullRequestLinkLabel(pr) {
   return `#${pr.number}${status ? ` ${status}` : ''}`;
 }
 
-function pullRequestStatusClass(pr) {
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (status.includes('failing')) return 'pr-status-failing';
-  if (status.includes('pending')) return 'pr-status-pending';
-  if (status.includes('passing')) return 'pr-status-passing';
-  if (status.includes('merged')) return 'pr-status-merged';
-  if (status.includes('draft')) return 'pr-status-draft';
-  if (status.includes('closed')) return 'pr-status-closed';
-  return 'pr-status-unknown';
+const PULL_REQUEST_CI_STATUS_SPECS = Object.freeze({
+  passing: Object.freeze({className: 'pr-status-passing', key: 'pr.ci.passing', fallback: 'CI passing'}),
+  failing: Object.freeze({className: 'pr-status-failing', key: 'pr.ci.failing', fallback: 'CI failing'}),
+  pending: Object.freeze({className: 'pr-status-pending', key: 'pr.ci.pending', fallback: 'CI pending'}),
+});
+
+function pullRequestCiState(pr) {
+  if (!pr || pullRequestIsMerged(pr)) return '';
+  const checks = pr.checks && typeof pr.checks === 'object' ? pr.checks : {};
+  const candidates = [checks.state, checks.status_label, checks.conclusion, pr.status_label];
+  for (const value of candidates) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw || raw === 'unknown' || raw === 'ci unknown') continue;
+    if (/\b(failure|failing|failed|red|error|cancelled|timed_out|action_required)\b/.test(raw)) return 'failing';
+    if (/\b(pending|queued|in_progress|running|waiting|requested)\b/.test(raw)) return 'pending';
+    if (/\b(success|passing|passed|green)\b/.test(raw)) return 'passing';
+  }
+  return '';
 }
 
-function pullRequestCiStatusClass(pr) {
-  const state = String(pr?.checks?.state || '').toLowerCase();
-  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
-  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
-  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
-  return pullRequestStatusClass(pr);
+function pullRequestCiStatus(pr) {
+  const state = pullRequestCiState(pr);
+  const spec = PULL_REQUEST_CI_STATUS_SPECS[state];
+  if (!spec) return null;
+  const descriptor = {key: spec.key, params: {}, fallback: spec.fallback};
+  return {state, className: spec.className, descriptor, text: messageDescriptorText(descriptor)};
+}
+
+function pullRequestStatusClass(pr) {
+  if (pullRequestIsMerged(pr)) return 'pr-status-merged';
+  const status = pullRequestStatusLabel(pr).toLowerCase();
+  if (status.includes('draft')) return 'pr-status-draft';
+  if (status.includes('closed')) return 'pr-status-closed';
+  const ci = pullRequestCiStatus(pr);
+  if (ci) return ci.className;
+  return 'pr-status-unknown';
 }
 
 function pullRequestStatusBadgeHtml(session, text, statusClass, options = {}) {
@@ -25006,10 +25393,9 @@ function pullRequestStatusIndicatorHtml(session, pr) {
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
-  if (pullRequestIsMerged(pr)) return '';
-  const state = pr?.checks?.state;
-  if (!state || state === 'unknown') return '';
-  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
+  const ci = pullRequestCiStatus(pr);
+  if (!ci) return '';
+  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${ci.className}`)}">CI</span>`;
 }
 
 function pullRequestNumberIndicatorHtml(session, pr) {
@@ -25084,11 +25470,10 @@ function pullRequestColumnLinkHtml(pr) {
 }
 
 function pullRequestChecksHtml(pr) {
-  if (pullRequestIsMerged(pr)) return '';
-  const checks = pr?.checks;
-  if (!checks || !checks.state || checks.state === 'unknown') return '';
-  const cls = pullRequestCiStatusClass(pr);
-  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || t('pr.checks.state', {state: checks.state}))}</span>`];
+  const ci = pullRequestCiStatus(pr);
+  if (!ci) return '';
+  const checks = pr?.checks && typeof pr.checks === 'object' ? pr.checks : {};
+  const parts = [`<span class="meta-pr-status ${ci.className}">${esc(ci.text)}</span>`];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
   )).filter(Boolean).join(', ');
@@ -25244,9 +25629,8 @@ function projectMetaParts(session, info, options = {}) {
   if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (pr?.number) {
-    if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
-      metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
-    }
+    const ci = pullRequestCiStatus(pr);
+    if (ci) metadataParts.push(`<span class="meta-pr-status ${ci.className}">${esc(ci.text)}</span>`);
   }
   const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
   if (desc) {
@@ -25311,37 +25695,52 @@ function showRepoChipMenu(session, x, y) {
   repoChipContextMenu.open(menu, x, y);
 }
 
+function summaryAgentContextText(agent) {
+  const params = {
+    agent: agent?.kind || t('popover.agent'),
+    pid: agent?.pid || '',
+    status: agent?.status || '',
+  };
+  return t(agent?.status ? 'summary.agentDetailsWithStatus' : 'summary.agentDetails', params);
+}
+
 function summaryContextHtml(session, info, agent) {
   const lines = [];
   const pane = info?.selected_pane;
   if (agent) {
-    lines.push(summaryContextLine('agent', `${agent.kind || 'agent'} pid=${agent.pid || ''}${agent.status ? ` status=${agent.status}` : ''}`));
-    if (agent.transcript) lines.push(summaryContextLine('transcript', agent.transcript));
-    if (agent.error && !agent.transcript) lines.push(summaryContextLine('transcript', agent.error));
+    lines.push(summaryContextLine(t('popover.agent'), summaryAgentContextText(agent)));
+    if (agent.transcript) lines.push(summaryContextLine(t('tab.transcript'), agent.transcript));
+    if (agent.error && !agent.transcript) lines.push(summaryContextLine(t('tab.transcript'), agent.error));
   } else {
-    lines.push(summaryContextLine('agent', 'not detected'));
+    lines.push(summaryContextLine(t('popover.agent'), t('agent.notDetected')));
   }
-  if (pane) lines.push(summaryContextLine('pane', `${pane.command || 'tmux'} ${pane.target || session} in ${pane.current_path || ''}`));
+  if (pane) {
+    lines.push(summaryContextLine(t('yoagent.action.row.pane'), t('summary.paneLocation', {
+      command: pane.command || 'tmux',
+      target: pane.target || session,
+      path: pane.current_path || '',
+    })));
+  }
 
   const project = info?.project || {};
   const git = project.git;
   if (git) {
-    lines.push(summaryContextLine('branch', `${git.branch || 'unknown'}${git.upstream ? ` -> ${git.upstream}` : ''}`));
-    if (git.root) lines.push(summaryContextLine('repo', git.root));
+    lines.push(summaryContextLine(t('popover.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
+    if (git.root) lines.push(summaryContextLine(t('popover.repo'), git.root));
     // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-    if (git.worktree) lines.push(summaryContextLine('worktree', `${git.worktree.name || git.worktree.path} — worktree of ${git.worktree.parent_root}`));
-    if (git.head) lines.push(summaryContextLine('head', git.head));
+    if (git.worktree) lines.push(summaryContextLine(t('popover.worktree'), worktreeDisplayText(git.worktree)));
+    if (git.head) lines.push(summaryContextLine(t('info.meta.gitCommit'), git.head));
   } else {
-    lines.push(summaryContextLine('repo', 'no git checkout detected'));
+    lines.push(summaryContextLine(t('popover.repo'), t('git.noCheckout')));
   }
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const label = pullRequestLinkLabel(pr);
-    lines.push(summaryContextLine('github', `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
+    lines.push(summaryContextLine(t('pref.section.github'), `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
   }
   for (const issue of project.linear || []) {
     const label = `${issue.identifier}${issue.state ? ` ${issue.state}` : ''}`;
-    lines.push(summaryContextLine('linear', `${label} ${issue.title || ''}`, issue.url, issue.identifier));
+    lines.push(summaryContextLine(t('info.field.linear'), `${label} ${issue.title || ''}`, issue.url, issue.identifier));
   }
   return lines.join('');
 }
@@ -25362,12 +25761,12 @@ async function ensureSession(session) {
     try {
       const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
       statusEl.innerHTML = payload.created
-        ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
-        : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
+        ? `<span class="ok">${localizedHtml('status.sessionCreatedWithAgent', {session: sessionLabel(session), agent: 'Claude'})}</span>`
+        : `<span class="ok">${localizedHtml('status.sessionReady', {session: sessionLabel(session)})}</span>`;
       return true;
     } catch (error) {
       if (error?.status) {
-        statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+        statusErr(esc(userMessageText(error, t('status.sessionCreateFailedDefault'))));
         return false;
       }
       statusErr(localizedHtml('status.sessionCheckFailed', {error}));
@@ -25399,8 +25798,8 @@ async function createNextSession(agent) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
   }
-  const agentLabel = agentName(agent) || 'agent';
-  statusEl.textContent = `creating ${agentLabel} session...`;
+  const agentLabel = agentName(agent) || t('popover.agent');
+  statusEl.textContent = t('status.sessionCreating', {agent: agentLabel});
   try {
     const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     markPendingTmuxSession(payload.session);
@@ -25412,10 +25811,14 @@ async function createNextSession(agent) {
     await ensureTerminalRunning(payload.session);
     refreshTranscripts({force: true});
     renderAutoApproveButtons();
-    statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
+    statusOk(localizedHtml('status.sessionCreated', {
+      label: sessionLabel(payload.session),
+      session: payload.session,
+      agent: agentName(payload.agent) || agentLabel,
+    }));
   } catch (error) {
     if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+      statusErr(esc(userMessageText(error, t('status.sessionCreateFailedDefault'))));
       return;
     }
     statusErr(localizedHtml('status.sessionCreateFailed', {error}));
@@ -25592,7 +25995,7 @@ async function renameTmuxSession(session, proposedName) {
     closeSessionRenameDialog();
     return true;
   }
-  statusEl.textContent = `renaming ${sessionLabel(session)}...`;
+  statusEl.textContent = t('status.sessionRenaming', {session: sessionLabel(session)});
   try {
     const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
     const renamed = payload.new_session || newName;
@@ -25601,11 +26004,11 @@ async function renameTmuxSession(session, proposedName) {
     await ensureTerminalRunning(renamed);
     refreshTranscripts({force: true});
     renderAutoApproveButtons();
-    statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
+    statusOk(localizedHtml('status.sessionRenamed', {oldName: session, newName: renamed}));
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionRenameFailedDefault')));
+      statusErr(esc(userMessageText(error, t('status.sessionRenameFailedDefault'))));
       return false;
     }
     statusErr(localizedHtml('status.sessionRenameFailed', {error}));
@@ -25619,8 +26022,8 @@ async function killTmuxSession(session) {
     return false;
   }
   if (!isTmuxSession(session)) return false;
-  if (!window.confirm(`Kill tmux session ${sessionLabel(session)}?`)) return false;
-  statusEl.textContent = `killing ${sessionLabel(session)}...`;
+  if (!window.confirm(t('dialog.sessionKill', {session: sessionLabel(session)}))) return false;
+  statusEl.textContent = t('status.sessionKilling', {session: sessionLabel(session)});
   try {
     const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
@@ -25634,11 +26037,11 @@ async function killTmuxSession(session) {
     if (sessionsChanged) renderPaneTabStrips();
     refreshTranscripts({force: true});
     renderAutoApproveButtons();
-    statusOk(`killed ${esc(sessionLabel(session))}`);
+    statusOk(localizedHtml('status.sessionKilled', {session: sessionLabel(session)}));
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(esc(error.payload?.error || t('status.sessionKillFailedDefault')));
+      statusErr(esc(userMessageText(error, t('status.sessionKillFailedDefault'))));
       return false;
     }
     statusErr(localizedHtml('status.sessionKillFailed', {error}));
@@ -26562,7 +26965,7 @@ function dismissTerminalConnectionToasts(session) {
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
   const node = showToast(
-    compactNotificationTitle(sessionLabel(session), 'terminal', {inApp: true}),
+    compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true}),
     text,
     {
       container: displayToastContainer(session),
@@ -26614,7 +27017,7 @@ function pruneDeadSession(session) {
   renderPanels(previousActive);
   renderPaneTabStrips();
   renderAutoApproveButtons();
-  statusOk(`${esc(sessionLabel(session))} ended`);
+  statusOk(localizedHtml('status.sessionEnded', {session: sessionLabel(session)}));
 }
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
@@ -26900,7 +27303,7 @@ function swapPaneSlots(sourceSlot, targetSlot) {
     focusSession: activeItemForSide(targetSlot, next) || activeItemForSide(sourceSlot, next),
     prune: false,
     forceFull: dockviewLayoutActive(),
-    message: 'panes swapped',
+    message: t('layout.status.swapped'),
   });
   return true;
 }
@@ -27063,6 +27466,15 @@ function applyDockedFileExplorerBoundaryPreviewGeometry(node, intent) {
   node.style.setProperty('--drop-preview-width', `${Math.round(Math.max(0, contentRect.width - 12))}px`);
 }
 
+function dropPreviewLabel(intent = {}) {
+  const zone = intent.zone || 'middle';
+  if (intent.swap === true) return t('layout.drop.swap');
+  if (intent.boundary === 'root') return t('layout.drop.fullZone', {zone: t(`layout.zone.${zone}`)});
+  if (intent.boundary === 'gutter') return t('layout.drop.fullSpan');
+  if (zone === 'middle') return t('layout.drop.takeOver');
+  return t(`layout.zone.${zone}`);
+}
+
 function showDropPreview(intent) {
   clearDropPreview();
   const node = intent?.boundary ? grid : intent?.previewNode;
@@ -27070,15 +27482,7 @@ function showDropPreview(intent) {
   const zone = intent.zone || 'middle';
   node.classList.add(CLS.dragOver, CLS.dropPreview, `drop-preview-${zone}`);
   if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
-  node.dataset.dropLabel = intent.swap === true
-    ? 'swap'
-    : intent.boundary === 'root'
-    ? `full ${zone}`
-    : intent.boundary === 'gutter'
-      ? 'full span'
-      : zone === 'middle'
-        ? 'take over'
-        : zone;
+  node.dataset.dropLabel = dropPreviewLabel(intent);
   applyGutterDropPreviewGeometry(node, intent);
   applyDockedFileExplorerBoundaryPreviewGeometry(node, intent);
 }
@@ -28832,13 +29236,7 @@ function dockviewPaneTabHtml(item) {
 }
 
 function dockviewTabAriaLabel(item) {
-  if (isFileEditorItem(item)) {
-    const missing = openFileIsMissing(fileItemPath(item)) ? ' missing on disk' : '';
-    return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
-  }
-  const type = tabTypeForItem(item);
-  if (type) return itemLabel(item);
-  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMeta.sessions?.[item], 140)}`.trim();
+  return paneTabAriaLabel(item);
 }
 
 function dockviewRefreshTabs() {
@@ -29319,7 +29717,7 @@ function pruneSmallLayoutSlots() {
   if (!candidate) return;
   const moved = paneTabs(candidate.slot);
   applyLayoutSlots(layoutWithoutSlot(candidate.slot), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout: not enough room` : '',
+    message: moved.length ? t('layout.status.hiddenNoRoom', {items: moved.map(itemLabel).join(', ')}) : '',
   });
 }
 
@@ -29615,14 +30013,15 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
   html = `${pinnedTabIconHtml(item)}${html}`;
   if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
+    const closeLabel = isEditor
+      ? t('finder.close', {name: itemLabel(item)})
+      : t('finder.hideFromLayout', {name: itemLabel(item)});
     const controlKind = isEditor ? 'close' : 'minimize';
     html += toolbarButtonHtml({
       className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
       action: 'pane-tab-close',
       dataset: {paneTabClose: ''},
-      title: closeTitle,
+      title: closeLabel,
       ariaLabel: closeLabel,
     });
   }
@@ -29687,9 +30086,7 @@ function createPaneTab(side, item, displayContext = {}) {
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isEditor
-    ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
-    : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', paneTabAriaLabel(item));
   tab.addEventListener('pointerdown', event => {
     dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
     dragTimingMark('pointerdown');
@@ -29749,6 +30146,16 @@ function createPaneTab(side, item, displayContext = {}) {
   return tab;
 }
 
+function paneTabAriaLabel(item) {
+  if (isFileEditorItem(item)) {
+    const missing = openFileIsMissing(fileItemPath(item)) ? ` ${t('filetab.missingTitle')}` : '';
+    return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
+  }
+  const type = tabTypeForItem(item);
+  if (type) return itemLabel(item);
+  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMeta.sessions?.[item], 140)}`.trim();
+}
+
 function beginPaneTabRename(tab, session) {
   if (isFileEditorItem(session)) {
     beginFileTabRename(tab, session);
@@ -29771,7 +30178,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   const currentName = basenameOf(path);
-  const nextName = window.prompt(`Rename ${currentName}`, currentName);
+  const nextName = window.prompt(t('rename.title', {name: currentName}), currentName);
   if (nextName === null) return;
   renameFileTreePath(path, entry, nextName);
 }
@@ -30431,12 +30838,12 @@ function schedulePanelDetailsFit(panel) {
 }
 
 function terminalTabDisplayLabel(session, info) {
-  return 'Term';
+  return t('tab.terminal.short');
 }
 
 function terminalTabDetailLabel(session, info) {
   const label = terminalProcessLabel(session, info);
-  return label || 'Term';
+  return label || t('tab.terminal.short');
 }
 
 function terminalTabLabel(session, info) {
@@ -30448,7 +30855,7 @@ function terminalTabLabel(session, info) {
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalTabDetailLabel(session, info)}`;
+  return t('terminal.tab.title', {name: terminalTabDetailLabel(session, info)});
 }
 
 function terminalProcessLabel(session, info) {
@@ -30458,7 +30865,7 @@ function terminalProcessLabel(session, info) {
   if (agent?.command) return processLabelFromCommand(agent.command);
   if (agent?.kind) return agent.kind;
   if (pane?.command) return pane.command;
-  return 'Term';
+  return t('tab.terminal.short');
 }
 
 function terminalDisplayPaneForWindowIndex(info, windowIndex) {
@@ -30834,7 +31241,7 @@ function tmuxWindowDisplayName(pane) {
   const name = String(pane?.window_name || '').trim();
   if (name) return name;
   const inferred = processLabelFromCommand(pane?.command || '');
-  return String(inferred || '').trim() || `window ${pane?.window ?? ''}`.trim() || 'window';
+  return String(inferred || '').trim() || t('terminal.window.unnamed', {index: pane?.window ?? ''});
 }
 
 function tmuxWindowProcessPid(pane) {
@@ -30844,7 +31251,7 @@ function tmuxWindowProcessPid(pane) {
 
 function tmuxWindowPidText(pid) {
   const value = Number(pid);
-  return Number.isFinite(value) && value > 0 ? `(pid=${Math.floor(value)})` : '';
+  return Number.isFinite(value) && value > 0 ? t('terminal.window.pid', {pid: Math.floor(value)}) : '';
 }
 
 function tmuxWindowDisplayLabel(name, pid) {
@@ -31020,11 +31427,11 @@ function handleWindowStepButtonClick(event) {
     } else if (typeof acknowledgeAgentWindowActivity === 'function') {
       acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
     }
-    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);
+    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, t('terminal.window.title', {name: label}));
     return;
   }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
-  const label = button.dataset.windowDir === 'prev' ? 'previous tmux sub-window' : 'next tmux sub-window';
+  const label = button.dataset.windowDir === 'prev' ? t('terminal.window.previous') : t('terminal.window.next');
   tmuxWindow(button.dataset.windowSession, key, label);
 }
 
@@ -31151,7 +31558,49 @@ function runHistoryAgentLabel(row) {
 function runHistoryPrLabel(row) {
   const pr = row?.pr && typeof row.pr === 'object' ? row.pr : null;
   if (!pr?.number) return '';
-  return `${t('searchHistory.pr')} #${pr.number}${pr.state ? ` ${pr.state}` : ''}`;
+  const status = pullRequestStatusDisplay(pr);
+  return `${t('searchHistory.pr')} #${pr.number}${status ? ` ${status}` : ''}`;
+}
+
+function runHistoryStateLabel(value) {
+  const state = String(value || '');
+  if (state && stateDefs[state]) return stateDef(state).label;
+  if (state === 'waiting') return t('searchHistory.runState.waiting');
+  return t('common.unknown');
+}
+
+const SEARCH_HISTORY_SOURCE_KEYS = Object.freeze({
+  event: 'searchHistory.source.event',
+  session_summary: 'searchHistory.source.sessionSummary',
+  rolling_summary: 'searchHistory.source.rollingSummary',
+  global_summary: 'searchHistory.source.globalSummary',
+});
+const SEARCH_HISTORY_SOURCE_BY_LEGACY_KIND = Object.freeze({
+  event: 'event',
+  summary: 'session_summary',
+  global_summary: 'global_summary',
+});
+
+function searchHistorySourceLabel(result) {
+  const kind = String(result?.kind || '');
+  const source = String(result?.source || SEARCH_HISTORY_SOURCE_BY_LEGACY_KIND[kind] || '');
+  const key = SEARCH_HISTORY_SOURCE_KEYS[source];
+  return key ? t(key) : t('common.result');
+}
+
+function searchHistoryErrorText(payload) {
+  if (!payload) return '';
+  const message = structuredMessageText(payload, 'message');
+  if (message) return message;
+  return userMessageText(payload, String(payload?.error || payload?.message || payload));
+}
+
+function searchHistoryPanelErrors() {
+  const payloadErrors = Array.isArray(runHistoryPayload?.errors) ? runHistoryPayload.errors : [];
+  return [searchHistoryError, runHistoryError, ...payloadErrors]
+    .filter(Boolean)
+    .map(searchHistoryErrorText)
+    .filter(Boolean);
 }
 
 function runHistoryMetaParts(row) {
@@ -31162,7 +31611,7 @@ function runHistoryMetaParts(row) {
     runHistoryAgentLabel(row),
     started ? `${t('searchHistory.started')}: ${started}` : '',
     ended ? `${t('searchHistory.ended')}: ${ended}` : '',
-    row?.final_state ? `${t('searchHistory.finalState')}: ${row.final_state}` : '',
+    row?.final_state ? `${t('searchHistory.finalState')}: ${runHistoryStateLabel(row.final_state)}` : '',
     runHistoryPrLabel(row),
   ].filter(Boolean);
 }
@@ -31171,11 +31620,13 @@ function searchHistoryResultHtml(result, index) {
   const target = result?.target && typeof result.target === 'object' ? result.target : {};
   const session = target.session || result?.session || '';
   const time = searchHistoryTimeLabel(result?.timestamp);
-  const meta = [session, result?.kind || result?.source || '', time].filter(Boolean).join(' · ');
+  const meta = [session, searchHistorySourceLabel(result), time].filter(Boolean).join(' · ');
+  const title = structuredMessageText(result, 'title') || t('common.result');
+  const snippet = structuredMessageText(result, 'snippet');
   return `<button type="button" class="search-history-result" data-search-result-index="${index}">
     <span class="search-history-row-meta">${esc(meta)}</span>
-    <span class="search-history-row-title">${esc(result?.title || result?.kind || t('searchHistory.result'))}</span>
-    <span class="search-history-row-snippet">${esc(result?.snippet || '')}</span>
+    <span class="search-history-row-title">${esc(title)}</span>
+    <span class="search-history-row-snippet">${esc(snippet)}</span>
   </button>`;
 }
 
@@ -31210,12 +31661,13 @@ function runHistoryRowsHtml() {
 
 function searchHistoryPanelStatusText() {
   if (searchHistoryLoading || runHistoryLoading) return t('common.loading');
-  if (searchHistoryError || runHistoryError) return searchHistoryError || runHistoryError;
+  const [error] = searchHistoryPanelErrors();
+  if (error) return error;
   return t('searchHistory.detail');
 }
 
 function searchHistoryPanelHtml() {
-  const errors = [searchHistoryError, runHistoryError].filter(Boolean);
+  const errors = searchHistoryPanelErrors();
   const errorHtml = errors.length ? `<div class="search-history-error">${esc(errors.join(' · '))}</div>` : '';
   return `
     <form class="search-history-search" data-search-history-form>
@@ -31248,12 +31700,14 @@ function renderSearchHistoryPanels() {
 
 async function refreshRunHistoryData() {
   runHistoryLoading = true;
-  runHistoryError = '';
+  runHistoryError = null;
   renderSearchHistoryPanels();
   try {
     runHistoryPayload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
   } catch (error) {
-    runHistoryError = String(error?.payload?.error || error?.message || error);
+    runHistoryError = error?.payload && typeof error.payload === 'object'
+      ? error.payload
+      : {error: String(error?.message || error)};
   } finally {
     runHistoryLoading = false;
     renderSearchHistoryPanels();
@@ -31263,7 +31717,7 @@ async function refreshRunHistoryData() {
 
 async function runSearchHistoryQuery(query = searchHistoryQuery) {
   searchHistoryQuery = String(query || '').trim();
-  searchHistoryError = '';
+  searchHistoryError = null;
   if (!searchHistoryQuery) {
     searchHistoryPayload = {query: '', results: []};
     renderSearchHistoryPanels();
@@ -31274,7 +31728,9 @@ async function runSearchHistoryQuery(query = searchHistoryQuery) {
   try {
     searchHistoryPayload = await apiFetchJson(`/api/search?q=${encodeURIComponent(searchHistoryQuery)}`, {cache: 'no-store'});
   } catch (error) {
-    searchHistoryError = String(error?.payload?.error || error?.message || error);
+    searchHistoryError = error?.payload && typeof error.payload === 'object'
+      ? error.payload
+      : {error: String(error?.message || error)};
   } finally {
     searchHistoryLoading = false;
     renderSearchHistoryPanels();
@@ -31391,7 +31847,7 @@ function infoGroupingControlsHtml() {
   const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
   const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
   const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];
-  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'}];
+  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: t('changes.sort.recent')}];
   const dimensionsForLevel = level => typeof infoGroupDimensionsForLevel === 'function'
     ? infoGroupDimensionsForLevel(level, grouping)
     : (typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : []);
@@ -31468,7 +31924,7 @@ function bindInfoPanel(panel) {
     const windowIndex = button.dataset.infoOpenAiWindow || '';
     if (!session) return;
     if (windowIndex !== '' && typeof tmuxWindow === 'function') {
-      tmuxWindow(session, {windowIndex}, button.textContent || `tmux sub-window ${windowIndex}`);
+      tmuxWindow(session, {windowIndex}, button.textContent || t('terminal.window.title', {name: windowIndex}));
     }
     selectSession(session, {userInitiated: true});
   });
@@ -31653,23 +32109,14 @@ function bindYoagentPanel(panel) {
     const path = yoagentSetting.dataset.yoagentSettingPath || '';
     saveSettingsPatch(settingPatchForPath(path, yoagentSetting.value))
       .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(yoagentComposerBackendKey())}); renderYoagentPanel(); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
   });
 }
 
 // Persistent virtual panels keep their chrome mounted between language changes. Re-label those controls in place.
 function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
-  const minimizeLabel = t('pane.minimize');
-  const expandLabel = t('pane.expand');
-  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
-    button.title = minimizeLabel;
-    button.setAttribute('aria-label', minimizeLabel);
-  });
-  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
-    button.title = expandLabel;
-    button.setAttribute('aria-label', expandLabel);
-  });
+  relocalizeVirtualPanelChrome(panel, infoTabLabel());
   const refresh = panel.querySelector('[data-info-refresh]');
   if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
@@ -31690,16 +32137,7 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
 
 function relocalizeYoagentPanelChrome(panel = document.getElementById(panelDomId(yoagentItemId))) {
   if (!panel) return;
-  const minimizeLabel = t('pane.minimize');
-  const expandLabel = t('pane.expand');
-  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
-    button.title = minimizeLabel;
-    button.setAttribute('aria-label', minimizeLabel);
-  });
-  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
-    button.title = expandLabel;
-    button.setAttribute('aria-label', expandLabel);
-  });
+  relocalizeVirtualPanelChrome(panel, yoagentTabLabel());
   const agentRefresh = panel.querySelector('[data-yoagent-refresh]');
   if (agentRefresh) {
     agentRefresh.textContent = t('yoagent.refresh');
@@ -31896,48 +32334,11 @@ function yoagentAuxiliaryLines(message) {
   return lines.map(line => String(line || '').trim()).filter(Boolean);
 }
 
-function yoagentAuxiliaryLineIsTool(line) {
-  return /^(tool start|tool output|tool done|approval requested):?/i.test(String(line || '').trim());
-}
-
-function yoagentAuxiliaryLineIsDiagnostic(line) {
-  return /^(?:thinking done|usage:|[-*]\s*(?:backend|response time|model CLI time|Codex transport|Codex timing|prompt size|model session|fallback reason|stream phase|raw model thinking|activity context changed|auxiliary stream truncated)\b)/i.test(String(line || '').trim());
-}
-
-function yoagentAuxiliaryLineIsThinking(line) {
-  return /^(?:thinking|thinking summary|redacted thinking):?/i.test(String(line || '').trim());
-}
-
 const YOAGENT_THINKING_PREVIEW_WORDS = 50;
 const YOAGENT_THINKING_LIVE_PREVIEW_WORDS = 160;
 
 function yoagentAuxiliaryPreviewThinkingLines(text) {
-  const result = [];
-  let currentKind = '';
-  for (const rawLine of String(text || '').split(/\r?\n/)) {
-    const line = String(rawLine || '').trim();
-    if (!line) continue;
-    if (yoagentAuxiliaryLineIsTool(line)) {
-      currentKind = 'tool';
-      continue;
-    }
-    if (yoagentAuxiliaryLineIsDiagnostic(line)) {
-      currentKind = 'diagnostic';
-      continue;
-    }
-    if (yoagentAuxiliaryLineIsThinking(line)) {
-      currentKind = 'thinking';
-      result.push(line);
-      continue;
-    }
-    if (currentKind === 'tool' || currentKind === 'diagnostic') continue;
-    result.push(line);
-  }
-  return result;
-}
-
-function yoagentLastLines(lines, count = 1) {
-  return (Array.isArray(lines) ? lines : []).slice(-Math.max(1, count)).join('\n');
+  return String(text || '').split(/\r?\n/).map(line => String(line || '').trim()).filter(Boolean);
 }
 
 function yoagentThinkingPreviewText(text, wordLimit = YOAGENT_THINKING_PREVIEW_WORDS) {
@@ -31958,21 +32359,7 @@ function yoagentThinkingWordCount(text) {
   return yoagentThinkingWords(text).length;
 }
 
-function yoagentThinkingTokenCount(text) {
-  let latest = 0;
-  const tokenPattern = /~\s*([0-9][\d,.]*)([kKmM]?)\s*tokens?\b/g;
-  for (const match of String(text || '').matchAll(tokenPattern)) {
-    const value = Number(String(match[1] || '').replace(/,/g, ''));
-    if (!Number.isFinite(value) || value <= 0) continue;
-    const suffix = String(match[2] || '').toLowerCase();
-    const multiplier = suffix === 'm' ? 1000000 : (suffix === 'k' ? 1000 : 1);
-    latest = Math.max(latest, Math.round(value * multiplier));
-  }
-  return latest;
-}
-
-function yoagentThinkingLabel(text) {
-  const tokenCount = yoagentThinkingTokenCount(text);
+function yoagentThinkingLabel(text, tokenCount = 0) {
   if (tokenCount > 0) return tPlural('yoagent.thinking.tokens', tokenCount);
   return tPlural('yoagent.thinking.words', yoagentThinkingWordCount(text));
 }
@@ -31980,27 +32367,23 @@ function yoagentThinkingLabel(text) {
 function yoagentThinkingReadableText(text) {
   return String(text || '')
     .replace(/\\n/g, '\n')
-    .replace(/\(~\s*[0-9][\d,.]*[kKmM]?\s*tokens?\)/g, ' ')
-    .replace(/~\s*[0-9][\d,.]*[kKmM]?\s*tokens?\b/g, ' ')
-    .split(/\r?\n/)
-    .map(line => line.replace(/^\s*(?:thinking summary|redacted thinking|thinking)\s*(?::|[.…-]+)?\s*/i, ''))
-    .join(' ')
+    .replace(/\s+/g, ' ')
     .replace(/[()[\]{}~*.,:;!?\s-]+/g, ' ')
     .trim();
 }
 
-function yoagentThinkingIsTokenOnly(text) {
-  return yoagentThinkingTokenCount(text) > 0 && !yoagentThinkingReadableText(text);
+function yoagentThinkingIsTokenOnly(text, tokenCount = 0) {
+  return Number(tokenCount) > 0 && !yoagentThinkingReadableText(text);
 }
 
-function yoagentThinkingTokenOnlyNoteHtml(text) {
-  return yoagentThinkingIsTokenOnly(text)
+function yoagentThinkingTokenOnlyNoteHtml(text, tokenCount = 0) {
+  return yoagentThinkingIsTokenOnly(text, tokenCount)
     ? `<div class="yoagent-details-note">${esc(t('yoagent.thinking.tokensOnlyNote'))}</div>`
     : '';
 }
 
 function yoagentThinkingDetailsPreview(text, options = {}) {
-  if (!options.active || yoagentThinkingIsTokenOnly(text)) return '';
+  if (!options.active || yoagentThinkingIsTokenOnly(text, options.tokenCount)) return '';
   return yoagentThinkingPreviewText(text, YOAGENT_THINKING_LIVE_PREVIEW_WORDS);
 }
 
@@ -32020,21 +32403,12 @@ function yoagentDetailsPreviewHtml(preview, className = '') {
   return `<span class="${esc(classes)}">${esc(preview)}</span>`;
 }
 
-function yoagentToolLineHtml(line) {
-  const text = String(line || '').replace(/\\n/g, '\n');
-  const commandMatch = text.match(/^((?:tool start:\s*(?:command|bash|shell)|approval requested):\s*)(.*)$/i);
-  if (commandMatch) {
-    return `${esc(commandMatch[1])}<span class="yoagent-tc-command">${esc(commandMatch[2])}</span>`;
-  }
-  const shellMatch = text.match(/^(\$\s+)(.*)$/);
-  if (shellMatch) {
-    return `${esc(shellMatch[1])}<span class="yoagent-tc-command">${esc(shellMatch[2])}</span>`;
-  }
-  return esc(text);
-}
-
-function yoagentToolLinesHtml(lines) {
-  return (Array.isArray(lines) ? lines : []).map(yoagentToolLineHtml).join('\n');
+function yoagentToolItemBodyHtml(item) {
+  const text = String(item?.text || '').replace(/\\n/g, '\n');
+  const command = String(item?.command || '');
+  return command && text === command
+    ? `<span class="yoagent-tc-command">${esc(command)}</span>`
+    : esc(text);
 }
 
 function yoagentStreamItems(message) {
@@ -32045,16 +32419,28 @@ function yoagentStreamItems(message) {
       return {
         kind: String(item?.kind || '').trim(),
         text,
+        eventKind: String(item?.eventKind || ''),
+        labelKey: String(item?.labelKey || ''),
+        labelParams: item?.labelParams && typeof item.labelParams === 'object' ? {...item.labelParams} : {},
+        fallback: String(item?.fallback || ''),
+        tokenCount: Math.max(0, Number(item?.tokenCount) || 0),
+        toolName: String(item?.toolName || ''),
+        command: String(item?.command || ''),
+        path: String(item?.path || ''),
         sourceIndex: Number.isFinite(sourceIndex) ? sourceIndex : null,
       };
     })
-    .filter(item => ['assistant', 'thinking', 'tool'].includes(item.kind) && item.text.trim())
+    .filter(item => ['assistant', 'thinking', 'tool', 'diagnostic'].includes(item.kind)
+      && (item.text.trim() || item.labelKey || item.fallback))
     .map((item, index) => ({...item, sourceIndex: item.sourceIndex == null ? index : item.sourceIndex}));
   const coalesced = [];
   for (const item of items) {
     const previous = coalesced[coalesced.length - 1];
-    if (previous && previous.kind === item.kind && (item.kind === 'thinking' || item.kind === 'tool')) {
+    if (previous && previous.kind === item.kind && previous.labelKey === item.labelKey
+      && JSON.stringify(previous.labelParams) === JSON.stringify(item.labelParams)
+      && (item.kind === 'thinking' || item.kind === 'tool')) {
       previous.text = `${previous.text.replace(/\s+$/, '')}\n${item.text.replace(/^\s+/, '')}`;
+      previous.tokenCount = Math.max(previous.tokenCount, item.tokenCount);
       continue;
     }
     coalesced.push({...item});
@@ -32069,10 +32455,12 @@ function yoagentPreviewLine(text) {
 function yoagentStreamAuxiliaryItemHtml(item, key, index, options = {}) {
   const kind = String(item?.kind || '');
   const text = String(item?.text || '');
-  if (!text || (kind !== 'thinking' && kind !== 'tool')) return '';
+  if (!['thinking', 'tool', 'diagnostic'].includes(kind)) return '';
   const tool = kind === 'tool';
-  const label = tool ? t('yoagent.toolCall.label') : yoagentThinkingLabel(text);
-  const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingDetailsPreview(text, options);
+  const diagnostic = kind === 'diagnostic';
+  const descriptorLabel = messageDescriptorText({key: item.labelKey, params: item.labelParams, fallback: item.fallback});
+  const label = kind === 'thinking' ? yoagentThinkingLabel(text, item.tokenCount) : descriptorLabel;
+  const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingDetailsPreview(text, {...options, tokenCount: item.tokenCount});
   const previewHtml = yoagentDetailsPreviewHtml(preview, tool ? '' : 'yoagent-thinking-live-preview');
   const classes = tool
     ? 'yoagent-message-details yoagent-toolcall-details has-auxiliary yoagent-stream-detail'
@@ -32080,9 +32468,9 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index, options = {}) {
   const streamClasses = tool
     ? 'yoagent-auxiliary-stream yoagent-toolcall-stream'
     : 'yoagent-auxiliary-stream';
-  const body = tool ? yoagentToolLinesHtml(String(text).replace(/\\n/g, '\n').split(/\r?\n/)) : esc(text);
-  const note = tool ? '' : yoagentThinkingTokenOnlyNoteHtml(text);
-  const streamBody = tool || !yoagentThinkingIsTokenOnly(text)
+  const body = tool ? yoagentToolItemBodyHtml(item) : esc(text);
+  const note = tool || diagnostic ? '' : yoagentThinkingTokenOnlyNoteHtml(text, item.tokenCount);
+  const streamBody = text && (tool || diagnostic || !yoagentThinkingIsTokenOnly(text, item.tokenCount))
     ? `<pre class="${streamClasses}">${body}</pre>`
     : '';
   const streamIndex = Number.isFinite(Number(item?.sourceIndex)) ? Number(item.sourceIndex) : index;
@@ -32107,27 +32495,22 @@ function yoagentMessageStreamItemsHtml(message, key = '') {
 function yoagentMessageDetailsHtml(message, key = '') {
   const text = String(message?.details || '').trim();
   const auxiliaryLines = yoagentAuxiliaryLines(message);
-  const toolLines = auxiliaryLines.filter(yoagentAuxiliaryLineIsTool);
-  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line) && !yoagentAuxiliaryLineIsDiagnostic(line));
-  const auxiliaryText = thinkingLines.join('\n');
-  const toolText = toolLines.join('\n');
+  const auxiliaryText = auxiliaryLines.join('\n');
   const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(message?.auxiliaryPreview || '');
-  const auxiliarySourceText = auxiliaryPreviewLines.join('\n') || thinkingLines.join('\n');
+  const auxiliarySourceText = auxiliaryPreviewLines.join('\n') || auxiliaryText;
   const auxiliaryBodyText = auxiliaryText || auxiliarySourceText;
   const thinkingActive = yoagentThinkingPreviewActive(message);
   const auxiliaryPreview = yoagentThinkingDetailsPreview(auxiliarySourceText, {active: thinkingActive});
-  const toolPreview = yoagentPreviewLine(yoagentLastLines(toolLines, 1));
   const hasAuxiliary = Boolean(auxiliaryBodyText || auxiliaryPreview);
-  const hasTool = Boolean(toolText || toolPreview);
   const truncated = Boolean(message?.auxiliaryTruncated);
-  if (!text && !hasAuxiliary && !hasTool) return '';
+  if (!text && !hasAuxiliary) return '';
   const preview = yoagentDetailsPreviewHtml(auxiliaryPreview, 'yoagent-thinking-live-preview');
   const auxiliaryBlock = auxiliaryBodyText && !yoagentThinkingIsTokenOnly(auxiliaryBodyText)
     ? `<pre class="yoagent-auxiliary-stream">${esc(auxiliaryBodyText)}</pre>`
     : '';
   const tokenOnlyNote = auxiliaryBodyText ? yoagentThinkingTokenOnlyNoteHtml(auxiliaryBodyText) : '';
   const truncationNote = truncated
-    ? `<div class="yoagent-details-note">auxiliary stream truncated to latest entries</div>`
+    ? `<div class="yoagent-details-note">${esc(t('yoagent.details.auxiliaryTruncated'))}</div>`
     : '';
   const detailsBlock = text
     ? `<pre class="yoagent-safe-details">${esc(text)}</pre>`
@@ -32141,13 +32524,13 @@ function yoagentMessageDetailsHtml(message, key = '') {
     ${tokenOnlyNote}${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`
     : '';
-  const toolDetails = hasTool
-    ? `<details class="yoagent-message-details yoagent-toolcall-details has-auxiliary" data-yoagent-message-details-key="${esc(`${key}|tc`)}">
-    <summary><span>${esc(t('yoagent.toolCall.label'))}</span>${yoagentDetailsPreviewHtml(toolPreview)}</summary>
-    <pre class="yoagent-auxiliary-stream yoagent-toolcall-stream">${yoagentToolLinesHtml(toolLines.length ? toolLines : [toolPreview])}</pre>
-  </details>`
-    : '';
-  return `${thinkingDetails}${toolDetails}`;
+  return thinkingDetails;
+}
+
+function yoagentMessageDetailRowsHtml(message) {
+  const rows = Array.isArray(message?.detailRows) ? message.detailRows : [];
+  if (!rows.length) return '';
+  return `<div class="yoagent-safe-details">${rows.map(row => `<div>${esc(messageDescriptorText(row))}</div>`).join('')}</div>`;
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
@@ -32171,11 +32554,20 @@ function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   return {text, title};
 }
 
+function activitySummaryGlobalDetailLines(summary) {
+  if (!summary || typeof summary !== 'object') return [];
+  const lines = Array.isArray(summary.detail_lines) ? summary.detail_lines.filter(Boolean) : [];
+  const messages = Array.isArray(summary.detail_messages)
+    ? summary.detail_messages.map(message => messageDescriptorText(message)).filter(Boolean)
+    : [];
+  return [...lines, ...messages];
+}
+
 function globalActivitySummaryHtml() {
   const summary = activitySummaryPayload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
-  const detailLines = lines.filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)));
+  const detailLines = activitySummaryGlobalDetailLines(summary);
   const generated = relativeActivityGeneratedText();
   const refreshBar = activitySummaryRefreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
   return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel()}))}">
@@ -32204,7 +32596,8 @@ function yoagentAgentResultParts(text) {
 }
 
 function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
-  const content = String(message?.content || (message?.aborted ? t('yoagent.stopped') : (streaming ? t('yoagent.thinking') : '')));
+  const contentFallback = message?.content || (message?.aborted ? t('yoagent.stopped') : (streaming ? t('yoagent.thinking') : ''));
+  const content = structuredMessageText(message, 'content', contentFallback);
   if (agentResult) {
     const parts = yoagentAgentResultParts(content);
     const heading = parts.heading
@@ -32246,6 +32639,7 @@ function yoagentChatMessagesHtml() {
       ${streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
       ${stoppedState}
       ${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
+      ${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message) : ''}
       ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
     </div>`;
   }).join('');
@@ -32291,9 +32685,22 @@ function yoagentActionTransportText(transport, fallback = '') {
 
 function yoagentActionStatusText(action) {
   const status = String(action?.status || '');
-  if (status === 'sent') return t('yoagent.action.state.sent');
-  if (String(action?.status_text || '') === 'sending') return t('yoagent.action.state.sending');
-  return action?.status_text || status;
+  return structuredMessageText(action, 'status_text', status);
+}
+
+function yoagentActionStatusPatch(key, fallback, params = {}) {
+  return structuredMessageSnapshot({status_text: fallback, status_text_key: key, status_text_params: params}, 'status_text');
+}
+
+function yoagentActionErrorStatusPatch(error) {
+  const snapshot = userMessageSnapshot(error, error?.message || String(error || ''));
+  return {
+    status: 'error',
+    status_text: snapshot.user_message.fallback,
+    status_text_key: snapshot.user_message.key,
+    status_text_params: snapshot.user_message.params,
+    status_diagnostic: snapshot.error,
+  };
 }
 
 function yoagentStartupActivityPayload() {
@@ -32321,11 +32728,10 @@ function yoagentIntroMessageText(payload = yoagentStartupActivityPayload()) {
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = String(summary.headline || lines[0] || '').trim();
   if (!headline) return '';
-  const details = lines
-    .filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)))
+  const details = activitySummaryGlobalDetailLines(summary)
     .slice(0, 2)
     .map(line => `- ${String(line).trim()}`);
-  return ["Here's what I see right now:", "", headline, ...details].filter(Boolean).join('\n');
+  return [t('yoagent.intro.now'), '', headline, ...details].filter(Boolean).join('\n');
 }
 
 function yoagentIntroMessageHtml() {
@@ -32362,8 +32768,19 @@ function hideYoagentStartupInfo() {
 
 function yoagentNoticeHtml() {
   if (!yoagentNotice?.reason) return '';
-  const backend = yoagentNotice.backend ? `<span class="yoagent-chat-notice-backend">${esc(yoagentNotice.backend)}</span> ` : '';
-  return `<div class="yoagent-chat-notice">${backend}${esc(yoagentNotice.reason)}</div>`;
+  const backendText = yoagentNotice.backend ? yoagentBackendLabel(yoagentNotice.backend) : '';
+  const backend = backendText ? `<span class="yoagent-chat-notice-backend">${esc(backendText)}</span> ` : '';
+  const reason = typeof yoagentNotice.reason === 'object'
+    ? messageDescriptorText(yoagentNotice.reason)
+    : String(yoagentNotice.reason || '');
+  return `<div class="yoagent-chat-notice">${backend}${esc(reason)}</div>`;
+}
+
+function yoagentFallbackNotice(payload = {}) {
+  return {
+    backend: String(payload.backend_used || payload.backend || ''),
+    reason: messageFieldDescriptor(payload, 'fallback_reason'),
+  };
 }
 
 function yoagentPendingWaitsHtml() {
@@ -32419,12 +32836,31 @@ function yoagentJobActionText(job) {
   return String(job?.public_text || job?.prompt_preview || action.text_preview || action.text || action.message || '').trim();
 }
 
-function yoagentJobStatusText(job) {
-  const status = String(job?.status || '');
-  if (status === 'pending_confirmation') return t('yoagent.jobs.status.pendingConfirmation');
-  if (status === 'timed_out') return t('yoagent.jobs.status.timedOut');
-  if (status) return status.replace(/_/g, ' ');
-  return t('yoagent.jobs.status.unknown');
+const YOAGENT_JOB_CLASSIFICATION_KEYS = Object.freeze({
+  status: Object.freeze({
+    queued: 'yoagent.jobs.status.queued',
+    pending_confirmation: 'yoagent.jobs.status.pendingConfirmation',
+    fired: 'yoagent.jobs.status.fired',
+    failed: 'yoagent.jobs.status.failed',
+    cancelled: 'yoagent.jobs.status.cancelled',
+    timed_out: 'yoagent.jobs.status.timedOut',
+  }),
+  type: Object.freeze({
+    notify_session_idle: 'yoagent.jobs.type.notifySessionIdle',
+    notify_session_needs_input: 'yoagent.jobs.type.notifySessionNeedsInput',
+    notify_session_blocked: 'yoagent.jobs.type.notifySessionBlocked',
+    notify_session_done_after_working: 'yoagent.jobs.type.notifySessionDoneAfterWorking',
+    notify_all_idle: 'yoagent.jobs.type.notifyAllIdle',
+    wait_then_send: 'yoagent.jobs.type.waitThenSend',
+    result_watch: 'yoagent.jobs.type.resultWatch',
+  }),
+});
+
+function yoagentJobClassificationText(classification, value) {
+  const kind = String(classification || '');
+  const normalized = String(value || '');
+  const key = YOAGENT_JOB_CLASSIFICATION_KEYS[kind]?.[normalized] || `yoagent.jobs.${kind}.unknown`;
+  return t(key);
 }
 
 function yoagentJobRowsHtml() {
@@ -32441,9 +32877,9 @@ function yoagentJobRowsHtml() {
     const blocker = job?.last_observed_state?.blockers && Array.isArray(job.last_observed_state.blockers)
       ? job.last_observed_state.blockers.join(', ')
       : '';
-    const error = String(job?.error || job?.result?.error || '');
+    const error = userMessageText(job?.result?.send || job?.result || job, '');
     const meta = [
-      type,
+      type ? yoagentJobClassificationText('type', type) : '',
       target ? t('yoagent.jobs.target', {target}) : '',
       blocker ? t('yoagent.jobs.blockedBy', {blocker}) : '',
       error,
@@ -32454,7 +32890,7 @@ function yoagentJobRowsHtml() {
     ].filter(Boolean).join('');
     return `<li class="yoagent-job-item yoagent-job-${esc(status || 'unknown')}" data-yoagent-job-row="${esc(id)}">
       <div class="yoagent-job-main">
-        <span class="yoagent-job-status">${esc(yoagentJobStatusText(job))}</span>
+        <span class="yoagent-job-status">${esc(yoagentJobClassificationText('status', status))}</span>
         <span class="yoagent-job-meta">${esc(meta)}</span>
       </div>
       ${actionText ? `<div class="yoagent-job-text">${esc(actionText)}</div>` : ''}
@@ -32528,22 +32964,22 @@ function applyYoagentStreamPayload(payload = {}) {
   const thinkingActive = Boolean(payload.hidden_work_active);
   const toolActive = Boolean(payload.tool_active);
   const auxiliaryActive = Boolean(thinkingActive || toolActive);
-  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line) && !yoagentAuxiliaryLineIsDiagnostic(line));
-  const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(payload.auxiliary_preview || '');
+  const thinkingItems = streamItems.filter(item => item.kind === 'thinking');
+  const auxiliaryPreviewLines = thinkingItems.map(item => item.text).filter(Boolean);
   const auxiliaryPreview = yoagentThinkingPreviewText(
     auxiliaryPreviewLines.join('\n')
-    || (thinkingLines.length ? thinkingLines.join('\n') : String(previous.auxiliaryPreview || '')),
+    || String(previous.auxiliaryPreview || ''),
   );
-  const detailLines = [];
-  if (payload.backend) detailLines.push(`- backend: \`${payload.backend}\``);
-  if (phase) detailLines.push(`- stream phase: \`${phase}\``);
-  if (hiddenThinking) detailLines.push('- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought');
-  if (payload.auxiliary_truncated) detailLines.push('- auxiliary stream truncated to latest entries');
+  const detailRows = [];
+  if (payload.backend) detailRows.push({key: 'yoagent.details.backend', params: {backend: payload.backend}, fallback: `backend: ${payload.backend}`});
+  if (phase) detailRows.push({key: 'yoagent.details.streamPhase', params: {phase}, fallback: `stream phase: ${phase}`});
+  if (hiddenThinking) detailRows.push({key: 'yoagent.details.hiddenThinking', params: {}, fallback: 'raw model thinking was hidden'});
+  if (payload.auxiliary_truncated) detailRows.push({key: 'yoagent.details.auxiliaryTruncated', params: {}, fallback: 'auxiliary stream truncated'});
   yoagentStreamingMessages.set(streamId, {
     role: 'assistant',
     content: content || previous.content || '',
     createdAt: previous.createdAt || createdAt,
-    details: detailLines.join('\n') || previous.details || '',
+    detailRows: detailRows.length ? detailRows : (Array.isArray(previous.detailRows) ? previous.detailRows : []),
     auxiliaryLines,
     auxiliaryText: auxiliaryLines.join('\n') || previous.auxiliaryText || '',
     auxiliaryPreview,
@@ -32641,7 +33077,7 @@ function yoagentRecentAgentActivityText(agent) {
   const activityTs = tmuxSignalWindowActivityTs(signal.window);
   if (activityTs > 0) {
     const seconds = Math.max(0, Math.round(Date.now() / 1000 - activityTs));
-    return `tmux ${compactRelativeTimeFormat(seconds)}`;
+    return t('yoagent.recent.tmuxActivity', {time: compactRelativeTimeFormat(seconds)});
   }
   if (agent?.running === true) return t('yoagent.agent.running');
   const ts = Number(agent?.last_used_ts || agent?.sort_ts || 0);
@@ -32682,11 +33118,11 @@ function yoagentRecentAgentSignalBadgesHtml(signal) {
   const badges = [];
   const deadText = tmuxSignalDeadText(pane);
   if (deadText) badges.push({kind: 'dead', text: deadText});
-  if (windowRecord?.bell_flag === true) badges.push({kind: 'bell', text: 'bell'});
-  if (windowRecord?.silence_flag === true) badges.push({kind: 'silence', text: 'silent'});
+  if (windowRecord?.bell_flag === true) badges.push({kind: 'bell', text: t('yoagent.recent.bell')});
+  if (windowRecord?.silence_flag === true) badges.push({kind: 'silence', text: t('yoagent.recent.silent')});
   const presenceText = tmuxSignalWindowPresenceText(windowRecord);
   if (presenceText) badges.push({kind: 'presence', text: presenceText});
-  if (windowRecord?.zoomed === true) badges.push({kind: 'zoom', text: 'zoom'});
+  if (windowRecord?.zoomed === true) badges.push({kind: 'zoom', text: t('yoagent.recent.zoom')});
   for (const label of tmuxSignalPaneModeLabels(pane)) badges.push({kind: 'mode', text: label});
   if (!badges.length) return '';
   return `<span class="yoagent-recent-agent-signals">${badges.map(badge => `<span class="yoagent-recent-agent-signal signal-${esc(badge.kind)}">${esc(badge.text)}</span>`).join('')}</span>`;
@@ -32736,15 +33172,15 @@ function yoagentRecentAgentsHtml(payload = yoagentStartupActivityPayload()) {
     const restart = yoagentRecentAgentRestartHtml(agent, signal);
     const idleClass = signal.window && !tmuxSignalWindowIsRecentlyActive(signal.window) ? ' tmux-idle' : '';
     const title = [
-      agent.cwd ? `cwd: ${agent.cwd}` : '',
-      pathText ? `paths: ${pathText}` : '',
-      agent.transcript ? `transcript: ${agent.transcript}` : '',
-      signal.window?.activity_ts ? `tmux activity: ${new Date(Number(signal.window.activity_ts) * 1000).toISOString()}` : '',
-      tmuxSignalWindowClientNames(signal.window).length ? `tmux viewers: ${tmuxSignalWindowClientNames(signal.window).join(', ')}` : '',
-      signal.window?.layout ? `tmux layout: ${signal.window.layout}` : '',
-      signal.window?.visible_layout ? `tmux visible layout: ${signal.window.visible_layout}` : '',
-      signal.window?.bell_flag ? 'tmux bell alert' : '',
-      signal.window?.silence_flag ? 'tmux silence alert' : '',
+      agent.cwd ? t('yoagent.tooltip.cwd', {path: agent.cwd}) : '',
+      pathText ? t('yoagent.tooltip.paths', {paths: pathText}) : '',
+      agent.transcript ? t('yoagent.tooltip.transcript', {path: agent.transcript}) : '',
+      signal.window?.activity_ts ? t('yoagent.tooltip.tmuxActivity', {time: new Date(Number(signal.window.activity_ts) * 1000).toISOString()}) : '',
+      tmuxSignalWindowClientNames(signal.window).length ? t('yoagent.tooltip.tmuxViewers', {viewers: tmuxSignalWindowClientNames(signal.window).join(', ')}) : '',
+      signal.window?.layout ? t('yoagent.tooltip.tmuxLayout', {layout: signal.window.layout}) : '',
+      signal.window?.visible_layout ? t('yoagent.tooltip.tmuxVisibleLayout', {layout: signal.window.visible_layout}) : '',
+      signal.window?.bell_flag ? t('yoagent.tooltip.tmuxBellAlert') : '',
+      signal.window?.silence_flag ? t('yoagent.tooltip.tmuxSilenceAlert') : '',
       signal.pane?.dead ? tmuxSignalDeadText(signal.pane) : '',
       tmuxSignalPaneModeLabels(signal.pane).join(', '),
       agent.state_text || '',
@@ -32956,7 +33392,7 @@ function yoagentChatHtml() {
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
     : '';
-  const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentError)}</span>${retry}</div>` : '';
+  const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
   const chatDisabled = !chatEnabled ? `<div class="yoagent-chat-disabled">${esc(t('yoagent.chatDisabled'))}</div>` : '';
   const clearDisabled = yoagentBusy || readOnlyMode || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
   const submitButton = yoagentBusy
@@ -32981,23 +33417,26 @@ function yoagentChatHtml() {
 }
 
 function yoagentChatNetworkError(error) {
-  const text = String(error?.message || error || '');
-  return error instanceof TypeError || /failed to fetch|networkerror|load failed|fetch failed/i.test(text);
+  return error instanceof TypeError;
 }
 
 function yoagentChatRequestTooLargeError(error) {
-  const text = `${error?.status || ''} ${error?.statusText || ''} ${error?.message || error || ''} ${JSON.stringify(error?.payload || {})}`;
-  return /\b413\b|request entity too large|request body too large|payload too large|entity too large/i.test(text);
+  return Number(error?.status || error?.payload?.status || 0) === 413;
 }
 
-function yoagentChatErrorMessage(error) {
+function yoagentChatErrorState(error) {
   if (yoagentChatNetworkError(error)) {
-    return t('yoagent.networkError');
+    return {key: 'yoagent.networkError', params: {}, fallback: ''};
   }
   if (yoagentChatRequestTooLargeError(error)) {
-    return t('yoagent.chatTooLarge');
+    return {key: 'yoagent.chatTooLarge', params: {}, fallback: ''};
   }
-  return t('yoagent.chatFailed', {error: error?.message || error});
+  return userMessageSnapshot(error, error?.message || String(error || '')).user_message;
+}
+
+function yoagentErrorText() {
+  if (yoagentError && typeof yoagentError === 'object') return messageDescriptorText(yoagentError);
+  return String(yoagentError || '');
 }
 
 let yoagentFocusSerial = 0;
@@ -33124,7 +33563,7 @@ async function clearYoagentConversation() {
   yoagentPrewarmStarted = false;
   yoagentStartupLlmRequested = false;
   if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
-  yoagentError = '';
+  yoagentError = null;
   yoagentDraft = '';
   resetYoagentComposerHistory();
   yoagentNotice = null;
@@ -33161,7 +33600,7 @@ async function updateYoagentJob(jobId, action) {
     await loadYoagentJobs({silent: true, render: false});
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   } catch (error) {
-    yoagentError = yoagentChatErrorMessage(error);
+    yoagentError = yoagentChatErrorState(error);
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   }
 }
@@ -33187,7 +33626,7 @@ async function clearYoagentPendingWait(waitId) {
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   } catch (error) {
     if (error?.payload?.conversation) applyYoagentConversationPayload(error.payload.conversation);
-    yoagentError = yoagentChatErrorMessage(error);
+    yoagentError = yoagentChatErrorState(error);
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   }
 }
@@ -33214,7 +33653,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
   yoagentDraft = '';
   yoagentBusy = true;
   yoagentPrewarming = false;
-  yoagentError = '';
+  yoagentError = null;
   yoagentNotice = null;
   if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
   startYoagentLocalThinkingStream(streamId);
@@ -33232,12 +33671,13 @@ async function startYoagentChatRequest(rawText, options = {}) {
       return;
     }
     if (payload.fallback && payload.fallback_reason) {
-      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+      yoagentNotice = yoagentFallbackNotice(payload);
     }
     if (!applyYoagentConversationPayload(payload.conversation || {})) {
       yoagentMessages.push({
         role: 'assistant',
-        content: payload.answer || t('yoagent.noAnswer'),
+        content: payload.answer || '',
+        ...(!payload.answer ? structuredMessageSnapshot({content: '', content_key: 'yoagent.noAnswer', content_params: {}}, 'content') : {}),
         actions: Array.isArray(payload.actions) ? payload.actions : [],
         details: payload.details || '',
         createdAt: payload.answered_at || new Date().toISOString(),
@@ -33247,7 +33687,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
   } catch (error) {
     if (yoagentActiveChatRequest?.id !== requestId || yoagentChatAbortError(error)) return;
     if (yoagentChatNetworkError(error)) yoagentDraft = text;
-    yoagentError = yoagentChatErrorMessage(error);
+    yoagentError = yoagentChatErrorState(error);
   } finally {
     finishYoagentActiveRequest(requestId, {
       preserveDraft: true,
@@ -33284,7 +33724,7 @@ async function executeYoagentActionSend(previewId) {
   if (!previewId || readOnlyMode || yoagentBusy) return;
   hideYoagentStartupInfo();
   yoagentBusy = true;
-  updateYoagentActionPreview(previewId, {status_text: 'sending'});
+  updateYoagentActionPreview(previewId, yoagentActionStatusPatch('yoagent.action.state.sending', 'sending'));
   renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   try {
     const payload = await apiFetchJson('/api/yoagent/actions/execute-send', {
@@ -33293,15 +33733,15 @@ async function executeYoagentActionSend(previewId) {
       body: JSON.stringify({preview_id: previewId}),
     });
     applyYoagentConversationPayload(payload.conversation || {});
-    updateYoagentActionPreview(previewId, {status: 'sent', status_text: 'sent'});
+    updateYoagentActionPreview(previewId, {status: 'sent', ...yoagentActionStatusPatch('yoagent.action.state.sent', 'sent')});
     const answer = payload.answer
       ? t('yoagent.action.sentWithAnswer', {session: payload.session, transport: payload.transport, answer: payload.answer})
       : t('yoagent.action.sent', {session: payload.session, transport: payload.transport});
     if (!payload.conversation) yoagentMessages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
     statusEl.textContent = t('yoagent.statusActionSent', {session: payload.session});
   } catch (error) {
-    updateYoagentActionPreview(previewId, {status: 'error', status_text: error?.message || String(error)});
-    yoagentError = yoagentChatErrorMessage(error);
+    updateYoagentActionPreview(previewId, yoagentActionErrorStatusPatch(error));
+    yoagentError = yoagentChatErrorState(error);
   } finally {
     yoagentBusy = false;
     renderYoagentPanel({preserveDraft: true, scrollBottom: true});
@@ -33322,12 +33762,12 @@ async function prewarmYoagent(options = {}) {
       body: JSON.stringify({locale: i18nActiveLocaleId(), visible: shouldRequestStartupAnswer}),
     });
     if (payload?.fallback && payload.fallback_reason) {
-      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+      yoagentNotice = yoagentFallbackNotice(payload);
     }
     if (payload?.conversation) applyYoagentConversationPayload(payload.conversation || {});
   } catch (error) {
     if (shouldRequestStartupAnswer) {
-      yoagentError = yoagentChatErrorMessage(error);
+      yoagentError = yoagentChatErrorState(error);
     }
     // Non-visible process warm-up is opportunistic; visible chat requests handle real errors.
   } finally {
@@ -33345,7 +33785,7 @@ function activitySummaryIsVisible() {
 }
 
 async function refreshActivitySummary(options = {}) {
-  if (options.silent === true) {
+  if (options.silent === true && options.localeChange !== true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
   }
@@ -33364,10 +33804,20 @@ async function refreshActivitySummary(options = {}) {
     applyActivitySummaryPayloadFromPush(payload, {refreshStartupSnapshot: true, render: true});
   } catch (error) {
     if (!requestIsCurrent()) return;
+    const errorDescriptor = userMessageSnapshot(error, error?.message || String(error || '')).user_message;
     activitySummaryPayload = {
       ...activitySummaryPayload,
       errors: [String(error)],
-      global: {lines: [`activity summary unavailable: ${String(error)}`]},
+      global: {
+        headline: '',
+        lines: [],
+        detail_lines: [],
+        detail_messages: [{
+          key: 'status.activitySummaryFailed',
+          params: {error: errorDescriptor},
+          fallback: '',
+        }],
+      },
     };
     if (!options.silent) statusErr(localizedHtml('status.activitySummaryFailed', {error}));
   } finally {
@@ -33595,13 +34045,13 @@ function preferencesStatusPulseExampleHtml() {
 
 function preferenceSections() {
   return [
-    {title: t('pref.section.general'), items: [
+    {id: PREFERENCE_SECTION_IDS.general, title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
       {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: i18nLocaleChoices(), help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
       {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
     ]},
-    {title: t('pref.section.appearance'), items: [
+    {id: PREFERENCE_SECTION_IDS.appearance, title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
       {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: layoutModePreferenceChoices(), help: t('pref.general.default_layout.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 6, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
@@ -33620,7 +34070,7 @@ function preferenceSections() {
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
       ], help: t('pref.appearance.date_time_hour_cycle.help')},
     ]},
-    {title: t('pref.section.terminal_editor'), items: [
+    {id: PREFERENCE_SECTION_IDS.terminalEditor, title: t('pref.section.terminal_editor'), items: [
       {path: 'appearance.terminal_theme', label: t('pref.appearance.terminal_theme.label'), type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
@@ -33634,7 +34084,7 @@ function preferenceSections() {
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
       {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
       {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 6, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
-      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
+      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: t('unit.line.other'), help: t('pref.terminal_editor.scrollback.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
       {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'radio', choices: [
@@ -33649,9 +34099,8 @@ function preferenceSections() {
       {path: 'editor.trim_trailing_whitespace_on_save', label: t('pref.editor.trim_trailing_whitespace_on_save.label'), type: 'boolean', help: t('pref.editor.trim_trailing_whitespace_on_save.help')},
       {path: 'editor.ensure_final_newline_on_save', label: t('pref.editor.ensure_final_newline_on_save.label'), type: 'boolean', help: t('pref.editor.ensure_final_newline_on_save.help')},
     ]},
-    {title: t('pref.section.notifications'), items: [
-      {type: 'notification-delivery', channel: 'inApp', label: 'Notification in YOLOmux', help: 'Show notification popups in YOLOmux.'},
-      {type: 'notification-delivery', channel: 'system', label: `Notification on the System (${isMacPlatform() ? 'macOS' : 'PC'})`, help: `Browser permission: ${notificationSystemPermission()}`},
+    {id: PREFERENCE_SECTION_IDS.notifications, title: t('pref.section.notifications'), items: [
+      ...notificationDeliveryDescriptors().map(({channel, label, help}) => ({type: 'notification-delivery', channel, label, help})),
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'updates.notify_level', label: t('pref.updates.notify_level.label'), type: 'radio', choices: updateNotifyLevelPreferenceChoices(), help: t('pref.updates.notify_level.help')},
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
@@ -33662,9 +34111,15 @@ function preferenceSections() {
       {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
     ]},
-    {title: fileExplorerLabel(), items: [
-      {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
-      {path: 'file_explorer.image_open_mode', label: t('pref.file_explorer.image_open_mode.label'), type: 'radio', choices: ['same-tab', 'new-tab'], help: t('pref.file_explorer.image_open_mode.help')},
+    {id: PREFERENCE_SECTION_IDS.fileExplorer, title: fileExplorerLabel(), items: [
+      {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: [
+        {value: 'fixed', label: t('pref.file_explorer.root_mode.fixed')},
+        {value: 'sync', label: t('finder.toolbar.syncLabel')},
+      ], help: t('pref.file_explorer.root_mode.help')},
+      {path: 'file_explorer.image_open_mode', label: t('pref.file_explorer.image_open_mode.label'), type: 'radio', choices: [
+        {value: 'same-tab', label: t('pref.file_explorer.image_open_mode.sameTab')},
+        {value: 'new-tab', label: t('pref.file_explorer.image_open_mode.newTab')},
+      ], help: t('pref.file_explorer.image_open_mode.help')},
       {path: 'file_explorer.image_preview_max_px', label: t('pref.file_explorer.image_preview_max_px.label'), type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: t('pref.file_explorer.image_preview_max_px.help')},
       {path: 'file_explorer.quick_access_paths', label: t('pref.file_explorer.quick_access_paths.label'), type: 'list', help: t('pref.file_explorer.quick_access_paths.help')},
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
@@ -33673,7 +34128,7 @@ function preferenceSections() {
       {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
-    {title: t('pref.section.uploads'), items: [
+    {id: PREFERENCE_SECTION_IDS.uploads, title: t('pref.section.uploads'), items: [
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
       {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
       {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
@@ -33682,7 +34137,7 @@ function preferenceSections() {
       {path: 'uploads.image_action_order', label: t('pref.uploads.image_action_order.label'), type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true, help: t('pref.uploads.image_action_order.help')},
       {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
     ]},
-    {title: t('pref.section.performance'), items: [
+    {id: PREFERENCE_SECTION_IDS.performance, title: t('pref.section.performance'), items: [
       {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
       {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
@@ -33696,10 +34151,10 @@ function preferenceSections() {
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
       {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
     ]},
-    {title: t('pref.section.github'), items: [
+    {id: PREFERENCE_SECTION_IDS.github, title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
     ]},
-    {title: t('pref.section.yoagent'), items: [
+    {id: PREFERENCE_SECTION_IDS.yoagent, title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'radio', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
         {value: 'codex', label: t('pref.yoagent.backend.codex')},
@@ -33716,13 +34171,13 @@ function preferenceSections() {
       {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
       {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
     ]},
-    {title: t('pref.section.share'), items: [
+    {id: PREFERENCE_SECTION_IDS.share, title: t('brand.share'), items: [
       {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
       {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
       {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
       {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
     ]},
-    {id: 'yolo', title: t('pref.section.yolo'), items: [
+    {id: PREFERENCE_SECTION_IDS.yolo, title: t('pref.section.yolo'), items: [
       {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
       {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
       {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
@@ -33751,8 +34206,8 @@ function preferenceDefault(path) {
 }
 
 function preferenceStatusText() {
-  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: clientSettingsPayload.error});
-  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: yoloRulesPayload.error});
+  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: userMessageText(clientSettingsPayload, clientSettingsPayload.error)});
+  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)});
   return settingsLoadedAgeText();
 }
 
@@ -34032,20 +34487,22 @@ function preferenceAdvisoryHtml(item, value) {
 
 function preferencesPanelHtml() {
   const query = preferenceSearchNeedle();
-  const sections = preferenceSections()
+  const allSections = preferenceSections();
+  setCollapsedPreferenceSections(collapsedPreferenceSections, {sections: allSections, persist: true});
+  const sections = allSections
     .filter(section => preferenceSectionMatches(section, query))
     .map(section => {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
       const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
-      const collapsed = !query && collapsedPreferenceSections.has(section.title);
-      const sectionIntro = section.id === 'yolo' && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
+      const collapsed = !query && collapsedPreferenceSections.has(section.id);
+      const sectionIntro = section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
         ? preferencesYoloRulesPathHtml()
         : '';
       const rows = `${sectionIntro}${visibleItems.map(item => preferenceControlHtml(item)).join('')}`;
       const count = visibleItems.length;
       return `
-        <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
-          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.title)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+        <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.id)}">
+          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.id)}" aria-expanded="${collapsed ? 'false' : 'true'}">
             ${disclosureTriangleHtml(!collapsed, 'preferences-section-caret')}
             <span class="preferences-section-title">${esc(section.title)}</span>
             <span class="preferences-section-count">${count}</span>
@@ -34323,7 +34780,7 @@ function bindPreferencesPanel(panel) {
     if (copyText && panel.contains(copyText)) {
       event.preventDefault();
       copyTextToClipboard(copyText.dataset.copyText || '')
-        .then(() => { statusEl.textContent = 'copied text'; })
+        .then(() => { statusEl.textContent = t('status.copiedText'); })
         .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
@@ -34338,12 +34795,12 @@ function bindPreferencesPanel(panel) {
     if (sectionToggle && panel.contains(sectionToggle)) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
-      const title = sectionToggle.dataset.preferenceSectionToggle || '';
-      if (collapsedPreferenceSections.has(title)) collapsedPreferenceSections.delete(title);
-      else collapsedPreferenceSections.add(title);
+      const sectionId = sectionToggle.dataset.preferenceSectionToggle || '';
+      if (collapsedPreferenceSections.has(sectionId)) collapsedPreferenceSections.delete(sectionId);
+      else collapsedPreferenceSections.add(sectionId);
       writeStoredCollapsedPreferenceSections();
       const section = sectionToggle.closest('[data-preference-section]');
-      const collapsed = collapsedPreferenceSections.has(title);
+      const collapsed = collapsedPreferenceSections.has(sectionId);
       if (section) {
         section.classList.toggle(CLS.collapsed, collapsed);
         sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -34422,25 +34879,25 @@ const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
 const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
 const jsDebugGraphAllClientsTotalId = 'all-clients-total';
-const jsDebugGraphOtherClientsAverageLinePattern = 'dash';
+const jsDebugGraphOtherClientsAverageLinePattern = 'dot';
 const jsDebugGraphAllClientsTotalLinePattern = 'dot';
 const jsDebugGraphAllClientsCombinedMetricKey = 'apiSseTotal';
 const jsDebugGraphClientMetrics = Object.freeze([
-  {key: 'api', label: 'API', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
-  {key: 'sse', label: 'SSE', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
-  {key: 'latency', label: 'Client latency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
-  {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
+  {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
+  {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
+  {key: 'latency', labelKey: 'debug.graph.metric.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
+  {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
 const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
 const jsDebugGraphAgentTokenTotalSeriesKey = 'agentTokenTotal';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
-const jsDebugAgentStatusSeriesLabels = Object.freeze({
-  askAgents: 'Attention',
-  workingAgents: 'Working',
-  transitionAgents: 'Transition',
-  idleAgents: 'Idle',
+const jsDebugAgentStatusSeriesLabelKeys = Object.freeze({
+  askAgents: 'debug.graph.status.attention',
+  workingAgents: 'debug.graph.status.working',
+  transitionAgents: 'debug.graph.status.transition',
+  idleAgents: 'debug.graph.status.idle',
 });
 const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   askAgents: bucket => bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0,
@@ -34471,19 +34928,26 @@ const jsDebugGraphEventResponseBytes = new Map();
 const jsDebugGraphEventRefTimes = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphSeries = Object.freeze([
-  ...jsDebugGraphClientMetrics.map(metric => ({...metric, label: `${metric.label} (this client)`, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
-  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, label: jsDebugAgentStatusSeriesLabels[key], unit: 'count'})),
-  {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
-  {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent', linePattern: 'solid'},
+  ...jsDebugGraphClientMetrics.map(metric => ({...metric, labelKey: 'debug.graph.series.thisClient', metricLabelKey: metric.labelKey, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
+  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
+  {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute'},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', label: 'Client API&SSE/sec', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', label: 'Client bandwidth/sec', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'cpu', label: 'CPU', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
-  {key: 'activity', label: 'Agent status', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', label: 'Agent tokens/min', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'latency', labelKey: 'debug.graph.chart.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
+
+function debugGraphLocalizedLabel(item = {}) {
+  if (!item.labelKey) return String(item.label || '');
+  const params = {...(item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(item.labelKey, params);
+}
 
 function normalizedJsDebugSubTab(value) {
   return value === 'graph' ? 'graph' : 'events';
@@ -35668,11 +36132,11 @@ function debugGraphTokenNumberText(value) {
 }
 
 function debugGraphTokensText(value) {
-  return `${debugGraphTokenNumberText(value)} tokens`;
+  return t('debug.graph.unit.tokens', {count: debugGraphTokenNumberText(value)});
 }
 
 function debugGraphTokensPerMinuteText(value) {
-  return `${debugGraphTokenNumberText(value)} tokens/min`;
+  return t('debug.graph.unit.tokensPerMinute', {count: debugGraphTokenNumberText(value)});
 }
 
 function debugGraphValueText(value, unit) {
@@ -35766,7 +36230,11 @@ function debugRemovalLatencyMetaText() {
   if (typeof terminalRemovalLatencySummary !== 'function') return '';
   const summary = terminalRemovalLatencySummary();
   if (!summary?.count) return '';
-  return `removal last ${debugGraphTerseTimeText(summary.last?.durationMs)} avg ${debugGraphTerseTimeText(summary.averageMs)} n=${summary.count}`;
+  return t('debug.graph.meta.removal', {
+    last: debugGraphTerseTimeText(summary.last?.durationMs),
+    average: debugGraphTerseTimeText(summary.averageMs),
+    count: summary.count,
+  });
 }
 
 function debugClientPerfRows() {
@@ -35799,7 +36267,8 @@ function debugClientPerfHtml() {
   const longTasks = typeof clientPerfLongTaskSummary === 'function' ? clientPerfLongTaskSummary() : {count: 0, averageMs: 0, maxMs: 0};
   const activeAnimations = typeof clientPerfActiveAnimationCount === 'function' ? clientPerfActiveAnimationCount() : 0;
   if (!rows.length && !longTasks.count && !activeAnimations) return '';
-  const header = `Client work | animations ${activeAnimations} | long tasks ${longTasks.count}${longTasks.count ? ` avg ${longTasks.averageMs}ms max ${longTasks.maxMs}ms` : ''}`;
+  const timing = longTasks.count ? t('debug.graph.clientWorkTiming', {average: longTasks.averageMs, max: longTasks.maxMs}) : '';
+  const header = t('debug.graph.clientWork', {animations: activeAnimations, tasks: longTasks.count, timing});
   return `<div class="js-debug-client-perf" data-js-debug-client-perf>
     <div class="js-debug-client-perf-title">${esc(header)}</div>
     <div class="js-debug-client-perf-grid">${rows.map(row => `<div class="js-debug-client-perf-row">${esc(debugClientPerfText(row))}</div>`).join('')}</div>
@@ -35808,18 +36277,18 @@ function debugClientPerfHtml() {
 
 function debugGraphMetaItems() {
   const items = [];
-  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(`yolomux.py uptime ${debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}`);
+  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(t('debug.graph.meta.uptime', {uptime: debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}));
   if (Number.isFinite(jsDebugStatsServerPid)) items.push(`PID=${Math.floor(jsDebugStatsServerPid)}`);
   const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
-  if (rss) items.push(`rss ${rss}`);
-  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(`server seq ${Math.floor(jsDebugStatsServerSequence)}`);
+  if (rss) items.push(t('debug.graph.meta.rss', {rss}));
+  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(t('debug.graph.meta.serverSequence', {sequence: Math.floor(jsDebugStatsServerSequence)}));
   const removalLatency = debugRemovalLatencyMetaText();
   if (removalLatency) items.push(removalLatency);
   if (items.length) {
     const counts = debugEventCounts();
     const uploadedMb = debugGraphTotalMegabytesText(counts.apiRequestBytes);
     const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
-    items.push(`total ${uploadedMb}/${downloadedMb} MB up/down`);
+    items.push(t('debug.graph.meta.totalTraffic', {uploaded: uploadedMb, downloaded: downloadedMb}));
   }
   return items;
 }
@@ -35860,7 +36329,7 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
   if (!agentSeries.length) return agentSeries;
   return [...agentSeries, {
     key: jsDebugGraphAgentTokenTotalSeriesKey,
-    label: 'All agents total',
+    labelKey: 'debug.graph.series.allAgentsTotal',
     unit: 'tokensPerMinute',
     cssKey: 'agentTokenTotal',
     agentTokenSeries: true,
@@ -35883,7 +36352,8 @@ function debugGraphClientMetricSeriesDefs(buckets) {
       return [{
         ...metric,
         key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
-        label: `${metric.label} (other clients avg)`,
+        labelKey: 'debug.graph.series.otherClientsAverage',
+        metricLabelKey: metric.labelKey,
         cssKey: metric.key,
         clientMetric: true,
         metricKey: metric.key,
@@ -35895,7 +36365,7 @@ function debugGraphClientMetricSeriesDefs(buckets) {
   if (!hasAnyClients) return peerAverageSeries;
   return [...peerAverageSeries, {
     key: `client:${jsDebugGraphAllClientsTotalId}:${jsDebugGraphAllClientsCombinedMetricKey}`,
-    label: 'API+SSE (all clients total)',
+    labelKey: 'debug.graph.series.allClientsApiSseTotal',
     unit: 'countPerSecond',
     cssKey: jsDebugGraphAllClientsCombinedMetricKey,
     chartMetricKey: 'api',
@@ -35903,7 +36373,7 @@ function debugGraphClientMetricSeriesDefs(buckets) {
     clientId: jsDebugGraphAllClientsTotalId,
     clientAggregate: 'allClientsApiSseTotal',
     clientLinePattern: jsDebugGraphAllClientsTotalLinePattern,
-    color: 'var(--js-debug-api-sse-total-series)',
+    color: 'var(--bad)',
   }];
 }
 
@@ -35916,14 +36386,15 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
       processes.set(processId, String(process?.label || processId));
     }
   }
-  if (!processes.size) return [{key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent', linePattern: 'solid'}];
+  if (!processes.size) return [{key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid'}];
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
   return [...processes.entries()]
     .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
     .map(([processId, label], index) => ({
       key: `cpu:${processId}`,
-      label: `${label} CPU %`,
+      labelKey: 'debug.graph.series.processCpu',
+      labelParams: {process: label},
       unit: 'percent',
       cssKey: 'cpu',
       chartMetricKey: 'cpu',
@@ -35939,6 +36410,7 @@ function debugGraphSeriesData(buckets) {
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
   const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
+    const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
     const hasDataValues = buckets.map(bucket => debugGraphSeriesBucketHasData(bucket, def));
     const sampleValues = values.filter((_value, index) => hasDataValues[index]);
@@ -35948,12 +36420,12 @@ function debugGraphSeriesData(buckets) {
     const current = sampleValues.length ? sampleValues[sampleValues.length - 1] : 0;
     const movingAverageSamples = Number(def.movingAverageSamples || 0);
     const movingAverageValues = movingAverageSamples > 0 ? debugGraphMovingAverageValues(sampleValues, movingAverageSamples) : [];
-    return {...def, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
+    return {...localizedDef, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
   });
 }
 
 function debugGraphScaleControlsHtml() {
-  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.tab.graph'))} bucket size">
+  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.graph.control.bucketSize'))}">
     ${jsDebugGraphScaleOptions.map(seconds => {
       const active = seconds === jsDebugGraphScaleSeconds;
       return `<button type="button" class="js-debug-scale-button${active ? ' active' : ''}" data-js-debug-scale="${seconds}" aria-pressed="${active ? 'true' : 'false'}">${seconds}s</button>`;
@@ -35969,11 +36441,11 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
   return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
-    <span class="js-debug-range-label" data-js-debug-range-label>${esc(zoomed ? 'Zoom' : jsDebugGraphRangeLabel(activeRange, nowMs))}</span>
-    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.tab.graph'))} time range">
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(zoomed ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs))}</span>
+    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
     <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
-    ${zoomed ? '<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>Reset</button>' : ''}
+    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('debug.graph.control.reset'))}</button>` : ''}
   </div>`;
 }
 
@@ -36072,7 +36544,7 @@ function debugGraphDisconnectedRectsHtml(buckets, domain) {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
-    const title = `Bad connection: no data collected for ${debugGraphTerseTimeText(range.disconnectedMs)}`;
+    const title = t('debug.graph.badConnection', {duration: debugGraphTerseTimeText(range.disconnectedMs)});
     return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(title)}</title></rect>`;
   }).join('');
 }
@@ -36258,7 +36730,8 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
   if (sampleCount <= 0) return '';
   const points = debugGraphPolylinePoints(series.movingAverageValues || [], series.movingAverageTimes || [], chartMax, domain);
   if (!points) return '';
-  return `<polyline class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-line--moving-average'))}" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)} ${sampleCount}-sample moving average</title></polyline>`;
+  const title = t('debug.graph.movingAverage', {label: series.label, count: sampleCount});
+  return `<polyline class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-line--moving-average'))}" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(title)}</title></polyline>`;
 }
 
 function debugGraphInteractionOverlayHtml() {
@@ -36411,6 +36884,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
 }
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
+  const groupLabel = debugGraphLocalizedLabel(group);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true);
@@ -36426,11 +36900,11 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const displayedTokenSum = group.dynamicAgentTokens === true ? debugGraphAgentTokenDisplayedSum(buckets) : null;
   const displayedTokenSumHtml = displayedTokenSum === null
     ? ''
-    : `<span class="js-debug-chart-summary" data-js-debug-displayed-token-sum="${esc(displayedTokenSum)}">(sum of tokens from displayed = ${esc(debugGraphTokenNumberText(displayedTokenSum))})</span>`;
+    : `<span class="js-debug-chart-summary" data-js-debug-displayed-token-sum="${esc(displayedTokenSum)}">${esc(t('debug.graph.sumDisplayedTokens', {count: debugGraphTokenNumberText(displayedTokenSum)}))}</span>`;
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
-        <span class="js-debug-chart-title">${esc(group.label)}</span>
+        <span class="js-debug-chart-title">${esc(groupLabel)}</span>
         ${displayedTokenSumHtml}
       </div>
       ${debugGraphLegendHtml(legendSeries)}
@@ -36438,7 +36912,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
     <div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
       <div class="js-debug-plot">
-        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(group.label)}" preserveAspectRatio="none">
+        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
@@ -36746,6 +37220,10 @@ function debugPanelHtml() {
       <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
     </div>
     <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`;
+}
+
+function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
+  return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
 }
 
 function createDebugPanel() {
@@ -37130,6 +37608,8 @@ function bindDebugPanel(panel) {
 }
 
 startJsDebugStatsPolling();
+const changesOutsideRepoKey = 'Outside repo';
+
 function sessionForFileRepo(path) {
   const normalized = String(path || '');
   if (!normalized) return '';
@@ -37343,11 +37823,22 @@ function diffRefRepoRefs(refsByRepo, repo) {
   return null;
 }
 
-function diffRefSuggestions(repo) {
-  const suggestions = [
-    {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
-    {ref: 'current', short: 'current', subject: 'working tree'},
+function localizedDiffRefSubject(ref, subject = '') {
+  const value = String(subject || '');
+  if (ref === 'HEAD' && (!value || value === 'base commit')) return t('diff.ref.base');
+  if (ref === 'current' && (!value || value === 'working tree')) return t('diff.ref.workingTree');
+  return value;
+}
+
+function defaultDiffRefSuggestions() {
+  return [
+    {ref: 'HEAD', short: 'HEAD', subject: localizedDiffRefSubject('HEAD')},
+    {ref: 'current', short: 'current', subject: localizedDiffRefSubject('current')},
   ];
+}
+
+function diffRefSuggestions(repo) {
+  const suggestions = defaultDiffRefSuggestions();
   const seen = new Set(suggestions.map(item => item.ref));
   const addRefs = refs => {
     if (!Array.isArray(refs)) return;
@@ -37358,7 +37849,7 @@ function diffRefSuggestions(repo) {
         const existing = suggestions.find(candidate => candidate.ref === ref);
         if (existing) {
           if (item?.short) existing.short = item.short;
-          if (item?.subject) existing.subject = item.subject;
+          if (item?.subject) existing.subject = localizedDiffRefSubject(ref, item.subject);
           if (item?.date) existing.date = item.date;
           if (item?.author) existing.author = item.author;
           if (item?.commit) existing.commit = item.commit;
@@ -37366,7 +37857,7 @@ function diffRefSuggestions(repo) {
         }
         continue;
       }
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: localizedDiffRefSubject(ref, item?.subject), date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
       seen.add(ref);
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
@@ -37385,10 +37876,7 @@ function diffRefSuggestions(repo) {
 function fileDiffRefHistoryItems(path) {
   const state = openFiles.get(path);
   if (!path || !fileStateHasUsefulGitHistory(state)) return [];
-  const suggestions = [
-    {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
-    {ref: 'current', short: 'current', subject: 'working tree'},
-  ];
+  const suggestions = defaultDiffRefSuggestions();
   const seen = new Set(suggestions.map(item => item.ref));
   for (const item of state.gitHistory) {
     const ref = cleanDiffRef(item?.ref || '', '');
@@ -37397,7 +37885,7 @@ function fileDiffRefHistoryItems(path) {
       const existing = suggestions.find(candidate => candidate.ref === ref);
       if (existing) {
         if (item?.short) existing.short = item.short;
-        if (item?.subject) existing.subject = item.subject;
+        if (item?.subject) existing.subject = localizedDiffRefSubject(ref, item.subject);
         if (item?.date) existing.date = item.date;
         if (item?.author) existing.author = item.author;
         if (item?.commit) existing.commit = item.commit;
@@ -37405,7 +37893,7 @@ function fileDiffRefHistoryItems(path) {
       }
       continue;
     }
-    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
+    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: localizedDiffRefSubject(ref, item?.subject), date: item?.date || '', author: item?.author || '', commit: item?.commit || '', aliases: Array.isArray(item?.aliases) ? item.aliases.slice() : []});
     seen.add(ref);
     if (suggestions.length >= diffRefSuggestionLimit) break;
   }
@@ -37502,7 +37990,9 @@ function mergeDiffRefSameCommitAlias(primary, duplicate) {
   if (primary.ref === 'HEAD' && duplicateShort && !primaryShort.includes('/HEAD')) {
     primary.short = `${duplicateShort}/HEAD`;
   }
-  if ((!primary.subject || primary.subject === 'base commit') && duplicate?.subject) primary.subject = duplicate.subject;
+  const defaultSubject = localizedDiffRefSubject(primary.ref);
+  const duplicateSubject = localizedDiffRefSubject(duplicate?.ref, duplicate?.subject);
+  if ((!primary.subject || primary.subject === defaultSubject) && duplicateSubject) primary.subject = duplicateSubject;
   if (!primary.date && duplicate?.date) primary.date = duplicate.date;
   if (!primary.author && duplicate?.author) primary.author = duplicate.author;
   if (!primary.commit) primary.commit = diffRefItemCommitId(primary) || diffRefItemCommitId(duplicate);
@@ -37567,7 +38057,7 @@ function diffRefOptionItems(value, options = {}) {
   const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
   const items = suggestions.slice(0, maxItems);
   if (value && !items.some(item => diffRefOptionMatches(value, item))) {
-    items.unshift({ref: value, short: value.slice(0, 9), subject: 'selected ref'});
+    items.unshift({ref: value, short: value.slice(0, 9), subject: t('diff.ref.selected')});
   }
   return items;
 }
@@ -37602,7 +38092,7 @@ function diffRefFromSuggestions(repo, path = '') {
 
 function diffRefToSuggestions(fromRef = diffRefFrom, repo, path = '') {
   const suggestions = scopedDiffRefSuggestions(repo, path);
-  const current = suggestions.find(item => item.ref === 'current') || {ref: 'current', short: 'current', subject: 'working tree'};
+  const current = suggestions.find(item => item.ref === 'current') || defaultDiffRefSuggestions()[1];
   const ordered = [current, ...suggestions.filter(item => item.ref !== 'current')];
   const from = cleanDiffRef(fromRef, '');
   const fromIndex = ordered.findIndex(item => diffRefOptionMatches(from, item));
@@ -38156,9 +38646,7 @@ async function fetchSessionFiles(options = {}) {
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
-    const response = await apiFetch(`/api/session-files?${params.toString()}`);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
+    const payload = await apiFetchJson(`/api/session-files?${params.toString()}`);
     const nextPayload = normalizedSessionFilesPayload(payload, {session});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
@@ -38171,14 +38659,15 @@ async function fetchSessionFiles(options = {}) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
-    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
+    const issue = err?.payload?.user_message || {key: '', params: {}, fallback: String(err?.message || err)};
+    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
-    if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: err}));
+    if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
   } finally {
     const current = requestIsCurrent();
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
@@ -38248,8 +38737,7 @@ function compactElapsedDurationText(seconds) {
 }
 
 function compactRelativeFileTimeText(unit, countText) {
-  const category = countText === '1' ? 'one' : 'other';
-  return t(`relative.compact.${unit}.${category}`, {count: countText});
+  return tPlural(`relative.compact.${unit}`, Number(countText));
 }
 
 function sessionFileRelativeTimeText(mtime, nowSeconds = fileTreeRecencyNowMs() / 1000) {
@@ -38319,7 +38807,7 @@ function sessionFileStatusCountParts(counts = {}) {
     Number.isFinite(added) && added > 0 ? {kind: 'add', text: `+${added}`} : null,
     Number.isFinite(deleted) && deleted > 0 ? {kind: 'remove', text: `-${deleted}`} : null,
   ].filter(Boolean);
-  if (parts.length) parts.push({kind: 'file-label', text: 'files'});
+  if (parts.length) parts.push({kind: 'file-label', text: t('common.files')});
   return parts;
 }
 
@@ -38346,7 +38834,7 @@ function sortedSessionFiles(files) {
 function groupedSessionFiles(files) {
   const groups = new Map();
   for (const item of files) {
-    const repo = item.repo || 'Outside repo';
+    const repo = item.repo || changesOutsideRepoKey;
     if (!groups.has(repo)) groups.set(repo, []);
     groups.get(repo).push(item);
   }
@@ -38374,7 +38862,7 @@ function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) 
 function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload) {
   const folders = new Set();
   for (const item of fileExplorerDifferFiles(payload)) {
-    const repoRoot = item?.repo && item.repo !== 'Outside repo' ? normalizeDirectoryPath(item.repo) : '/';
+    const repoRoot = item?.repo && item.repo !== changesOutsideRepoKey ? normalizeDirectoryPath(item.repo) : '/';
     const absPath = item?.abs_path || (item?.repo && item?.path ? `${item.repo}/${item.path}` : item?.path || '');
     if (!absPath) continue;
     let directory = normalizeDirectoryPath(dirnameOf(absPath));
@@ -38519,12 +39007,14 @@ function repoComparisonTitleHtml(repoInfo) {
   const from = diffRefDisplayText(repoInfo?.from_ref || diffRefFrom);
   const to = diffRefDisplayText(repoInfo?.to_ref || diffRefTo);
   const title = `<span class="changes-repo-compare-title">${t('diff.comparing', {from: esc(from), to: esc(to)})}</span>`;
-  const error = repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
+  const errorText = messageDescriptorText(repoInfo?.error_message, repoInfo?.error || '');
+  const error = errorText ? `<span class="changes-repo-refs-error">${esc(errorText)}</span>` : '';
   return `${title}${error}`;
 }
 
 function repoComparisonErrorHtml(repoInfo) {
-  return repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
+  const error = messageDescriptorText(repoInfo?.error_message, repoInfo?.error || '');
+  return error ? `<span class="changes-repo-refs-error">${esc(error)}</span>` : '';
 }
 
 function changesRepoCount(payload, files) {
@@ -38582,7 +39072,7 @@ function changesRepoMetaHtml(repoInfo, options = {}) {
 
 function repoPayloadByPath(payload) {
   const map = new Map();
-  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) map.set(repo.repo || 'Outside repo', repo);
+  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) map.set(repo.repo || changesOutsideRepoKey, repo);
   return map;
 }
 
@@ -38594,7 +39084,7 @@ function repoHasExplicitComparison(repoInfo) {
 
 function repoPayloadHasRenderableSection(repoInfo) {
   const repo = normalizeDirectoryPath(repoInfo?.repo || '');
-  return Boolean(repo && repo !== 'Outside repo');
+  return Boolean(repo && repo !== changesOutsideRepoKey);
 }
 
 function payloadHasRenderableRepoSections(payload) {
@@ -38693,7 +39183,7 @@ function initializeDefaultCollapsedChangesFolders(entriesByDir) {
 
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
-  const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
+  const treeRoot = repoPath === changesOutsideRepoKey ? '/' : repoPath;
   const {entries, entriesByDir, sessionFilesMap, directoryStatusCounts} = buildSessionFileTree(treeRoot, sessionFiles);
   const renderedRows = entries.length + Array.from(entriesByDir.values()).reduce((total, childEntries) => total + (Array.isArray(childEntries) ? childEntries.length : 0), 0);
   recordClientPerfCounter('sessionFilesRender', 0, {nodes: entriesByDir.size, rows: renderedRows});
@@ -38717,7 +39207,8 @@ function changedFileAgentTitle(kind, item) {
   const name = agentLabel(kind);
   if (!name) return '';
   const timeText = sessionFileRelativeTimeText(item?.mtime);
-  return timeText ? `modified by ${name} ${timeText}` : `modified by ${name}`;
+  const prefix = t('filetab.modified');
+  return timeText ? `${prefix}: ${name} ${timeText}` : `${prefix}: ${name}`;
 }
 
 function changeFileAgentsHtml(item) {
@@ -38741,7 +39232,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
   const groups = new Map(groupedSessionFiles(regular));
   if (options.includeEmptyRepoSections === true) {
     for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
-      const repo = repoInfo?.repo || 'Outside repo';
+      const repo = repoInfo?.repo || changesOutsideRepoKey;
       if (repoPayloadHasRenderableSection(repoInfo) && !groups.has(repo)) {
         groups.set(repo, []);
       }
@@ -38765,8 +39256,8 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     const collapsed = changesRepoCollapsed.has(repo);
     section.classList.toggle(CLS.collapsed, collapsed);
     const repoInfo = repoMap.get(repo) || {};
-    const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
-    const hasGit = repo && repo !== 'Outside repo';
+    const repoLabel = repo === changesOutsideRepoKey ? t('changes.outsideRepo') : compactHomePath(repo);
+    const hasGit = repo && repo !== changesOutsideRepoKey;
     // Update repo header button (small HTML string — not performance sensitive)
     let head = section.querySelector(':scope > .changes-repo-head');
     if (!head) {
@@ -38894,8 +39385,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const loading = sessionFilesPanelIsLoading(payload, files);
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
-  const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
-  const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(warning)}</div>`).join('');
+  const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(messageDescriptorText(error, String(error || '')))}</div>`).join('');
+  const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(messageDescriptorText(warning, String(warning || '')))}</div>`).join('');
   const full = options.full === true || fileExplorerMode === 'diff';
   const showEmptyRepoSections = full && !loading && !files.length && payloadHasRenderableRepoSections(payload);
   const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
@@ -39002,17 +39493,13 @@ function fileExplorerModeTitle() {
 }
 
 function fileExplorerModeButtonTitle(mode) {
-  // 'Tabber' tooltip is a brand-literal for now (no locale key) to avoid a 14-catalog change while the
-  // co-agent is editing locales; the localized title lands with the B6 docs pass.
-  if (mode === 'tabber') return 'Tabber: open tabs, tmux sub-windows, and the paths each agent touched';
+  if (mode === 'tabber') return t('tabber.description');
   return mode === 'diff' ? t('changes.show') : t('changes.hide');
 }
 
 function fileExplorerModeButtonLabel(mode) {
-  // 'Differ' and 'Tabber' are brand-literal UI labels (like 'Differ' has always been); only 'Finder'
-  // is localized because it predates the brand naming.
-  if (mode === 'diff') return 'Differ';
-  if (mode === 'tabber') return 'Tabber';
+  if (mode === 'diff') return t('changes.title');
+  if (mode === 'tabber') return t('tabber.title');
   return t('finder.label.finder');
 }
 
@@ -39160,7 +39647,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   }
   renderOpenFilePath(path);
   if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
-    const reason = current?.diffError || (current?.kind !== 'text' ? 'not a text file' : 'no git diff or useful history for this file');
+    const reason = current?.diffError || t(current?.kind !== 'text' ? 'editor.notTextFile' : 'editor.noGitDiffHistory');
     const panel = panelNodes.get(item);
     if (panel) setFileEditorPanelStatus(panel, t('editor.diffUnavailable', {error: reason}), 'warn');
   }
@@ -39479,16 +39966,16 @@ function showChangedDirectoryContextMenu(row, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
-  appendContextMenuButton(menu, `Expand ${displayName} in ${fileExplorerLabel()}`, () => openChangedDirectoryInFinder(path), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyRelativePath'), () => copyChangedPath(rel || path, 'status.copiedRelativePath'), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyFullPath'), () => copyChangedPath(path, 'status.copiedPath'), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.expandInFinder', {name: displayName, finder: fileExplorerLabel()}), () => openChangedDirectoryInFinder(path), closeFileContextMenu);
   fileContextMenu.open(menu, x, y);
 }
 
-async function copyChangedPath(path, label) {
+async function copyChangedPath(path, statusKey) {
   try {
     await copyTextToClipboard(path);
-    statusEl.textContent = `copied ${label}`;
+    statusEl.textContent = t(statusKey);
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
   }
@@ -39503,14 +39990,14 @@ async function openChangedDirectoryInFinder(path) {
       const expanded = await expandFileExplorerTreesToPath(path);
       if (expanded) {
         selectFileTreePath(path);
-        statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+        statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
         return;
       }
     }
     const opened = await openFileExplorerAt(path);
     if (!opened) return;
     selectFileTreePath(path);
-    statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+    statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
   } catch (error) {
     statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
   }
@@ -39700,9 +40187,9 @@ function savePreferenceControl(control) {
       if (path === 'uploads.max_bytes' && Number(value) > uploadRsyncRecommendationBytes && Number(previousValue) <= uploadRsyncRecommendationBytes) {
         showUploadRsyncRecommendation({sizeBytes: Number(value)});
       }
-      statusEl.textContent = `saved ${path}`;
+      statusEl.textContent = t('status.settingSaved', {path});
     })
-    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }
 
 function resetPreference(path) {
@@ -39711,8 +40198,8 @@ function resetPreference(path) {
   saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
-    .then(() => { statusEl.textContent = `reset ${path}`; })
-    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
+    .then(() => { statusEl.textContent = t('status.settingReset', {path}); })
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error: userMessageText(error, t('common.requestFailed'))})); });
 }
 
 function resetAllPreferences() {
@@ -39727,7 +40214,7 @@ function resetAllPreferences() {
       renderPreferencesPanels({force: true});
       statusEl.textContent = t('status.preferencesResetAll');
     })
-    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error: userMessageText(error, t('common.requestFailed'))})); });
 }
 
 function clampEditorPreviewFontSize(value) {
@@ -39762,7 +40249,7 @@ function setEditorPreviewFontSize(value) {
   scheduleShareUiStatePublish();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = t('status.previewFontSizeSaved'); })
-    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }
 
 // File Explorer pane content is self-contained so layout panes do not depend on
@@ -40076,7 +40563,7 @@ function fileEditorToolbarHtml(item) {
             {
               className: 'file-editor-diff-panel',
               action: 'editor-diff',
-              label: 'Differ',
+              label: t('changes.title'),
               title: t('editor.diff'),
               ariaLabel: t('editor.diff'),
               hidden: true,
@@ -40242,6 +40729,51 @@ function fileEditorToolbarHtml(item) {
       </div>`;
 }
 
+function setFileEditorLocalizedLabel(panel, selector, key, options = {}) {
+  const node = panel?.querySelector?.(selector);
+  if (!node) return;
+  const label = t(key);
+  if (options.text === true) node.textContent = label;
+  if (options.title !== false) node.title = label;
+  if (options.aria !== false) node.setAttribute('aria-label', label);
+}
+
+function relocalizeFileEditorPanel(panel, item) {
+  if (!panel) return false;
+  const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
+  if (diffRefPanel) {
+    delete diffRefPanel.dataset.diffRefRepoRendered;
+    delete diffRefPanel.dataset.diffRefPathRendered;
+    delete diffRefPanel.dataset.diffRefHistoryRendered;
+  }
+  renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
+  reconfigureCodeMirrorPanelLocale(panel);
+  relocalizeVirtualPanelChrome(panel);
+  setFileEditorLocalizedLabel(panel, '.file-editor-panel-close', 'editor.closePane');
+  setFileEditorLocalizedLabel(panel, '.file-editor-toolbar', 'editor.toolbar.aria', {title: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-mode-control-panel', 'editor.mode.aria', {title: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'editor.previewFont.aria', {title: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-popout-preview-panel', 'editor.popoutPreview');
+  setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reloadFromDisk');
+  setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reload', {text: true, title: false, aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-diff-expand-panel', 'editor.diffExpand');
+  setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.save', {aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.saveFile', {text: false, title: false});
+  const findPanel = panel.querySelector('.file-editor-preview-find-panel');
+  if (findPanel) {
+    findPanel.setAttribute('aria-label', t('preview.find'));
+    const input = findPanel.querySelector('input');
+    if (input) {
+      input.placeholder = t('preview.find');
+      input.setAttribute('aria-label', t('preview.find'));
+    }
+    findPanel.querySelector('[data-preview-find-move="-1"]')?.setAttribute('aria-label', t('preview.find.previous'));
+    findPanel.querySelector('[data-preview-find-move="1"]')?.setAttribute('aria-label', t('preview.find.next'));
+    findPanel.querySelector('[data-preview-find-close]')?.setAttribute('aria-label', t('preview.find.close'));
+  }
+  return true;
+}
+
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
   const panel = document.createElement('article');
@@ -40272,12 +40804,12 @@ function createFileEditorPanel(item) {
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
           <div class="file-editor-find-overview" hidden aria-hidden="true"></div>
-          <form class="file-editor-preview-find-panel" hidden role="search" aria-label="Find in preview">
-            <input type="search" placeholder="Find in preview" aria-label="Find in preview" autocomplete="off">
+          <form class="file-editor-preview-find-panel" hidden role="search" aria-label="${esc(t('preview.find'))}">
+            <input type="search" placeholder="${esc(t('preview.find'))}" aria-label="${esc(t('preview.find'))}" autocomplete="off">
             <span class="file-editor-preview-find-count" aria-live="polite"></span>
-            <button type="button" data-preview-find-move="-1" aria-label="Previous match">↑</button>
-            <button type="button" data-preview-find-move="1" aria-label="Next match">↓</button>
-            <button type="button" data-preview-find-close aria-label="Close find">×</button>
+            <button type="button" data-preview-find-move="-1" aria-label="${esc(t('preview.find.previous'))}">↑</button>
+            <button type="button" data-preview-find-move="1" aria-label="${esc(t('preview.find.next'))}">↓</button>
+            <button type="button" data-preview-find-close aria-label="${esc(t('preview.find.close'))}">×</button>
           </form>
           <div class="file-editor-image-panel" hidden></div>
         </div>
@@ -40493,8 +41025,11 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     };
     img.onerror = () => {
       disconnectFileEditorImageObserver(imagePane);
-      imagePane.replaceChildren(fileEditorEmptyState('Image could not be loaded', `The file may be unreadable, unsupported, or over ${formatFileSize(MAX_FILE_PREVIEW_BYTES)}.`));
-      status('failed to load image', 'error');
+      imagePane.replaceChildren(fileEditorEmptyState(
+        t('preview.image.loadFailed'),
+        t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
+      ));
+      status(t('preview.image.loadFailedStatus'), 'error');
     };
     img.src = rawFileUrl(path, {v: version});
     imagePane.dataset.imagePath = path;
@@ -41133,11 +41668,11 @@ async function loadMermaidApi() {
         if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
         api = await loadMermaidBundleScript({force: true});
         if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
-        bundleError = new Error('Mermaid bundle missing critical exports');
+        bundleError = new Error(t('preview.mermaid.renderFailed'));
       } catch (error) {
         bundleError = error;
       }
-      throw bundleError || new Error('Mermaid unavailable');
+      throw bundleError || new Error(t('preview.mermaid.renderFailed'));
     })();
   }
   try {
@@ -41184,17 +41719,17 @@ function markdownImageFallbackNode(path, label = '') {
   const node = document.createElement('span');
   node.className = 'markdown-image-error';
   const text = document.createElement('span');
-  text.textContent = label || `Image unavailable: ${path}`;
+  text.textContent = label || t('preview.markdown.imageUnavailable', {path});
   node.appendChild(text);
   if (path) {
     const open = document.createElement('a');
     open.href = rawFileUrl(path);
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
-    open.textContent = 'Open';
+    open.textContent = t('preview.action.open');
     const download = document.createElement('a');
     download.href = rawFileDownloadUrl(path);
-    download.textContent = 'Download';
+    download.textContent = t('preview.action.download');
     node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
   }
   return node;
@@ -41212,7 +41747,7 @@ function rewriteMarkdownPreviewImages(root, markdownPath) {
     img.setAttribute('src', target.src);
     if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
     img.addEventListener('error', () => {
-      img.replaceWith(markdownImageFallbackNode(target.path, `Image unavailable: ${target.path || original}`));
+      img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
     }, {once: true});
   }
 }
@@ -41964,28 +42499,28 @@ const previewZoomActions = Object.freeze([
   Object.freeze({
     id: 'out',
     label: '-',
-    title: 'Zoom out',
+    titleKey: 'preview.zoom.out',
     zoomState: current => ({mode: 'manual', scale: current / previewZoomPolicy.step}),
     disabled: scale => scale <= previewZoomPolicy.minScale + previewZoomPolicy.disabledEpsilon,
   }),
   Object.freeze({
     id: 'fit',
-    label: 'Fit',
-    title: 'Fit to view',
+    labelKey: 'preview.zoom.fit.label',
+    titleKey: 'preview.zoom.fit.title',
     zoomState: current => ({mode: 'fit', scale: current}),
     pressed: state => state.mode === 'fit',
   }),
   Object.freeze({
     id: 'actual',
     label: '1:1',
-    title: 'Actual size',
+    titleKey: 'preview.zoom.actual',
     zoomState: () => ({mode: 'actual', scale: 1}),
     pressed: (state, scale) => state.mode !== 'fit' && Math.abs(scale - 1) < previewZoomPolicy.actualPressedEpsilon,
   }),
   Object.freeze({
     id: 'in',
     label: '+',
-    title: 'Zoom in',
+    titleKey: 'preview.zoom.in',
     zoomState: current => ({mode: 'manual', scale: current * previewZoomPolicy.step}),
     disabled: scale => scale >= previewZoomPolicy.maxScale - previewZoomPolicy.disabledEpsilon,
   }),
@@ -42138,9 +42673,10 @@ function previewZoomButton(action) {
   const button = document.createElement('button');
   button.type = 'button';
   button.dataset.previewZoomAction = action.id;
-  button.textContent = action.label;
-  button.title = action.title;
-  button.setAttribute('aria-label', action.title);
+  button.textContent = action.labelKey ? t(action.labelKey) : action.label;
+  const title = action.titleKey ? t(action.titleKey) : action.title;
+  button.title = title;
+  button.setAttribute('aria-label', title);
   return button;
 }
 
@@ -42369,10 +42905,10 @@ function mermaidErrorNode(source, error) {
   node.className = 'mermaid-preview-error';
   const title = document.createElement('div');
   title.className = 'file-editor-empty-title';
-  title.textContent = 'Mermaid diagram could not be rendered';
+  title.textContent = t('preview.mermaid.renderFailed');
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
-  detail.textContent = String(error || 'invalid Mermaid source');
+  detail.textContent = String(error || t('preview.mermaid.invalidSource'));
   const pre = document.createElement('pre');
   const code = document.createElement('code');
   code.className = 'language-mermaid';
@@ -42392,7 +42928,7 @@ function mermaidLoadingNode() {
   node.setAttribute('aria-busy', 'true');
   const title = document.createElement('div');
   title.className = 'file-editor-empty-title';
-  title.innerHTML = textWithMovingEllipsisHtml('Rendering Mermaid diagram', 'mermaid-preview-loading-dots');
+  title.innerHTML = textWithMovingEllipsisHtml(t('preview.mermaid.rendering'), 'mermaid-preview-loading-dots');
   node.appendChild(title);
   return node;
 }
@@ -42401,7 +42937,7 @@ async function renderMermaidSourceInto(container, source, options = {}) {
   const text = String(source || '').trim();
   disconnectPreviewZoomSurface(container, {resetClasses: true});
   if (!text) {
-    container.replaceChildren(fileEditorEmptyState('Mermaid diagram is empty'));
+    container.replaceChildren(fileEditorEmptyState(t('preview.mermaid.empty')));
     return false;
   }
   const seq = ++mermaidPreviewRenderSeq;
@@ -42416,10 +42952,10 @@ async function renderMermaidSourceInto(container, source, options = {}) {
     if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
     const rawSvg = typeof result === 'string' ? result : result?.svg;
     const svg = sanitizeStandaloneSvg(rawSvg);
-    if (!svg) throw new Error('Mermaid produced no SVG');
+    if (!svg) throw new Error(t('preview.mermaid.noSvg'));
     const img = document.createElement('img');
     img.className = 'mermaid-preview-image';
-    img.alt = 'Mermaid diagram';
+    img.alt = t('preview.mermaid.alt');
     img.src = svgImageUrl(svg);
     const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
       ? options.full !== false
@@ -42603,7 +43139,7 @@ function previewRendererLanguageForPath(path) {
   return renderer?.languageByExtension?.[ext] || renderer?.language || syntaxLanguageForPath(path) || 'text';
 }
 
-function jsonStructuredPreview(label, source, errorLabel = `${label} parse error`) {
+function jsonStructuredPreview(label, source, errorLabel = t('preview.structured.parseError', {format: label})) {
   try {
     return {label, text: JSON.stringify(JSON.parse(source), null, 2), language: 'json', error: ''};
   } catch (error) {
@@ -42621,19 +43157,19 @@ function jsonLinesStructuredPreview(path, source) {
     try {
       records.push(JSON.parse(line));
     } catch (error) {
-      errors.push(`line ${index + 1}: ${String(error?.message || error)}`);
+      errors.push(t('preview.parse.lineError', {line: index + 1, error: String(error?.message || error)}));
     }
   });
   if (errors.length) {
     return {
-      label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} parse error`,
+      label: t('preview.structured.parseError', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL'}),
       text: source,
       language: 'json',
       error: errors.slice(0, 5).join('\n'),
     };
   }
   return {
-    label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} preview · ${records.length} records`,
+    label: t('preview.structured.records', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL', count: records.length}),
     text: records.map(record => JSON.stringify(record)).join('\n'),
     language: 'json',
     error: '',
@@ -42645,32 +43181,33 @@ function notebookStructuredPreview(source) {
   try {
     notebook = JSON.parse(String(source ?? ''));
   } catch (error) {
-    return {label: 'Notebook parse error', text: source, language: 'json', error: String(error?.message || error)};
+    return {label: t('preview.structured.parseError', {format: t('preview.format.notebook')}), text: source, language: 'json', error: String(error?.message || error)};
   }
   const cells = Array.isArray(notebook?.cells) ? notebook.cells : [];
-  const out = [`Notebook preview · ${cells.length} cells · outputs not rendered`];
+  const out = [t('preview.notebook.summary', {count: cells.length})];
   cells.slice(0, 80).forEach((cell, index) => {
     const type = String(cell?.cell_type || 'cell');
     const sourceText = Array.isArray(cell?.source) ? cell.source.join('') : String(cell?.source || '');
     const outputCount = Array.isArray(cell?.outputs) ? cell.outputs.length : 0;
-    out.push('', `## ${index + 1}. ${type}${outputCount ? ` · ${outputCount} outputs hidden` : ''}`, sourceText.trimEnd());
+    const outputs = outputCount ? t('preview.notebook.outputsHidden', {count: outputCount}) : '';
+    out.push('', `## ${index + 1}. ${type}${outputs}`, sourceText.trimEnd());
   });
-  if (cells.length > 80) out.push('', `... ${cells.length - 80} more cells truncated ...`);
-  return {label: 'Notebook preview', text: out.join('\n'), language: 'markdown', error: ''};
+  if (cells.length > 80) out.push('', t('preview.notebook.moreCells', {count: cells.length - 80}));
+  return {label: t('preview.notebook.title'), text: out.join('\n'), language: 'markdown', error: ''};
 }
 
 function structuredPreviewValue(path, text) {
   const ext = fileExtensionOf(path);
   const source = String(text ?? '');
-  if (ext === '.json') return jsonStructuredPreview('JSON preview', source, 'JSON parse error');
-  if (ext === '.geojson') return jsonStructuredPreview('GeoJSON preview', source, 'GeoJSON parse error');
-  if (ext === '.excalidraw') return jsonStructuredPreview('Excalidraw JSON preview', source, 'Excalidraw parse error');
+  if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
+  if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
+  if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
   if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
   if (ext === '.ipynb') return notebookStructuredPreview(source);
-  if (ext === '.toml') return {label: 'TOML preview', text: source, language: 'ini', error: ''};
-  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: ext === '.xml' ? 'XML preview' : 'Draw.io XML preview', text: source, language: 'xml', error: ''};
-  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: 'Config preview', text: source, language: 'ini', error: ''};
-  return {label: 'YAML preview', text: source, language: 'yaml', error: ''};
+  if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
+  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
+  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: t('preview.structured.title', {format: t('preview.format.config')}), text: source, language: 'ini', error: ''};
+  return {label: t('preview.structured.title', {format: 'YAML'}), text: source, language: 'yaml', error: ''};
 }
 
 function renderStructuredPreviewInto(container, path, text) {
@@ -42680,7 +43217,7 @@ function renderStructuredPreviewInto(container, path, text) {
   wrapper.className = 'file-editor-data-preview';
   const header = document.createElement('div');
   header.className = 'file-editor-data-preview-header';
-  header.textContent = `${value.label}${bounded.truncated ? ' · truncated' : ''}`;
+  header.textContent = bounded.truncated ? t('preview.truncated', {label: value.label}) : value.label;
   wrapper.appendChild(header);
   if (value.error) {
     const error = document.createElement('div');
@@ -42743,7 +43280,12 @@ function renderTablePreviewInto(container, path, text) {
   wrapper.className = 'file-editor-table-preview';
   const header = document.createElement('div');
   header.className = 'file-editor-data-preview-header';
-  header.textContent = `${delimiter === '\t' ? 'TSV' : 'CSV'} preview · ${Math.min(lines.length, maxRows)} of ${lines.length} rows${lines.length > maxRows || truncatedColumns ? ' · truncated' : ''}`;
+  header.textContent = t('preview.table.summary', {
+    format: delimiter === '\t' ? 'TSV' : 'CSV',
+    shown: Math.min(lines.length, maxRows),
+    total: lines.length,
+    truncated: lines.length > maxRows || truncatedColumns ? t('preview.table.truncatedSuffix') : '',
+  });
   wrapper.appendChild(header);
   const table = document.createElement('table');
   const body = document.createElement('tbody');
@@ -42779,7 +43321,7 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   img.loading = 'eager';
   img.decoding = 'async';
   img.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode('Image could not be loaded', `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+    container.replaceChildren(previewActionFallbackNode(t('preview.image.loadFailed'), `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
   }, {once: true});
   container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
     path,
@@ -42791,23 +43333,23 @@ function renderPdfPreviewInto(container, path) {
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-pdf-preview';
   frame.setAttribute('sandbox', '');
-  frame.setAttribute('title', `${basenameOf(path)} PDF preview`);
+  frame.setAttribute('title', t('preview.pdf.frameTitle', {name: basenameOf(path)}));
   frame.src = rawFileUrl(path);
   const fallback = document.createElement('div');
   fallback.className = 'file-editor-preview-fallback';
   const title = document.createElement('div');
   title.className = 'file-editor-empty-title';
-  title.textContent = 'PDF preview';
+  title.textContent = t('preview.pdf.title');
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
   const open = document.createElement('a');
   open.href = rawFileUrl(path);
   open.target = '_blank';
   open.rel = 'noopener noreferrer';
-  open.textContent = 'Open';
+  open.textContent = t('preview.action.open');
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
-  download.textContent = 'Download';
+  download.textContent = t('preview.action.download');
   detail.append(open, document.createTextNode(' · '), download);
   fallback.append(title, detail);
   container.replaceChildren(frame, fallback);
@@ -42827,10 +43369,10 @@ function previewActionFallbackNode(titleText, detailText, path) {
     open.href = rawFileUrl(path);
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
-    open.textContent = 'Open';
+    open.textContent = t('preview.action.open');
     const download = document.createElement('a');
     download.href = rawFileDownloadUrl(path);
-    download.textContent = 'Download';
+    download.textContent = t('preview.action.download');
     detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
   }
   fallback.append(title, detail);
@@ -42844,15 +43386,15 @@ function renderNativeMediaPreviewInto(container, path, state = null, kind = 'aud
   media.preload = 'metadata';
   media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
   media.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} could not be loaded`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+    container.replaceChildren(previewActionFallbackNode(t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
   }, {once: true});
-  container.replaceChildren(media, previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} preview`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
 }
 
 function renderUnsupportedPreviewInto(container, path, state = null) {
   const renderer = previewRendererForPath(path, state);
-  const title = renderer?.fallbackTitle || 'Preview is not available';
-  const label = state?.mime || previewMimeForPath(path) || state?.kind || 'unsupported file';
+  const title = renderer?.fallbackTitleKey ? t(renderer.fallbackTitleKey) : t('preview.unsupported.default');
+  const label = state?.mime || previewMimeForPath(path) || state?.kind || t('preview.unsupported.file');
   container.replaceChildren(previewActionFallbackNode(title, `${label}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
 }
 
@@ -43015,6 +43557,14 @@ function panePopoutDocument(popoutWindow) {
   try { return popoutWindow?.document || null; } catch (_) { return null; }
 }
 
+function panePopoutDefaultLabel() {
+  return t('app.documentTitle');
+}
+
+function panePopoutDefaultTitle() {
+  return t('pane.popout.title', {name: panePopoutDefaultLabel()});
+}
+
 function currentStylesheetHref(match = 'yolomux.css') {
   const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
     .find(item => String(item.getAttribute('href') || '').includes(match));
@@ -43054,7 +43604,7 @@ function panePopoutVariableStyle() {
 function writePanePopoutDocument(popoutWindow, options = {}) {
   const doc = panePopoutDocument(popoutWindow);
   if (!doc) return false;
-  const title = options.title || 'YOLOmux popout';
+  const title = options.title || panePopoutDefaultTitle();
   const cssHref = options.cssHref || currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
   const bodyClass = options.bodyClass || panePopoutBodyClassName();
   const bodyStyle = options.bodyStyle || panePopoutVariableStyle();
@@ -43106,12 +43656,12 @@ function paneCanPopout(item) {
 }
 
 function panePopoutDisabledReason(item) {
-  if (isTmuxSession(item)) return 'live terminal/transcript popout is disabled in phase 1';
+  if (isTmuxSession(item)) return t('pane.popout.disabledTerminal');
   const type = tabTypeForItem(item);
   const reason = type?.popoutDisabledReason;
-  if (typeof reason === 'function') return String(reason(item) || 'pane popout disabled for this tab');
+  if (typeof reason === 'function') return String(reason(item) || t('pane.popout.disabled'));
   if (reason) return String(reason);
-  return 'pane popout disabled for this tab';
+  return t('pane.popout.disabled');
 }
 
 function panePopoutPanelSnapshot(item, options = {}) {
@@ -43129,7 +43679,7 @@ function panePopoutPanelSnapshot(item, options = {}) {
   });
   const label = itemLabel(item);
   return {
-    title: `${label} popout`,
+    title: t('pane.popout.title', {name: label}),
     label,
     className: `pane-popout-snapshot ${clone.className || ''}`.trim(),
     html: clone.innerHTML,
@@ -43226,12 +43776,12 @@ function panePopoutDocumentStyle() {
 function writePaneItemPopoutDocument(record, snapshot) {
   if (!record?.window || !snapshot) return false;
   return writePanePopoutDocument(record.window, {
-    title: snapshot.title || 'YOLOmux popout',
+    title: snapshot.title || panePopoutDefaultTitle(),
     bodyClass: panePopoutBodyClassName('pane-popout-item-window'),
     bodyStyle: panePopoutVariableStyle(),
     style: panePopoutDocumentStyle(),
     bodyHtml: `<main class="pane-popout-shell">
-  <header class="pane-popout-title">${esc(snapshot.label || snapshot.title || 'YOLOmux')}</header>
+  <header class="pane-popout-title">${esc(snapshot.label || snapshot.title || panePopoutDefaultLabel())}</header>
   <section data-pane-popout-root class="pane-popout-root ${esc(snapshot.className || '')}">${snapshot.html || ''}</section>
 </main>`,
   });
@@ -43251,11 +43801,11 @@ function updatePanePopout(item) {
     const doc = popoutWindow.document;
     const root = doc?.querySelector?.('[data-pane-popout-root]');
     if (!root) return writePaneItemPopoutDocument(record, snapshot);
-    doc.title = snapshot.title || 'YOLOmux popout';
+    doc.title = snapshot.title || panePopoutDefaultTitle();
     doc.body.className = panePopoutBodyClassName('pane-popout-item-window');
     doc.body.setAttribute('style', panePopoutVariableStyle());
     const title = doc.querySelector('.pane-popout-title');
-    if (title) title.textContent = snapshot.label || snapshot.title || 'YOLOmux';
+    if (title) title.textContent = snapshot.label || snapshot.title || panePopoutDefaultLabel();
     root.className = `pane-popout-root ${snapshot.className || ''}`.trim();
     root.innerHTML = snapshot.html || '';
     return true;
@@ -43309,7 +43859,7 @@ function openPanePopout(item) {
   }
   const popoutWindow = window.open(`/pane-popout?item=${encodeURIComponent(item)}`, `yolomux-pane-${encodeURIComponent(item)}`, 'popup,width=980,height=900');
   if (!popoutWindow) {
-    statusErr('pane pop-out was blocked by the browser');
+    statusErr(localizedHtml('status.panePopoutBlocked'));
     return false;
   }
   try {
@@ -43320,7 +43870,7 @@ function openPanePopout(item) {
   } catch (error) {
     paneItemPopouts.delete(item);
     try { popoutWindow.close(); } catch (_) {}
-    statusErr(`pane pop-out failed: ${error}`);
+    statusErr(localizedHtml('status.panePopoutFailed', {error}));
     return false;
   }
 }
@@ -43578,7 +44128,6 @@ async function renderedPreviewSnapshotAsync(path, text) {
 function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
   const doc = previewWindow?.document;
   if (!doc) return false;
-  const title = `${basenameOf(path)} preview`;
   const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
   doc.open();
   doc.write(`<!doctype html>
@@ -43586,7 +44135,7 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${esc(title)}</title>
+  <title></title>
   <link rel="stylesheet" href="${esc(cssHref)}">
   <style>
     html {
@@ -44000,6 +44549,7 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
 </body>
 </html>`);
   doc.close();
+  doc.title = t('preview.popout.title', {name: basenameOf(path)});
   doc._yolomuxPreviewControlsBound = false;
   bindFilePreviewPopoutControls(path, previewWindow);
   return true;
@@ -44078,7 +44628,7 @@ function updateFilePreviewPopout(path, text) {
     applyPreviewSnapshotRoot(root, snapshot);
     doc.body.className = previewPopoutBodyClassName();
     updateFilePreviewPopoutControls(path, previewWindow);
-    doc.title = `${basenameOf(path)} preview`;
+    doc.title = t('preview.popout.title', {name: basenameOf(path)});
     restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
     renderedPreviewSnapshotAsync(path, text).then(asyncSnapshot => {
       if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
@@ -44188,6 +44738,8 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmEditorOptionCompartment = null;
     panel._cmEditorOptionViews = [];
     panel._cmEditorOptionConfig = null;
+    panel._cmLocaleCompartment = null;
+    panel._cmLocaleViews = [];
     panel._cmPath = '';
     panel._cmSignature = '';
     panel._cmMode = '';
@@ -44237,6 +44789,7 @@ function codeMirrorDiffLayout(_container) {
 
 function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
   return [
+    codeMirrorLocaleExtensions(api, panel),
     api.drawSelection(),
     codeMirrorContextMenuSelectionExtension(api),
     api.highlightActiveLine(),
@@ -44300,22 +44853,18 @@ function codeMirrorContextMenuSelectionExtension(api) {
   });
 }
 
-function syncCodeMirrorDocument(view, text, options = {}) {
-  if (!view) return;
-  const next = String(text || '');
-  if (view.state.doc.toString() === next) return;
-  if (options.cleanOnly && openFiles.get(options.path)?.dirty) return;
+function updateCodeMirrorViewPreservingState(view, update, options = {}) {
+  if (!view || typeof update !== 'function') return false;
   const scrollDOM = view.scrollDOM;
   const scrollTop = scrollDOM?.scrollTop || 0;
   const scrollLeft = scrollDOM?.scrollLeft || 0;
-  const selection = view.state.selection;
-  const selectionFits = selection?.ranges?.every(range => (
-    range.anchor <= next.length && range.head <= next.length
-  ));
-  view.dispatch({
-    changes: {from: 0, to: view.state.doc.length, insert: next},
-    ...(selectionFits ? {selection} : {}),
-  });
+  const selection = options.preserveSelection === false ? null : view.state.selection;
+  update(selection);
+  const currentSelection = view.state.selection;
+  const selectionPreserved = !selection || currentSelection === selection || currentSelection?.eq?.(selection) === true;
+  if (!selectionPreserved) {
+    try { view.dispatch({selection}); } catch (_) {}
+  }
   const restoreScroll = () => {
     if (!scrollDOM) return;
     scrollDOM.scrollTop = scrollTop;
@@ -44326,7 +44875,28 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   } else {
     requestAnimationFrame(restoreScroll);
   }
-  requestAnimationFrame(restoreScroll);
+  requestAnimationFrame(() => {
+    restoreScroll();
+    requestAnimationFrame(restoreScroll);
+  });
+  return true;
+}
+
+function syncCodeMirrorDocument(view, text, options = {}) {
+  if (!view) return;
+  const next = String(text || '');
+  if (view.state.doc.toString() === next) return;
+  if (options.cleanOnly && openFiles.get(options.path)?.dirty) return;
+  const selection = view.state.selection;
+  const selectionFits = selection?.ranges?.every(range => (
+    range.anchor <= next.length && range.head <= next.length
+  ));
+  updateCodeMirrorViewPreservingState(view, preservedSelection => {
+    view.dispatch({
+      changes: {from: 0, to: view.state.doc.length, insert: next},
+      ...(preservedSelection ? {selection: preservedSelection} : {}),
+    });
+  }, {preserveSelection: selectionFits});
 }
 
 function codeMirrorThemeExtensions(api, path) {
@@ -44375,6 +44945,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     ...(Array.isArray(api.searchKeymap) ? api.searchKeymap : []),
   ].filter(Boolean)));
   return [
+    codeMirrorLocaleExtensions(api, panel),
     safeCodeMirrorExtension('history', () => api.history?.()),
     safeCodeMirrorExtension('selection drawing', () => api.drawSelection()),
     codeMirrorContextMenuSelectionExtension(api),
@@ -44462,6 +45033,21 @@ function trackCodeMirrorThemeViews(panel, api, views) {
   const liveViews = views.filter(Boolean);
   panel._cmThemeViews = liveViews;
   panel._cmEditorOptionViews = liveViews;
+  panel._cmLocaleViews = liveViews;
+}
+
+function reconfigureCodeMirrorPanelLocale(panel) {
+  const api = panel?._cmApi;
+  const compartment = panel?._cmLocaleCompartment;
+  const views = Array.isArray(panel?._cmLocaleViews) ? panel._cmLocaleViews : [];
+  if (!api || !compartment || !views.length) return false;
+  const effect = compartment.reconfigure(codeMirrorLocaleExtensions(api, null));
+  for (const view of views) {
+    try {
+      updateCodeMirrorViewPreservingState(view, selection => view.dispatch({effects: effect, selection}));
+    } catch (_) {}
+  }
+  return true;
 }
 
 function reconfigureCodeMirrorPanelTheme(panel) {
@@ -45100,6 +45686,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         console.warn('CodeMirror diff language parser failed; retrying plain diff editor', error);
         panel._cmThemeCompartment = null;
         panel._cmEditorOptionCompartment = null;
+        panel._cmLocaleCompartment = null;
         cmState = api.EditorState.create({
           doc: currentText,
           extensions: unifiedDiffExtensions(true),
@@ -45328,7 +45915,7 @@ function destroyEditorAndShowStatus(panel, parts, message, level = '') {
 }
 
 function renderClosedEditor(panel, parts) {
-  destroyEditorAndShowStatus(panel, parts, 'file closed', '');
+  destroyEditorAndShowStatus(panel, parts, t('editor.fileClosed'), '');
 }
 
 function renderLoadingEditor(panel, item, path, parts) {
@@ -45350,13 +45937,13 @@ function renderErrorEditor(panel, path, state, parts) {
     const size = formatFileSize(state.size);
     const title = state.kind === 'too-large' ? t('editor.fileTooLargeTitle') : t('editor.fileOpenFailedTitle');
     const detail = state.kind === 'too-large'
-      ? (state.error || t('editor.fileTooLargeDetail', {size: size || '', limit}))
-      : String(state.error || t('editor.fileLoadFailed'));
+      ? fileErrorText(state.error, 'editor.fileTooLargeDetail', {size: size || '', limit})
+      : fileErrorText(state.error, 'editor.fileLoadFailed');
     parts.imagePane.replaceChildren(fileEditorEmptyState(title, detail));
   }
   const status = state.kind === 'too-large'
     ? t('editor.fileTooLargeStatus', {limit: formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)})
-    : state.error || t('editor.fileLoadFailed');
+    : fileErrorText(state.error, 'editor.fileLoadFailed');
   setFileEditorPanelStatus(panel, status, 'error');
 }
 
@@ -45559,7 +46146,7 @@ function loadFileEditorState(path, panel, item) {
       const entry = fetched.entry;
       if (!entry) {
         if (fetched.missing) markOpenFileMissing(path);
-        else setFileState(path, fileErrorState(fetched.error || 'failed to inspect preview file'));
+        else setFileState(path, fileErrorState(fetched.error));
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -45591,13 +46178,12 @@ function loadFileEditorState(path, panel, item) {
     } catch (err) {
       const status = Number(err?.status) || 0;
       if (status) {
-        const message = String(err?.payload?.error || status);
         const sniffed = status === 415 ? await sniffedRawPreviewFileState(path) : null;
         setFileState(path, sniffed || (status === 413
-          ? tooLargeFileState(null, message)
+          ? tooLargeFileState(null, err)
           : status === 404
-            ? missingFileState(message)
-            : fileErrorState(message)));
+            ? missingFileState(err)
+            : fileErrorState(err)));
       } else {
         setFileState(path, fileErrorState(err));
       }
@@ -46346,7 +46932,7 @@ async function saveFileEditor(path, panel, options = {}) {
   }
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
-  setFileEditorPanelStatus(panel, options.autosave ? 'auto-saving...' : 'saving...', '');
+  setFileEditorPanelStatus(panel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
   try {
     const body = {
       path,
@@ -46360,11 +46946,12 @@ async function saveFileEditor(path, panel, options = {}) {
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
+      const errorText = userMessageText(payload, response.statusText || String(response.status));
       if (response.status === 409) {
-        setFileEditorPanelStatus(panel, 'save conflict: file changed on disk', 'warn');
-        return showFileSaveConflictDialog(path, panel, {message: payload.error || ''});
+        setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
+        return showFileSaveConflictDialog(path, panel, {message: errorText});
       }
-      setFileEditorPanelStatus(panel, `save failed: ${payload.error || response.status}`, 'error');
+      setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: errorText}), 'error');
       return false;
     }
     const payload = await response.json();
@@ -46383,14 +46970,14 @@ async function saveFileEditor(path, panel, options = {}) {
     }
     for (const openPanel of fileEditorPanelsForPath(path)) {
       updateFileEditorPanelChrome(openPanel, path);
-      setFileEditorPanelStatus(openPanel, `${options.autosave ? 'auto-saved' : 'saved'} (${payload.size} bytes)`, 'ok');
+      setFileEditorPanelStatus(openPanel, t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), 'ok');
     }
     renderSessionButtons();
     renderPaneTabStrips();
     sharePublishFileVersion(path, {mtime: state.mtime, size: state.size});
     return true;
   } catch (err) {
-    setFileEditorPanelStatus(panel, `save failed: ${err}`, 'error');
+    setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: err}), 'error');
     return false;
   }
 }
@@ -46579,7 +47166,7 @@ function shareDefaultSchemeForForm(readOnly = shareDefaultReadOnly) {
 }
 
 function shareModeLabel(share) {
-  return share?.mode === 'rw' ? t('share.mode.write') : t('share.mode.readOnly');
+  return share?.mode === 'rw' ? t('share.mode.write') : t('common.readOnly');
 }
 
 function shareTotalViewers() {
@@ -46691,12 +47278,16 @@ function shareReplayShellEnabled() {
   return shareReplayViewerModeEnabled();
 }
 
+function shareReplayMirrorLabel() {
+  return t('share.replay.mirrorAria');
+}
+
 function shareReplayUserStatusText(status = '') {
   const cleanStatus = String(status || '').trim();
-  if (cleanStatus === 'mirrored') return 'mirrored';
-  if (cleanStatus === 'host-disconnected') return 'host disconnected';
-  if (cleanStatus === 'viewer-behind') return 'viewer behind';
-  return 'resyncing';
+  if (cleanStatus === 'mirrored') return t('share.mirror.synced');
+  if (cleanStatus === 'host-disconnected') return t('share.mirror.hostDisconnected');
+  if (cleanStatus === 'viewer-behind') return t('share.mirror.viewerBehind');
+  return t('share.mirror.checking');
 }
 
 function setShareReplayShellStatus(status = 'waiting', detail = {}) {
@@ -46735,7 +47326,7 @@ function prepareShareReplayMirrorRoot() {
   root.dataset.shareReplayInert = 'true';
   root.dataset.shareReplayStatus = 'waiting';
   root.setAttribute('role', 'presentation');
-  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('aria-label', shareReplayMirrorLabel());
   root.setAttribute('tabindex', '-1');
   return root;
 }
@@ -47718,7 +48309,7 @@ function shareReplayResetMirrorRootAttributes(root, attrs = {}) {
   root.dataset.shareReplayRoot = 'true';
   root.dataset.shareReplayInert = 'true';
   root.setAttribute('role', 'presentation');
-  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('aria-label', shareReplayMirrorLabel());
   root.setAttribute('tabindex', '-1');
   shareReplayApplyAttributes(root, attrs, {preserveRoot: true});
 }
@@ -47779,7 +48370,7 @@ function shareReplayPrepareTerminalPlaceholderElement(element, entry = {}) {
     element.dataset.shareTerminalPlaceholderId = entry.placeholderId;
   }
   element.setAttribute?.('role', 'presentation');
-  element.setAttribute?.('aria-label', `Shared terminal ${entry.session}`);
+  element.setAttribute?.('aria-label', t('share.replay.sharedTerminalAria', {session: entry.session}));
   return element;
 }
 
@@ -48941,7 +49532,7 @@ function shareAutoApproveStateSnapshot() {
       target: String(state.target || session),
       enabled: state.enabled === true,
       locked: state.locked === true,
-      last_action: String(state.last_action || ''),
+      ...structuredMessageSnapshot(state, 'last_action'),
       last_screen_sig: String(state.last_screen_sig || ''),
       screen: state.screen && typeof state.screen === 'object'
         ? {
@@ -49508,7 +50099,7 @@ function applySharePreferencesState(preferences = {}) {
   if (!preferences || typeof preferences !== 'object') return;
   if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
   if (Array.isArray(preferences.collapsedSections)) {
-    collapsedPreferenceSections = new Set(shareStringArray(preferences.collapsedSections, 200));
+    setCollapsedPreferenceSections(shareStringArray(preferences.collapsedSections, 200), {sections: preferenceSections()});
   }
   if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
   renderPreferencesPanels({force: true});
@@ -49826,6 +50417,21 @@ function shareScrollElementForPayload(payload = {}) {
   return null;
 }
 
+function applyShareScrollDescriptorPosition(descriptor, top, left) {
+  if (!descriptor) return false;
+  if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
+    descriptor.term.scrollToLine(top);
+    return true;
+  }
+  if (!descriptor.element) return false;
+  descriptor.element.scrollTop = top;
+  descriptor.element.scrollLeft = left;
+  // Setting scrollTop before CodeMirror's first measure can leave its virtual viewport at the old
+  // rows without emitting another scroll event. Force the same editor view to consume the host offset.
+  if (descriptor.kind === 'editor') descriptor.panel?._cmView?.requestMeasure?.();
+  return true;
+}
+
 function applyShareScrollState(payload = {}) {
   if (!payload || typeof payload !== 'object') return;
   const target = String(payload.target || '');
@@ -49845,14 +50451,7 @@ function applyShareScrollState(payload = {}) {
   const previous = applyingShareRemoteScroll;
   applyingShareRemoteScroll = true;
   try {
-    if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
-      descriptor.term.scrollToLine(top);
-      return;
-    }
-    if (descriptor.element) {
-      descriptor.element.scrollTop = top;
-      descriptor.element.scrollLeft = left;
-    }
+    applyShareScrollDescriptorPosition(descriptor, top, left);
     if (descriptor.kind === 'editor' && descriptor.panel?._cmView) {
       const view = descriptor.panel._cmView;
       const docLength = view.state?.doc?.length || 0;
@@ -50538,7 +51137,7 @@ function shareReplayHealthDiagnostics() {
 }
 
 function shareDebugTextForClipboard(report = shareDebugReports[shareDebugReports.length - 1] || null) {
-  const fallback = shareReplayShellActive ? shareReplayHealthDiagnostics() : {message: 'No share debug diagnostics recorded yet'};
+  const fallback = shareReplayShellActive ? shareReplayHealthDiagnostics() : {message: t('share.debug.noDiagnostics')};
   return JSON.stringify(shareRedactDiagnosticValue(report || fallback), null, 2);
 }
 
@@ -51053,6 +51652,7 @@ function openShareModalChrome(titleText) {
   if (!modal || !title || !body) return {};
   modal.classList.remove('about-open');
   modal.classList.add('share-open', 'open');
+  relocalizeModalChrome({content: false});
   title.textContent = titleText;
   body.innerHTML = '';
   scheduleSharePopupLayerPublish();
@@ -51090,15 +51690,15 @@ function syncShareProtocolControls(form) {
   if (hint) hint.textContent = http.checked ? t('share.hint.http') : '';
 }
 
-function renderShareCreateView(errorText = '') {
-  const {body} = openShareModalChrome(t('share.title'));
+function renderShareCreateView() {
+  const {body} = openShareModalChrome(t('brand.share'));
   if (!body) return;
-  body.innerHTML = shareCreateFormHtml(errorText);
+  body.innerHTML = shareCreateFormHtml();
   bindShareCreateForm(body);
   scheduleSharePopupLayerPublish();
 }
 
-function shareCreateFormHtml(errorText = '') {
+function shareCreateFormHtml() {
   const sharedSessions = shareSessionsFromLayout();
   if (!sharedSessions.length && !currentSessionActionTarget()) {
     return `<div class="share-modal-message">${esc(t('share.noSession'))}</div>`;
@@ -51108,6 +51708,7 @@ function shareCreateFormHtml(errorText = '') {
   const maxViewersDefault = Math.max(1, Math.min(300, Math.round(Number(shareDefaultMaxViewers) || 2)));
   const readOnlyChecked = shareDefaultReadOnly || !shareTlsAvailable();
   const defaultScheme = shareDefaultSchemeForForm(readOnlyChecked);
+  const errorText = shareCreateErrorPayload ? userMessageText(shareCreateErrorPayload) : '';
   return `<form class="share-modal-form" id="shareCreateForm">
     <div class="share-create-controls">
     <label class="share-field">
@@ -51244,18 +51845,18 @@ function bindShareEntries(root) {
   });
 }
 
-function renderShareManageView(errorText = '') {
-  const {body} = openShareModalChrome(t('share.manageTitle'));
+function renderShareManageView() {
+  const {body} = openShareModalChrome(t('brand.share'));
   if (!body) return;
   if (!shareHasActiveShare()) {
-    renderShareCreateView(errorText);
+    renderShareCreateView();
     return;
   }
   const list = activeShares.map(shareEntryHtml).join('');
   body.innerHTML = `<div class="share-result">
     <div class="share-create-panel">
       <div class="share-section-title">${esc(t('share.newShare'))}</div>
-      ${shareCreateFormHtml(errorText)}
+      ${shareCreateFormHtml()}
     </div>
     <div class="share-active-panel">
       <div class="share-section-title">${esc(t('share.activeShares', {count: activeShares.length}))}</div>
@@ -51274,6 +51875,38 @@ function renderShareResultView(share = activeShare) {
   renderShareManageView();
 }
 
+function shareCreateFormValues(form) {
+  if (!form) return null;
+  return {
+    ttlMinutes: form.elements.ttl_minutes?.value || '',
+    maxViewers: form.elements.max_viewers?.value || '',
+    readOnly: form.elements.read_only?.checked === true,
+    debugProfile: form.elements.debug_profile?.checked === true,
+    scheme: form.elements.scheme?.value || '',
+  };
+}
+
+function restoreShareCreateFormValues(form, values) {
+  if (!form || !values) return;
+  if (form.elements.ttl_minutes) form.elements.ttl_minutes.value = values.ttlMinutes;
+  if (form.elements.max_viewers) form.elements.max_viewers.value = values.maxViewers;
+  if (form.elements.read_only) form.elements.read_only.checked = values.readOnly;
+  if (form.elements.debug_profile) form.elements.debug_profile.checked = values.debugProfile;
+  const scheme = form.querySelector(`input[name="scheme"][value="${cssEscape(values.scheme)}"]`);
+  if (scheme) scheme.checked = true;
+  syncShareProtocolControls(form);
+}
+
+function relocalizeShareModal() {
+  if (!shareModalIsVisible()) return false;
+  const previousForm = document.getElementById('shareCreateForm');
+  const values = shareCreateFormValues(previousForm);
+  if (shareHasActiveShare()) renderShareManageView();
+  else renderShareCreateView();
+  restoreShareCreateFormValues(document.getElementById('shareCreateForm'), values);
+  return true;
+}
+
 async function createShareFromForm(form) {
   const submit = form.querySelector('button[type="submit"]');
   const error = form.querySelector('.share-error');
@@ -51282,6 +51915,7 @@ async function createShareFromForm(form) {
     error.hidden = true;
     error.textContent = '';
   }
+  shareCreateErrorPayload = null;
   try {
     const payload = shareCreatePayloadFromForm(form);
     const createdShare = normalizeSharePayload(await apiFetchJson('/api/share', {
@@ -51301,9 +51935,10 @@ async function createShareFromForm(form) {
     renderShareManageView();
     statusOk(localizedHtml('share.created'));
   } catch (err) {
+    shareCreateErrorPayload = userMessageSnapshot(err);
     if (error) {
       error.hidden = false;
-      error.textContent = err?.message || String(err);
+      error.textContent = userMessageText(shareCreateErrorPayload);
     }
   } finally {
     if (submit) submit.disabled = false;
@@ -51347,7 +51982,8 @@ async function extendActiveShare(tokenOrShortId = '', addSeconds = 600) {
 }
 
 async function showShareModal() {
-  openShareModalChrome(t('share.title'));
+  shareCreateErrorPayload = null;
+  openShareModalChrome(t('brand.share'));
   const {body} = shareModalElements();
   if (body) body.textContent = t('common.loading');
   const shares = await refreshActiveShare({silent: true});
@@ -51365,7 +52001,7 @@ function updateShareViewerBanner() {
   text.className = 'share-viewer-banner-text';
   text.textContent = t('share.viewerBanner', {
     host,
-    mode: share?.mode === 'rw' ? t('share.mode.write') : t('share.mode.readOnly'),
+    mode: share?.mode === 'rw' ? t('share.mode.write') : t('common.readOnly'),
     time: shareTimeLeftText(share),
   });
   const fit = document.createElement('button');
@@ -51389,8 +52025,8 @@ function updateShareViewerBanner() {
     debug.type = 'button';
     debug.className = 'share-view-fit-toggle share-debug-copy control-active-hover';
     debug.dataset.shareViewerControl = 'debug';
-    debug.textContent = 'debug';
-    debug.title = 'Copy share mirror diagnostics';
+    debug.textContent = t('debug.copy');
+    debug.title = t('share.debug.copyDiagnostics');
     debug.setAttribute('aria-label', debug.title);
     debug.addEventListener('click', event => {
       event.preventDefault();
@@ -51505,21 +52141,28 @@ function shareReadonlyPointerEventHitsScrollContainer(event) {
   return Boolean(descriptor?.element && descriptor.element === event.target);
 }
 
-function restoreShareReadonlyScrollTarget(target) {
+function shareReadonlyScrollStateForTarget(target) {
   const descriptor = shareScrollTargetForElement(target);
-  if (!descriptor?.target) return false;
+  if (!descriptor?.target) return null;
   const state = shareLastAppliedScrollByTarget.get(descriptor.target);
-  if (!state) return false;
+  if (!state) return null;
   const top = Math.max(0, Math.round(Number(state.top || 0)));
   const left = Math.max(0, Math.round(Number(state.left || 0)));
-  if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
-    descriptor.term.scrollToLine(top);
-    return true;
-  }
-  if (!descriptor.element) return false;
-  descriptor.element.scrollTop = top;
-  descriptor.element.scrollLeft = left;
-  return true;
+  return {descriptor, top, left};
+}
+
+function shareReadonlyScrollMatchesAppliedState(target) {
+  const snapshot = shareReadonlyScrollStateForTarget(target);
+  if (!snapshot?.descriptor?.element) return false;
+  return Math.round(Number(snapshot.descriptor.element.scrollTop || 0)) === snapshot.top
+    && Math.round(Number(snapshot.descriptor.element.scrollLeft || 0)) === snapshot.left;
+}
+
+function restoreShareReadonlyScrollTarget(target) {
+  const snapshot = shareReadonlyScrollStateForTarget(target);
+  if (!snapshot) return false;
+  const {descriptor, top, left} = snapshot;
+  return applyShareScrollDescriptorPosition(descriptor, top, left);
 }
 
 function restoreShareScrollTargetByKey(target) {
@@ -51535,14 +52178,7 @@ function restoreShareScrollTargetByKey(target) {
   };
   const descriptor = shareScrollElementForPayload(payload);
   if (!descriptor) return false;
-  if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
-    descriptor.term.scrollToLine(payload.top);
-    return true;
-  }
-  if (!descriptor.element) return false;
-  descriptor.element.scrollTop = payload.top;
-  descriptor.element.scrollLeft = payload.left;
-  return true;
+  return applyShareScrollDescriptorPosition(descriptor, payload.top, payload.left);
 }
 
 function scheduleShareScrollRestoreByKey(target, options = {}) {
@@ -51583,6 +52219,10 @@ function blockShareReadonlyInteraction(event) {
   if (!shareSemanticReadOnlyMirrorEnabled()) return;
   if (event.target?.closest?.('[data-share-viewer-control]')) return;
   if (event.type === 'scroll') {
+    // Host-authored scrolls must reach virtualized widgets such as CodeMirror so they can mount the
+    // rows at the mirrored offset. Only a scroll that diverges from the authoritative host position
+    // is local input and needs to be restored/stopped.
+    if (shareReadonlyScrollMatchesAppliedState(event.target)) return;
     restoreShareReadonlyScrollTarget(event.target);
     event.stopImmediatePropagation?.();
     event.stopPropagation?.();
@@ -51689,7 +52329,7 @@ function panelControlsHtml(session, options = {}) {
   const readonlyAttrs = label => ` type="button" disabled title="${esc(t('tab.adminRequiredFor', {name: label}))}" aria-label="${esc(label)}"`;
   const tabAttrs = (name, label = '') => {
     if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs('YO!summary');
+    if (readOnlyMode && name === 'summary') return readonlyAttrs(t('brand.tab.summary'));
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
@@ -51724,6 +52364,23 @@ function virtualPanelControlsHtml(session, options = {}) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
           ${paneFrameControlsHtml(session, {actions: false, close: false, ...options})}
         </div>`;
+}
+
+function relocalizeVirtualPanelChrome(panel, label = '') {
+  if (!panel) return false;
+  panel.querySelectorAll('.pane-tabs[role="tablist"]').forEach(tablist => tablist.setAttribute('aria-label', t('pane.tabs.aria')));
+  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
+    button.title = t('pane.minimize');
+    button.setAttribute('aria-label', t('pane.minimize'));
+  });
+  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
+    button.title = t('pane.expand');
+    button.setAttribute('aria-label', t('pane.expand'));
+  });
+  const labelNode = panel.querySelector('.panel-session-label .session-button-dir');
+  if (labelNode && label) labelNode.textContent = label;
+  if (typeof syncPanelDetailsToggleState === 'function') syncPanelDetailsToggleState(panel);
+  return true;
 }
 
 function panelActiveTabName(session) {
@@ -51800,14 +52457,14 @@ function createPanel(session) {
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
-          <div id="summary-context-${session}" class="summary-context">${esc(t('summary.loadingContext'))}</div>
-          <div id="summary-${session}" class="summary-preview markdown-body">${esc(t('summary.emptyPrompt'))}</div>
+          <div id="summary-context-${session}" class="summary-context" data-locale-text-key="summary.loadingContext">${esc(t('summary.loadingContext'))}</div>
+          <div id="summary-${session}" class="summary-preview markdown-body" data-locale-text-key="summary.emptyPrompt">${esc(t('summary.emptyPrompt'))}</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('events.title'))}</div>
-          <div id="events-${session}" class="event-list">${esc(t('events.loading'))}</div>
+          <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
       </div>`;
   bindPanelShell(panel, session);
@@ -51834,13 +52491,7 @@ function syncTranscriptMetaLoadingUi() {
     metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
     metaRefreshButton.disabled = transcriptMetaLoading;
     metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
-    if (transcriptMetaLoading) {
-      metaRefreshButton.title = t('info.loadingRepo');
-      metaRefreshButton.setAttribute('aria-label', t('info.loadingRepo'));
-    } else {
-      refreshMetaButtonTitle();
-      metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
-    }
+    refreshMetaButtonChrome();
   }
   document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
 }
@@ -51866,8 +52517,8 @@ function backgroundServerLabel(record, fallback = '') {
   return [
     endpoint,
     root,
-    Number.isFinite(pid) && pid > 0 ? `pid ${Math.trunc(pid)}` : '',
-  ].filter(Boolean).join(' · ') || 'this server';
+    Number.isFinite(pid) && pid > 0 ? t('backgroundOwner.pid', {pid: Math.trunc(pid)}) : '',
+  ].filter(Boolean).join(' · ') || t('backgroundOwner.thisServer');
 }
 
 function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPayload, options = {}) {
@@ -51938,7 +52589,7 @@ async function refreshBackgroundOwnerStatus(options = {}) {
       const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
       return applyBackgroundOwnerStatusPayload(payload, options);
     } catch (error) {
-      backgroundOwnerStatusError = String(error?.payload?.error || error?.message || error);
+      backgroundOwnerStatusError = userMessageSnapshot(error);
       backgroundOwnerStatusLoading = false;
       if (options.render !== false) renderInfoPanel();
       if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
@@ -52148,7 +52799,7 @@ function linkYoagentSessionCodeReferences(container) {
     const link = document.createElement('a');
     link.href = `?yoagent-session=${encodeURIComponent(session)}`;
     link.className = 'yoagent-session-link';
-    link.title = `Open tmux session ${session}`;
+    link.title = t('yoagent.openSession', {session});
     code.replaceWith(link);
     link.appendChild(code);
   });
@@ -52235,34 +52886,42 @@ const infoDefaultGrouping = Object.freeze(['tab', 'path', 'tmux-window']);
 const infoDefaultSort = Object.freeze({key: 'date', dir: 'desc'});
 const infoSearchMaxLength = 240;
 const infoSortDefs = Object.freeze([
-  {key: 'name', dir: 'asc', value: 'name:asc', label: 'A-Z'},
-  {key: 'name', dir: 'desc', value: 'name:desc', label: 'Z-A'},
-  {key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'},
-  {key: 'date', dir: 'asc', value: 'date:asc', label: 'oldest'},
+  {key: 'name', dir: 'asc', value: 'name:asc', labelKey: 'finder.sort.az'},
+  {key: 'name', dir: 'desc', value: 'name:desc', labelKey: 'finder.sort.za'},
+  {key: 'date', dir: 'desc', value: 'date:desc', labelKey: 'finder.sort.newest'},
+  {key: 'date', dir: 'asc', value: 'date:asc', labelKey: 'finder.sort.oldest'},
 ]);
 const infoDimensionDefs = Object.freeze([
-  {key: 'tab', label: 'Tab'},
-  {key: 'tmux-window', label: 'tmux sub-window'},
-  {key: 'ai', label: 'AI'},
-  {key: 'path', label: 'Path'},
-  {key: 'branch', label: 'Branch'},
-  {key: 'linear', label: 'Linear'},
-  {key: 'pr', label: 'PR'},
+  {key: 'tab', labelKey: 'info.dimension.tab'},
+  {key: 'tmux-window', labelKey: 'info.field.tmuxSubWindow'},
+  {key: 'ai', labelKey: 'info.dimension.ai'},
+  {key: 'path', labelKey: 'yoagent.action.row.path'},
+  {key: 'branch', labelKey: 'info.dimension.branch'},
+  {key: 'linear', labelKey: 'info.field.linear'},
+  {key: 'pr', labelKey: 'searchHistory.pr'},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-tmux-window', label: 'Tab > tmux-window', title: 'Tab, then tmux sub-window', grouping: ['tab', 'tmux-window']},
-  {key: 'tab-path', label: 'Tab > Path > tmux-window', title: 'Tab, then path, then tmux sub-window', grouping: ['tab', 'path', 'tmux-window']},
-  {key: 'path-branch', label: 'Path > Branch', title: 'Path, then branch', grouping: ['path', 'branch']},
-  {key: 'linear-pr', label: 'Linear > PR', title: 'Linear, then PR', grouping: ['linear', 'pr']},
-  {key: 'pr-branch', label: 'PR > Branch', title: 'PR, then branch', grouping: ['pr', 'branch']},
+  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
+  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['path', 'branch']},
+  {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
+  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['pr', 'branch']},
 ]);
 let infoGrouping = readStoredInfoGrouping();
 let infoSort = readStoredInfoSort();
 let infoSearch = '';
 const infoCollapsedGroupKeys = new Set();
 
+function localizedInfoDefinition(definition) {
+  return {
+    ...definition,
+    ...(definition.labelKey ? {label: t(definition.labelKey)} : {}),
+    ...(definition.titleKey ? {title: t(definition.titleKey)} : {}),
+  };
+}
+
 function infoGroupDimensions() {
-  return infoDimensionDefs.map(dimension => ({...dimension}));
+  return infoDimensionDefs.map(localizedInfoDefinition);
 }
 
 function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
@@ -52283,15 +52942,15 @@ function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
   return infoDimensionDefs
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
-    .map(dimension => ({...dimension}));
+    .map(localizedInfoDefinition);
 }
 
 function infoSortFields() {
-  return infoSortDefs.map(def => ({...def}));
+  return infoSortDefs.map(localizedInfoDefinition);
 }
 
 function infoGroupingPresets() {
-  return infoPresetDefs.map(preset => ({...preset, grouping: preset.grouping.slice()}));
+  return infoPresetDefs.map(preset => ({...localizedInfoDefinition(preset), grouping: preset.grouping.slice()}));
 }
 
 function normalizeInfoGrouping(value, options = {}) {
@@ -52487,8 +53146,8 @@ function infoRecordTmuxWindowIndex(record = {}) {
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
-  if (!infoRecordHasAi(record)) return 'No tmux sub-window';
-  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || 'tmux sub-window';
+  if (!infoRecordHasAi(record)) return t('info.missing.tmuxSubWindow');
+  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxSubWindow');
 }
 
 function infoRecordTmuxWindowKey(record = {}) {
@@ -52500,7 +53159,7 @@ function infoRecordTmuxWindowKey(record = {}) {
 }
 
 function infoDimensionValue(record, dimension) {
-  const fallback = {key: 'none', label: 'None', title: ''};
+  const fallback = {key: 'none', label: t('info.group.none'), title: ''};
   if (!record || !dimension) return fallback;
   if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
   if (dimension === 'tmux-window') return {key: infoRecordTmuxWindowKey(record), label: infoRecordTmuxWindowLabel(record), title: record.tmuxWindowTitle || record.aiTitle || infoRecordTmuxWindowLabel(record), sortValue: infoRecordNumericSortValue(record, 'tmux-window')};
@@ -52537,21 +53196,29 @@ function infoRowPrNumber(row = {}) {
 
 function infoRelationshipRecords(rows = infoBranchRows()) {
   const records = [];
-  const noTab = {session: '', label: 'No tab / no AI', title: 'No tab or AI associated with this branch', kind: '', window: '', tabLabel: 'No tab', aiLabel: 'No AI'};
+  const noTab = {
+    session: '',
+    label: t('info.missing.tabAndAi'),
+    title: t('info.missing.tabOrAiForBranch'),
+    kind: '',
+    window: '',
+    tabLabel: t('info.missing.tab'),
+    aiLabel: t('info.missing.ai'),
+  };
   for (const row of Array.isArray(rows) ? rows : []) {
     const directTabAgents = Array.isArray(row?.tabAgents) && row.tabAgents.length ? row.tabAgents : [];
     const pathTabAgents = Array.isArray(row?.pathTabAgents) && row.pathTabAgents.length ? row.pathTabAgents : [];
     const tabAgents = directTabAgents.length ? directTabAgents : (pathTabAgents.length ? pathTabAgents : [noTab]);
     for (const agent of tabAgents) {
       const session = String(agent?.session || '');
-      const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || 'No tab');
+      const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || t('info.missing.tab'));
       const aiLabel = String(agent?.aiLabel || infoTabAgentAiLabel(agent));
       const aiKind = String(agent?.kind || '');
       const tmuxWindowIndex = String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? '');
       const tmuxWindowKey = tmuxWindowIndex
         ? `${session || 'no-tab'}:${tmuxWindowIndex}:${aiLabel}`
         : '__no_tmux_window__';
-      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? 'No tmux sub-window' : aiLabel;
+      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxSubWindow') : aiLabel;
       const path = String(row?.path || '');
       const branch = String(row?.branch || '');
       const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
@@ -52589,17 +53256,17 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tmuxWindowLabel,
         tmuxWindowTitle: String(agent?.title || tmuxWindowLabel),
         pathKey: infoNormalizedPath(path) || '__no_path__',
-        pathLabel: String(row?.pathLabel || compactHomePath(path) || 'No path'),
-        pathTitle: String(row?.pathTitle || path || 'No path'),
+        pathLabel: String(row?.pathLabel || compactHomePath(path) || t('info.missing.path')),
+        pathTitle: String(row?.pathTitle || path || t('info.missing.path')),
         pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
         pathActivitySource: String(row?.pathActivitySource || ''),
         branchKey: branch || '__no_branch__',
-        branchLabel: branch || 'No branch',
-        branchTitle: branch || 'No branch',
-        branchHtml: row?.branchHtml || esc(branch || 'No branch'),
+        branchLabel: branch || t('info.missing.branch'),
+        branchTitle: branch || t('info.missing.branch'),
+        branchHtml: row?.branchHtml || esc(branch || t('info.missing.branch')),
         prKey: prCompactLabel || prKeyLabel || '__no_pr__',
-        prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || 'No PR',
-        prTitle: prDisplayLabel || prCompactLabel || 'No PR',
+        prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || t('info.missing.pr'),
+        prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
         prNumber: Number.isFinite(prNumber) ? prNumber : null,
         prUrl: String(row?.prUrl || ''),
         prClass: String(row?.prClass || ''),
@@ -52609,8 +53276,8 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         prCiClass: String(row?.prCiClass || ''),
         prHtml: infoPrCellHtml(row) || '',
         linearKey: linearLabel || '__no_linear__',
-        linearLabel: linearLabel || 'No Linear',
-        linearTitle: String(row?.linearTitle || linearLabel || 'No Linear'),
+        linearLabel: linearLabel || t('info.missing.linear'),
+        linearTitle: String(row?.linearTitle || linearLabel || t('info.missing.linear')),
         linearHtml: infoLinearCellHtml(row) || '',
         linearItems: Array.isArray(row?.linearItems) ? row.linearItems.slice(0, 20) : [],
         desc: String(row?.desc || ''),
@@ -52887,7 +53554,7 @@ function infoGroupTree(records = infoRelationshipRecords(), grouping = infoGroup
     for (const record of sortedItems) {
       const value = infoDimensionValue(record, dimension);
       const key = String(value.key || value.label || 'none');
-      if (!groups.has(key)) groups.set(key, {type: 'group', dimension, key, label: String(value.label || 'None'), title: String(value.title || value.label || ''), sortValue: value.sortValue, count: 0, records: [], children: []});
+      if (!groups.has(key)) groups.set(key, {type: 'group', dimension, key, label: String(value.label || t('info.group.none')), title: String(value.title || value.label || ''), sortValue: value.sortValue, count: 0, records: [], children: []});
       const group = groups.get(key);
       if (!Number.isFinite(Number(group.sortValue)) && Number.isFinite(Number(value.sortValue))) group.sortValue = value.sortValue;
       group.count += 1;
@@ -52987,31 +53654,6 @@ function infoPullRequestLifecycleClass(pr) {
   if (status === 'draft' || pr.draft) return 'pr-status-draft';
   if (status === 'closed') return 'pr-status-closed';
   return 'pr-status-open';
-}
-
-function infoPullRequestCiText(pr) {
-  if (!pr?.number || infoPullRequestLifecycleClass(pr) === 'pr-status-merged') return '';
-  const checks = pr.checks && typeof pr.checks === 'object' ? pr.checks : null;
-  const checkState = String(checks?.state || checks?.status_label || checks?.conclusion || '').trim();
-  const checkSummary = String(checks?.summary || '').trim();
-  if (checkState && checkState.toLowerCase() !== 'unknown') {
-    const label = checkSummary || checkState;
-    return /^ci\b/i.test(label) ? label : `CI ${label}`;
-  }
-  const status = String(pr?.status_label || '').trim();
-  if (!status || /^(open|merged|closed|draft)$/i.test(status)) return '';
-  if (!/(ci|fail|pend|pass|error|queued|running|success)/i.test(status)) return '';
-  const display = pullRequestStatusDisplay(pr) || status;
-  return /^ci\b/i.test(display) ? display : `CI ${display}`;
-}
-
-function infoPullRequestCiClass(pr) {
-  const checks = pr?.checks && typeof pr.checks === 'object' ? pr.checks : null;
-  const state = String(checks?.state || checks?.status_label || checks?.conclusion || pr?.status_label || '').toLowerCase();
-  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
-  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
-  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
-  return pullRequestCiStatusClass(pr);
 }
 
 function infoStatusBadgeHtml(record, text, className, options = {}) {
@@ -53269,7 +53911,7 @@ function infoRecordPathActivityMetaHtml(record) {
   const timestamp = Number(record?.pathActivityTs || 0);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
   const text = relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - timestamp));
-  const title = `Latest repository path activity: ${text}`;
+  const title = t('info.meta.latestPathActivity', {time: text});
   return `<span class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta" title="${esc(title)}">${esc(text)}</span>`;
 }
 
@@ -53310,16 +53952,18 @@ function infoTreeHiddenDimensions(ancestors, dimension) {
   return Array.from(new Set([...(Array.isArray(ancestors) ? ancestors : []), dimension].filter(Boolean)));
 }
 
-function infoDimensionCountNoun(key, count) {
-  const plural = count !== 1;
-  if (key === 'tab') return plural ? 'tabs' : 'tab';
-  if (key === 'tmux-window') return plural ? 'tmux sub-windows' : 'tmux sub-window';
-  if (key === 'ai') return 'AI';
-  if (key === 'path') return plural ? 'paths' : 'path';
-  if (key === 'branch') return plural ? 'branches' : 'branch';
-  if (key === 'pr') return plural ? 'PRs' : 'PR';
-  if (key === 'linear') return plural ? 'Linear issues' : 'Linear issue';
-  return plural ? 'items' : 'item';
+const infoDimensionCountKeys = Object.freeze({
+  tab: 'common.tabs',
+  'tmux-window': 'info.count.tmuxWindow',
+  ai: 'info.count.ai',
+  path: 'info.count.path',
+  branch: 'info.count.branch',
+  pr: 'info.count.pr',
+  linear: 'info.count.linear',
+});
+
+function infoDimensionCountText(key, count) {
+  return tPlural(infoDimensionCountKeys[key] || 'info.count.item', count);
 }
 
 function infoGroupLabelHtml(group = {}) {
@@ -53335,11 +53979,11 @@ function infoGroupLabelHtml(group = {}) {
   }
   if (group.dimension === 'pr') {
     const html = infoRecordPrDescHtml(representative);
-    return `<span class="info-tree-group-label info-tree-group-label-pr">${html || 'None'}</span>`;
+    return `<span class="info-tree-group-label info-tree-group-label-pr">${html || esc(t('info.group.none'))}</span>`;
   }
   if (group.dimension === 'linear') {
     const html = infoRecordLinearDescHtml(representative);
-    return `<span class="info-tree-group-label info-tree-group-label-linear">${html || 'None'}</span>`;
+    return `<span class="info-tree-group-label info-tree-group-label-linear">${html || esc(t('info.group.none'))}</span>`;
   }
   if (group.dimension === 'tab') {
     const tabHtml = infoRecordTabValueHtml(representative, {
@@ -53357,7 +54001,7 @@ function infoGroupChildCountHtml(group = {}) {
   const directChildGroups = Array.isArray(group.children) ? group.children.filter(child => child?.type === 'group') : [];
   if (directChildGroups.length <= 1) return '';
   const dimension = directChildGroups[0]?.dimension || '';
-  return `<span class="info-tree-group-child-count">(${esc(`${directChildGroups.length} ${infoDimensionCountNoun(dimension, directChildGroups.length)}`)})</span>`;
+  return `<span class="info-tree-group-child-count">(${esc(infoDimensionCountText(dimension, directChildGroups.length))})</span>`;
 }
 
 function infoGroupDimensionLabel(key) {
@@ -53395,7 +54039,7 @@ function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ance
 }
 
 function infoDimensionLabel(key) {
-  return infoDimensionDefs.find(dimension => dimension.key === key)?.label || key;
+  return infoGroupDimensions().find(dimension => dimension.key === key)?.label || key;
 }
 
 function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGrouping, sort = infoSort) {
@@ -53468,7 +54112,7 @@ function renderInfoPanelMeasured(node, options = {}) {
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      commitInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
+      commitInfoContent(`<div class="info-empty info-tree-empty">${localizedHtml('info.search.noMatches', {query: infoSearch.trim()})}</div>`);
       return;
     }
     if (transcriptMetaLoading) {
@@ -53476,7 +54120,7 @@ function renderInfoPanelMeasured(node, options = {}) {
       return;
     }
     if (transcriptMetaLoadError) {
-      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
+      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetadataLoadErrorText())}</div>`);
       return;
     }
     if (!transcriptMetaLoaded) {
@@ -53509,14 +54153,18 @@ function infoPathLabel(git) {
   const label = compactHomePath(path);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return label;
-  return `${label} (worktree of ${compactHomePath(parent)})`;
+  return infoWorktreeText(label, compactHomePath(parent));
 }
 
 function infoPathTitle(git) {
   const path = infoGitRoot(git);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return path;
-  return `${path} (worktree of ${parent})`;
+  return infoWorktreeText(path, parent);
+}
+
+function infoWorktreeText(name, root) {
+  return t('popover.worktreeOf', {name, root});
 }
 
 function infoGitRoot(git) {
@@ -53640,12 +54288,12 @@ function infoSourceWindowRowsForBranch(source, branch, options = {}) {
 
 function infoTabAgentLabel(session, agent = null) {
   const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
-  if (!agent) return `${tabLabel} / no AI`;
+  if (!agent) return t('info.tabAgent.withoutAi', {tab: tabLabel});
   return `${tabLabel} / ${infoTabAgentAiLabel(agent)}`;
 }
 
 function infoTabAgentAiLabel(agent = null) {
-  if (!agent) return 'no AI';
+  if (!agent) return t('info.missing.ai');
   if (agent.aiLabel) return String(agent.aiLabel);
   if (agent.label && String(agent.label).includes(' / ')) return String(agent.label).split(' / ').slice(1).join(' / ') || 'AI';
   const agentLabel = typeof agentWindowCanonicalLabel === 'function'
@@ -53656,7 +54304,7 @@ function infoTabAgentAiLabel(agent = null) {
 
 function infoAgentKindLabel(value) {
   const kind = String(value || '').trim();
-  return kind || 'No AI';
+  return kind || t('info.missing.ai');
 }
 
 function infoTabAgentEntry(session, agent = null) {
@@ -53666,7 +54314,7 @@ function infoTabAgentEntry(session, agent = null) {
   const label = infoTabAgentLabel(session, agent);
   const title = agent
     ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
-    : `${label} · no Claude/Codex tmux sub-window detected`;
+    : `${label} · ${t('info.missing.tmuxSubWindow')}`;
   return {
     session: String(session || ''),
     label,
@@ -53813,8 +54461,9 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
   const prLifecycleText = prValue?.number ? infoPullRequestLifecycleText(prValue) : '';
   const prLifecycleClass = prValue?.number ? infoPullRequestLifecycleClass(prValue) : '';
-  const prCiText = prValue?.number ? infoPullRequestCiText(prValue) : '';
-  const prCiClass = prCiText ? infoPullRequestCiClass(prValue) : '';
+  const prCiStatus = prValue?.number ? pullRequestCiStatus(prValue) : null;
+  const prCiText = prCiStatus?.text || '';
+  const prCiClass = prCiStatus?.className || '';
   const linearTitle = linearSourceItems.length
     ? linearSourceItems.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
     : linearIds.join(' ');
@@ -54005,7 +54654,7 @@ function bindPanelControls(panel, session) {
   delegate(panel, 'click', '[data-tmux-status-toggle]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    void cycleTmuxStatusMode(button.dataset.tmuxStatusToggle).catch(error => statusErr(String(error?.message || error)));
+    void cycleTmuxStatusMode(button.dataset.tmuxStatusToggle).catch(error => statusErr(userMessageText(error, t('common.requestFailed'))));
   });
   delegate(panel, 'click', '[data-tab]', (_event, button) => {
     const currentName = button.dataset.tabName;
@@ -54092,6 +54741,7 @@ function hasUploadableDrag(event) {
 
 function bindFileUpload(panel, session) {
   if (readOnlyMode) return;
+  panel.dataset.fileDropLabel = t('drop.uploadOverlay');
   panel.addEventListener('dragenter', event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
@@ -54120,6 +54770,12 @@ function bindFileUpload(panel, session) {
     // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
     const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
     uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
+  });
+}
+
+function relocalizeFileUploadDropLabels() {
+  document.querySelectorAll?.('.panel[data-file-drop-label]').forEach(panel => {
+    panel.dataset.fileDropLabel = t('drop.uploadOverlay');
   });
 }
 
@@ -54395,9 +55051,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
-    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
-    statusErr(esc(message));
-    showFileTransferError(message, {session});
+    showFileTransferError(error, {session, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -54427,9 +55081,7 @@ async function uploadEditorFiles(editorTarget, fileList) {
     syncPasteCountersFromPayload(payload);
     insertEditorPasteUploadReferences(editorTarget, payload.files || []);
   } catch (error) {
-    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
-    statusErr(esc(message));
-    showFileTransferError(message, {item: focusedPanelItem});
+    showFileTransferError(error, {item: focusedPanelItem, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -54587,23 +55239,37 @@ const tmuxWindowReadbackMaxAttempts = 6;
 const terminalTmuxWindowRepeatMs = 900;
 const terminalTmuxWindowRepeatBySession = new Map();
 
-function terminalTmuxPrefixWindowShortcut(key) {
+const terminalTmuxWindowShortcutDefs = Object.freeze({
+  n: {labelKey: 'terminal.window.next', repeatable: true},
+  p: {labelKey: 'terminal.window.previous', repeatable: true},
+  l: {labelKey: 'terminal.window.last', requireChanged: true, prefixOnly: true},
+  w: {labelKey: 'terminal.window.chooser', requireChanged: true, prefixOnly: true},
+  "'": {labelKey: 'terminal.window.prompt', requireChanged: true, prefixOnly: true},
+  f: {labelKey: 'terminal.window.find', requireChanged: true, prefixOnly: true},
+});
+
+function terminalTmuxWindowShortcut(key, options = {}) {
   const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
-  if (value === 'l') return {label: 'last tmux sub-window', requireChanged: true};
-  if (value === 'w') return {label: 'tmux sub-window chooser', requireChanged: true};
-  if (value === "'") return {label: 'tmux sub-window prompt', requireChanged: true};
-  if (value === 'f') return {label: 'tmux find sub-window', requireChanged: true};
-  if (/^[0-9]$/.test(value)) return {label: `tmux sub-window ${value}`, windowIndex: value};
+  const definition = terminalTmuxWindowShortcutDefs[value];
+  if (definition && (!definition.prefixOnly || options.includePrefixOnly === true)) {
+    return {
+      label: t(definition.labelKey),
+      ...(definition.repeatable ? {repeatable: true} : {}),
+      ...(definition.requireChanged ? {requireChanged: true} : {}),
+    };
+  }
+  if (options.includeNumbers === true && /^[0-9]$/.test(value)) {
+    return {label: t('terminal.window.title', {name: value}), windowIndex: value};
+  }
   return null;
 }
 
+function terminalTmuxPrefixWindowShortcut(key) {
+  return terminalTmuxWindowShortcut(key, {includePrefixOnly: true, includeNumbers: true});
+}
+
 function terminalTmuxAltWindowShortcut(key) {
-  const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
-  return null;
+  return terminalTmuxWindowShortcut(key);
 }
 
 function tmuxWindowSignalReadbackUrl(session) {
@@ -55089,7 +55755,7 @@ function tmuxWindow(session, key, label) {
         } else {
           reconcileTmuxWindowActiveIndexOverride(session, transcriptMeta.sessions?.[session], {sequence});
         }
-        statusErr(localizedHtml('terminal.window.failed', {error: error.message || error}));
+        statusErr(esc(userMessageText(error, t('terminal.window.failed', {error: error.message || error}))));
       });
     return;
   }
@@ -55302,7 +55968,7 @@ function startTerminal(session) {
   }
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
-    container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
+    container.innerHTML = `<pre class="terminal-error">${esc(t('terminal.xtermLoadFailed'))}</pre>`;
     statusErr(localizedHtml('status.xtermUnavailable'));
     return;
   }
@@ -55450,7 +56116,7 @@ async function setAutoApprove(session, enabled) {
         scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
-      statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
+      statusErr(esc(userMessageText(error, t('status.yoloApprovalFailedDefault'))));
       return;
     }
     statusErr(localizedHtml('status.yoloRequestFailed', {error}));
@@ -55569,7 +56235,7 @@ function autoApproveOwnerLabel(payload) {
   const owner = payload?.lock_owner || {};
   const pid = owner.pid ? `pid ${owner.pid}` : '';
   const root = owner.project_root || '';
-  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || t('yolo.ownerFallback');
+  return [pid, root].filter(Boolean).join(' ') || structuredMessageText(payload, 'last_action', t('yolo.ownerFallback'));
 }
 
 function renderAutoApproveButtons() {
@@ -55591,7 +56257,8 @@ function renderAutoApproveButton(session, payload) {
     button.classList.toggle('working', working);
     button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = t('brand.marker');
-    const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
+    const actionText = structuredMessageText(payload, 'last_action');
+    const action = actionText ? t('yolo.actionSuffix', {action: actionText}) : '';
     const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
     const buttonLabel = enabled
       ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
@@ -55610,6 +56277,7 @@ function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));
   if (!node) return;
+  delete node.dataset.localeTextKey;
   if (readOnlyMode) {
     node.textContent = t('transcript.adminRequired');
     statusErr(`${esc(t('transcript.adminStatus'))}`);
@@ -55619,7 +56287,7 @@ function startSummaryStream(session) {
   // (coalesced to one render per frame) so the panel shows formatted markdown,
   // not raw `##`/`**`/backticks. The leading `[codex]` status lines render as
   // plain paragraphs, then the model's markdown summary renders properly.
-  let raw = 'Starting structured Codex summary for the last hour…\n\n';
+  let raw = `${t('summary.stream.starting')}\n\n`;
   let renderScheduled = false;
   const renderSummary = () => {
     renderScheduled = false;
@@ -55639,15 +56307,20 @@ function startSummaryStream(session) {
   source.addEventListener('meta', event => {
     const payload = safeJsonParse(event.data, null);
     if (!payload) return;
-    const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
+    const fallback = t(payload.fallback ? 'summary.stream.source.recentTail' : 'summary.stream.source.lastHour');
     const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
-    appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
-    if (payload.summary_model) appendSummary(`[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`);
-    appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
+    appendSummary(`${t('summary.stream.summarizing', {source: fallback, focus: payload.focus_root || session})}\n`);
+    if (payload.summary_model) {
+      appendSummary(`${t('summary.stream.model', {
+        model: payload.summary_model,
+        effort: payload.summary_effort || t('summary.stream.effortDefault'),
+      })}\n`);
+    }
+    appendSummary(`${tPlural('summary.stream.projectInventory', projectCount)}\n\n`);
   });
   source.addEventListener('log', event => {
     const payload = safeJsonParse(event.data, null);
-    if (payload?.text) appendSummary(`[codex] ${payload.text}\n`);
+    if (payload?.text) appendSummary(`${t('summary.stream.log', {text: payload.text})}\n`);
   });
   source.addEventListener('delta', event => {
     const payload = safeJsonParse(event.data, null);
@@ -55657,13 +56330,13 @@ function startSummaryStream(session) {
     // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
     // — an unguarded JSON.parse throw here would leak the EventSource.
     const payload = safeJsonParse(event.data, null);
-    appendSummary(`\n[error] ${payload?.error || 'summary failed'}\n`);
+    appendSummary(`\n${t('summary.stream.error', {error: userMessageText(payload, t('summary.stream.failed'))})}\n`);
     stopSummaryStream(session);
   });
   source.addEventListener('done', event => {
     const payload = safeJsonParse(event.data, null);
     if (payload?.return_code && payload.return_code !== 0) {
-      appendSummary(`\n[codex exited ${payload.return_code}]\n`);
+      appendSummary(`\n${t('summary.stream.exited', {code: payload.return_code})}\n`);
     }
     stopSummaryStream(session);
   });
@@ -55721,6 +56394,18 @@ function hideUpdateBadge() {
   if (!badge) return;
   badge.hidden = true;
   delete badge.dataset.updateTarget;
+  renderUpdateBadgeChrome();
+}
+
+function renderUpdateBadgeChrome() {
+  const badge = document.querySelector('[data-update-badge]');
+  if (!badge) return;
+  const target = String(badge.dataset.updateTarget || selfUpdateAvailableTarget || '').trim();
+  badge.textContent = t('update.badgeLabel');
+  badge.setAttribute('aria-label', t('update.badgeAria'));
+  badge.title = badge.hidden
+    ? t('update.badgeTitle')
+    : t('update.badgeAvailable', {target: target ? ` (${target})` : ''});
 }
 
 function markSelfUpdateReloadPending(target = '') {
@@ -55743,20 +56428,20 @@ function selfUpdateOwnsServerVersion(serverVersion) {
 
 function selfUpdateReloadDeferredReason() {
   for (const file of openFiles.values()) {
-    if (file?.dirty) return 'unsaved edits';
+    if (file?.dirty) return t('update.defer.unsavedEdits');
   }
   const active = document.activeElement;
   if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
-    return 'active typing';
+    return t('update.defer.activeTyping');
   }
-  return 'current activity';
+  return t('update.defer.currentActivity');
 }
 
 function showSelfUpdateReloadDeferredToast() {
   if (selfUpdateReloadDeferredToastShown) return;
   selfUpdateReloadDeferredToastShown = true;
-  showToast('Software Update', [
-    `Reload deferred because of ${selfUpdateReloadDeferredReason()}. YOLOmux will reload when it is safe.`,
+  showToast(t('update.softwareTitle'), [
+    t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()}),
   ], {className: 'attention-alert toast toast-update'});
 }
 
@@ -55784,14 +56469,14 @@ async function pollSelfUpdateReload() {
   if (!selfUpdateReloadPending) return false;
   selfUpdateReloadAttempts += 1;
   try {
-    const res = await fetch(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
-    if (res && res.ok !== false) return maybeReloadAfterSelfUpdate();
+    await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
+    return maybeReloadAfterSelfUpdate();
   } catch (_error) {
     // The old process may already be gone. Keep polling until the replacement server answers.
   }
   if (selfUpdateReloadAttempts >= selfUpdateReloadMaxAttempts) {
     selfUpdateReloadPending = false;
-    showToast('Software Update', ['Update installed, but YOLOmux did not answer after restart. Reload when it is reachable.']);
+    showToast(t('update.softwareTitle'), [t('update.restartTimeout')]);
     return false;
   }
   scheduleSelfUpdateReloadPoll();
@@ -55869,7 +56554,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     reconcileTmuxWindowMetadataFromAgentWindows(session, autoApproveStates.get(session));
   }
   transcriptMetaLoaded = true;
-  transcriptMetaLoadError = '';
+  transcriptMetaLoadError = null;
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
   maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
   applyAgentAvailabilityPayload(transcriptMeta);
@@ -55895,14 +56580,11 @@ async function applySessionMetadataPayload(payload, options = {}) {
       updateTranscriptPathRow(session, agent.transcript);
       if (options.refreshContext === false) continue;
       if (typeof transcriptPreviewPaneIsActive === 'function' && !transcriptPreviewPaneIsActive(session)) continue;
-      preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\n${t('transcript.loadingRecentContext')}`;
+      clearTranscriptContextLoadError(preview);
+      preview.textContent = `${t('transcript.meta', {sessionId: agent.session_id || '', status: agent.status || ''})}\n\n${t('transcript.loadingRecentContext')}`;
       refreshTranscriptPreview(session, preview, {preserveScroll: false});
-    } else if (agent?.error) {
-      updateTranscriptPathRow(session, '', agent.error);
-      preview.textContent = agent.error;
     } else {
-      updateTranscriptPathRow(session, '', t('transcript.noAgentFound'));
-      preview.textContent = t('transcript.noAgentFound');
+      relocalizeTranscriptPanelStatus(session);
     }
   }
   renderPaneTabStrips();
@@ -55921,7 +56603,7 @@ function applyTranscriptsPayload(payload, options = {}) {
 async function refreshSessionMetadata(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
-  transcriptMetaLoadError = '';
+  transcriptMetaLoadError = null;
   syncTranscriptMetaLoadingUi();
   renderInfoPanel();
   transcriptMetaRefreshPromise = (async () => {
@@ -55936,13 +56618,9 @@ async function refreshSessionMetadata(options = {}) {
         refreshActivity: options.refreshActivity !== false,
       });
     } catch (error) {
-      transcriptMetaLoadError = String(error);
+      transcriptMetaLoadError = userMessageSnapshot(error, {key: 'transcript.lookupFailed', params: {}, fallback: ''});
       for (const session of activeSessions.filter(isTmuxSession)) {
-        const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(transcriptDomId(session));
-        if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
-        updateTranscriptPathRow(session, '', 'transcript lookup failed');
-        if (preview) preview.textContent = `transcript lookup failed: ${error}`;
+        renderTranscriptMetadataLoadError(session);
       }
     } finally {
       transcriptMetaLoading = false;
@@ -56114,25 +56792,120 @@ function refreshTrackedSessionChrome(session) {
 
 function refreshActivePanelHeaders() {
   for (const session of activeSessions.filter(isTmuxSession)) {
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    relocalizeTerminalPanelChrome(session);
   }
 }
 
 function renderSummaryContext(session, info, agent) {
   const node = document.getElementById(`summary-context-${session}`);
   if (!node) return;
+  delete node.dataset.localeTextKey;
   node.innerHTML = summaryContextHtml(session, info, agent);
 }
 
-function transcriptPathRowHtml(path, fallback = 'no transcript path') {
-  if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
-  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: 'Copy transcript path'})}`;
+function relocalizeTerminalPanelChrome(session) {
+  const panel = document.getElementById(panelDomId(session));
+  if (!panel) return false;
+  relocalizeVirtualPanelChrome(panel);
+  const terminalTab = panel.querySelector('.terminal-tab');
+  if (terminalTab) {
+    const info = transcriptMeta.sessions?.[session];
+    const title = terminalTabTitle(session, info);
+    terminalTab.textContent = terminalTabLabel(session, info);
+    terminalTab.title = title;
+    terminalTab.setAttribute('aria-label', title);
+  }
+  panel.querySelectorAll('.pane-actions').forEach(button => {
+    button.title = t('pane.actions');
+    button.setAttribute('aria-label', t('pane.actions'));
+  });
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  panel.querySelectorAll('[data-locale-text-key]').forEach(node => {
+    node.textContent = t(node.dataset.localeTextKey);
+  });
+  const statusToggle = panel.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
+  if (statusToggle) statusToggle.outerHTML = tmuxStatusToggleHtml(session);
+  const transcriptHead = panel.querySelector(`#transcript-pane-${cssEscape(session)} .transcript-head`);
+  if (transcriptHead) transcriptHead.textContent = t('tab.transcript');
+  const summaryHead = panel.querySelector(`#summary-pane-${cssEscape(session)} .transcript-head`);
+  if (summaryHead) summaryHead.textContent = t('menu.tmux.aiTranscript', {session: sessionLabel(session)});
+  const eventsHead = panel.querySelector(`#events-pane-${cssEscape(session)} .transcript-head`);
+  if (eventsHead) eventsHead.textContent = t('events.title');
+  relocalizeTranscriptPanelStatus(session);
+  return true;
 }
 
-function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
+function transcriptPathRowHtml(path, fallback = '') {
+  if (!path) return `<span class="transcript-path-missing">${esc(fallback || t('transcript.noPath'))}</span>`;
+  return `<span class="transcript-path-label">${esc(t('transcript.path'))}</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: t('transcript.copyPath')})}`;
+}
+
+function updateTranscriptPathRow(session, path, fallback = '') {
   const row = document.getElementById(`transcript-path-${session}`);
   if (!row) return;
   row.innerHTML = transcriptPathRowHtml(path, fallback);
+}
+
+function transcriptMetadataLoadErrorText() {
+  return userMessageText(transcriptMetaLoadError, t('transcript.lookupFailed'));
+}
+
+function transcriptAgentErrorText(agent) {
+  return structuredMessageText(agent, 'error', String(agent?.error || t('transcript.noAgentFound')));
+}
+
+function transcriptContextLoadErrorText(error) {
+  return t('transcript.contextLoadFailed', {error: userMessageText(error, t('common.requestFailed'))});
+}
+
+function clearTranscriptContextLoadError(preview) {
+  if (!preview) return;
+  delete preview._transcriptContextLoadError;
+  preview.querySelector?.('.transcript-context-error')?.remove?.();
+}
+
+function renderTranscriptContextLoadError(preview) {
+  if (!preview) return;
+  const error = preview._transcriptContextLoadError;
+  const existing = preview.querySelector?.('.transcript-context-error');
+  if (!error) {
+    existing?.remove?.();
+    return;
+  }
+  const html = `<div class="transcript-item system transcript-context-error"><div class="transcript-text">${esc(transcriptContextLoadErrorText(error))}</div></div>`;
+  if (existing) existing.outerHTML = html;
+  else preview.insertAdjacentHTML?.('beforeend', html);
+}
+
+function renderTranscriptMetadataLoadError(session) {
+  const meta = document.getElementById(`meta-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
+  const error = transcriptMetadataLoadErrorText();
+  if (meta) meta.innerHTML = `<span class="err">${esc(t('transcript.lookupFailed'))}</span>`;
+  updateTranscriptPathRow(session, '', t('transcript.lookupFailed'));
+  if (preview) {
+    clearTranscriptContextLoadError(preview);
+    preview.textContent = t('transcript.lookupFailedWithError', {error});
+  }
+}
+
+function relocalizeTranscriptPanelStatus(session) {
+  const preview = document.getElementById(transcriptDomId(session));
+  if (!preview) return;
+  if (transcriptMetaLoadError) {
+    renderTranscriptMetadataLoadError(session);
+    return;
+  }
+  const info = transcriptMeta.sessions?.[session];
+  const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+  if (agent?.transcript) {
+    renderTranscriptContextLoadError(preview);
+    return;
+  }
+  clearTranscriptContextLoadError(preview);
+  const message = agent?.error ? transcriptAgentErrorText(agent) : t('transcript.noAgentFound');
+  updateTranscriptPathRow(session, '', message);
+  preview.textContent = message;
 }
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
@@ -56142,7 +56915,8 @@ async function refreshTranscriptPreview(session, preview, options = {}) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
   } catch (error) {
-    preview.textContent += `\n\ncontext load failed: ${error}`;
+    preview._transcriptContextLoadError = userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: ''});
+    renderTranscriptContextLoadError(preview);
   }
 }
 
@@ -56203,6 +56977,7 @@ function renderTranscriptItems(container, path, items, options = {}) {
   const oldTop = container.scrollTop;
   const oldHeight = container.scrollHeight;
   const blocks = items.map(item => transcriptItemHtml(item));
+  delete container._transcriptContextLoadError;
   container.innerHTML = blocks.join('');
   if (shouldScrollBottom) {
     requestAnimationFrame(() => {
@@ -56235,23 +57010,35 @@ function appendTranscriptItems(container, items) {
 
 function transcriptItemHtml(item) {
   const role = normalizeRole(item.role);
+  const roleKeys = {
+    assistant: 'transcript.role.assistant',
+    user: 'transcript.role.user',
+    tool_use: 'transcript.role.toolUse',
+    tool_result: 'transcript.role.toolResult',
+    summary: 'transcript.role.summary',
+    system: 'transcript.role.system',
+  };
+  const roleLabel = t(roleKeys[role] || 'transcript.role.message');
+  const meta = [item.timestamp, item.cwd].map(value => String(value || '')).filter(Boolean).join(', ');
+  const header = meta ? t('transcript.itemHeader', {role: roleLabel, meta}) : roleLabel;
   return `<div class="transcript-item ${role}">
-    <div class="transcript-role">${esc(item.header || role)}</div>
+    <div class="transcript-role">${esc(header)}</div>
     <div class="transcript-text">${esc(item.text || '')}</div>
   </div>`;
 }
 
 function eventItemHtml(event) {
   const details = event.details && typeof event.details === 'object' ? event.details : {};
+  const message = structuredMessageText(event, 'message');
   const detailText = Object.entries(details)
     .filter(([, value]) => value != null && value !== '')
     .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(',') : value}`)
     .join(' · ');
-  const title = detailText ? `${event.message || ''}\n${detailText}` : event.message || '';
+  const title = detailText ? `${message}\n${detailText}` : message;
   return `<div class="event-item" title="${esc(title)}">
     <span class="event-time">${esc(formatEventTime(event.time))}</span>
-    <span class="event-type">${esc(event.type || 'event')}</span>
-    <span class="event-message">${esc(event.message || '')}${detailText ? ` · ${esc(detailText)}` : ''}</span>
+    <span class="event-type">${esc(event.type || t('events.typeFallback'))}</span>
+    <span class="event-message">${esc(message)}${detailText ? ` · ${esc(detailText)}` : ''}</span>
   </div>`;
 }
 
@@ -56270,18 +57057,19 @@ function formatEventTime(value) {
 async function refreshEventLog(session) {
   const node = document.getElementById(`events-${session}`);
   if (!node) return;
+  delete node.dataset.localeTextKey;
   try {
     const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
     const events = Array.isArray(payload.events) ? payload.events : [];
     node.innerHTML = events.length
       ? events.slice().reverse().map(eventItemHtml).join('')
-      : '<div class="event-empty">no events yet</div>';
+      : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
   } catch (error) {
     if (error?.status) {
-      node.innerHTML = `<div class="event-empty">${esc(error.payload?.error || 'failed to load events')}</div>`;
+      node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
       return;
     }
-    node.innerHTML = `<div class="event-empty">failed to load events: ${esc(error)}</div>`;
+    node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
   }
 }
 
@@ -56561,22 +57349,21 @@ function updateActionButton(label, onClick) {
 async function triggerSelfUpdate(_event = null, ownerToast = null) {
   const dry = updateDryRunEnabled();
   const confirmed = window.confirm(dry
-    ? 'Dry run: simulate installing a YOLOmux update? Nothing is pulled and the server is not restarted.'
-    : 'Install the latest YOLOmux update and restart now?');
+    ? t('update.confirmDryRun')
+    : t('update.confirmInstall'));
   if (!confirmed) return;
   const target = String(ownerToast?.dataset?.updateTarget || selfUpdateAvailableTarget || '').trim();
   dismissUpdateAvailableToasts(ownerToast);
   hideUpdateBadge();
   try {
-    const res = await fetch(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
-    const data = await res.json().catch(() => ({}));
-    const title = data.ok ? (data.restarting ? 'Installing update...' : 'Software Update') : 'Update failed';
-    showToast(title, [data.message || (data.ok ? 'done' : 'see server logs')]);
+    const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
+    const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
+    showToast(title, [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))]);
     if (data.ok && data.restarting) {
       startSelfUpdateReloadPolling(data.target || data.version || target);
     }
   } catch (error) {
-    showToast('Update failed', [String(error)]);
+    showToast(t('update.failed'), [userMessageText(error, t('update.seeServerLogs'))]);
   }
 }
 
@@ -56590,13 +57377,14 @@ function applyUpdateAvailable(status) {
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;
-    badge.title = `YOLOmux update available${status.target ? ` (${status.target})` : ''} - click to update now`;
     if (target) badge.dataset.updateTarget = target;
+    else delete badge.dataset.updateTarget;
+    renderUpdateBadgeChrome();
   }
-  const node = showToast('YOLOmux update available', [
-    `A new YOLOmux update is available${status.target ? ` (${status.target})` : ''}.`,
+  const node = showToast(t('update.availableTitle'), [
+    t('update.availableBody', {target: status.target ? ` (${status.target})` : ''}),
   ], {
-    actions: [updateActionButton('Update Now', triggerSelfUpdate)],
+    actions: [updateActionButton(t('update.now'), triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
   });
@@ -56605,16 +57393,22 @@ function applyUpdateAvailable(status) {
 
 async function checkForUpdateOnce() {
   try {
-    const res = await fetch(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
-    if (!res.ok) return;  // readonly (403) or unavailable
-    const status = await res.json();
+    const status = await apiFetchJson(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
     if (status && status.available) applyUpdateAvailable(status);
   } catch (_error) { /* offline / transient — the hourly push will retry */ }
 }
 
+function yoagentJobNotificationTitle(notification = {}) {
+  return structuredMessageText(notification, 'title', t('brand.tab.agent'));
+}
+
+function yoagentJobNotificationBody(notification = {}) {
+  return structuredMessageText(notification, 'body', '').trim();
+}
+
 function maybeNotifyYoagentJob(notification = {}) {
-  const title = String(notification.title || 'YO!agent');
-  const body = String(notification.body || '').trim();
+  const title = yoagentJobNotificationTitle(notification);
+  const body = yoagentJobNotificationBody(notification);
   if (!body || !notificationDeliveryEnabled()) return;
   const session = String(notification.session || '').trim();
   const tag = `yoagent-job:${session || 'global'}:${body}`;
@@ -56910,27 +57704,51 @@ function installDevAutoReload() {
     if (serverRevision && bootRevision && serverRevision !== bootRevision) location.reload();
   });
   source.addEventListener('reload', () => {
-    statusOk('dev: bundle changed — reloading');
+    statusOk(localizedHtml('status.devBundleReloading'));
     location.reload();
   });
 }
 
 async function showContext(session) {
   const modal = document.getElementById('modal');
-  const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
   modal.classList.remove('about-open', 'share-open');
-  title.textContent = t('transcript.tailTitle', {session: sessionLabel(session)});
   body.innerHTML = '';
-  body.textContent = t('common.loading');
+  modal.dataset.modalKind = 'context';
+  modal.dataset.modalSession = session;
+  body.dataset.localeTextKey = 'common.loading';
   modal.classList.add(CLS.open);
+  relocalizeModalChrome();
   const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+  delete body.dataset.localeTextKey;
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
   } else {
     body.textContent = JSON.stringify(payload, null, 2);
   }
   scheduleSharePopupLayerPublish();
+}
+
+function relocalizeModalChrome(options = {}) {
+  const modal = document.getElementById('modal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+  const close = document.getElementById('closeModal');
+  const closeLabel = t('common.close');
+  if (close) {
+    close.title = closeLabel;
+    close.setAttribute('aria-label', closeLabel);
+  }
+  if (!modal || options.content === false || !modal.classList.contains(CLS.open)) return Boolean(modal);
+  if (modal.classList.contains('about-open')) {
+    showAboutModal();
+    return true;
+  }
+  if (modal.classList.contains('share-open')) return relocalizeShareModal();
+  if (modal.dataset.modalKind !== 'context') return true;
+  if (title) title.textContent = t('transcript.tailTitle', {session: sessionLabel(modal.dataset.modalSession || '')});
+  if (body?.dataset.localeTextKey) body.textContent = t(body.dataset.localeTextKey);
+  return true;
 }
 
 function globalShortcutTargetAllowsAppAction(target) {
@@ -57013,7 +57831,7 @@ function toggleFileExplorerShortcut() {
     rememberFileExplorerOpenIntent(true);
     applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
       prune: false,
-      message: `${fileExplorerLabel()} restored`,
+      message: t('layout.status.restored', {item: fileExplorerLabel()}),
     });
     fileExplorerShortcutRestoreSlots = null;
     return;
@@ -57035,9 +57853,7 @@ function handleFocusedTerminalCopyShortcut(event) {
 }
 
 if (refreshMeta) {
-  refreshMeta.textContent = t('meta.refresh');
-  refreshMeta.setAttribute('aria-label', t('meta.refreshAria'));
-  refreshMetaButtonTitle();
+  refreshMetaButtonChrome();
   refreshMeta.onclick = refreshAll;
 }
 if (tabMetaToggle) {

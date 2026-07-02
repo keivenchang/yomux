@@ -417,11 +417,11 @@ async function loadMermaidApi() {
         if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
         api = await loadMermaidBundleScript({force: true});
         if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
-        bundleError = new Error('Mermaid bundle missing critical exports');
+        bundleError = new Error(t('preview.mermaid.renderFailed'));
       } catch (error) {
         bundleError = error;
       }
-      throw bundleError || new Error('Mermaid unavailable');
+      throw bundleError || new Error(t('preview.mermaid.renderFailed'));
     })();
   }
   try {
@@ -468,17 +468,17 @@ function markdownImageFallbackNode(path, label = '') {
   const node = document.createElement('span');
   node.className = 'markdown-image-error';
   const text = document.createElement('span');
-  text.textContent = label || `Image unavailable: ${path}`;
+  text.textContent = label || t('preview.markdown.imageUnavailable', {path});
   node.appendChild(text);
   if (path) {
     const open = document.createElement('a');
     open.href = rawFileUrl(path);
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
-    open.textContent = 'Open';
+    open.textContent = t('preview.action.open');
     const download = document.createElement('a');
     download.href = rawFileDownloadUrl(path);
-    download.textContent = 'Download';
+    download.textContent = t('preview.action.download');
     node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
   }
   return node;
@@ -496,7 +496,7 @@ function rewriteMarkdownPreviewImages(root, markdownPath) {
     img.setAttribute('src', target.src);
     if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
     img.addEventListener('error', () => {
-      img.replaceWith(markdownImageFallbackNode(target.path, `Image unavailable: ${target.path || original}`));
+      img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
     }, {once: true});
   }
 }
