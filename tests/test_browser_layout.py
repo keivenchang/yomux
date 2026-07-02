@@ -338,9 +338,9 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         <svg class="js-debug-line-chart" viewBox="0 0 20 20" role="img" preserveAspectRatio="none">
           <path class="js-debug-line js-debug-line--api" d="M0 1L20 1"></path>
           <path class="js-debug-line js-debug-line--sse" d="M0 3L20 3"></path>
-          <path class="js-debug-line js-debug-line--cpu" d="M0 5L20 5"></path>
-          <path data-cpu-server="peer" class="js-debug-line js-debug-line--cpu" style="--js-debug-series-color: var(--accent-gold)" d="M0 6L20 6"></path>
-          <path class="js-debug-line js-debug-line--systemCpu" d="M0 7L20 7"></path>
+          <path data-cpu-server="current" class="js-debug-line js-debug-line--cpu js-debug-line--pattern js-debug-line--pattern-solid" d="M0 5L20 5"></path>
+          <path data-cpu-server="peer" class="js-debug-line js-debug-line--cpu js-debug-line--pattern js-debug-line--pattern-dot" style="--js-debug-series-color: var(--accent-gold)" d="M0 6L20 6"></path>
+          <path data-cpu-server="system" class="js-debug-line js-debug-line--systemCpu js-debug-line--pattern js-debug-line--pattern-solid" d="M0 7L20 7"></path>
           <path data-client-line="solid" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-solid" d="M0 8L20 8"></path>
           <path data-client-line="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" d="M0 10L20 10"></path>
           <path data-client-line="dot" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--js-debug-api-sse-total-series)" d="M0 11L20 11"></path>
@@ -408,6 +408,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
             },
             clientLines: Object.fromEntries(['solid', 'dash', 'dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
             clientLegend: Object.fromEntries(['dash', 'dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-legend="${pattern}"]`)).strokeDasharray])),
+            cpuLines: Object.fromEntries(['current', 'peer', 'system'].map(server => [server, getComputedStyle(document.querySelector(`[data-cpu-server="${server}"]`)).strokeDasharray])),
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
           return values;
@@ -449,6 +450,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
             "dot": "1px, 3px",
         }, (theme, item)
         assert item["clientLegend"] == {"dash": item["clientLines"]["dash"], "dot": item["clientLines"]["dot"]}, (theme, item)
+        assert item["cpuLines"] == {"current": "none", "peer": "1px, 3px", "system": "none"}, (theme, item)
 
 
 def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tmp_path):

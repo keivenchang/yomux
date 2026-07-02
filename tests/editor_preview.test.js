@@ -2879,7 +2879,7 @@ async function runEditorPreviewSuite() {
     assert.equal(movingAverageValues.at(-1), 7.5, 'moving average uses the trailing 10 samples for the final value');
 
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
-    assert.ok(/\.js-debug-line--client\s*\{[\s\S]*stroke-dasharray:\s*var\(--js-debug-client-line-dash, none\)/.test(debugPaneCss), 'client identity overrides the smoothing default through one shared line-pattern token');
+    assert.ok(/\.js-debug-line--pattern,[\s\S]*\.js-debug-line--client\s*\{[\s\S]*stroke-dasharray:\s*var\(--js-debug-line-dash, none\)/.test(debugPaneCss), 'client and CPU identities share one line-pattern token');
   });
 
   test('YO!stats graph combines all-client API and SSE while averaging peer latency and bandwidth', () => {
@@ -2949,6 +2949,7 @@ async function runEditorPreviewSuite() {
         system_cpu_total_percent: 40,
         system_cpu_count: 1,
         servers: {
+          'port:7777': {label: 'yolomux.py :7777', cpu_total_percent: 7, cpu_count: 1},
           'port:8001': {label: 'yolomux.py :8001', cpu_total_percent: 11, cpu_count: 1},
           'port:8002': {label: 'yolomux.py :8002', cpu_total_percent: 22, cpu_count: 1},
           'port:8003': {label: 'yolomux.py :8003', cpu_total_percent: 33, cpu_count: 1},
@@ -2957,16 +2958,23 @@ async function runEditorPreviewSuite() {
     });
     const cpuSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.processCpu === true);
     assert.deepStrictEqual([...cpuSeries.map(series => series.label)], [
+      'yolomux.py :7777 CPU %',
       'yolomux.py :8001 CPU %',
       'yolomux.py :8002 CPU %',
       'yolomux.py :8003 CPU %',
     ], 'CPU series are stable and ordered by server label');
-    assert.deepStrictEqual([...cpuSeries.map(series => series.values.at(-1))], [11, 22, 33], 'each server keeps its own CPU samples');
-    assert.equal(new Set(cpuSeries.map(series => series.color)).size, 3, 'server CPU lines use distinct colors from the shared palette');
+    assert.deepStrictEqual([...cpuSeries.map(series => series.values.at(-1))], [7, 11, 22, 33], 'each server keeps its own CPU samples');
+    assert.deepStrictEqual([...cpuSeries.map(series => series.linePattern)], ['solid', 'dot', 'dot', 'dot'], 'only the YOLOmux server on the current browser port uses a solid CPU line');
+    assert.equal(new Set(cpuSeries.map(series => series.color)).size, 4, 'server CPU lines use distinct colors from the shared palette');
     const html = api.debugPanelHtmlForTest();
-    for (const port of ['8001', '8002', '8003']) {
+    for (const port of ['7777', '8001', '8002', '8003']) {
       assert.ok(html.includes(`data-js-debug-series="cpu:port:${port}"`) && html.includes(`yolomux.py :${port} CPU %`), `CPU chart renders server ${port}`);
     }
+    assert.match(html, /data-js-debug-series="cpu:port:7777"[^>]*data-js-debug-line-pattern="solid"/, 'current YOLOmux CPU plot is solid');
+    for (const port of ['8001', '8002', '8003']) {
+      assert.match(html, new RegExp(`data-js-debug-series="cpu:port:${port}"[^>]*data-js-debug-line-pattern="dot"`), `peer YOLOmux ${port} CPU plot is dotted`);
+    }
+    assert.match(html, /data-js-debug-series="systemCpu"[^>]*data-js-debug-line-pattern="solid"/, 'system CPU plot is solid');
     assert.ok(html.includes('system avg CPU %'), 'one system CPU series remains beside all process series');
   });
 

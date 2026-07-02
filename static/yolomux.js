@@ -34420,7 +34420,7 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => ({...metric, label: `${metric.label} (this client)`, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
   ...jsDebugAgentStatusSeriesKeys.map(key => ({key, label: jsDebugAgentStatusSeriesLabels[key], unit: 'count'})),
   {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
-  {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
+  {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent', linePattern: 'solid'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'latency', label: 'Client latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
@@ -35862,7 +35862,9 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
       processes.set(processId, String(process?.label || processId));
     }
   }
-  if (!processes.size) return [{key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent'}];
+  if (!processes.size) return [{key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent', linePattern: 'solid'}];
+  const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
+  const currentProcessId = `port:${currentPort}`;
   return [...processes.entries()]
     .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
     .map(([processId, label], index) => ({
@@ -35873,6 +35875,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
       chartMetricKey: 'cpu',
       processCpu: true,
       processId,
+      linePattern: processId === currentProcessId ? 'solid' : 'dot',
       color: jsDebugGraphProcessCpuColors[index % jsDebugGraphProcessCpuColors.length],
     }));
 }
@@ -36107,8 +36110,20 @@ function debugGraphSeriesClientAttrs(series) {
   return ` data-js-debug-client-series="${esc(clientId)}" data-js-debug-client-line="${esc(series.clientLinePattern || 'solid')}"`;
 }
 
+function debugGraphSeriesLinePattern(series) {
+  const pattern = String(series?.linePattern || (series?.clientMetric === true ? series.clientLinePattern : '') || '').trim();
+  return ['solid', 'dot', 'dash'].includes(pattern) ? pattern : '';
+}
+
+function debugGraphSeriesLinePatternAttrs(series) {
+  const pattern = debugGraphSeriesLinePattern(series);
+  return pattern ? ` data-js-debug-line-pattern="${esc(pattern)}"` : '';
+}
+
 function debugGraphSeriesLineClassName(series, extraClass = '') {
   const classes = ['js-debug-line', `js-debug-line--${debugGraphSeriesClassKey(series)}`];
+  const linePattern = debugGraphSeriesLinePattern(series);
+  if (linePattern) classes.push('js-debug-line--pattern', `js-debug-line--pattern-${linePattern}`);
   if (series?.clientMetric === true) {
     classes.push('js-debug-line--client', `js-debug-line--client-${series.clientLinePattern || 'solid'}`);
   }
@@ -36131,7 +36146,7 @@ function debugGraphPolylineHtml(series, chartMax, domain) {
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
-    return `<polyline class="${esc(debugGraphSeriesLineClassName(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
+    return `<polyline class="${esc(debugGraphSeriesLineClassName(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
   }).join('');
 }
 
@@ -36189,7 +36204,7 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
   if (sampleCount <= 0) return '';
   const points = debugGraphPolylinePoints(series.movingAverageValues || [], series.movingAverageTimes || [], chartMax, domain);
   if (!points) return '';
-  return `<polyline class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-line--moving-average'))}" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)} ${sampleCount}-sample moving average</title></polyline>`;
+  return `<polyline class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-line--moving-average'))}" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)} ${sampleCount}-sample moving average</title></polyline>`;
 }
 
 function debugGraphInteractionOverlayHtml() {
@@ -36203,8 +36218,8 @@ function debugGraphLegendHtml(seriesItems) {
 }
 
 function debugGraphLegendSwatchHtml(series) {
-  if (series?.clientMetric === true) {
-    return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}" x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
+  if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu') {
+    return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
   return `<span class="js-debug-legend-swatch js-debug-legend-swatch--${esc(debugGraphSeriesClassKey(series))}"${debugGraphSeriesStyleAttr(series)}></span>`;
 }
