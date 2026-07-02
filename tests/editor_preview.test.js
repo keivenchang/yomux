@@ -2892,7 +2892,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/if \(event\.type === 'pointerdown'\)[\s\S]*jsDebugGraphRangeSliderDragging = true;[\s\S]*return true;[\s\S]*if \(event\.type === 'change'\)[\s\S]*jsDebugGraphRangeSliderDragging = false;[\s\S]*setDebugGraphRangeFromSlider/.test(debugPaneSource), 'YO!stats range dragging preserves the native input and commits only on change');
     assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
     assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*syncJsDebugStatsPolling\(\{pollNow: true\}\)/.test(debugPaneSource), 'every Chrome-style pane-tab activation re-arms or stops the shared YO!stats sampler');
-    assert.ok(/function syncJsDebugStatsPolling\(\{pollNow = true\} = \{\}\)[\s\S]*armJsDebugStatsPolling\(\{pollNow\}\)/.test(debugPaneSource), 'YO!stats uses one polling synchronizer for layout and browser visibility changes');
+    assert.ok(/function syncJsDebugStatsPolling\(\{pollNow = true, forceGraphRefresh = false\} = \{\}\)[\s\S]*armJsDebugStatsPolling\(\{pollNow, forceGraphRefresh\}\)/.test(debugPaneSource), 'YO!stats uses one polling synchronizer for layout and browser visibility changes');
+    assert.ok(/document\.addEventListener\('visibilitychange'[\s\S]*forceGraphRefresh: visible/.test(debugPaneSource), 'YO!stats forces a catch-up graph redraw when Chrome makes the page visible again');
     assert.ok(/await Promise\.all\(activeSessions\.filter\(isTmuxSession\)[\s\S]*await primeJsDebugStatsBeforeLongLivedStreams\(\)[\s\S]*installClientEventStream\(\)/.test(debugPaneSource), 'YO!stats primes its first sample before the global long-lived SSE streams can consume the remaining HTTP\/1.1 connection slots');
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
@@ -2956,13 +2957,13 @@ async function runEditorPreviewSuite() {
     }, 'debug=1 enables instrumentation without injecting Debug into an existing URL layout');
   });
 
-  test('YO!stats graph retains 24 hours with old timing buckets compressed', () => {
+  test('YO!stats graph retains 1s, 10s, and 60s timing tiers for 24 hours', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     api.clearJsDebugEventsForTest();
     const now = Date.now();
     for (let i = 0; i < 20; i += 1) {
       api.recordJsDebugEventForTest('api', {
-        ts: new Date(now - (2 * 60 * 60 * 1000) + (i * 1000)).toISOString(),
+        ts: new Date(now - (90 * 60 * 1000) + (i * 1000)).toISOString(),
         method: 'GET',
         url: `/api/timing-${i}`,
         status: 200,
@@ -2982,13 +2983,16 @@ async function runEditorPreviewSuite() {
       requestBytes: 100,
       responseBytes: 100,
     });
-    api.recordJsDebugStatsSampleForTest({time: (now - (2 * 60 * 60 * 1000)) / 1000, cpu_percent: 42});
+    api.recordJsDebugStatsSampleForTest({time: (now - (3 * 60 * 60 * 1000)) / 1000, cpu_percent: 42});
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.retentionHours, 24, 'YO!stats graph keeps a 24 hour retention window');
     assert.equal(summary.rawWindowSeconds, 3600, 'YO!stats graph keeps high-resolution raw buckets for the last hour');
-    assert.equal(summary.rollupBucketSeconds, 30, 'YO!stats graph rolls old samples into thirty-second timing buckets');
-    assert.equal(summary.rawBuckets, 0, 'two-hour-old samples are no longer kept as one-second raw buckets');
-    assert.ok(summary.rollupBuckets > 0 && summary.rollupBuckets <= 2, 'two-hour-old per-second samples compress into thirty-second buckets');
+    assert.equal(summary.middleWindowSeconds, 7200, 'YO!stats graph keeps the middle tier through two hours');
+    assert.equal(summary.middleBucketSeconds, 10, 'YO!stats graph rolls one-to-two-hour samples into ten-second timing buckets');
+    assert.equal(summary.rollupBucketSeconds, 60, 'YO!stats graph rolls samples older than two hours into sixty-second timing buckets');
+    assert.equal(summary.rawBuckets, 0, 'older samples are no longer kept as one-second raw buckets');
+    assert.ok(summary.middleBuckets > 0 && summary.middleBuckets <= 3, 'ninety-minute-old per-second samples compress into ten-second buckets');
+    assert.equal(summary.oldBuckets, 1, 'three-hour-old samples compress into one sixty-second bucket');
     assert.equal(summary.scaleSeconds, 5, 'YO!stats graph defaults to five-second aggregate buckets');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
@@ -3920,6 +3924,42 @@ async function runEditorPreviewSuite() {
     assert.equal(wideUrl.searchParams.get('since'), '0', 'the wider request resets the incremental sequence so older retained records are returned');
     assert.equal(api.jsDebugStatsPollingStateForTest().historyStartSeconds, Number(wideUrl.searchParams.get('history_start')), 'loaded-history coverage advances only after the wider response succeeds');
     assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 2, 'the widened graph contains both the old and recent records without visiting 1h first');
+  });
+
+  await testAsync('YO!stats preserves a forced Chrome refocus redraw behind an in-flight poll', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    let releaseInFlightPoll;
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      if (requests.length === 1) return new Promise(resolve => { releaseInFlightPoll = resolve; });
+      return Promise.resolve(jsonResponse({
+        history: {sequence: 2, records: [{start: Math.floor(Date.now() / 1000) - 15, duration: 1, sequence: 2, system_cpu_total_percent: 30, system_cpu_count: 1}]},
+      }));
+    });
+
+    const inFlightPoll = api.pollJsDebugStatsSampleForTest();
+    await flushAsyncWork();
+    const visibilityListener = api.documentListenersForTest('visibilitychange')
+      .find(listener => String(listener).includes('syncJsDebugStatsPolling'));
+    assert.ok(visibilityListener, 'the stats visibility listener is installed');
+    api.setDocumentVisibilityForTest('visible');
+    visibilityListener();
+    const pending = api.jsDebugStatsPollingStateForTest();
+    assert.equal(pending.pending, true, 'refocus queues a follow-up while the old poll is still running');
+    assert.equal(pending.pendingForceGraphRefresh, true, 'the queued refocus poll retains its forced-redraw requirement');
+
+    releaseInFlightPoll(jsonResponse({history: {sequence: 1, records: []}}));
+    await inFlightPoll;
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.equal(requests.length, 2, 'the queued refocus request runs immediately after the old poll settles');
+    assert.equal(api.jsDebugStatsPollingStateForTest().pendingForceGraphRefresh, false, 'the force latch clears only after it is handed to the catch-up poll');
+    assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 1, 'the refocus response applies missed history without waiting for a steady poll');
+    api.stopJsDebugStatsPollingForTest();
   });
 
   await testAsync('YO!stats gates polling but uploads client history outside the active pane', async () => {

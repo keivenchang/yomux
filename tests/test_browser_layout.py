@@ -1179,6 +1179,92 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
     assert result["finishedAt"] - result["startedAt"] < 3000, result
 
 
+def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediately(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof renderDebugPanels === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsFirstSampleReceived = true;
+          jsDebugStatsPollInFlight = false;
+          jsDebugStatsPollPending = false;
+          jsDebugStatsPollPendingForceGraphRefresh = false;
+          jsDebugStatsServerSequence = 1;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          recordJsDebugStatsSample({history: {sequence: 1, records: [{
+            start: nowSeconds - 10 * 60,
+            duration: 1,
+            sequence: 1,
+            system_cpu_total_percent: 10,
+            system_cpu_count: 1,
+          }]}}, {forceGraphRefresh: true});
+          renderDebugPanels({force: true});
+          const graph = document.querySelector('[data-js-debug-graph]');
+          const renderedBefore = Number(graph.dataset.jsDebugGraphRenderedAt);
+          const originalFetch = window.fetch;
+          let requests = 0;
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests += 1;
+            return Promise.resolve(new Response(JSON.stringify({history: {sequence: 2, records: [{
+              start: nowSeconds - 15,
+              duration: 1,
+              sequence: 2,
+              system_cpu_total_percent: 30,
+              system_cpu_count: 1,
+            }]}}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          };
+          try {
+            Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
+            document.dispatchEvent(new Event('visibilitychange'));
+            await new Promise(resolve => setTimeout(resolve, 20));
+            const refocusedAt = performance.now();
+            Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
+            document.dispatchEvent(new Event('visibilitychange'));
+            const deadline = performance.now() + 2000;
+            while (performance.now() < deadline) {
+              const currentRenderedAt = Number(document.querySelector('[data-js-debug-graph]')?.dataset.jsDebugGraphRenderedAt);
+              if (!jsDebugStatsPollInFlight && requests >= 1 && currentRenderedAt > renderedBefore) break;
+              await new Promise(resolve => setTimeout(resolve, 10));
+            }
+            const refreshedGraph = document.querySelector('[data-js-debug-graph]');
+            const renderedAfter = Number(refreshedGraph.dataset.jsDebugGraphRenderedAt);
+            const points = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'))
+              .flatMap(line => String(line.getAttribute('points') || '').trim().split(/\\s+/).filter(Boolean));
+            return {
+              requests,
+              renderedBefore,
+              renderedAfter,
+              redrawDelayMs: performance.now() - refocusedAt,
+              pointCount: points.length,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+            delete document.visibilityState;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requests"] == 1, metrics
+    assert metrics["renderedAfter"] > metrics["renderedBefore"], metrics
+    assert metrics["redrawDelayMs"] < 1000, metrics
+    assert metrics["pointCount"] >= 2, metrics
+
+
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
     page = tmp_path / "debug-graph-bad-connection-overlay.html"
     page.write_text(page_html("""

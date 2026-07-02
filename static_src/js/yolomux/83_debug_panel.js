@@ -10,6 +10,7 @@ let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugStatsPollTimer = null;
 let jsDebugStatsPollInFlight = false;
 let jsDebugStatsPollPending = false;
+let jsDebugStatsPollPendingForceGraphRefresh = false;
 let jsDebugStatsFirstSampleReceived = false;
 let jsDebugStatsHistoryFlushTimer = null;
 let jsDebugStatsHistoryFlushInFlight = false;
@@ -43,8 +44,10 @@ const jsDebugGraphRangeOptions = Object.freeze([
 ]);
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
 const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
+const jsDebugGraphMiddleWindowMs = 2 * 60 * 60 * 1000;
 const jsDebugGraphRawBucketMs = 1000;
-const jsDebugGraphRollupBucketMs = 30 * 1000;
+const jsDebugGraphMiddleBucketMs = 10 * 1000;
+const jsDebugGraphRollupBucketMs = 60 * 1000;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2000;
 const jsDebugStatsPollMs = 30000;
@@ -471,7 +474,7 @@ function debugGraphBucketHasData(bucket) {
 }
 
 function debugGraphBucket(map, startMs, durationMs) {
-  const key = String(startMs);
+  const key = `${startMs}:${durationMs}`;
   let bucket = map.get(key);
   if (!bucket) {
     bucket = debugGraphNewBucket(startMs, durationMs);
@@ -493,23 +496,25 @@ function debugGraphLatencyMs(event) {
   return NaN;
 }
 
+function debugGraphBucketDurationForTime(timeMs, nowMs = Date.now()) {
+  if (timeMs < nowMs - jsDebugGraphMiddleWindowMs) return jsDebugGraphRollupBucketMs;
+  if (timeMs < nowMs - jsDebugGraphRawWindowMs) return jsDebugGraphMiddleBucketMs;
+  return jsDebugGraphRawBucketMs;
+}
+
 function debugGraphBucketForTime(timeMs, nowMs = Date.now()) {
   const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
   if (!Number.isFinite(timeMs) || timeMs < retentionCutoff) return null;
-  const rawCutoff = nowMs - jsDebugGraphRawWindowMs;
-  if (timeMs < rawCutoff) {
-    const startMs = Math.floor(timeMs / jsDebugGraphRollupBucketMs) * jsDebugGraphRollupBucketMs;
-    return debugGraphBucket(jsDebugGraphRollupBuckets, startMs, jsDebugGraphRollupBucketMs);
-  }
-  const startMs = Math.floor(timeMs / jsDebugGraphRawBucketMs) * jsDebugGraphRawBucketMs;
-  return debugGraphBucket(jsDebugGraphRawBuckets, startMs, jsDebugGraphRawBucketMs);
+  const durationMs = debugGraphBucketDurationForTime(timeMs, nowMs);
+  const startMs = Math.floor(timeMs / durationMs) * durationMs;
+  const map = durationMs < jsDebugGraphMiddleBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
+  return debugGraphBucket(map, startMs, durationMs);
 }
 
 function debugGraphServerBucketRefForTime(timeMs, nowMs = Date.now()) {
   const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
   if (!Number.isFinite(timeMs) || timeMs < retentionCutoff) return null;
-  const rawCutoff = nowMs - jsDebugGraphRawWindowMs;
-  const durationMs = timeMs < rawCutoff ? jsDebugGraphRollupBucketMs : jsDebugGraphRawBucketMs;
+  const durationMs = debugGraphBucketDurationForTime(timeMs, nowMs);
   return {
     startMs: Math.floor(timeMs / durationMs) * durationMs,
     durationMs,
@@ -732,10 +737,19 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
   const rawCutoff = nowMs - jsDebugGraphRawWindowMs;
   for (const [key, bucket] of [...jsDebugGraphRawBuckets.entries()]) {
     if (bucket.startMs >= rawCutoff) continue;
+    const middleStartMs = Math.floor(bucket.startMs / jsDebugGraphMiddleBucketMs) * jsDebugGraphMiddleBucketMs;
+    const middle = debugGraphBucket(jsDebugGraphRollupBuckets, middleStartMs, jsDebugGraphMiddleBucketMs);
+    debugGraphMergeBucket(middle, bucket);
+    jsDebugGraphRawBuckets.delete(key);
+  }
+  const middleCutoff = nowMs - jsDebugGraphMiddleWindowMs;
+  for (const [key, bucket] of [...jsDebugGraphRollupBuckets.entries()]) {
+    if (bucket.durationMs === jsDebugGraphRollupBucketMs) continue;
+    if (bucket.durationMs === jsDebugGraphMiddleBucketMs && bucket.startMs >= middleCutoff) continue;
     const rollupStartMs = Math.floor(bucket.startMs / jsDebugGraphRollupBucketMs) * jsDebugGraphRollupBucketMs;
     const rollup = debugGraphBucket(jsDebugGraphRollupBuckets, rollupStartMs, jsDebugGraphRollupBucketMs);
     debugGraphMergeBucket(rollup, bucket);
-    jsDebugGraphRawBuckets.delete(key);
+    jsDebugGraphRollupBuckets.delete(key);
   }
   const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
   for (const [key, bucket] of [...jsDebugGraphRollupBuckets.entries()]) {
@@ -914,7 +928,7 @@ function debugGraphBucketForServerRecord(record) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return null;
   const durationMs = Math.max(jsDebugGraphRawBucketMs, durationSeconds * 1000);
   const startMs = Math.floor(startSeconds * 1000);
-  const map = durationMs >= jsDebugGraphRollupBucketMs ? jsDebugGraphRollupBuckets : jsDebugGraphRawBuckets;
+  const map = durationMs < jsDebugGraphMiddleBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
   return debugGraphBucket(map, startMs, durationMs);
 }
 
@@ -1035,6 +1049,9 @@ function debugGraphApplyServerAgentTokenRates(bucket, rates) {
 
 function debugGraphApplyServerHistory(history = {}) {
   if (!history || typeof history !== 'object') return;
+  // Compact local fine buckets before applying an authoritative server coarse bucket. Applying
+  // first would merge the same measurements a second time at the 1h/2h tier boundaries.
+  compactJsDebugGraphBuckets();
   const tokenSchemaVersion = Number(history.agent_token_schema_version);
   if (Number.isFinite(tokenSchemaVersion) && tokenSchemaVersion > 0 && tokenSchemaVersion !== jsDebugStatsAgentTokenSchemaVersion) {
     clearDebugGraphAgentTokenData();
@@ -2235,6 +2252,8 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   return {
     rawBuckets: jsDebugGraphRawBuckets.size,
     rollupBuckets: jsDebugGraphRollupBuckets.size,
+    middleBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphMiddleBucketMs).length,
+    oldBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
     agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
     agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
     agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
@@ -2247,6 +2266,8 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     availableRangeSeconds,
     retentionHours: jsDebugGraphRetentionMs / 60 / 60 / 1000,
     rawWindowSeconds: jsDebugGraphRawWindowMs / 1000,
+    middleWindowSeconds: jsDebugGraphMiddleWindowMs / 1000,
+    middleBucketSeconds: jsDebugGraphMiddleBucketMs / 1000,
     rollupBucketSeconds: jsDebugGraphRollupBucketMs / 1000,
     serverSequence: jsDebugStatsServerSequence,
     pendingServerBuckets: jsDebugGraphPendingServerBuckets.size,
@@ -2278,13 +2299,13 @@ function jsDebugStatsPollIntervalMs() {
   return jsDebugStatsFirstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
 }
 
-function armJsDebugStatsPolling({pollNow = false} = {}) {
+function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {}) {
   if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) {
     stopJsDebugStatsPolling();
     return;
   }
   stopJsDebugStatsPolling();
-  if (pollNow) pollJsDebugStatsSample();
+  if (pollNow) pollJsDebugStatsSample({forceGraphRefresh});
   if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
 }
 
@@ -2301,7 +2322,7 @@ async function fetchJsDebugStatsJson(url, options = {}) {
   }
 }
 
-async function pollJsDebugStatsSample() {
+async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   if (!jsDebugCollectionEnabled) return;
   if (!jsDebugStatsPanelVisible()) {
     stopJsDebugStatsPolling();
@@ -2309,6 +2330,7 @@ async function pollJsDebugStatsSample() {
   }
   if (jsDebugStatsPollInFlight) {
     jsDebugStatsPollPending = true;
+    jsDebugStatsPollPendingForceGraphRefresh ||= forceGraphRefresh;
     return;
   }
   if (typeof apiFetchJsonQuiet !== 'function') return;
@@ -2330,13 +2352,15 @@ async function pollJsDebugStatsSample() {
       : '';
     const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}${tokenHistory}`, {cache: 'no-store'});
     if (expandsHistory) jsDebugStatsHistoryStartSeconds = historyStart;
-    recordJsDebugStatsSample(payload, {forceGraphRefresh: expandsHistory});
+    recordJsDebugStatsSample(payload, {forceGraphRefresh: forceGraphRefresh || expandsHistory});
   } catch (_error) {
   } finally {
     jsDebugStatsPollInFlight = false;
     if (jsDebugStatsPollPending) {
+      const pendingForceGraphRefresh = jsDebugStatsPollPendingForceGraphRefresh;
       jsDebugStatsPollPending = false;
-      pollJsDebugStatsSample();
+      jsDebugStatsPollPendingForceGraphRefresh = false;
+      pollJsDebugStatsSample({forceGraphRefresh: pendingForceGraphRefresh});
     }
   }
 }
@@ -2420,13 +2444,13 @@ function startJsDebugStatsPolling() {
   syncJsDebugStatsPolling({pollNow: true});
 }
 
-function syncJsDebugStatsPolling({pollNow = true} = {}) {
+function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {}) {
   if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) {
     stopJsDebugStatsPolling();
     return false;
   }
   if (jsDebugStatsPollTimer && !pollNow) return true;
-  armJsDebugStatsPolling({pollNow});
+  armJsDebugStatsPolling({pollNow, forceGraphRefresh});
   return true;
 }
 
@@ -2438,7 +2462,8 @@ async function primeJsDebugStatsBeforeLongLivedStreams() {
 
 if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
-    syncJsDebugStatsPolling({pollNow: document.visibilityState === 'visible'});
+    const visible = document.visibilityState === 'visible';
+    syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
   });
 }
 

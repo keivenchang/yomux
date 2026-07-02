@@ -887,6 +887,7 @@ globalThis.__layoutTestApi = {
       firstSampleReceived: jsDebugStatsFirstSampleReceived,
       inFlight: jsDebugStatsPollInFlight,
       pending: jsDebugStatsPollPending,
+      pendingForceGraphRefresh: jsDebugStatsPollPendingForceGraphRefresh,
       historyStartSeconds: jsDebugStatsHistoryStartSeconds,
     };
   },

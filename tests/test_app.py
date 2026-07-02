@@ -148,7 +148,7 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
     now = 200000.0
     monkeypatch.setattr(app_module.time, "time", lambda: now)
     records = [{
-        "start": now - (2 * 60 * 60) + i,
+        "start": age_start + i,
         "duration": 1,
         "api_count": 1,
         "sse_count": 1 if i % 2 == 0 else 0,
@@ -157,7 +157,7 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
         "bandwidth_bytes": 100 + i,
         "system_cpu_total_percent": 5,
         "system_cpu_count": 1,
-    } for i in range(20)]
+    } for age_start in (now - (90 * 60), now - (3 * 60 * 60)) for i in range(20)]
     try:
         payload, status = webapp.record_stats_history_payload({"records": records})
         incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
@@ -166,11 +166,19 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
 
     assert status == HTTPStatus.OK
     assert payload["history"]["raw_window_seconds"] == app_module.STATS_HISTORY_RAW_WINDOW_SECONDS
+    assert payload["history"]["middle_window_seconds"] == app_module.STATS_HISTORY_MIDDLE_WINDOW_SECONDS
+    assert payload["history"]["middle_bucket_seconds"] == app_module.STATS_HISTORY_MIDDLE_BUCKET_SECONDS
     assert payload["history"]["rollup_bucket_seconds"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS
-    assert len(payload["history"]["records"]) <= 3
-    assert sum(record["api_count"] for record in payload["history"]["records"]) == 20
+    assert payload["history"]["tiers"] == [
+        {"max_age_seconds": 60 * 60, "bucket_seconds": 1},
+        {"max_age_seconds": 2 * 60 * 60, "bucket_seconds": 10},
+        {"max_age_seconds": 24 * 60 * 60, "bucket_seconds": 60},
+    ]
+    assert len(payload["history"]["records"]) <= 6
+    assert sum(record["api_count"] for record in payload["history"]["records"]) == 40
     assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 0
     assert sum(record["agent_activity_samples"] for record in payload["history"]["records"]) == 0
+    assert any(record["duration"] == app_module.STATS_HISTORY_MIDDLE_BUCKET_SECONDS for record in payload["history"]["records"])
     assert any(record["duration"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS for record in payload["history"]["records"])
     assert incremental["history"]["records"] == []
 
@@ -187,6 +195,54 @@ def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
     assert status == HTTPStatus.OK
     assert payload["history"]["records"] == []
     assert payload["history"]["sequence"] >= 20
+
+
+def test_stats_client_snapshot_replaces_fine_rows_before_applying_compacted_rows():
+    webapp = app_module.TmuxWebtermApp([])
+    now = 200000.0
+    fine_start = int(now - (3 * 60 * 60)) // 60 * 60
+    fine_snapshot = {
+        "version": app_module.STATS_CLIENT_HISTORY_VERSION,
+        "sequence": 6,
+        "raw_buckets": [],
+        "rollup_buckets": [
+            [fine_start + offset, 10, index + 1, {"client-a": {
+                "api_count": 1.0,
+                "sse_count": 0.0,
+                "latency_total_ms": 0.0,
+                "latency_count": 0.0,
+                "bandwidth_bytes": 0.0,
+                "disconnected_ms": 0.0,
+                "sequence": index + 1,
+            }}, {}]
+            for index, offset in enumerate(range(0, 60, 10))
+        ],
+    }
+    coarse_snapshot = {
+        "version": app_module.STATS_CLIENT_HISTORY_VERSION,
+        "sequence": 6,
+        "raw_buckets": [],
+        "rollup_buckets": [[fine_start, 60, 6, {"client-a": {
+            "api_count": 6.0,
+            "sse_count": 0.0,
+            "latency_total_ms": 0.0,
+            "latency_count": 0.0,
+            "bandwidth_bytes": 0.0,
+            "disconnected_ms": 0.0,
+            "sequence": 6,
+        }}, {}]],
+    }
+    try:
+        with webapp.stats_history_lock:
+            webapp.stats_client_history_apply_snapshot_locked(fine_snapshot)
+            webapp.stats_client_history_apply_snapshot_locked(coarse_snapshot)
+            webapp.stats_history_compact_locked(now)
+            history = webapp.stats_history_payload_locked(client_id="client-a")
+    finally:
+        webapp.control_server.stop()
+
+    assert [record["duration"] for record in history["records"]] == [60]
+    assert sum(record["api_count"] for record in history["records"]) == 6
 
 
 def test_stats_history_wide_token_history_is_server_aggregated(monkeypatch):

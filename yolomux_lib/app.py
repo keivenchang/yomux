@@ -277,8 +277,10 @@ TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
 INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 60 * 60
+STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
 STATS_HISTORY_RAW_BUCKET_SECONDS = 1
-STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 30
+STATS_HISTORY_MIDDLE_BUCKET_SECONDS = 10
+STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 60
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
@@ -1452,8 +1454,11 @@ class TmuxWebtermApp:
     def stats_history_bucket_locked(self, sample_time: float, now: float) -> dict[str, Any] | None:
         if not math.isfinite(sample_time) or sample_time < now - STATS_HISTORY_RETENTION_SECONDS:
             return None
-        if sample_time < now - STATS_HISTORY_RAW_WINDOW_SECONDS:
+        if sample_time < now - STATS_HISTORY_MIDDLE_WINDOW_SECONDS:
             bucket_seconds = STATS_HISTORY_ROLLUP_BUCKET_SECONDS
+            buckets = self.stats_history_rollup_buckets
+        elif sample_time < now - STATS_HISTORY_RAW_WINDOW_SECONDS:
+            bucket_seconds = STATS_HISTORY_MIDDLE_BUCKET_SECONDS
             buckets = self.stats_history_rollup_buckets
         else:
             bucket_seconds = STATS_HISTORY_RAW_BUCKET_SECONDS
@@ -1587,19 +1592,34 @@ class TmuxWebtermApp:
                 target_process["sequence"] = max(int(target_process.get("sequence") or 0), int(source_process.get("sequence") or 0))
                 target["sequence"] = max(int(target.get("sequence") or 0), int(target_process.get("sequence") or 0))
 
+    def stats_history_bucket_map_locked(self, duration: int) -> dict[tuple[int, int], dict[str, Any]]:
+        return self.stats_history_raw_buckets if duration < STATS_HISTORY_MIDDLE_BUCKET_SECONDS else self.stats_history_rollup_buckets
+
+    def stats_history_merge_into_duration_locked(self, bucket: dict[str, Any], duration: int) -> None:
+        start = int(math.floor(float(bucket.get("start") or 0.0) / duration) * duration)
+        target_key = (start, duration)
+        target = self.stats_history_bucket_map_locked(duration).get(target_key)
+        if target is None:
+            target = stats_history_empty_bucket(start, duration)
+            self.stats_history_bucket_map_locked(duration)[target_key] = target
+        self.stats_history_merge_bucket_locked(target, bucket)
+
     def stats_history_compact_locked(self, now: float) -> None:
         raw_cutoff = now - STATS_HISTORY_RAW_WINDOW_SECONDS
         for key, bucket in list(self.stats_history_raw_buckets.items()):
             if float(bucket.get("start") or 0.0) >= raw_cutoff:
                 continue
-            start = int(math.floor(float(bucket.get("start") or 0.0) / STATS_HISTORY_ROLLUP_BUCKET_SECONDS) * STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
-            rollup_key = (start, STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
-            rollup = self.stats_history_rollup_buckets.get(rollup_key)
-            if rollup is None:
-                rollup = stats_history_empty_bucket(start, STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
-                self.stats_history_rollup_buckets[rollup_key] = rollup
-            self.stats_history_merge_bucket_locked(rollup, bucket)
+            self.stats_history_merge_into_duration_locked(bucket, STATS_HISTORY_MIDDLE_BUCKET_SECONDS)
             self.stats_history_raw_buckets.pop(key, None)
+        middle_cutoff = now - STATS_HISTORY_MIDDLE_WINDOW_SECONDS
+        for key, bucket in list(self.stats_history_rollup_buckets.items()):
+            duration = int(bucket.get("duration") or 0)
+            if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS:
+                continue
+            if duration == STATS_HISTORY_MIDDLE_BUCKET_SECONDS and float(bucket.get("start") or 0.0) >= middle_cutoff:
+                continue
+            self.stats_history_merge_into_duration_locked(bucket, STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
+            self.stats_history_rollup_buckets.pop(key, None)
         retention_cutoff = now - STATS_HISTORY_RETENTION_SECONDS
         for key, bucket in list(self.stats_history_raw_buckets.items()):
             if float(bucket.get("start") or 0.0) < retention_cutoff:
@@ -1758,7 +1778,14 @@ class TmuxWebtermApp:
             "records": self.stats_history_records_locked(since, client_id=client_id, history_start=history_start),
             "retention_seconds": STATS_HISTORY_RETENTION_SECONDS,
             "raw_window_seconds": STATS_HISTORY_RAW_WINDOW_SECONDS,
+            "middle_window_seconds": STATS_HISTORY_MIDDLE_WINDOW_SECONDS,
+            "middle_bucket_seconds": STATS_HISTORY_MIDDLE_BUCKET_SECONDS,
             "rollup_bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS,
+            "tiers": [
+                {"max_age_seconds": STATS_HISTORY_RAW_WINDOW_SECONDS, "bucket_seconds": STATS_HISTORY_RAW_BUCKET_SECONDS},
+                {"max_age_seconds": STATS_HISTORY_MIDDLE_WINDOW_SECONDS, "bucket_seconds": STATS_HISTORY_MIDDLE_BUCKET_SECONDS},
+                {"max_age_seconds": STATS_HISTORY_RETENTION_SECONDS, "bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS},
+            ],
             "client_id": stats_history_client_id(client_id),
         }
         if token_resolution_seconds > 0:
@@ -1965,7 +1992,7 @@ class TmuxWebtermApp:
             return
         if start <= 0 or duration <= 0:
             return
-        buckets = self.stats_history_rollup_buckets if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS else self.stats_history_raw_buckets
+        buckets = self.stats_history_bucket_map_locked(duration)
         bucket = buckets.get((start, duration))
         # The shared snapshot carries the full 24-hour history even though normal writes change
         # only one client or server row. A bucket-level sequence cannot decide freshness here:
@@ -2011,8 +2038,20 @@ class TmuxWebtermApp:
         self.stats_history_refresh_bucket_sequence_locked(bucket)
 
     def stats_client_history_apply_snapshot_locked(self, snapshot: dict[str, Any]) -> None:
-        raw_buckets = snapshot.get("raw_buckets") if isinstance(snapshot.get("raw_buckets"), list) else []
-        rollup_buckets = snapshot.get("rollup_buckets") if isinstance(snapshot.get("rollup_buckets"), list) else []
+        raw_value = snapshot.get("raw_buckets")
+        rollup_value = snapshot.get("rollup_buckets")
+        if not isinstance(raw_value, list) and not isinstance(rollup_value, list):
+            return
+        raw_buckets = raw_value if isinstance(raw_value, list) else []
+        rollup_buckets = rollup_value if isinstance(rollup_value, list) else []
+        # The disk snapshot is the complete client/process history. Clear those rows before
+        # applying it so a newly compacted coarse bucket cannot coexist with its old fine rows
+        # and get counted twice. Server-global fields live in the same buckets but are owned by
+        # the separate tmux-AI-status snapshot, so preserve them here.
+        for bucket in [*self.stats_history_raw_buckets.values(), *self.stats_history_rollup_buckets.values()]:
+            bucket["clients"] = {}
+            bucket["servers"] = {}
+            self.stats_history_refresh_bucket_sequence_locked(bucket)
         for bucket in [*rollup_buckets, *raw_buckets]:
             self.stats_client_history_apply_bucket_locked(bucket)
         try:
@@ -2244,7 +2283,7 @@ class TmuxWebtermApp:
             return
         if start <= 0 or duration <= 0:
             return
-        buckets = self.stats_history_rollup_buckets if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS else self.stats_history_raw_buckets
+        buckets = self.stats_history_bucket_map_locked(duration)
         key = (start, duration)
         bucket = buckets.get(key)
         if bucket is None:
@@ -2268,7 +2307,7 @@ class TmuxWebtermApp:
             return
         if start <= 0 or duration <= 0:
             return
-        buckets = self.stats_history_rollup_buckets if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS else self.stats_history_raw_buckets
+        buckets = self.stats_history_bucket_map_locked(duration)
         bucket = buckets.get((start, duration))
         if bucket is None:
             bucket = stats_history_empty_bucket(start, duration)
