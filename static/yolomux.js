@@ -31596,8 +31596,10 @@ function updatePanelWindowStepButtons(session, info) {
     if (!row) return false;
     const replacement = replacementFromHtml();
     if (!replacement) return false;
+    const controls = row.querySelector(':scope > .pane-info-bar-controls') || row.querySelector('.pane-info-bar-controls');
     const close = row.querySelector(':scope > .panel-detail-close') || row.querySelector('.panel-detail-close');
-    if (close?.parentElement === row) row.insertBefore(replacement, close);
+    if (controls?.parentElement === row) row.insertBefore(replacement, controls);
+    else if (close?.parentElement === row) row.insertBefore(replacement, close);
     else row.appendChild(replacement);
     changed = true;
     return true;
@@ -54168,6 +54170,10 @@ function infoRecordMainChipsHtml(record, options = {}) {
   const pathVisible = !hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__';
   const branchVisible = !hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__';
   const updatedMeta = infoRecordUpdatedMetaHtml(record);
+  const linearDesc = infoRecordLinearDescHtml(record);
+  if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
+  const prDesc = infoRecordPrDescHtml(record);
+  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
   if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
     fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
   }
@@ -54182,10 +54188,6 @@ function infoRecordMainChipsHtml(record, options = {}) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
     fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
   }
-  const prDesc = infoRecordPrDescHtml(record);
-  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
-  const linearDesc = infoRecordLinearDescHtml(record);
-  if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   return fields.join('');
 }
 

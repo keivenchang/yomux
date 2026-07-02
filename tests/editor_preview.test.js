@@ -1620,9 +1620,11 @@ async function runEditorPreviewSuite() {
     const latePanel = lateApi.testElementForId('panel-late');
     const lateDetailRow = new TestElement('', 'div');
     lateDetailRow.className = 'pane-info-bar panel-detail-row';
+    const lateControls = new TestElement('', 'div');
+    lateControls.className = 'pane-info-bar-controls';
     const lateClose = new TestElement('', 'button');
     lateClose.className = 'panel-detail-close';
-    lateDetailRow.appendChild(lateClose);
+    lateDetailRow.append(lateControls, lateClose);
     latePanel.appendChild(lateDetailRow);
     assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'late metadata panel starts without a tmux sub-window bar');
     lateApi.setTranscriptInfoForTest('late', {panes: [
@@ -1637,6 +1639,7 @@ async function runEditorPreviewSuite() {
       ['0', '1'],
       'late transcript metadata inserts the tmux sub-window bar instead of leaving the Info Bar stuck without window buttons',
     );
+    assert.ok(lateDetailRow.children.indexOf(lateBars[0]) < lateDetailRow.children.indexOf(lateControls), 'late tmux metadata inserts the window bar before the fixed repo selector');
     lateApi.updatePanelWindowStepButtonsForTest('late', {panes: []});
     assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'empty window metadata removes the stale tmux sub-window bar');
     const calls = [];
@@ -5294,7 +5297,8 @@ async function runEditorPreviewSuite() {
     assert.ok(describedMain.indexOf('info-tree-field-ai') < describedMain.indexOf('info-tree-field-branch'), 'YO!info leaf rows list the tmux sub-window before the Git branch');
     assert.ok(/info-tree-field-branch[\s\S]*?>main<[\s\S]*?info-tree-meta-updated[\s\S]*?Git commit 3 days ago/.test(describedMain) && describedMain.includes('title="Git commit: 3 days ago"') && !describedMain.includes('<span class="info-tree-field-label">Updated:</span>'), 'YO!info identifies the Git commit date beside its Git branch instead of rendering a detached Updated row');
     assert.ok(/info-tree-ai-window-token[\s\S]*?info-tree-ai-pid">\(pid=2345\)<\/span>[\s\S]*?info-tree-ai-recency info-tree-trailing-meta">10 min ago<\/span>/.test(describedMain), 'YO!info keeps the PID inline after its tmux sub-window button and the recency trailing');
-    assert.ok(describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>') < describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>'), 'YO!info leaf rows render PR before Linear');
+    assert.ok(describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>') < describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>'), 'YO!info leaf rows render Linear before the PR');
+    assert.ok(describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>') < describedMain.indexOf('info-tree-field-tab'), 'YO!info leaf rows render the PR before session/window and repository metadata');
     const fullCss = fs.readFileSync('static/yolomux.css', 'utf8');
     const infoTreeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');

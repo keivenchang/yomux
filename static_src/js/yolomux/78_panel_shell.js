@@ -2016,8 +2016,10 @@ function updatePanelWindowStepButtons(session, info) {
     if (!row) return false;
     const replacement = replacementFromHtml();
     if (!replacement) return false;
+    const controls = row.querySelector(':scope > .pane-info-bar-controls') || row.querySelector('.pane-info-bar-controls');
     const close = row.querySelector(':scope > .panel-detail-close') || row.querySelector('.panel-detail-close');
-    if (close?.parentElement === row) row.insertBefore(replacement, close);
+    if (controls?.parentElement === row) row.insertBefore(replacement, controls);
+    else if (close?.parentElement === row) row.insertBefore(replacement, close);
     else row.appendChild(replacement);
     changed = true;
     return true;

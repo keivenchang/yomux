@@ -4548,7 +4548,7 @@ def test_yoinfo_tab_values_match_shared_tab_detail(browser, tmp_path):
     assert metrics["groupPrCount"] == metrics["leafPrCount"] == 1, metrics
 
 
-def test_yoinfo_leaf_fields_put_pr_before_linear(browser, tmp_path):
+def test_yoinfo_leaf_fields_put_linear_then_pr_before_repository_metadata(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return typeof infoRecordHtml === 'function';")
@@ -4579,7 +4579,7 @@ def test_yoinfo_leaf_fields_put_pr_before_linear(browser, tmp_path):
         );
         """
     )
-    assert order == ["path", "branch", "pr", "linear"], order
+    assert order == ["linear", "pr", "path", "branch"], order
 
 
 def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):
