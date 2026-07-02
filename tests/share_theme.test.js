@@ -2630,6 +2630,24 @@ async function runShareThemeSuite() {
     assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
     assert.ok(popoverForPosition.getBoundingClientRect().width > panelForPopover.getBoundingClientRect().width);
+    const tabberPaneForPopover = {
+      getBoundingClientRect() {
+        return {left: 80, right: 780, top: 0, bottom: 500, width: 700, height: 500};
+      },
+    };
+    const tabberPopover = new TestElement('tabber-pane-popover');
+    tabberPopover.rect = {left: 0, right: 520, top: 0, bottom: 300, width: 520, height: 300};
+    const tabberTab = new TestElement('tabber-session-tab');
+    tabberTab.classList.add('tabber-session-tab');
+    tabberTab.getBoundingClientRect = () => ({left: 132, right: 372, top: 40, bottom: 68, width: 240, height: 28});
+    tabberTab.closest = selector => {
+      assert.equal(selector, '.file-explorer-panel, .file-explorer-changes-panel');
+      return tabberPaneForPopover;
+    };
+    api.positionPaneTabPopover(tabberTab, tabberPopover);
+    assert.equal(tabberPopover.style.left, '80px', 'Tabber session popovers align to the owning pane instead of the indented tree row');
+    assert.equal(tabberPopover.style.width, '700px', 'Tabber session popovers span the owning pane width');
+    assert.equal(tabberPopover.style.maxWidth, '700px', 'Tabber pane width overrides the generic tab-popover cap');
     api.positionPaneTabPopover({
       getBoundingClientRect() {
         return {left: 1080, right: 1160, top: 40, bottom: 68, width: 80, height: 28};

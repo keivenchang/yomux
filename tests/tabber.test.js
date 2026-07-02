@@ -149,6 +149,7 @@ async function runTabberSuite() {
     assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2'], 'focused Tabber ArrowDown moves the selected row');
     assert.equal(sessionTwo.classList.contains('selected'), true, 'moved Tabber row gets shared selected class');
 
+    api.setDocumentActiveElementForTest(panel);
     const enter = treeKeyEvent('Enter', panel);
     assert.equal(api.handleFileExplorerArrowNavForTest(enter), true, 'Tabber Enter activates the selected row');
     assert.equal(api.currentSessionActionTarget(), '2', 'Tabber Enter opens the selected tmux session');

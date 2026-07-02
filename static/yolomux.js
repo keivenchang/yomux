@@ -29753,6 +29753,10 @@ function refreshFileTabPopover(tab, item) {
 function positionPaneTabPopover(tab, popover = null) {
   const rect = tab.getBoundingClientRect();
   popover = popover || paneTabPopoverForAnchor(tab);
+  const tabberPane = tab?.classList?.contains?.('tabber-session-tab')
+    ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
+    : null;
+  const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
@@ -29764,11 +29768,11 @@ function positionPaneTabPopover(tab, popover = null) {
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
-  const width = Math.min(maxInline, measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+  const width = Math.min(maxInline, tabberPaneRect?.width || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
-    Math.floor(rect.left),
+    Math.floor(tabberPaneRect?.left ?? rect.left),
     Math.ceil(rect.bottom) + bridgeGap,
     width,
     height,
@@ -29783,6 +29787,7 @@ function positionPaneTabPopover(tab, popover = null) {
     popover.style.top = top;
     popover.style.left = left;
     popover.style.width = inlineSize;
+    popover.style.maxWidth = tabberPaneRect ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }

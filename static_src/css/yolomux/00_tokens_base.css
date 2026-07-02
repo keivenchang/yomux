@@ -68,6 +68,9 @@
   --agent-status-attention-ring-rgb: 255 51 71;
   --agent-status-cooldown: #ffd633;
   --agent-status-cooldown-rgb: 255 214 51;
+  --agent-status-opacity-noticeable-min: 0.16;
+  --agent-status-opacity-subtle-min: 0.5;
+  --agent-status-pulse-min-opacity: var(--agent-status-opacity-noticeable-min);
   --menu-accent: var(--accent);
   --icon-code: #7dd3fc;
   --icon-doc: #facc15;

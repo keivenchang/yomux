@@ -4422,12 +4422,17 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
           rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
         });
         const marker = tab()?.querySelector('.session-yolo-marker');
+        const statusDotNode = tab()?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--working');
+        const statusDotStyle = statusDotNode ? getComputedStyle(statusDotNode) : null;
+        const statusDotAnimation = statusDotNode?.getAnimations?.().find(animation => animation.animationName === 'agent-status-opacity-pulse');
         return {
           before,
           after: !!marker,
           active: marker?.classList.contains('active') || false,
           session: marker?.dataset.yoloSession || '',
           statusDot: !!tab()?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--working'),
+          statusDotPulseMin: statusDotStyle?.getPropertyValue('--agent-status-pulse-min-opacity').trim() || '',
+          statusDotKeyframeOpacities: statusDotAnimation ? statusDotAnimation.effect.getKeyframes().map(frame => frame.opacity) : [],
           errors: window.__bootErrors || [],
           rejections: window.__bootRejections || [],
         };
@@ -4438,6 +4443,8 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
     assert result["active"] is True, result
     assert result["session"] == "1", result
     assert result["statusDot"] is True, result
+    assert result["statusDotPulseMin"] == "0.5", result
+    assert result["statusDotKeyframeOpacities"] == ["0.5", "1", "0.5"], result
     assert result["errors"] == [], result
     assert result["rejections"] == [], result
 

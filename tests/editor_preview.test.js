@@ -200,8 +200,10 @@ async function runEditorPreviewSuite() {
     assert.equal(/display:\s*inline-grid/.test(dotBlock), false, 'status balls are not drawn as fixed inline-grid discs');
     assert.equal(/font-size:\s*0\s*;/.test(dotBlock), false, 'status balls keep a visible glyph font size');
     assert.ok(/\.status-indicator--dot\.status-indicator--working\.heartbeat-pulse\s*\{[\s\S]*animation-name:\s*agent-status-opacity-pulse/.test(sessionsCss), 'working balls use the shared opacity pulse instead of a color flash and glow');
+    assert.ok(/--agent-status-opacity-noticeable-min:\s*0\.16[\s\S]*--agent-status-opacity-subtle-min:\s*0\.5[\s\S]*--agent-status-pulse-min-opacity:\s*var\(--agent-status-opacity-noticeable-min\)/.test(tokensCss), 'status opacity ranges have one inherited noticeable/subtle token owner');
+    assert.ok(/\.session-agent-activity-marker \.agent-window-status-dot\.status-indicator--working:not\(\.agent-window-status-dot--segmented\)\s*\{[\s\S]*--agent-status-pulse-min-opacity:\s*var\(--agent-status-opacity-subtle-min\)/.test(sessionsCss), 'full-green aggregate Tab circles inherit the subtle pulse range regardless of which shared pulse class drives them');
     assert.ok(/\.status-indicator--dot\.status-indicator--cooldown\.heartbeat-pulse\s*\{[\s\S]*animation-name:\s*agent-status-opacity-pulse/.test(sessionsCss), 'yellow cooldown balls use the same opacity pulse as working balls');
-    assert.ok(/@keyframes agent-status-opacity-pulse\s*\{[\s\S]*opacity:\s*0\.16[\s\S]*opacity:\s*1/.test(sessionsCss), 'one shared keyframe pulses the agent markers through visible opacity changes only');
+    assert.ok(/@keyframes agent-status-opacity-pulse\s*\{[\s\S]*opacity:\s*var\(--agent-status-pulse-min-opacity\)[\s\S]*opacity:\s*1/.test(sessionsCss), 'one shared keyframe inherits the status opacity range');
     assert.equal(/working-ball-hard-flash/.test(sessionsCss), false, 'working ball color-flash keyframes are removed');
     assert.equal(/#a9ff7a/.test(sessionsCss), false, 'working balls do not peak into the old yellow-lime tone');
     assert.ok(/\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence/.test(sessionsCss), 'the --active agent glyph keeps the glow-cadence; status states use a static symbol plus an opacity-pulsed ball');
@@ -1214,7 +1216,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.tmux-window-bar \.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--working,[\s\S]*\.session-agent-window-block > \.session-agent-row\.current \.agent-window-status-dot\.status-indicator--working\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--pr-status-passing\)/.test(yoloCss), 'active working play glyphs stay green and rely on their real border for contrast');
     assert.ok(/\.session-agent-activity-marker \.agent-window-status-dot\s*\{[\s\S]*inline-size:\s*var\(--agent-status-ball-size\)[\s\S]*block-size:\s*var\(--agent-status-ball-size\)[\s\S]*border:\s*1px solid var\(--agent-status-ball-border\)[\s\S]*filter:\s*none/.test(yoloCss), 'active session-tab working balls use a real round border instead of a drop-shadow outline');
     assert.equal(/\.tmux-window-button\.active \.agent-window-status-dot[\s\S]{0,260}text-shadow:/.test(yoloCss), false, 'active tmux sub-window glyphs do not rely on text-shadow for border/clip-path shapes');
-    assert.ok(/@keyframes agent-status-opacity-pulse\s*\{[\s\S]*opacity:\s*0\.16[\s\S]*opacity:\s*1/.test(yoloCss), 'active tmux sub-window activity markers inherit the shared opacity pulse in the built CSS');
+    assert.ok(/@keyframes agent-status-opacity-pulse\s*\{[\s\S]*opacity:\s*var\(--agent-status-pulse-min-opacity\)[\s\S]*opacity:\s*1/.test(yoloCss), 'active tmux sub-window activity markers inherit the shared opacity pulse in the built CSS');
     assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux sub-window buttons have no per-agent tint CSS');
     assert.ok(source.includes("workflowTransitionGlowSeconds = initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow initializes from the persisted setting');
     assert.ok(source.includes("workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow live-updates from settings changes');
@@ -2095,6 +2097,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/session-yolo-marker[^"]*active/.test(workingHtml), 'working Claude session tabs keep the YO button visible');
     assert.equal(/session-yolo-marker[^"]*working/.test(workingHtml), false, 'attributed working Claude tabs leave motion to the status ball');
     assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(workingMarkerHtml), 'working Claude session tabs show the shared green status ball');
+    assert.equal(workingMarkerHtml.includes('agent-window-status-dot--segmented'), false, 'a single-tone working session tab uses the full-green parent-circle pulse path');
     assert.equal(workingMarkerHtml.includes('agent-icon claude'), false, 'working Claude session tabs omit the Claude icon');
     assert.ok(workingHtml.indexOf('session-yolo-marker') < workingHtml.indexOf('session-agent-activity-marker'), 'YO button stays before the working status ball');
 
