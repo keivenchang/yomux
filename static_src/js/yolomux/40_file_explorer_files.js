@@ -3077,10 +3077,7 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     const rows = controller.rows(panel);
     if (!rows.length) return false;
     const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
-    const globalTargetAllowed = typeof globalShortcutTargetAllowsAppAction !== 'function' || globalShortcutTargetAllowsAppAction(event?.target);
-    const explicitlyOwned = typeof options.allowKeyboardFromGlobalTarget === 'function'
-      && options.allowKeyboardFromGlobalTarget(event, panel) === true;
-    if (!globalTargetAllowed && !eventTargetsOwnedPanel && !explicitlyOwned) return false;
+    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
     const lead = controller.leadRow(panel);
     let leadIndex = lead ? rows.indexOf(lead) : -1;
     if (intent === 'select-all' && options.allowSelectAll === true) {
@@ -3754,7 +3751,7 @@ function buildTabberTree() {
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const fallbackSessionRecency = tabberRecency(session);
-    const sessionWork = sessionWorkDescription(session, info, 200);
+    const sessionWork = sessionWorkDescription(session, info, 0);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
     const nowSeconds = Date.now() / 1000;
@@ -3942,6 +3939,7 @@ function tabberSessionChromeHtml(data) {
     info,
     state,
     auto,
+    detail: data.description || '',
     attrs: ['data-tabber-session-chrome="shared"', 'draggable="true"'],
     stripContentTitles: true,
     afterHtml: sessionPopoverHtml(session, info, agentKind, auto, state),
@@ -4288,10 +4286,6 @@ function handleTabberRowActivate(row, event) {
   }
 }
 
-function tabberTreeKeyboardNavigationReady() {
-  return fileExplorerMode === 'tabber' && tabberTreeSelectedPaths.size > 0;
-}
-
 const tabberTreeInteractionController = createSharedTreeInteractionController({
   name: 'tabber',
   rowSelector: '.file-tree-row[data-tabber-type]',
@@ -4301,7 +4295,6 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
   getLeadId: () => tabberTreeSelectionLead,
   setLeadId: id => { tabberTreeSelectionLead = id; },
   currentRowId: activeTabberRowPath,
-  allowKeyboardFromGlobalTarget: () => tabberTreeKeyboardNavigationReady(),
   syncCurrentSelection(currentId) {
     tabberTreeSelectedPaths.clear();
     if (currentId) tabberTreeSelectedPaths.add(currentId);
@@ -4319,6 +4312,12 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
 });
 
 function syncTabberTreeActiveSelection(panel = document, options = {}) {
+  if (!activeTabberRowPath()) {
+    tabberTreeSelectedPaths.clear();
+    tabberTreeSelectionLead = '';
+    tabberTreeInteractionController.applyState(panel, options);
+    return false;
+  }
   return tabberTreeInteractionController.syncCurrent(panel, options);
 }
 

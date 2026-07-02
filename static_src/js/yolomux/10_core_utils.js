@@ -2487,12 +2487,14 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     if (disposed) return;
     const viewportSignature = terminalFileReferenceViewportSignature(term);
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
-    if (viewportChanged) scheduleCachedRender();
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = 0;
-      refresh();
-    }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+    const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
+    if (viewportChanged || contentChanged) scheduleCachedRender();
+    if (!timer) {
+      timer = setTimeout(() => {
+        timer = 0;
+        refresh();
+      }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+    }
   };
 
   const bindTerminalEvent = (name, callback) => {
@@ -2501,7 +2503,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
   bindTerminalEvent('onScroll', () => schedule({reason: 'scroll', viewportChanged: true}));
   bindTerminalEvent('onResize', () => schedule({reason: 'resize', viewportChanged: true}));
-  bindTerminalEvent('onRender', () => schedule({reason: 'render'}));
+  bindTerminalEvent('onRender', () => schedule({reason: 'render', contentChanged: true}));
   container.addEventListener?.('mousemove', updateHover);
   container.addEventListener?.('mouseleave', clearHover);
   disposables.push({

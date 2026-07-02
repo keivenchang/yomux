@@ -2605,6 +2605,11 @@ async function runEditorPreviewSuite() {
         latency_total_ms: 2.5,
         latency_count: 1,
         bandwidth_bytes: 40,
+        clients: {
+          'client-alpha': {api_count: 2, sse_count: 1, latency_total_ms: 20, latency_count: 1, bandwidth_bytes: 100},
+          'client-beta': {api_count: 3, sse_count: 1, latency_total_ms: 30, latency_count: 1, bandwidth_bytes: 200},
+          'client-gamma': {api_count: 4, sse_count: 1, latency_total_ms: 40, latency_count: 1, bandwidth_bytes: 300},
+        },
       }],
     });
     summary = api.debugGraphBucketSummaryForTest(now);
@@ -2617,6 +2622,11 @@ async function runEditorPreviewSuite() {
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range slider stops');
     assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart headers carry per-second units');
+    assert.ok(html.includes('API (this client)') && html.includes('Client latency (this client)'), 'solid client series identify the current browser in the legend');
+    assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-line="solid"/, 'the current browser uses a solid API line');
+    assert.match(html, /data-js-debug-series="client:client-alpha:api"[^>]*data-js-debug-client-line="dot"/, 'the first other browser uses a dotted API line');
+    assert.match(html, /data-js-debug-series="client:client-beta:latency"[^>]*data-js-debug-client-line="dash"/, 'the second other browser uses a dashed latency line');
+    assert.match(html, /data-js-debug-series="client:client-gamma:bandwidth"[^>]*data-js-debug-client-line="dash-dot"/, 'the third other browser uses a dash-dot bandwidth line');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>[0-9.]+(?:B|kB|MB)</.test(html), 'bandwidth chart Y axis uses compact byte labels');
@@ -2828,7 +2838,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/data-js-debug-axis-mid="bandwidth"[^>]*>100kB</.test(html), 'bandwidth midpoint stays readable after rounding');
   });
 
-  await testAsync('YO!stats graph renders 10-sample moving averages for timing series', async () => {
+  await testAsync('YO!stats graph renders one identity line per client metric', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     const startSeconds = Math.floor((now - 120000) / 10000) * 10;
@@ -2853,19 +2863,15 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphScaleForTest(10);
     const html = api.debugPanelHtmlForTest();
 
-    for (const series of ['api', 'sse', 'latency', 'bandwidth']) {
-      assert.ok(html.includes(`data-js-debug-moving-average="${series}"`), `YO!stats renders a moving-average overlay for ${series}`);
+    for (const series of ['api', 'sse', 'latency', 'bandwidth', 'cpu', 'systemCpu']) {
+      assert.equal(html.includes(`data-js-debug-moving-average="${series}"`), false, `YO!stats renders one ${series} identity line without a same-color moving-average duplicate`);
     }
-    assert.equal(html.includes('data-js-debug-moving-average="cpu"'), false, 'YO!stats does not add an unrequested CPU moving average');
-    assert.equal(html.includes('data-js-debug-moving-average="systemCpu"'), false, 'YO!stats does not add an unrequested system CPU moving average');
-    assert.ok(html.includes('data-js-debug-moving-average-samples="10"'), 'YO!stats labels moving averages with their sample window');
-    assert.ok(html.includes('API 10-sample moving average'), 'YO!stats titles moving-average overlays');
 
     const movingAverageValues = api.debugGraphMovingAverageValuesForTest(Array.from({length: 12}, (_, i) => i + 1), 10);
     assert.equal(movingAverageValues.at(-1), 7.5, 'moving average uses the trailing 10 samples for the final value');
 
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
-    assert.ok(/\.js-debug-line--moving-average\s*\{[\s\S]*stroke-dasharray:\s*0\.75 4\.25/.test(debugPaneCss), 'YO!stats moving-average overlays are rendered as small dotted dashes');
+    assert.ok(/\.js-debug-line--client\s*\{[\s\S]*stroke-dasharray:\s*var\(--js-debug-client-line-dash, none\)/.test(debugPaneCss), 'client identity overrides the smoothing default through one shared line-pattern token');
   });
 
   test('YO!stats graph renders server-shared agent activity and token area charts', () => {
@@ -5161,6 +5167,7 @@ async function runEditorPreviewSuite() {
     assert.ok(linkProviderSource.includes('function installTerminalFileReferenceUnderlines'), 'existing terminal file refs have a persistent underline overlay owner');
     assert.ok(/function terminalFileReferenceViewportSignature\(term\)/.test(linkProviderSource), 'terminal file underline scheduling keys cheap viewport state');
     assert.ok(/const scheduleCachedRender = \(\) => \{[\s\S]*if \(renderFrame\) return;[\s\S]*requestAnimationFrame/.test(linkProviderSource), 'terminal file underline cached repaint is coalesced through one frame');
+    assert.ok(/const contentChanged = scheduleOptions\.contentChanged === true \|\| \['output', 'render'\]\.includes\(scheduleOptions\.reason\);[\s\S]*if \(viewportChanged \|\| contentChanged\) scheduleCachedRender\(\);[\s\S]*if \(!timer\)/.test(linkProviderSource), 'terminal output clears stale cached underlines immediately and cannot postpone the bounded resolver with continuous renders');
     assert.equal(/const schedule = \(scheduleOptions = \{\}\) => \{[\s\S]{0,360}renderCached\(\);[\s\S]{0,200}setTimeout/.test(linkProviderSource), false, 'terminal output does not synchronously repaint cached file underlines before the 90ms resolver');
     assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
     assert.ok(/function applyTerminalContainerTheme\(container[\s\S]*dataset\.terminalTheme = resolvedTerminalThemeMode\(terminalThemeMode, mode\)[\s\S]*style\.background = theme\.background/.test(runtimeSource), 'terminal containers carry the resolved terminal theme used by xterm link underline colors');
@@ -5292,7 +5299,7 @@ async function runEditorPreviewSuite() {
     const callsAfterRefresh = resolverCalls;
     controller.schedule({reason: 'output'});
     assert.equal(resolverCalls, callsAfterRefresh, 'same-viewport terminal output does not synchronously re-resolve file references');
-    assert.equal(layer.children.length, 1, 'terminal writes keep the previous underline until the coalesced 90ms resolver catches up');
+    assert.equal(layer.children.length, 1, 'terminal writes immediately repaint a still-visible cached file reference without re-resolving it');
     term.buffer.active.viewportY = 10;
     controller.schedule({reason: 'scroll', viewportChanged: true});
     assert.equal(layer.children.length, 0, 'underlines clear when the resolved file reference scrolls out of the visible viewport');
@@ -5301,8 +5308,8 @@ async function runEditorPreviewSuite() {
     assert.equal(layer.children.length, 1, 'scrolling a cached resolved file reference back into view redraws from cache on the coalesced frame');
     lines[0] = terminalLine('No file references here');
     controller.schedule({reason: 'output'});
-    assert.equal(layer.children.length, 1, 'same-viewport terminal output avoids a synchronous stale-underline scan before async file re-resolution completes');
-    assert.equal(await controller.refresh(), 0, 'the trailing resolver clears stale underline segments after terminal output settles');
+    assert.equal(layer.children.length, 0, 'same-viewport terminal output clears stale underline segments on the coalesced cached repaint');
+    assert.equal(await controller.refresh(), 0, 'the trailing resolver confirms the removed reference stays absent');
     controller.dispose();
     assert.equal(container.listeners.get('mousemove').length, 0, 'terminal file underline hover listener is removed on dispose');
     assert.equal(container.listeners.get('mouseleave').length, 0, 'terminal file underline leave listener is removed on dispose');

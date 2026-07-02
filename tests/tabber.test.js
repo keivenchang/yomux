@@ -134,14 +134,28 @@ async function runTabberSuite() {
     api.setDocumentActiveElementForTest(terminal);
     api.setDocumentQuerySelectorForTest(selector => selector === '.file-explorer-panel' ? panel : null);
     const arrowDown = treeKeyEvent('ArrowDown', terminal);
-    assert.equal(api.handleFileExplorerArrowNavForTest(arrowDown), true, 'an automatic Tabber selection claims ArrowDown without a preliminary Tabber click');
-    assert.equal(arrowDown.defaultPrevented, true, 'Tabber ArrowDown is consumed');
-    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2'], 'ArrowDown moves the Tabber selected row');
+    assert.equal(api.handleFileExplorerArrowNavForTest(arrowDown), false, 'Tabber does not steal ArrowDown from a focused terminal');
+    assert.notEqual(arrowDown.defaultPrevented, true, 'terminal ArrowDown remains available to xterm');
+    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_1/w_1'], 'terminal ArrowDown does not move the Tabber selection');
+
+    const terminalEnter = treeKeyEvent('Enter', terminal);
+    assert.equal(api.handleFileExplorerArrowNavForTest(terminalEnter), false, 'Tabber does not steal Enter from a focused terminal');
+    assert.notEqual(terminalEnter.defaultPrevented, true, 'terminal Enter remains available to xterm');
+    assert.equal(api.currentSessionActionTarget(), '1', 'terminal Enter does not activate the selected Tabber row');
+
+    api.setDocumentActiveElementForTest(panel);
+    const panelArrowDown = treeKeyEvent('ArrowDown', panel);
+    assert.equal(api.handleFileExplorerArrowNavForTest(panelArrowDown), true, 'Tabber ArrowDown works after Tabber owns focus');
+    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2'], 'focused Tabber ArrowDown moves the selected row');
     assert.equal(sessionTwo.classList.contains('selected'), true, 'moved Tabber row gets shared selected class');
 
     const enter = treeKeyEvent('Enter', panel);
     assert.equal(api.handleFileExplorerArrowNavForTest(enter), true, 'Tabber Enter activates the selected row');
     assert.equal(api.currentSessionActionTarget(), '2', 'Tabber Enter opens the selected tmux session');
+
+    api.setFocusedPanelItem(api.fileExplorerItemId);
+    api.syncTabberTreeActiveSelectionForTest(panel);
+    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), [], 'Tabber clears a stale selection when the finder pane is focused');
   });
 
   test('Tabber highlights every visible tab, not only the focused one', () => {
@@ -1334,6 +1348,7 @@ async function runTabberSuite() {
     assert.ok(source.includes("'tabber-session-tab', 'session-popover-host'"), 'TR2: Tabber session tabs opt into the shared popover host class');
     assert.ok(/function tmuxPaneTabTokenHtml\(session, options = \{\}\)[\s\S]*tmux-pane-tab-token-action[\s\S]*stripContentTitles === true/.test(source), 'TR1: the shared compact tmux pane-tab token helper owns action/static classes and optional title stripping');
     assert.ok(tabberSessionChromeSource.includes('tmuxPaneTabTokenHtml(session,') && /stripContentTitles:\s*true/.test(tabberSessionChromeSource), 'TR1: Tabber session rows use the shared compact tmux pane-tab token helper');
+    assert.ok(/detail:\s*data\.description \|\| ''/.test(tabberSessionChromeSource) && /sessionWorkDescription\(session, info, 0\)/.test(source), 'Tabber passes the unbounded work description into shared tab chrome so only real layout overflow truncates it');
     assert.equal(tabberSessionChromeSource.includes('tmuxPaneTabHtml('), false, 'TR1: Tabber does not rebuild shared tmux pane-tab inner HTML');
     assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*width:\s*min\(420px/.test(css), false, 'TR2: Tabber does not keep a divergent one-off popover width');
     assert.equal(source.includes("tabber: {type: 'loading'"), false, 'Tabber no longer renders a client-side touched-path loading row');
@@ -1436,8 +1451,9 @@ async function runTabberSuite() {
     api.setLayoutSlotsForTest(tabberActiveSlots);
     api.setFocusedPanelItem('1');
 
+    const longSessionWork = 'feat(conformance): preserve every parser-specific compatibility detail when the Tabber row has room';
     const session1ShellTranscript = {
-      project: {git: {branch: 'devbranch', root: '/home/u/proj'}},
+      project: {git: {branch: 'devbranch', root: '/home/u/proj', other_branches: {branches: [{name: 'devbranch', current: true, subject: longSessionWork}]}}},
       panes: [
         {window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', process_label_pid: 12345, command: 'claude', current_path: '/home/u/proj'},
         {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', pid: 54321, command: 'bash', current_path: '/home/u'},
@@ -1459,6 +1475,7 @@ async function runTabberSuite() {
     assert.equal(s1.tabber.active, true, 'A5: the focused tmux session is marked active at the top level');
     assert.equal(entries.find(e => e.tabber && e.tabber.session === '2')?.tabber.active, true, 'A5: a second session shown in another pane is active too');
     assert.ok(String(s1.tabber.branchText || '').length > 0, 'B2: the repo branch is retained as Tabber metadata');
+    assert.equal(s1.tabber.description, longSessionWork, 'Tabber keeps the full work description instead of baking a character-count ellipsis into the row');
     const windows = entriesByDir.get('/' + s1.name);
     assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 has its two tmux sub-windows');
     const claudeWin = windows.find(w => /0:claude/.test(w.tabber.label));
@@ -1478,6 +1495,7 @@ async function runTabberSuite() {
     const defaultSessionRow = defaultCollapsedRows.find(row => row.type === 'session' && row.path === `/${s1.name}`);
     const defaultWindowRow = defaultCollapsedRows.find(row => row.type === 'window' && row.path === `/${s1.name}/${claudeWin.name}`);
     assert.equal(defaultSessionRow?.ariaExpanded, 'true', 'Tabber defaults to expanding each session Tab');
+    assert.ok(defaultSessionRow?.nameHtml.includes(`<span class="session-button-dir tab-inline-detail">${longSessionWork}</span>`), 'shared Tabber chrome renders the full description and leaves overflow decisions to CSS');
     assert.equal(defaultWindowRow?.ariaExpanded, 'false', 'Tabber defaults to collapsing the directories inside sub-window buttons');
     assert.equal(defaultCollapsedRows.some(row => row.type === 'repo' && row.path.startsWith(`/${s1.name}/${claudeWin.name}/`)), false, 'Tabber hides sub-window directories until the user expands that window');
     assert.equal(api.setTabberPathExpandedForTest(defaultWindowRow.path, true), true, 'an explicit sub-window expansion changes the shared Tabber expansion model');

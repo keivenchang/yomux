@@ -639,22 +639,27 @@ function defaultBranchBadgeHtml(session, info) {
   return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
 }
 
-function sessionWorkDescription(session, info, limit = 96) {
+function sessionWorkDescriptionSource(session, info) {
   const project = info?.project || {};
   const git = project.git;
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     const prefix = pullRequestLinkLabel(pr);
-    return shortText(title ? `${prefix}: ${title}` : prefix, limit);
+    return title ? `${prefix}: ${title}` : prefix;
   }
   const linear = project.linear || [];
   const issue = linear.find(item => item.title);
-  if (issue) return shortText(`${issue.identifier}: ${issue.title}`, limit);
+  if (issue) return `${issue.identifier}: ${issue.title}`;
   const subject = currentBranchSubject(git);
-  if (subject) return shortText(subject, limit);
-  if (git?.branch) return shortText(shortBranch(git.branch), limit);
-  return shortText(projectDirName(session, info), limit);
+  if (subject) return subject;
+  if (git?.branch) return shortBranch(git.branch);
+  return projectDirName(session, info);
+}
+
+function sessionWorkDescription(session, info, limit = 96) {
+  const description = sessionWorkDescriptionSource(session, info);
+  return Number.isFinite(limit) && limit > 0 ? shortText(description, limit) : description;
 }
 
 function sessionTabDescription(session, info) {

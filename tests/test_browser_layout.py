@@ -340,6 +340,10 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <path class="js-debug-line js-debug-line--sse" d="M0 3L20 3"></path>
           <path class="js-debug-line js-debug-line--cpu" d="M0 5L20 5"></path>
           <path class="js-debug-line js-debug-line--systemCpu" d="M0 7L20 7"></path>
+          <path data-client-line="solid" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-solid" d="M0 8L20 8"></path>
+          <path data-client-line="dot" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" d="M0 9L20 9"></path>
+          <path data-client-line="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" d="M0 10L20 10"></path>
+          <path data-client-line="dash-dot" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash-dot" d="M0 11L20 11"></path>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="cyan" style="--js-debug-series-color: var(--js-debug-agent-token-cyan)" x="0" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="orange" style="--js-debug-series-color: var(--js-debug-agent-token-orange)" x="2" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="magenta" style="--js-debug-series-color: var(--js-debug-agent-token-magenta)" x="4" y="9" width="1" height="1"></rect>
@@ -354,6 +358,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         <span class="js-debug-legend-swatch js-debug-legend-swatch--cpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--agentTokenTotal" style="--js-debug-series-color: var(--js-debug-agent-token-total)"></span>
+        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="dash-dot" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash-dot" x1="0" y1="2" x2="18" y2="2"></line></svg>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
@@ -399,6 +404,8 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               swatchWidth: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).width,
               swatchBackground: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).backgroundImage,
             },
+            clientLines: Object.fromEntries(['solid', 'dot', 'dash', 'dash-dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
+            clientLegend: getComputedStyle(document.querySelector('[data-client-legend="dash-dot"]')).strokeDasharray,
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
           return values;
@@ -431,6 +438,13 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["total"]["strokeWidth"] == "2.4px", (theme, item)
         assert item["total"]["swatchWidth"] == "16px", (theme, item)
         assert "repeating-linear-gradient" in item["total"]["swatchBackground"], (theme, item)
+        assert item["clientLines"] == {
+            "solid": "none",
+            "dot": "1px, 3px",
+            "dash": "6px, 4px",
+            "dash-dot": "6px, 3px, 1px, 3px",
+        }, (theme, item)
+        assert item["clientLegend"] == item["clientLines"]["dash-dot"], (theme, item)
 
 
 def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
@@ -3604,7 +3618,7 @@ def test_yoinfo_leaf_fields_put_pr_before_linear(browser, tmp_path):
 def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):
     for label, theme_class, pane_width, window_width in (
         ("dark-narrow", "theme-dark", 300, 700),
-        ("light-wide", "theme-light", 520, 900),
+        ("light-wide", "theme-light", 1200, 1400),
     ):
         browser.set_window_size(window_width, 720)
         page = tmp_path / f"tabber-session-row-{label}.html"
@@ -3797,7 +3811,10 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["active"]["tab"]["right"] <= metrics["active"]["date"]["left"] + 1, (label, metrics)
         assert metrics["active"]["name"]["left"] >= metrics["active"]["tab"]["left"] - 1, (label, metrics)
         assert metrics["active"]["description"]["right"] <= metrics["active"]["tab"]["right"] + 1, (label, metrics)
-        assert metrics["active"]["descriptionScrollWidth"] >= metrics["active"]["descriptionClientWidth"], (label, metrics)
+        if label == "light-wide":
+            assert metrics["active"]["descriptionScrollWidth"] <= metrics["active"]["descriptionClientWidth"] + 1, (label, metrics)
+        else:
+            assert metrics["active"]["descriptionScrollWidth"] > metrics["active"]["descriptionClientWidth"], (label, metrics)
         assert metrics["activeWindow"]["top"] >= metrics["active"]["row"]["bottom"] - 1, (label, metrics)
         screenshot = browser_screenshot_rgb(browser)
         assert screenshot.size[0] >= window_width - 20, (label, screenshot.size)
@@ -4198,6 +4215,47 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
     assert metrics["lightLink"]["textDecorationColor"] == metrics["lightLink"]["color"], metrics
     assert metrics["layerPointerEvents"] == "none", metrics
     assert int(metrics["layerZIndex"]) > 0, metrics
+
+
+def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const container = document.createElement('div');
+          container.className = 'terminal';
+          container.style.cssText = 'position:relative;width:1000px;height:60px';
+          const rows = document.createElement('div');
+          rows.className = 'xterm-rows';
+          rows.style.cssText = 'width:1000px;height:60px';
+          container.appendChild(rows);
+          document.body.appendChild(container);
+          let text = 'Open static_src/js/yolomux/00_bootstrap_state.js:283';
+          const term = {
+            cols: 100,
+            rows: 3,
+            buffer: {active: {viewportY: 0, getLine: index => index === 0 ? {isWrapped: false, translateToString: () => text} : null}},
+            _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+          };
+          const controller = installTerminalFileReferenceUnderlines('1', term, container, {
+            targetResolver: async (_session, reference) => ({path: `/repo/${reference.path}`}),
+          });
+          const initial = await controller.refresh();
+          const before = container.querySelectorAll('.terminal-file-link-underline').length;
+          text = 'No file references here';
+          controller.schedule({reason: 'output'});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const after = container.querySelectorAll('.terminal-file-link-underline').length;
+          controller.dispose();
+          container.remove();
+          return {initial, before, after};
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["initial"] == 1 and metrics["before"] == 1, metrics
+    assert metrics["after"] == 0, metrics
 
 
 def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):

@@ -253,8 +253,14 @@ def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared
     assert sum(record["cpu_count"] for record in history_b["records"]) == 1
     assert sum(record["agent_activity_samples"] for record in history_a["records"]) == 1
     assert sum(record["agent_activity_samples"] for record in history_b["records"]) == 1
+    clients = history_a["records"][0]["clients"]
+    assert clients["client-a"]["api_count"] == 2
+    assert clients["client-b"]["api_count"] == 7
+    assert clients["client-b"]["bandwidth_bytes"] == 3000
     assert history_a_after_b["sequence"] == client_b["history"]["sequence"]
-    assert history_a_after_b["records"] == []
+    assert len(history_a_after_b["records"]) == 1
+    assert history_a_after_b["records"][0]["api_count"] == 2
+    assert history_a_after_b["records"][0]["clients"]["client-b"]["api_count"] == 7
 
 
 def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypatch):
@@ -288,6 +294,7 @@ def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypat
 
 def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monkeypatch, tmp_path):
     monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", tmp_path / "stats-client-history.json")
     monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
     owner = app_module.TmuxWebtermApp(["1"])
     follower = app_module.TmuxWebtermApp(["1"])
@@ -338,8 +345,49 @@ def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monk
     assert isinstance(data["stats_history"]["raw_buckets"][0], list)
 
 
+def test_shared_stats_client_history_survives_other_server_writes_and_restart(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", tmp_path / "stats-client-history.json")
+    monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+    owner = app_module.TmuxWebtermApp([])
+    follower = app_module.TmuxWebtermApp([])
+    restarted = app_module.TmuxWebtermApp([])
+    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
+    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
+    restarted.background_owner = StatsRoleOwner(owner=False, port=8001)
+    sample_time = time.time()
+    sample = {"time": sample_time, "pid": 8003, "cpu_percent": 12.0, "system_cpu_percent": 24.0}
+    monkeypatch.setattr(owner, "current_stats_sample", lambda: (dict(sample), True))
+    monkeypatch.setattr(owner, "stats_agent_activity_record", lambda _sample_time, include_token_rates=True: None)
+    try:
+        owner.record_stats_global_sample(trigger="sampler")
+        follower.record_stats_history_payload({
+            "client_id": "client-b",
+            "records": [{"start": sample_time, "api_count": 7, "latency_total_ms": 90, "latency_count": 3, "bandwidth_bytes": 3000}],
+        })
+        owner.record_stats_global_sample(trigger="sampler")
+        payload = restarted.stats_sample_payload(client_id="client-a")
+    finally:
+        owner.control_server.stop()
+        follower.control_server.stop()
+        restarted.control_server.stop()
+
+    records = payload["history"]["records"]
+    clients = next(record["clients"] for record in records if "client-b" in record["clients"])
+    assert clients["client-b"]["api_count"] == 7
+    assert clients["client-b"]["latency_total_ms"] == 90
+    assert clients["client-b"]["bandwidth_bytes"] == 3000
+    owner_data = json.loads((tmp_path / "tmux-AI-status.json").read_text(encoding="utf-8"))
+    assert owner_data["stats_history"]["writer"]["port"] == 8003
+    client_data = json.loads((tmp_path / "stats-client-history.json").read_text(encoding="utf-8"))
+    persisted_bucket = client_data["raw_buckets"][0]
+    assert len(persisted_bucket) == len(app_module.STATS_CLIENT_HISTORY_BUCKET_FIELDS)
+    assert app_module.stats_history_client_id("client-b") in persisted_bucket[-1]
+
+
 def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch, tmp_path):
     monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", tmp_path / "stats-client-history.json")
     monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
     writer = app_module.TmuxWebtermApp([])
     reader = app_module.TmuxWebtermApp([])
@@ -383,6 +431,7 @@ def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch
 
 def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch, tmp_path):
     monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", tmp_path / "stats-client-history.json")
     monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
     owner = app_module.TmuxWebtermApp(["1"])
     follower = app_module.TmuxWebtermApp(["1"])

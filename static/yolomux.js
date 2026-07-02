@@ -4202,12 +4202,14 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     if (disposed) return;
     const viewportSignature = terminalFileReferenceViewportSignature(term);
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
-    if (viewportChanged) scheduleCachedRender();
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = 0;
-      refresh();
-    }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+    const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
+    if (viewportChanged || contentChanged) scheduleCachedRender();
+    if (!timer) {
+      timer = setTimeout(() => {
+        timer = 0;
+        refresh();
+      }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+    }
   };
 
   const bindTerminalEvent = (name, callback) => {
@@ -4216,7 +4218,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
   bindTerminalEvent('onScroll', () => schedule({reason: 'scroll', viewportChanged: true}));
   bindTerminalEvent('onResize', () => schedule({reason: 'resize', viewportChanged: true}));
-  bindTerminalEvent('onRender', () => schedule({reason: 'render'}));
+  bindTerminalEvent('onRender', () => schedule({reason: 'render', contentChanged: true}));
   container.addEventListener?.('mousemove', updateHover);
   container.addEventListener?.('mouseleave', clearHover);
   disposables.push({
@@ -14667,10 +14669,7 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     const rows = controller.rows(panel);
     if (!rows.length) return false;
     const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
-    const globalTargetAllowed = typeof globalShortcutTargetAllowsAppAction !== 'function' || globalShortcutTargetAllowsAppAction(event?.target);
-    const explicitlyOwned = typeof options.allowKeyboardFromGlobalTarget === 'function'
-      && options.allowKeyboardFromGlobalTarget(event, panel) === true;
-    if (!globalTargetAllowed && !eventTargetsOwnedPanel && !explicitlyOwned) return false;
+    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
     const lead = controller.leadRow(panel);
     let leadIndex = lead ? rows.indexOf(lead) : -1;
     if (intent === 'select-all' && options.allowSelectAll === true) {
@@ -15344,7 +15343,7 @@ function buildTabberTree() {
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const fallbackSessionRecency = tabberRecency(session);
-    const sessionWork = sessionWorkDescription(session, info, 200);
+    const sessionWork = sessionWorkDescription(session, info, 0);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
     const nowSeconds = Date.now() / 1000;
@@ -15532,6 +15531,7 @@ function tabberSessionChromeHtml(data) {
     info,
     state,
     auto,
+    detail: data.description || '',
     attrs: ['data-tabber-session-chrome="shared"', 'draggable="true"'],
     stripContentTitles: true,
     afterHtml: sessionPopoverHtml(session, info, agentKind, auto, state),
@@ -15878,10 +15878,6 @@ function handleTabberRowActivate(row, event) {
   }
 }
 
-function tabberTreeKeyboardNavigationReady() {
-  return fileExplorerMode === 'tabber' && tabberTreeSelectedPaths.size > 0;
-}
-
 const tabberTreeInteractionController = createSharedTreeInteractionController({
   name: 'tabber',
   rowSelector: '.file-tree-row[data-tabber-type]',
@@ -15891,7 +15887,6 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
   getLeadId: () => tabberTreeSelectionLead,
   setLeadId: id => { tabberTreeSelectionLead = id; },
   currentRowId: activeTabberRowPath,
-  allowKeyboardFromGlobalTarget: () => tabberTreeKeyboardNavigationReady(),
   syncCurrentSelection(currentId) {
     tabberTreeSelectedPaths.clear();
     if (currentId) tabberTreeSelectedPaths.add(currentId);
@@ -15909,6 +15904,12 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
 });
 
 function syncTabberTreeActiveSelection(panel = document, options = {}) {
+  if (!activeTabberRowPath()) {
+    tabberTreeSelectedPaths.clear();
+    tabberTreeSelectionLead = '';
+    tabberTreeInteractionController.applyState(panel, options);
+    return false;
+  }
   return tabberTreeInteractionController.syncCurrent(panel, options);
 }
 
@@ -22935,22 +22936,27 @@ function defaultBranchBadgeHtml(session, info) {
   return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
 }
 
-function sessionWorkDescription(session, info, limit = 96) {
+function sessionWorkDescriptionSource(session, info) {
   const project = info?.project || {};
   const git = project.git;
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     const prefix = pullRequestLinkLabel(pr);
-    return shortText(title ? `${prefix}: ${title}` : prefix, limit);
+    return title ? `${prefix}: ${title}` : prefix;
   }
   const linear = project.linear || [];
   const issue = linear.find(item => item.title);
-  if (issue) return shortText(`${issue.identifier}: ${issue.title}`, limit);
+  if (issue) return `${issue.identifier}: ${issue.title}`;
   const subject = currentBranchSubject(git);
-  if (subject) return shortText(subject, limit);
-  if (git?.branch) return shortText(shortBranch(git.branch), limit);
-  return shortText(projectDirName(session, info), limit);
+  if (subject) return subject;
+  if (git?.branch) return shortBranch(git.branch);
+  return projectDirName(session, info);
+}
+
+function sessionWorkDescription(session, info, limit = 96) {
+  const description = sessionWorkDescriptionSource(session, info);
+  return Number.isFinite(limit) && limit > 0 ? shortText(description, limit) : description;
 }
 
 function sessionTabDescription(session, info) {
@@ -34287,7 +34293,14 @@ const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
-const jsDebugGraphMovingAverageSeries = new Set(['api', 'sse', 'latency', 'bandwidth']);
+const jsDebugGraphClientLinePatterns = Object.freeze(['dot', 'dash', 'dash-dot']);
+const jsDebugGraphClientMetrics = Object.freeze([
+  {key: 'api', label: 'API', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
+  {key: 'sse', label: 'SSE', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
+  {key: 'latency', label: 'Client latency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
+  {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
+]);
+const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
 const jsDebugGraphAgentTokenTotalSeriesKey = 'agentTokenTotal';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
@@ -34321,10 +34334,7 @@ const jsDebugGraphEventResponseBytes = new Map();
 const jsDebugGraphEventRefTimes = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphSeries = Object.freeze([
-  {key: 'api', label: 'API', unit: 'countPerSecond'},
-  {key: 'sse', label: 'SSE', unit: 'countPerSecond'},
-  {key: 'latency', label: 'Client latency', unit: 'ms'},
-  {key: 'bandwidth', label: 'Bandwidth', unit: 'bytesPerSecond'},
+  ...jsDebugGraphClientMetrics.map(metric => ({...metric, label: `${metric.label} (this client)`, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
   ...jsDebugAgentStatusSeriesKeys.map(key => ({key, label: jsDebugAgentStatusSeriesLabels[key], unit: 'count'})),
   {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
   {key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent'},
@@ -34626,6 +34636,18 @@ function debugGraphNewBucket(startMs, durationMs) {
     tokensPerAgentTotal: 0,
     agentTokenSamples: 0,
     agentTokenRates: new Map(),
+    clients: new Map(),
+  };
+}
+
+function debugGraphNewClientBucket() {
+  return {
+    apiCount: 0,
+    sseCount: 0,
+    latencyTotalMs: 0,
+    latencyCount: 0,
+    bandwidthBytes: 0,
+    disconnectedMs: 0,
   };
 }
 
@@ -34641,6 +34663,7 @@ function debugGraphBucketHasData(bucket) {
     || Number(bucket?.agentActivitySamples || 0)
     || Number(bucket?.agentTokenSamples || 0)
     || Number(bucket?.agentTokenRates?.size || 0)
+    || Number(bucket?.clients?.size || 0)
   );
 }
 
@@ -34876,6 +34899,19 @@ function debugGraphMergeBucket(target, source) {
   target.tokensPerAgentTotal += source.tokensPerAgentTotal || 0;
   target.agentTokenSamples += source.agentTokenSamples || 0;
   debugGraphMergeAgentTokenRates(target, source);
+  if (source.clients instanceof Map) {
+    if (!(target.clients instanceof Map)) target.clients = new Map();
+    for (const [clientId, sourceClient] of source.clients.entries()) {
+      const targetClient = target.clients.get(clientId) || debugGraphNewClientBucket();
+      targetClient.apiCount += Number(sourceClient.apiCount || 0);
+      targetClient.sseCount += Number(sourceClient.sseCount || 0);
+      targetClient.latencyTotalMs += Number(sourceClient.latencyTotalMs || 0);
+      targetClient.latencyCount += Number(sourceClient.latencyCount || 0);
+      targetClient.bandwidthBytes += Number(sourceClient.bandwidthBytes || 0);
+      targetClient.disconnectedMs += Number(sourceClient.disconnectedMs || 0);
+      target.clients.set(clientId, targetClient);
+    }
+  }
 }
 
 function compactJsDebugGraphBuckets(nowMs = Date.now()) {
@@ -35077,6 +35113,7 @@ function debugGraphApplyServerRecord(record) {
   bucket.latencyCount = Math.max(bucket.latencyCount, Number(record.latency_count || 0));
   bucket.bandwidthBytes = Math.max(bucket.bandwidthBytes, Number(record.bandwidth_bytes || 0));
   bucket.disconnectedMs = Math.max(bucket.disconnectedMs, Number(record.disconnected_ms || 0));
+  debugGraphApplyServerClients(bucket, record.clients);
   bucket.cpuTotalPercent = Math.max(bucket.cpuTotalPercent, Number(record.cpu_total_percent || 0));
   bucket.cpuCount = Math.max(bucket.cpuCount, Number(record.cpu_count || 0));
   bucket.systemCpuTotalPercent = Math.max(bucket.systemCpuTotalPercent, Number(record.system_cpu_total_percent || 0));
@@ -35103,6 +35140,23 @@ function debugGraphApplyServerRecord(record) {
   bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
   bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
   debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
+}
+
+function debugGraphApplyServerClients(bucket, clients) {
+  if (!clients || typeof clients !== 'object' || Array.isArray(clients)) return;
+  if (!(bucket.clients instanceof Map)) bucket.clients = new Map();
+  for (const [clientId, record] of Object.entries(clients)) {
+    const cleanClientId = String(clientId || '').trim();
+    if (!cleanClientId || !record || typeof record !== 'object') continue;
+    const client = bucket.clients.get(cleanClientId) || debugGraphNewClientBucket();
+    client.apiCount = Math.max(client.apiCount, Number(record.api_count || 0));
+    client.sseCount = Math.max(client.sseCount, Number(record.sse_count || 0));
+    client.latencyTotalMs = Math.max(client.latencyTotalMs, Number(record.latency_total_ms || 0));
+    client.latencyCount = Math.max(client.latencyCount, Number(record.latency_count || 0));
+    client.bandwidthBytes = Math.max(client.bandwidthBytes, Number(record.bandwidth_bytes || 0));
+    client.disconnectedMs = Math.max(client.disconnectedMs, Number(record.disconnected_ms || 0));
+    bucket.clients.set(cleanClientId, client);
+  }
 }
 
 function debugGraphApplyServerAgentTokenRates(bucket, rates) {
@@ -35299,6 +35353,20 @@ function debugGraphBucketValue(bucket, key) {
   return 0;
 }
 
+function debugGraphClientMetricBucket(bucket, clientId = '') {
+  if (!clientId) return bucket;
+  return bucket?.clients instanceof Map ? bucket.clients.get(clientId) : null;
+}
+
+function debugGraphSeriesBucketValue(bucket, series) {
+  if (series?.clientMetric === true) {
+    const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
+    const clientBucket = debugGraphClientMetricBucket(bucket, series.clientId);
+    return metric && clientBucket ? metric.value(clientBucket) : 0;
+  }
+  return debugGraphBucketValue(bucket, series?.key);
+}
+
 function debugGraphBucketHasSeriesData(bucket, key) {
   if (!bucket) return false;
   if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
@@ -35313,6 +35381,15 @@ function debugGraphBucketHasSeriesData(bucket, key) {
   if (key === 'cpu') return Number(bucket.cpuCount || 0) > 0;
   if (key === 'systemCpu') return Number(bucket.systemCpuCount || 0) > 0;
   return debugGraphBucketValue(bucket, key) > 0;
+}
+
+function debugGraphSeriesBucketHasData(bucket, series) {
+  if (series?.clientMetric === true) {
+    const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
+    const clientBucket = debugGraphClientMetricBucket(bucket, series.clientId);
+    return Boolean(metric && clientBucket && metric.hasData(clientBucket));
+  }
+  return debugGraphBucketHasSeriesData(bucket, series?.key);
 }
 
 function debugGraphMovingAverageValues(values, sampleCount = jsDebugGraphMovingAverageSamples) {
@@ -35575,19 +35652,49 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
   }];
 }
 
+function debugGraphClientLabel(clientId) {
+  const compact = String(clientId || '').replace(/^client-/, '');
+  return compact.length > 8 ? compact.slice(-8) : compact;
+}
+
+function debugGraphClientMetricSeriesDefs(buckets) {
+  const thisClientId = jsDebugStatsClientIdForRequest();
+  const otherClientIds = new Set();
+  for (const bucket of buckets) {
+    if (!(bucket.clients instanceof Map)) continue;
+    for (const clientId of bucket.clients.keys()) {
+      if (clientId && clientId !== thisClientId) otherClientIds.add(clientId);
+    }
+  }
+  return [...otherClientIds].sort().flatMap((clientId, index) => {
+    const clientLinePattern = jsDebugGraphClientLinePatterns[index % jsDebugGraphClientLinePatterns.length];
+    const clientLabel = debugGraphClientLabel(clientId);
+    return jsDebugGraphClientMetrics.map(metric => ({
+      ...metric,
+      key: `client:${clientId}:${metric.key}`,
+      label: `${metric.label} (${clientLabel})`,
+      cssKey: metric.key,
+      clientMetric: true,
+      metricKey: metric.key,
+      clientId,
+      clientLinePattern,
+    }));
+  });
+}
+
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphAgentTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
-    const values = buckets.map(bucket => debugGraphBucketValue(bucket, def.key));
-    const hasDataValues = buckets.map(bucket => debugGraphBucketHasSeriesData(bucket, def.key));
+    const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
+    const hasDataValues = buckets.map(bucket => debugGraphSeriesBucketHasData(bucket, def));
     const sampleValues = values.filter((_value, index) => hasDataValues[index]);
     const sampleTimes = times.filter((_time, index) => hasDataValues[index]);
     const samples = sampleValues.length;
     const max = Math.max(0, ...sampleValues);
     const current = sampleValues.length ? sampleValues[sampleValues.length - 1] : 0;
-    const movingAverageSamples = Number(def.movingAverageSamples || (jsDebugGraphMovingAverageSeries.has(def.key) ? jsDebugGraphMovingAverageSamples : 0));
+    const movingAverageSamples = Number(def.movingAverageSamples || 0);
     const movingAverageValues = movingAverageSamples > 0 ? debugGraphMovingAverageValues(sampleValues, movingAverageSamples) : [];
     return {...def, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
   });
@@ -35740,18 +35847,18 @@ function debugGraphRangesOverlap(aStart, aEnd, bStart, bEnd) {
   return Number(aStart) < Number(bEnd) && Number(bStart) < Number(aEnd);
 }
 
-function debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, seriesKeys) {
+function debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, seriesItems) {
   return bucketRanges.some(item => debugGraphRangesOverlap(startMs, endMs, item.startMs, item.endMs)
-    && seriesKeys.some(key => debugGraphBucketHasSeriesData(item.bucket, key)));
+    && seriesItems.some(series => debugGraphSeriesBucketHasData(item.bucket, series)));
 }
 
 function debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs) {
   return disconnectedRanges.some(range => debugGraphRangesOverlap(startMs, endMs, range.startMs, range.endMs));
 }
 
-function debugGraphNoDataRuns(buckets, domain, seriesKeys) {
-  const keys = Array.isArray(seriesKeys) ? seriesKeys.filter(Boolean) : [];
-  if (!keys.length) return [];
+function debugGraphNoDataRuns(buckets, domain, seriesItems) {
+  const items = Array.isArray(seriesItems) ? seriesItems.filter(Boolean) : [];
+  if (!items.length) return [];
   const domainStart = Number(domain?.startMs);
   const domainEnd = Number(domain?.endMs);
   if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
@@ -35761,7 +35868,7 @@ function debugGraphNoDataRuns(buckets, domain, seriesKeys) {
   const runs = [];
   for (let startMs = domainStart; startMs < domainEnd;) {
     const endMs = Math.min(domainEnd, startMs + stepMs);
-    const hasData = debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, keys);
+    const hasData = debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, items);
     const coveredByDisconnect = debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs);
     if (!hasData && !coveredByDisconnect) {
       const previous = runs.at(-1);
@@ -35773,8 +35880,8 @@ function debugGraphNoDataRuns(buckets, domain, seriesKeys) {
   return runs;
 }
 
-function debugGraphNoDataRectsHtml(buckets, domain, seriesKeys) {
-  return debugGraphNoDataRuns(buckets, domain, seriesKeys).map((range, index) => {
+function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
+  return debugGraphNoDataRuns(buckets, domain, seriesItems).map((range, index) => {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
@@ -35799,6 +35906,21 @@ function debugGraphSeriesStyleAttr(series) {
   return color ? ` style="--js-debug-series-color: ${esc(color)};"` : '';
 }
 
+function debugGraphSeriesClientAttrs(series) {
+  if (series?.clientMetric !== true) return '';
+  const clientId = String(series.clientId || 'this');
+  return ` data-js-debug-client-series="${esc(clientId)}" data-js-debug-client-line="${esc(series.clientLinePattern || 'solid')}"`;
+}
+
+function debugGraphSeriesLineClassName(series, extraClass = '') {
+  const classes = ['js-debug-line', `js-debug-line--${debugGraphSeriesClassKey(series)}`];
+  if (series?.clientMetric === true) {
+    classes.push('js-debug-line--client', `js-debug-line--client-${series.clientLinePattern || 'solid'}`);
+  }
+  if (extraClass) classes.push(extraClass);
+  return classes.join(' ');
+}
+
 function debugGraphSeriesTokenAgentAttrs(series) {
   if (series?.agentTokenSeries !== true || series?.agentTokenTotalSeries === true) return '';
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}"`;
@@ -35814,7 +35936,7 @@ function debugGraphPolylineHtml(series, chartMax, domain) {
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
-    return `<polyline class="js-debug-line js-debug-line--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
+    return `<polyline class="${esc(debugGraphSeriesLineClassName(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
   }).join('');
 }
 
@@ -35872,7 +35994,7 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
   if (sampleCount <= 0) return '';
   const points = debugGraphPolylinePoints(series.movingAverageValues || [], series.movingAverageTimes || [], chartMax, domain);
   if (!points) return '';
-  return `<polyline class="js-debug-line js-debug-line--${esc(debugGraphSeriesClassKey(series))} js-debug-line--moving-average" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)} ${sampleCount}-sample moving average</title></polyline>`;
+  return `<polyline class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-line--moving-average'))}" data-js-debug-moving-average="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)} data-js-debug-moving-average-samples="${esc(sampleCount)}" points="${esc(points)}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)} ${sampleCount}-sample moving average</title></polyline>`;
 }
 
 function debugGraphInteractionOverlayHtml() {
@@ -35881,8 +36003,15 @@ function debugGraphInteractionOverlayHtml() {
 
 function debugGraphLegendHtml(seriesItems) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
-    ${seriesItems.map(series => `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}><span class="js-debug-legend-swatch js-debug-legend-swatch--${esc(debugGraphSeriesClassKey(series))}"${debugGraphSeriesStyleAttr(series)}></span><span>${esc(series.label)}</span></div>`).join('')}
+    ${seriesItems.map(series => `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span>${esc(series.label)}</span></div>`).join('')}
   </div>`;
+}
+
+function debugGraphLegendSwatchHtml(series) {
+  if (series?.clientMetric === true) {
+    return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}" x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
+  }
+  return `<span class="js-debug-legend-swatch js-debug-legend-swatch--${esc(debugGraphSeriesClassKey(series))}"${debugGraphSeriesStyleAttr(series)}></span>`;
 }
 
 function debugGraphIntegerAxisValues(max) {
@@ -35962,8 +36091,8 @@ function debugGraphXAxisHtml(domain) {
 
 function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
-  const seriesByKey = new Map(seriesItems.map(series => [series.key, series]));
-  return group.series.map(key => seriesByKey.get(key)).filter(Boolean);
+  const seriesKeys = new Set(group.series);
+  return seriesItems.filter(series => seriesKeys.has(series.clientMetric === true ? series.metricKey : series.key));
 }
 
 function debugGraphLegendSeriesItems(group, groupSeries) {
@@ -36044,7 +36173,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
-          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, group.series) : ''}
+          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, groupSeries) : ''}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}
@@ -39049,8 +39178,10 @@ const differTreeInteractionController = createSharedTreeInteractionController({
 
 const originalFileExplorerArrowNavForSharedTree = handleFileExplorerArrowNav;
 handleFileExplorerArrowNav = event => {
-  const tabberKeyboardReady = tabberTreeKeyboardNavigationReady();
-  if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !tabberKeyboardReady) return false;
+  // Tabber/Finder navigation never steals terminal input. This precedes every tree-state
+  // branch because a stale selection must not consume Enter or arrows before xterm sees them.
+  if (typeof globalShortcutTargetIsTerminalSurface === 'function' && globalShortcutTargetIsTerminalSurface(event?.target)) return false;
+  if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target)) return false;
   const panel = event?.target?.closest?.('.file-explorer-panel')
     || event?.target?.closest?.('.file-explorer-changes-panel')
     || document.querySelector('.file-explorer-panel')
