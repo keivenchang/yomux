@@ -34979,6 +34979,7 @@ let jsDebugGraphScaleSeconds = jsDebugGraphDefaultScaleSeconds;
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugStatsPollTimer = null;
 let jsDebugStatsPollInFlight = false;
+let jsDebugStatsPollPending = false;
 let jsDebugStatsFirstSampleReceived = false;
 let jsDebugStatsHistoryFlushTimer = null;
 let jsDebugStatsHistoryFlushInFlight = false;
@@ -35817,7 +35818,7 @@ function recordJsDebugClientEventsConnectionState(connected) {
   scheduleJsDebugPanelRefresh();
 }
 
-function recordJsDebugStatsSample(payload = {}) {
+function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}) {
   if (!jsDebugCollectionEnabled || !payload || typeof payload !== 'object') return;
   const nextPid = Number(payload.pid);
   const nextStartedAt = Number(payload.started_at);
@@ -35849,7 +35850,7 @@ function recordJsDebugStatsSample(payload = {}) {
   }
   debugGraphApplyServerHistory(payload.history);
   if (payload.history && typeof payload.history === 'object') {
-    scheduleJsDebugPanelRefresh({force: firstSampleApplied});
+    scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
     return;
   }
   const cpuPercent = Number(payload.cpu_percent);
@@ -35862,7 +35863,7 @@ function recordJsDebugStatsSample(payload = {}) {
     systemCpuPercent: Number.isFinite(systemCpuPercent) ? systemCpuPercent : 0,
   });
   compactJsDebugGraphBuckets();
-  scheduleJsDebugPanelRefresh({force: firstSampleApplied});
+  scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
 }
 
 function clearJsDebugGraphData() {
@@ -36803,6 +36804,12 @@ function debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs
   return disconnectedRanges.some(range => debugGraphRangesOverlap(startMs, endMs, range.startMs, range.endMs));
 }
 
+function debugGraphCurrentClientSeriesItems(seriesItems) {
+  const items = Array.isArray(seriesItems) ? seriesItems.filter(Boolean) : [];
+  const currentClientItems = items.filter(series => series.clientMetric === true && !series.clientAggregate);
+  return currentClientItems.length ? currentClientItems : items;
+}
+
 function debugGraphNoDataRuns(buckets, domain, seriesItems) {
   const items = Array.isArray(seriesItems) ? seriesItems.filter(Boolean) : [];
   if (!items.length) return [];
@@ -37144,7 +37151,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
-          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, groupSeries) : ''}
+          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}
@@ -37270,16 +37277,21 @@ async function pollJsDebugStatsSample() {
     stopJsDebugStatsPolling();
     return;
   }
-  if (jsDebugStatsPollInFlight || typeof apiFetchJsonQuiet !== 'function') return;
+  if (jsDebugStatsPollInFlight) {
+    jsDebugStatsPollPending = true;
+    return;
+  }
+  if (typeof apiFetchJsonQuiet !== 'function') return;
+  jsDebugStatsPollPending = false;
   jsDebugStatsPollInFlight = true;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
     const tokenResolution = debugGraphAgentTokenResolution();
     const historyStart = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
-    if (!jsDebugStatsHistoryStartSeconds || historyStart < jsDebugStatsHistoryStartSeconds) {
+    const expandsHistory = !jsDebugStatsHistoryStartSeconds || historyStart < jsDebugStatsHistoryStartSeconds;
+    if (expandsHistory) {
       jsDebugStatsServerSequence = 0;
-      jsDebugStatsHistoryStartSeconds = historyStart;
       resetDebugGraphAgentTokenHistory();
     }
     if (tokenResolution !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
@@ -37287,10 +37299,15 @@ async function pollJsDebugStatsSample() {
       ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
       : '';
     const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}${tokenHistory}`, {cache: 'no-store'});
-    recordJsDebugStatsSample(payload);
+    if (expandsHistory) jsDebugStatsHistoryStartSeconds = historyStart;
+    recordJsDebugStatsSample(payload, {forceGraphRefresh: expandsHistory});
   } catch (_error) {
   } finally {
     jsDebugStatsPollInFlight = false;
+    if (jsDebugStatsPollPending) {
+      jsDebugStatsPollPending = false;
+      pollJsDebugStatsSample();
+    }
   }
 }
 
@@ -37317,12 +37334,11 @@ async function flushJsDebugStatsHistory() {
   if (!records.length) return;
   jsDebugStatsHistoryFlushInFlight = true;
   try {
-    const payload = await apiFetchJsonQuiet('/api/stats-history', {
+    await apiFetchJsonQuiet('/api/stats-history', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
     });
-    debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
   } catch (_error) {
     for (const record of chunk) {

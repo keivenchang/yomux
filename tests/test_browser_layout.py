@@ -8,6 +8,12 @@ from tools.static_build import build_asset
 from yolomux_lib.locales import SHIPPED_LOCALES
 
 
+def test_browser_wait_timeout_has_one_xdist_only_floor():
+    assert browser_wait_timeout(5, worker="gw0") == XDIST_BROWSER_WAIT_FLOOR_SECONDS
+    assert browser_wait_timeout(15, worker="gw0") == 15
+    assert browser_wait_timeout(5, worker="") == 5
+
+
 def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     metrics = browser.execute_script(
@@ -1211,6 +1217,73 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
     assert metrics["pointerEvents"] == "none", metrics
 
 
+def test_debug_graph_peer_traffic_does_not_hide_current_client_no_data_boxes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof clearJsDebugGraphData === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Date.now();
+        const bucketStart = offsetMs => Math.floor(((now - offsetMs) / 1000) / 5) * 5;
+        const peerBucketStart = bucketStart(25_000);
+        setDebugGraphScale(5);
+        setDebugGraphRange(60, {render: false});
+        debugGraphApplyServerHistory({
+          sequence: 202,
+          records: [
+            {
+              start: bucketStart(45_000), duration: 5, sequence: 200,
+              api_count: 5, sse_count: 2, latency_total_ms: 150, latency_count: 3, bandwidth_bytes: 2048,
+            },
+            {
+              start: peerBucketStart, duration: 5, sequence: 201,
+              clients: {'peer-client': {
+                api_count: 8, sse_count: 3, latency_total_ms: 240, latency_count: 4, bandwidth_bytes: 4096,
+              }},
+            },
+            {
+              start: bucketStart(5_000), duration: 5, sequence: 202,
+              api_count: 4, sse_count: 1, latency_total_ms: 80, latency_count: 2, bandwidth_bytes: 1024,
+            },
+          ],
+        });
+        renderDebugPanels({force: true});
+        const grid = document.querySelector('[data-js-debug-chart-grid]');
+        const domainStart = Number(grid?.dataset.jsDebugDomainStart);
+        const domainEnd = Number(grid?.dataset.jsDebugDomainEnd);
+        const peerMidpointX = (((peerBucketStart * 1000) + 2500 - domainStart) / (domainEnd - domainStart)) * 600;
+        const charts = {};
+        for (const key of ['latency', 'count', 'bandwidth']) {
+          const chart = document.querySelector(`[data-js-debug-chart="${key}"]`);
+          const ranges = [...chart.querySelectorAll('[data-js-debug-no-data-range]')].map(rect => ({
+            start: Number(rect.getAttribute('x')),
+            end: Number(rect.getAttribute('x')) + Number(rect.getAttribute('width')),
+            fill: getComputedStyle(rect).fill,
+          }));
+          charts[key] = {
+            ranges,
+            peerCovered: ranges.some(range => range.start <= peerMidpointX && range.end >= peerMidpointX),
+          };
+        }
+        return {peerMidpointX, charts};
+        """
+    )
+    assert 0 < metrics["peerMidpointX"] < 600, metrics
+    for key, chart in metrics["charts"].items():
+        assert chart["peerCovered"] is True, (key, metrics)
+        assert chart["ranges"], (key, metrics)
+        assert all(item["fill"] == "rgba(220, 38, 38, 0.12)" for item in chart["ranges"]), (key, metrics)
+
+
 def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
@@ -1418,6 +1491,215 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert drag_metrics["value"] > 1, drag_metrics
     assert drag_metrics["value"] == round(drag_metrics["value"]), drag_metrics
     assert drag_metrics["rangeSeconds"] > 300, drag_metrics
+
+
+def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsFirstSampleReceived = false;
+          jsDebugStatsPollInFlight = false;
+          jsDebugStatsPollPending = false;
+          jsDebugStatsServerSequence = 0;
+          jsDebugStatsHistoryStartSeconds = 0;
+          jsDebugGraphRangeSeconds = 15 * 60;
+          const originalFetch = window.fetch;
+          const requests = [];
+          let releaseIncremental;
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url.toString());
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            if (requests.length === 1) {
+              return response({history: {sequence: 100, records: [{
+                start: nowSeconds - 60,
+                duration: 1,
+                sequence: 100,
+                system_cpu_total_percent: 20,
+                system_cpu_count: 1,
+              }]}});
+            }
+            if (requests.length === 2) {
+              return new Promise(resolve => {
+                releaseIncremental = () => response({history: {sequence: 101, records: []}}).then(resolve);
+              });
+            }
+            return response({history: {sequence: 102, records: [{
+              start: nowSeconds - (25 * 60),
+              duration: 1,
+              sequence: 101,
+              system_cpu_total_percent: 40,
+              system_cpu_count: 1,
+            }]}});
+          };
+          try {
+            await pollJsDebugStatsSample();
+            stopJsDebugStatsPolling();
+            renderDebugPanels({force: true});
+            const narrowPoll = pollJsDebugStatsSample();
+            await Promise.resolve();
+            setDebugGraphRange(30 * 60);
+            releaseIncremental();
+            await narrowPoll;
+            const deadline = performance.now() + 3000;
+            while ((requests.length < 3 || jsDebugStatsPollInFlight) && performance.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            await new Promise(resolve => setTimeout(resolve, 650));
+            const wideUrl = new URL(requests[2]);
+            const lines = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'));
+            const xValues = lines.flatMap(line => String(line.getAttribute('points') || '')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(point => Number(point.split(',')[0]))
+              .filter(Number.isFinite));
+            const grid = document.querySelector('[data-js-debug-chart-grid]');
+            return {
+              requestCount: requests.length,
+              since: wideUrl.searchParams.get('since'),
+              historyStart: Number(wideUrl.searchParams.get('history_start')),
+              rangeSeconds: (Number(grid?.dataset.jsDebugDomainEnd) - Number(grid?.dataset.jsDebugDomainStart)) / 1000,
+              minX: xValues.length ? Math.min(...xValues) : null,
+              maxX: xValues.length ? Math.max(...xValues) : null,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] == 3, metrics
+    assert metrics["since"] == "0", metrics
+    assert 1790 <= metrics["rangeSeconds"] <= 1810, metrics
+    assert metrics["minX"] is not None and metrics["minX"] < 200, metrics
+    assert metrics["maxX"] is not None and metrics["maxX"] > 500, metrics
+
+
+def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof flushJsDebugStatsHistory === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsFirstSampleReceived = false;
+          jsDebugStatsPollInFlight = false;
+          jsDebugStatsPollPending = false;
+          jsDebugStatsServerSequence = 0;
+          jsDebugStatsHistoryStartSeconds = 0;
+          jsDebugGraphRangeSeconds = 15 * 60;
+          const originalFetch = window.fetch;
+          const requests = [];
+          let getCount = 0;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            requests.push({url: url.toString(), method: String(options.method || 'GET')});
+            if (url.pathname === '/api/stats-history') {
+              return response({ok: true, history: {sequence: 200, records: []}});
+            }
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            getCount += 1;
+            if (getCount === 1) {
+              return response({history: {sequence: 100, records: [{
+                start: nowSeconds - 600,
+                duration: 1,
+                sequence: 100,
+                system_cpu_total_percent: 20,
+                system_cpu_count: 1,
+              }]}});
+            }
+            const since = Number(url.searchParams.get('since') || 0);
+            const records = [{
+              start: nowSeconds - 60,
+              duration: 1,
+              sequence: 201,
+              system_cpu_total_percent: 30,
+              system_cpu_count: 1,
+            }];
+            if (since <= 100) records.unshift({
+              start: nowSeconds - 300,
+              duration: 1,
+              sequence: 150,
+              system_cpu_total_percent: 25,
+              system_cpu_count: 1,
+            });
+            return response({history: {sequence: 201, records}});
+          };
+          try {
+            await pollJsDebugStatsSample();
+            stopJsDebugStatsPolling();
+            recordJsDebugEventForGraph({
+              id: 999999,
+              type: 'api',
+              ts: new Date().toISOString(),
+              durationMs: 1,
+              requestBytes: 0,
+              responseBytes: 0,
+            });
+            await flushJsDebugStatsHistory();
+            await pollJsDebugStatsSample();
+            stopJsDebugStatsPolling();
+            renderDebugPanels({force: true});
+            const sampleRequests = requests.filter(request => new URL(request.url).pathname === '/api/stats-sample');
+            const catchUpUrl = new URL(sampleRequests[1].url);
+            const xValues = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'))
+              .flatMap(line => String(line.getAttribute('points') || '')
+                .split(/\\s+/)
+                .filter(Boolean)
+                .map(point => Number(point.split(',')[0]))
+                .filter(Number.isFinite));
+            return {
+              since: catchUpUrl.searchParams.get('since'),
+              requestCount: requests.length,
+              xValues,
+              hasMiddlePoint: xValues.some(value => value > 330 && value < 470),
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["since"] == "100", metrics
+    assert metrics["requestCount"] == 3, metrics
+    assert metrics["hasMiddlePoint"] is True, metrics
 
 
 def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):

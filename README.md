@@ -4,17 +4,7 @@ Browser tools for watching, driving, and summarizing tmux sessions.
 
 `yolomux.py` serves an interactive UI that attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them. Two companion tools ship alongside it: `auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tmux_wall.py` (a read-only snapshot wall).
 
-Developer / AI-agent docs (conventions, architecture, code layout, API reference) live in [`AGENTS.md`](AGENTS.md). Contributing and build instructions are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
-
-## Development Checks
-
-Before committing local changes, run the parallel check gate:
-
-```bash
-python3 tools/check.py
-```
-
-Use `python3 tools/check.py --list-lanes` to see focused lanes, `--lane <name>` for a smaller run, and `--serial` when debugging order or load-sensitive failures. Full/default runs serialize through `/tmp/yolomux-expensive-tools.lock` and run at lower priority while live YOLOmux servers are active; use `--no-tool-guard` only when you intentionally want overlapping high-load checks.
+Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), and detailed product behavior lives under [`docs/specs/`](docs/specs/).
 
 ## Requirements
 
@@ -37,8 +27,6 @@ python3 yolomux.py --self-signed --dang   # or: make run
 On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Not using `make`? `pip install -e ".[yoagent]"` installs the deps + the `yolomux` command (pip enforces Python 3.9+), then `npm install` for local xterm.js assets.
 
 Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
-
-For local automated verification only, `YOLOMUX_TEST_AUTH_BYPASS=1` starts the server with a test admin identity so scripts and Selenium can call login-gated routes without creating cookies. Do not use that environment variable for normal runs, production, or any server reachable by untrusted clients.
 
 ## First launch
 
@@ -83,41 +71,21 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
 - Press `?` for Keyboard Shortcuts and Legends, including the green play, yellow pause, and red stop status glyph meanings.
-- Hover a tmux tab to see each Claude/Codex tmux sub-window in that session near the top of the popover, with working agents first, idle durations from recent activity, and path/branch/git metadata under the matching AI tmux sub-window when sub-windows differ.
 - Drag a tab between pane tab bars to move it, drop near a pane edge to split that pane, or drop on the outer root edge for a full-span pane. Pane splits are percentage-based and encode into the shareable page URL.
-- Pinned tabs stay at the front of their pane and cannot be dragged into another pane.
 - Drag a Finder or Differ file row into a pane to open that file there; dropping near a pane edge opens it in a new split.
-- Re-opening an existing Finder/Differ file tab keeps it in the pane where you last moved it.
-- Browser uploads from drag-drop, clipboard paste, or the `+` button default into a `.uploads/` subdirectory of the resolved target directory. The `uploads.subdir` Preference controls that folder; setting it blank restores the old direct-to-target behavior.
-- Dropping or pasting a file onto a terminal can show a transient file-action menu with shortcut keys `1` through `n`, up to `9`. Agent panes get prompt actions such as OCR, summarize, review, or compare; plain shell panes get read-only shell commands such as `file`, `wc`, `tail -F`, `jq`, and `column -t`; server actions can show bounded previews, log scans, data stats, and OCR results. Upload Preferences control the suggestion menu, image paste action order, read-only shell autorun, and custom actions; image paste menus only show the configured image-order rows that apply to the current pane.
-- Terminal panes measure against the bundled mono font and ignore duplicate resize-observer echoes once the pane size and cell metrics are unchanged, so a tmux grid fills the pane instead of flickering between transient widths.
-- The mouse wheel scrolls full-screen apps (Claude, Codex, vim, less) at the same speed as a normal scrollback pane. Those panes own the mouse and keep no tmux scrollback, so the wheel is forwarded to the app instead of into tmux copy-mode; a normal shell pane still scrolls its tmux scrollback.
-- Finder / File Explorer is docked by default on fresh and sessions-only URLs. Hiding it with `Mod+B`, the close button, or File -> Finder shows the restore shortcut in the status line.
-- Finder / File Explorer self-heals after reconnect, wake, or Dockview remeasure if it vanished without an explicit user close. A deliberate hide stays hidden in that browser tab until restored.
-- The pane Info Bar shows one button per tmux sub-window (`0:bash`, `1:codex`, ...); clicking a button switches that session to the matching tmux sub-window, and the path/repo metadata follows that selected sub-window instead of inheriting touched repos from another sub-window in the same session. Each Claude/Codex tmux sub-window has its own path/branch/git state; a plain shell tmux sub-window has cwd/path but no agent state. The pane toolbar shows transcripts (`Tx`), asks for an AI summary (`AI`), and opens the event log (`Log`).
+- Upload or paste files with drag-drop, clipboard paste, or the `+` button. Dropping a file on a terminal offers actions suited to an AI or shell pane.
+- Use the pane Info Bar to switch tmux sub-windows (`0:bash`, `1:codex`, ...), open transcripts (`Tx`), request an AI summary (`AI`), or inspect the event log (`Log`).
 - File -> `Search & Runs` opens a data pane that searches captured session events and summaries, then lists compact run history rows with prompt, cwd, agent, timing, final state, PR, and latest summary.
-- File -> `YO!info` opens the grouped relationship tree over Tab, AI, path, branch, PR, and Linear metadata. It renders one record per Tab x AI x Path x Branch association, keeps unassigned branch-inventory rows visible, preserves collapsed groups across refreshes, and lets the grouping order switch between presets such as `Tab > Path > tmux-window`, `Path > Branch`, `Linear > PR`, and `PR > Branch` or custom per-level selectors. Tmux sub-window is available in the second, third, or fourth custom level when Tab is first. Tab group headers and leaf values show the same session work description as Tabber while keeping the session name as the grouping and sorting identity.
-- File -> `YO!stats` opens debug performance stats as a normal tab that can live in any pane; it enables in-page collection without reloading or adding `debug=1` to the URL. `API/SSE` shows recent request/event text and counters; `Graph` shows history split by unit: Client API&SSE count per second, Client latency, Client bandwidth per second, CPU, Agent status, and transcript-only Agent tokens/min each get their own Y axis with concrete unit labels and X-axis time ticks. The raw Client work counter block appears only when the URL explicitly includes `debug=1`. The CPU chart overlays the stats-owner `yolomux.py` CPU and system average CPU on a fixed 0-100% scale. Agent tokens/min samples transcript totals every minute even while YO!stats is closed and every 10 seconds while watched, renders stacked one-minute bars, and resets its baseline after a transcript switch or long unobserved gap instead of painting a continuous rate across that gap. Provider output-token fields are alternate totals rather than additive counters, and repeated Claude records with the same message ID count once. The graph has 1, 5, 10, and 30 second scale buttons, selectable ranges from last minute through 24 hours, plus a meta row with `yolomux.py uptime`, PID, RSS, server sequence, tab/window removal latency, and total upload/download MB. The 8 hour and 16 hour range buttons appear only after retained history reaches those ages. Graph history is remembered in the server for browser refreshes, fetched incrementally by sequence, and bounded to 24 hours with data older than one hour rolled into thirty-second buckets. Multiple YOLOmux servers sharing one `YOLOMUX_STATE_DIR` use one `stats-sampler` owner for owner CPU, system CPU, Agent status, and Agent tokens/min, with followers reading the durable `tmux-AI-status.json` snapshot while browser API/SSE/latency/bandwidth stay per-client. `python3 yolomux.py --print-runtime-report` prints a no-listener JSON report for owner/coalescing state, cache sizes, top endpoints, event types, and largest transcripts.
-- The pane header pop-out button opens a detached same-origin browser window for preview-capable file editors, YO!info, and YO!stats. Phase 1 intentionally disables terminal/transcript, Preferences, Finder/Tabber, Search & Runs, and YO!agent pop-outs because those panes need live PTY/WebSocket or interactive command bridging rather than a frozen snapshot.
-- A session shows its real repo and branch even when the agent was launched from your home directory or another non-repo path: YOLOmux infers the repo from the directories the agent has actually edited (read from its transcript), not just the pane's current directory. If one session touches multiple repos, its tab shows one description from the primary repo rather than combining every PR: stronger work evidence wins first, then a current-branch PR, then recent git activity. The Info Bar repo carousel changes the displayed repo details but not that primary tab description; YO!info shows the complete multi-repo relationship set. A pane sitting in a directory with no git checkout and no edits shows `no git checkout detected`.
+- File -> `YO!info` opens a grouped relationship tree over tabs, agents, paths, branches, pull requests, and Linear work.
+- File -> `YO!stats` opens API/SSE events and performance graphs for client traffic, CPU, agent status, and agent tokens. Use its scale and time-range controls to inspect recent or retained history; the detailed behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md).
+- The pane header pop-out button opens supported file previews, YO!info, and YO!stats in a detached browser window.
 - File -> `YO!share...` creates short live magic URLs for the current YOLOmux layout. Defaults are short-lived, read-only, http links; write access requires https. The host can extend active shares and see connected users with duration, IP, and browser type. Replay details live in [`docs/specs/SHARE_MIRRORING.md`](docs/specs/SHARE_MIRRORING.md).
-- Finder switches between the file tree and a full-pane `Differ` mode (per-repo FROM/TO diff controls). The root toggle defaults to `Sync`, which follows the last clicked/typed session's affected repos and highlights changed paths; stale background syncs from other sessions cannot retarget it afterward.
-- File editor refresh errors preserve the backend/API reason and HTTP status before falling back to a generic `Cannot inspect <path>` message; valid files in the current worktree continue refreshing without being marked unknown.
-- Tab YO buttons appear only when YO is on locally, on or locked from another YOLOmux server, or the tab has an unacknowledged prompt/question. Acknowledging a red/yellow attention state is shared across YOLOmux ports that use the same state directory, including when another port missed the live event and next reads its status. YO state resyncs after client-events reconnect, page wake, or network restore, with a narrow auto-status fallback poll while the live event stream is disconnected.
-- Finder, Explorer, Differ, and Tabber path rows share the same file context menu. Image rows include `Copy image`, which writes image bytes to the browser clipboard when supported and otherwise falls back to copying the path. Folder rows include `Zip & download` for single-folder admin selections; YOLOmux creates a `<folder>.<YYYYMMDD-HHMMSS>.zip` download and rejects transfers over the Preferences `File transfer size cap` with a visible error.
-- A third `Tabber` mode lists open tabs and each tmux session's sub-windows, sorted by recent activity. Parent session recency comes from child sub-window rows: Claude/Codex rows use meaningful transcript event recency, shell/non-agent rows use the activity ledger, and touched-path file mtimes stay only on the touched-path rows. Click any non-arrow part of a green session row such as `2 #10731...` to focus that tmux tab, click the disclosure arrow to collapse/expand it, and click a sub-window row to switch tmux sub-windows. Agent touched-path rows are cached by the server, attach only under the matching agent tmux sub-window, and keep their recency text visible while the tree text truncates first.
-- YO!agent keeps its chat transcript across server restarts until you click `Clear conversation`. It is the central command surface for product-state and Preferences questions, safe admin-approved settings changes, session watches, finish notifications, robust sends to detected Claude/Codex panes, wait-then-send jobs, and multi-agent handoffs. Explicit target-session sends show target results back in the YO!agent chat by default unless you ask it not to wait. It preserves perspective: `ask agent 1 to <do ...>` sends only `<do ...>` to agent `1`, and handoffs pass exact, summarized, or modified information only when that is the requested form. More examples and transport rules live in [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) and [`docs/specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md`](docs/specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md).
-- YO!agent-managed Claude/Codex SDK, app-server, MCP, and exec sessions are background job/conversation targets unless YOLOmux also starts a real visible TUI for them. They show up through YO!agent jobs, waits, Recent Agents, and result messages with their provider, thread id, cwd, model, sandbox/approval settings, and result source; YOLOmux does not fake them as normal tmux tabs.
-- SDK-backed managed transports are optional. Install `requirements-yoagent-managed.txt` in the Python environment that runs YOLOmux to enable `claude-sdk` and `codex-sdk`; without those packages YO!agent reports a structured missing-SDK diagnostic and can still use CLI/app-server/MCP transports where available.
-- YO!agent jobs persist in YOLOmux state across server restarts. Notify jobs fire browser/toast notifications through the client-events stream; wait-then-send jobs revalidate the exact target agent prompt state before sending. High-risk prompt text such as secrets, recursive deletes, broad resets, broad `pkill`, recursive permission changes, or SSH commands requires confirmation instead of auto-sending.
-- YO!skills are loaded from built-in YOLOmux skill files first, then user-local files in `~/.config/yolomux/skills.d/`; user context Markdown lives in `~/.config/yolomux/context.d/`. Built-ins bootstrap common workflows and stay read-only. User-local files can add, override, disable, update, or delete skills. See [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) for schema, examples, and management commands.
-- Finder browsing defaults to the filesystem root (`/`); credential-heavy paths such as `.ssh`, `.gnupg`, `.aws`, `.config/gh`, token files, and registry config files are blocked and hidden from search/index results.
-- Quick Search (`Mod+P`) ranks filename matches ahead of path-only fuzzy matches; image hits render as `[Image #1] '/abs/path.png'` references. Renaming a file or directory in Finder/Differ refreshes affected persistent indexes so searches use the new path instead of waiting for the index TTL.
-- The language picker in the top bar, login/setup screens, and Preferences supports English, Traditional and Simplified Chinese, Japanese, Korean, Spanish, German, French, Italian, Brazilian Portuguese, Polish, Dutch, Hebrew, Arabic, Russian, Hindi, Vietnamese, Thai, and Turkish. Changing it updates already-open panes, Help, YO!stats, previews, menus, titles, and accessibility labels without emptying Finder or resetting live pane state; Hebrew and Arabic switch the page to right-to-left layout. The topbar picker stays open while background session refreshes run. The build rejects missing translations, placeholder/protected-token drift, incomplete plural categories, and duplicated locale concepts without a declared shared owner.
-- The file editor's `Differ` toggle opens a diff view with a FROM/TO sha picker for any git-tracked file with commit history, even when the working tree is clean.
-- Opening the same editable file through a symlink or hard-link path focuses the existing editor and keeps its dirty buffer instead of creating a second editor for the same physical file.
-- Markdown Preview task checkboxes are editable for admin users: clicking a rendered `- [ ]` / `- [x]` item updates the underlying Markdown source through the normal dirty/autosave path.
-- Sessions waiting at a detected permission prompt show an attention badge in the roster even when YOLO auto-approval is off, so pending `Yes/No` prompts do not silently sit idle.
+- Finder includes file browsing, editing, preview, search, and per-repository `Differ` views. Quick Search is `Mod+P`.
+- Tabber lists open tabs and tmux sub-windows by recent activity, and the top-bar language picker changes the live UI language.
+- YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. See [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) for setup and examples.
+- Tab attention badges surface agents waiting for input or approval even when automatic approval is off.
+
+For exact UI behavior, edge cases, and coverage, see [`docs/specs/GUI.md`](docs/specs/GUI.md).
 
 ### Copying terminal text
 
@@ -174,8 +142,6 @@ python3 yolomux.py --cert fullchain.pem --key privkey.pem   # bring your own
 
 Cookies have a 90-day sliding lifetime and survive server restarts. Cookies are scoped by port, so dev and production servers on the same host do not overwrite each other. Changing a user's password invalidates existing cookies for that user.
 
-`YOLOMUX_TEST_AUTH_BYPASS=1` is the only no-login mode, and it is for local tests and one-off verification commands. When enabled, YOLOmux treats non-share requests as admin, while share-token requests remain scoped readonly guests.
-
 ## Agent permissions & YOLO
 
 **Launching agents.** Claude's auto permission mode:
@@ -189,8 +155,6 @@ codex --dangerously-bypass-hook-trust             # hook trust bypass
 ```
 
 `claude --dangerously-skip-permissions` bypasses Claude Code permission prompts.
-
-**Do not use `claude --bare` with YOLOmux.** `--bare` is a minimal mode (skips hooks, LSP, plugin sync, auto-memory, background prefetches, keychain reads, and `CLAUDE.md` auto-discovery), but it also makes Claude Code read Anthropic auth **strictly** from `ANTHROPIC_API_KEY` or `apiKeyHelper` — OAuth and the keychain are never read. With a subscription or enterprise OAuth login (the common YOLOmux setup) and no API key in the environment, a `--bare` session has no usable credential and shows "Not logged in · Please run /login". YOLOmux therefore launches Claude without `--bare`. Claude Code does not expose a narrow hook-trust bypass flag equivalent to Codex's `--dangerously-bypass-hook-trust`.
 
 `codex --dangerously-bypass-approvals-and-sandbox` lets Codex run model-generated commands without approval prompts and without the Codex command sandbox. `codex --dangerously-bypass-hook-trust` is separate: it allows enabled Codex hooks to run without persisted hook trust. It does not remove the normal command sandbox by itself.
 
@@ -228,8 +192,6 @@ The optional `risk:` field is a label shown in the YOLO event log. Keep it to th
 ## Remote access
 
 YOLOmux binds `--host 0.0.0.0` (all interfaces) by default, on purpose: the product is built for reaching your sessions from a phone or another machine on a trusted LAN, and every request is gated by the login layer. If that's your setup, restrict the port to trusted IPs at the firewall:
-
-Never combine `YOLOMUX_TEST_AUTH_BYPASS=1` with a remotely reachable bind address. The bypass is only for localhost/dev test harnesses.
 
 ```bash
 sudo ufw allow from <client-ip> to any port 9998 proto tcp

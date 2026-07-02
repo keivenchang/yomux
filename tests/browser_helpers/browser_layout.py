@@ -38,7 +38,26 @@ webdriver = pytest.importorskip("selenium.webdriver")
 ActionChains = pytest.importorskip("selenium.webdriver.common.action_chains").ActionChains
 Options = pytest.importorskip("selenium.webdriver.chrome.options").Options
 TimeoutException = pytest.importorskip("selenium.common.exceptions").TimeoutException
-WebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
+SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
+
+
+XDIST_BROWSER_WAIT_FLOOR_SECONDS = 10.0
+
+
+def browser_wait_timeout(timeout, worker=None):
+    requested = max(0.0, float(timeout))
+    active_worker = os.environ.get("PYTEST_XDIST_WORKER") if worker is None else worker
+    if not active_worker:
+        return requested
+    return max(requested, XDIST_BROWSER_WAIT_FLOOR_SECONDS)
+
+
+class WebDriverWait(SeleniumWebDriverWait):
+    def __init__(self, driver, timeout, poll_frequency=0.5, ignored_exceptions=None):
+        # `-n auto` starts one Chrome per worker. A five-second assertion budget is enough for an
+        # isolated browser but randomly expires before an unrelated fixture gets CPU under the full
+        # pool. Keep local focused tests fast while giving xdist one shared, still-bounded floor.
+        super().__init__(driver, browser_wait_timeout(timeout), poll_frequency, ignored_exceptions)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

@@ -2888,7 +2888,7 @@ async function runEditorPreviewSuite() {
     assert.ok(debugPaneSource.includes("textWithMovingEllipsisHtml(t('debug.waitingForServerStats'))"), 'YO!stats waiting metadata uses the shared localized moving ellipsis');
     assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/function scheduleJsDebugPanelRefresh\(options = \{\}\) \{[\s\S]*if \(options\.force === true\) jsDebugRenderForce = true;[\s\S]*if \(jsDebugRenderTimer\) return;[\s\S]*const force = jsDebugRenderForce;[\s\S]*jsDebugRenderForce = false;[\s\S]*refreshDebugPanelsFromEvents\(\{force\}\)/.test(debugPaneSource), 'YO!stats latches a forced redraw into an already-pending shared refresh');
-    assert.equal((debugPaneSource.match(/scheduleJsDebugPanelRefresh\(\{force: firstSampleApplied\}\);/g) || []).length, 2, 'YO!stats forces the first history or direct CPU sample through the shared refresh path');
+    assert.equal((debugPaneSource.match(/scheduleJsDebugPanelRefresh\(\{force: firstSampleApplied \|\| forceGraphRefresh\}\);/g) || []).length, 2, 'YO!stats forces first samples and widened-history responses through the shared refresh path');
     assert.ok(/if \(event\.type === 'pointerdown'\)[\s\S]*jsDebugGraphRangeSliderDragging = true;[\s\S]*return true;[\s\S]*if \(event\.type === 'change'\)[\s\S]*jsDebugGraphRangeSliderDragging = false;[\s\S]*setDebugGraphRangeFromSlider/.test(debugPaneSource), 'YO!stats range dragging preserves the native input and commits only on change');
     assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
     assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*syncJsDebugStatsPolling\(\{pollNow: true\}\)/.test(debugPaneSource), 'every Chrome-style pane-tab activation re-arms or stops the shared YO!stats sampler');
@@ -3879,6 +3879,49 @@ async function runEditorPreviewSuite() {
 	    assert.ok(/function recordSseDebugEvent\(eventType, envelope = \{\}, rawEvent = null\) \{[\s\S]*if \(!jsDebugCollectionEnabled\) return;[\s\S]*const payload = clientEventPayloadFromEnvelope\(envelope\)/.test(terminalBootSource), 'SSE debug recording returns before payload extraction when collection is disabled');
 	  });
 
+  await testAsync('YO!stats widening the range queues an older-history fetch behind an in-flight poll', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    let releaseIncrementalPoll;
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.clearJsDebugEventsForTest();
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        return Promise.resolve(jsonResponse({
+          history: {sequence: 100, records: [{start: Math.floor(Date.now() / 1000) - 60, duration: 1, sequence: 100, api_count: 1}]},
+        }));
+      }
+      if (requests.length === 2) {
+        return new Promise(resolve => { releaseIncrementalPoll = resolve; });
+      }
+      return Promise.resolve(jsonResponse({
+        history: {sequence: 102, records: [{start: Math.floor(Date.now() / 1000) - (25 * 60), duration: 1, sequence: 101, api_count: 7}]},
+      }));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    api.stopJsDebugStatsPollingForTest();
+    const incrementalPoll = api.pollJsDebugStatsSampleForTest();
+    await flushAsyncWork();
+    assert.equal(api.jsDebugStatsPollingStateForTest().inFlight, true, 'the narrow-range incremental poll is held in flight');
+
+    api.setDebugGraphRangeForTest(30 * 60);
+    releaseIncrementalPoll(jsonResponse({history: {sequence: 101, records: []}}));
+    await incrementalPoll;
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.equal(requests.length, 3, 'the 30-minute range starts a coalesced follow-up poll after the 15-minute poll settles');
+    const narrowUrl = new URL(requests[0], 'http://localhost');
+    const wideUrl = new URL(requests[2], 'http://localhost');
+    assert.ok(Number(wideUrl.searchParams.get('history_start')) < Number(narrowUrl.searchParams.get('history_start')), 'the follow-up poll requests the newly exposed older half');
+    assert.equal(wideUrl.searchParams.get('since'), '0', 'the wider request resets the incremental sequence so older retained records are returned');
+    assert.equal(api.jsDebugStatsPollingStateForTest().historyStartSeconds, Number(wideUrl.searchParams.get('history_start')), 'loaded-history coverage advances only after the wider response succeeds');
+    assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 2, 'the widened graph contains both the old and recent records without visiting 1h first');
+  });
+
   await testAsync('YO!stats gates polling but uploads client history outside the active pane', async () => {
     let nextTimerId = 0;
     const timers = [];
@@ -3913,6 +3956,41 @@ async function runEditorPreviewSuite() {
     assert.ok(historyRequest, 'inactive YO!stats still uploads pending client history');
     assert.ok(JSON.parse(historyRequest.body).records.some(record => record.api_count === 1), 'inactive upload retains the recorded API bucket');
     assert.equal(api.jsDebugEventsForTest().length, 1, 'event capture remains available for later YO!stats inspection');
+  });
+
+  await testAsync('YO!stats client-history acknowledgements cannot skip server history collected while polling is paused', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.clearJsDebugEventsForTest();
+    api.setFetchForTest((url, options = {}) => {
+      const request = {url: String(url), method: String(options.method || 'GET')};
+      requests.push(request);
+      if (request.url === '/api/stats-history') {
+        return Promise.resolve(jsonResponse({ok: true, history: {sequence: 200, records: []}}));
+      }
+      const sampleUrl = new URL(request.url, 'http://localhost');
+      const since = Number(sampleUrl.searchParams.get('since') || 0);
+      if (requests.filter(item => item.url.startsWith('/api/stats-sample?')).length === 1) {
+        return Promise.resolve(jsonResponse({history: {sequence: 100, records: [{start: nowSeconds - 600, duration: 1, sequence: 100, system_cpu_total_percent: 20, system_cpu_count: 1}]}}));
+      }
+      const records = [{start: nowSeconds - 60, duration: 1, sequence: 201, system_cpu_total_percent: 30, system_cpu_count: 1}];
+      if (since <= 100) records.unshift({start: nowSeconds - 300, duration: 1, sequence: 150, system_cpu_total_percent: 25, system_cpu_count: 1});
+      return Promise.resolve(jsonResponse({history: {sequence: 201, records}}));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    api.stopJsDebugStatsPollingForTest();
+    api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 1});
+    await api.flushJsDebugStatsHistoryForTest();
+    await api.pollJsDebugStatsSampleForTest();
+
+    const sampleRequests = requests.filter(request => request.url.startsWith('/api/stats-sample?'));
+    const catchUpUrl = new URL(sampleRequests[1].url, 'http://localhost');
+    assert.equal(catchUpUrl.searchParams.get('since'), '100', 'the upload acknowledgement leaves the independent GET-history cursor at its last applied sample');
+    assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 3, 'the catch-up GET applies the server bucket created while polling was paused');
   });
 
   await testAsync('YO!stats retries timed-out cold starts quickly, then switches to steady polling after its first sample', async () => {
@@ -4067,6 +4145,8 @@ async function runEditorPreviewSuite() {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     const bucketStart = offsetMs => Math.floor(((now - offsetMs) / 1000) / 5) * 5;
+    const peerBucketStart = bucketStart(25_000);
+    const peerMidpointX = (((peerBucketStart * 1000) + 2500 - (now - 60_000)) / 60_000) * 600;
     api.setDebugGraphScaleForTest(5);
     api.setDebugGraphRangeForTest(60);
     api.debugGraphApplyServerHistoryForTest({
@@ -4087,9 +4167,18 @@ async function runEditorPreviewSuite() {
           system_cpu_count: 1,
         },
         {
-          start: bucketStart(25_000),
+          start: peerBucketStart,
           duration: 5,
           sequence: 202,
+          clients: {
+            'peer-client': {
+              api_count: 8,
+              sse_count: 3,
+              latency_total_ms: 240,
+              latency_count: 4,
+              bandwidth_bytes: 4096,
+            },
+          },
           cpu_total_percent: 11,
           cpu_count: 1,
           system_cpu_total_percent: 21,
@@ -4113,12 +4202,16 @@ async function runEditorPreviewSuite() {
     });
     const html = api.debugPanelHtmlForTest();
     const chartHtml = key => html.match(new RegExp(`<section[^>]*data-js-debug-chart="${key}"[\\s\\S]*?<\\/section>`))?.[0] || '';
+    const noDataRanges = chart => [...chart.matchAll(/data-js-debug-no-data-range="[^"]+"[^>]* x="([0-9.]+)"[^>]* width="([0-9.]+)"/g)]
+      .map(match => ({start: Number(match[1]), end: Number(match[1]) + Number(match[2])}));
     const countChart = chartHtml('count');
     assert.ok((countChart.match(/data-js-debug-no-data-range="/g) || []).length >= 2, 'Client API&SSE chart shades both leading and interior no-data spans');
     assert.ok(/class="js-debug-no-data-range"[^>]* x="0\.0"[^>]* height="120"/.test(countChart), 'leading client no-data block starts at the left edge and covers the graph height');
     assert.ok((countChart.match(/data-js-debug-series="api"/g) || []).length >= 2, 'client API line is split into separate polyline segments instead of drawing a diagonal across the no-data gap');
+    assert.ok(noDataRanges(countChart).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), 'peer API/SSE traffic does not hide this client\'s no-data overlay');
     for (const chart of ['latency', 'bandwidth']) {
       assert.ok(new RegExp(`data-js-debug-chart="${chart}"[\\s\\S]*data-js-debug-no-data-range=`).test(html), `YO!stats shades no-data spans in client ${chart} chart`);
+      assert.ok(noDataRanges(chartHtml(chart)).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), `peer traffic does not hide this client\'s ${chart} no-data overlay`);
     }
     for (const chart of ['cpu', 'activity', 'agentTokens']) {
       assert.equal(chartHtml(chart).includes('data-js-debug-no-data-range='), false, `YO!stats does not shade server-side ${chart} chart for client no-data spans`);

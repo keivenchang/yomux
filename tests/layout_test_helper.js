@@ -882,7 +882,14 @@ globalThis.__layoutTestApi = {
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
-  jsDebugStatsPollingStateForTest() { return {firstSampleReceived: jsDebugStatsFirstSampleReceived, inFlight: jsDebugStatsPollInFlight}; },
+  jsDebugStatsPollingStateForTest() {
+    return {
+      firstSampleReceived: jsDebugStatsFirstSampleReceived,
+      inFlight: jsDebugStatsPollInFlight,
+      pending: jsDebugStatsPollPending,
+      historyStartSeconds: jsDebugStatsHistoryStartSeconds,
+    };
+  },
   startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
   syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
   stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,

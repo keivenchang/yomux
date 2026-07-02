@@ -4721,7 +4721,12 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
         calls.append(payload)
         return f"encoded-{len(calls)}"
 
+    def fake_merge_attention_acks():
+        with webapp.client_watch_lock:
+            webapp.client_watch_attention_ack_rev = 7
+
     webapp.client_event_payload_signature = fake_signature
+    webapp.merge_shared_attention_acks = fake_merge_attention_acks
     try:
         _path, disk_signature = webapp.session_files_disk_cache_path(("payload", {"session": "5"}))
         payload_signature = webapp.session_files_payload_signature({"files": [{"path": "same.py"}]})
@@ -4734,7 +4739,7 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
     assert tabber_signature == hashlib.sha256(b"encoded-3").hexdigest()
     assert calls[0] == ("payload", {"session": "5"})
     assert calls[1] == {"files": [{"path": "same.py"}]}
-    assert calls[2] == {"scope": "configured", "sessions": [("5", None)], "attention_ack_rev": 1}
+    assert calls[2] == {"scope": "configured", "sessions": [("5", None)], "attention_ack_rev": 7}
 
 
 def test_update_client_watch_roots_filters_and_expires(monkeypatch):
