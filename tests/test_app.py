@@ -762,6 +762,45 @@ def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch
     assert sum(record["agent_token_samples"] for record in records) == 4
 
 
+def test_stats_agent_token_rate_tracks_claude_subagent_appends(monkeypatch, tmp_path):
+    app_module.session_files._CLAUDE_TRANSCRIPT_SCAN_CACHE.clear()
+    webapp = app_module.TmuxWebtermApp(["1"])
+    transcript = tmp_path / "session-id.jsonl"
+    subagent = tmp_path / "session-id" / "subagents" / "agent-a.jsonl"
+    subagent.parent.mkdir(parents=True)
+
+    def line(message_id: str, output_tokens: int) -> str:
+        return json.dumps({
+            "type": "assistant",
+            "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []},
+        }) + "\n"
+
+    transcript.write_text(line("parent", 100), encoding="utf-8")
+    subagent.write_text(line("child-first", 50), encoding="utf-8")
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{
+        "session": "1",
+        "kind": "claude",
+        "state": "working",
+        "window_index": 0,
+        "window_label": "0:claude",
+        "transcript": str(transcript),
+    }])
+    try:
+        first = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
+        with subagent.open("a", encoding="utf-8") as handle:
+            handle.write(line("child-second", 120))
+        second = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert "_agent_token_records" not in first
+    assert sum(
+        rate["tokens"]
+        for record in second["_agent_token_records"]
+        for rate in record["agent_token_rates"]
+    ) == pytest.approx(120.0)
+
+
 def test_stats_sampler_bootstraps_token_scan_without_consumer(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     wall_times = iter([1000.0])

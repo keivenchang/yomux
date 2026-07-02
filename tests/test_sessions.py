@@ -179,6 +179,74 @@ def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):
     assert glob_calls == ["**/session-123.jsonl"]
 
 
+def test_select_claude_agent_follows_daemon_delegated_session(tmp_path):
+    clear_transcript_lookup_cache()
+    claude_root = tmp_path / ".claude"
+    sessions_root = claude_root / "sessions"
+    projects_root = claude_root / "projects"
+    project_root = projects_root / "-repo"
+    sessions_root.mkdir(parents=True)
+    project_root.mkdir(parents=True)
+    old_transcript = project_root / "old-session.jsonl"
+    current_transcript = project_root / "current-session.jsonl"
+    old_transcript.write_text("{}\n", encoding="utf-8")
+    current_transcript.write_text("{}\n", encoding="utf-8")
+    os.utime(old_transcript, (1000, 1000))
+    os.utime(current_transcript, (2000, 2000))
+    (sessions_root / "101.json").write_text(json.dumps({
+        "pid": 101,
+        "sessionId": "old-session",
+        "cwd": "/repo",
+        "kind": "interactive",
+        "status": "busy",
+        "startedAt": 900_000,
+        "updatedAt": 1000_000,
+    }), encoding="utf-8")
+    (sessions_root / "104.json").write_text(json.dumps({
+        "pid": 104,
+        "sessionId": "current-session",
+        "cwd": "/repo",
+        "kind": "bg",
+        "status": "busy",
+        "startedAt": 1900_000,
+        "updatedAt": 2000_000,
+    }), encoding="utf-8")
+    candidates = [
+        ProcessInfo(pid=101, ppid=100, command="claude --dangerously-skip-permissions"),
+        ProcessInfo(pid=102, ppid=101, command="claude daemon run"),
+        ProcessInfo(pid=103, ppid=102, command="2.1.198 --bg-pty-host current.sock"),
+        ProcessInfo(pid=104, ppid=103, command="2.1.198 --session-id current-session --resume old-session.jsonl"),
+    ]
+
+    agent = sessions.select_claude_agent(
+        "1",
+        _pane(100),
+        candidates,
+        sessions_root=sessions_root,
+        projects_root=projects_root,
+    )
+
+    assert agent is not None
+    assert agent.pid == 104
+    assert agent.session_id == "current-session"
+    assert agent.transcript == str(current_transcript)
+
+
+def test_claude_transcript_family_paths_include_nested_subagents(tmp_path):
+    transcript = tmp_path / "session-id.jsonl"
+    direct = tmp_path / "session-id" / "subagents" / "agent-direct.jsonl"
+    nested = tmp_path / "session-id" / "subagents" / "nested" / "agent-nested.jsonl"
+    unrelated = tmp_path / "other.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    direct.parent.mkdir(parents=True)
+    nested.parent.mkdir(parents=True)
+    direct.write_text("{}\n", encoding="utf-8")
+    nested.write_text("{}\n", encoding="utf-8")
+    unrelated.write_text("{}\n", encoding="utf-8")
+
+    assert sessions.claude_transcript_family_paths(transcript) == [transcript, direct, nested]
+
+
 def test_codex_transcript_from_process_fd_prefers_open_rollout(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"

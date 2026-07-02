@@ -191,6 +191,34 @@ def test_claude_transcript_usage_deduplicates_repeated_message_ids(tmp_path):
     assert details["usage"]["generated_tokens"] == 20
 
 
+def test_claude_generated_tokens_include_subagent_transcript_family(tmp_path):
+    session_files._CLAUDE_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "session-id.jsonl"
+    subagent = tmp_path / "session-id" / "subagents" / "agent-a.jsonl"
+    nested_subagent = tmp_path / "session-id" / "subagents" / "nested" / "agent-b.jsonl"
+    subagent.parent.mkdir(parents=True)
+    nested_subagent.parent.mkdir(parents=True)
+
+    def line(message_id, output_tokens):
+        return json.dumps({
+            "type": "assistant",
+            "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []},
+        }) + "\n"
+
+    transcript.write_text(line("parent", 11), encoding="utf-8")
+    subagent.write_text(line("child-a", 17), encoding="utf-8")
+    nested_subagent.write_text(line("child-b", 23), encoding="utf-8")
+
+    identity = session_files.transcript_usage_identity(transcript, "claude")
+    assert session_files.transcript_generated_tokens(transcript, "claude") == 51
+
+    with subagent.open("a", encoding="utf-8") as handle:
+        handle.write(line("child-a-more", 7))
+
+    assert session_files.transcript_usage_identity(transcript, "claude") == identity
+    assert session_files.transcript_generated_tokens(transcript, "claude") == 58
+
+
 def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypatch):
     session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "rollout.jsonl"

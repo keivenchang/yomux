@@ -29,6 +29,7 @@ TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
 CODEX_LSOF_TIMEOUT_SECONDS = 1.0
 CODEX_LSOF_CACHE_SECONDS = 15.0
+CLAUDE_SUBAGENTS_DIRNAME = "subagents"
 # the shared TtlCache instead of a hand-rolled dict+lock+TTL. get_or_miss() preserves the
 # _CACHE_MISS-vs-cached-None distinction the callers rely on.
 _TRANSCRIPT_LOOKUP_CACHE = TtlCache(ttl_seconds=TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS)
@@ -235,8 +236,25 @@ def find_transcript_by_session_id(base_dir: Path, session_id: str) -> Path | Non
     return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, None)
 
 
-def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
-    meta_path = Path.home() / ".claude" / "sessions" / f"{process.pid}.json"
+def claude_transcript_family_paths(path: Path) -> list[Path]:
+    paths = [path]
+    subagents_root = path.with_suffix("") / CLAUDE_SUBAGENTS_DIRNAME
+    if subagents_root.is_dir():
+        paths.extend(sorted(subagents_root.rglob("*.jsonl")))
+    return paths
+
+
+def read_claude_agent(
+    session: str,
+    pane: PaneInfo,
+    process: ProcessInfo,
+    *,
+    sessions_root: Path | None = None,
+    projects_root: Path | None = None,
+) -> AgentInfo:
+    sessions_root = sessions_root or Path.home() / ".claude" / "sessions"
+    projects_root = projects_root or Path.home() / ".claude" / "projects"
+    meta_path = sessions_root / f"{process.pid}.json"
     if not meta_path.exists():
         return AgentInfo(
             session=session,
@@ -262,7 +280,7 @@ def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Age
     session_id = metadata.get("sessionId")
     transcript_path = None
     if isinstance(session_id, str) and session_id:
-        transcript_path = find_transcript_by_session_id(Path.home() / ".claude" / "projects", session_id)
+        transcript_path = find_transcript_by_session_id(projects_root, session_id)
 
     return AgentInfo(
         session=session,
@@ -277,6 +295,48 @@ def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Age
         error=None if transcript_path else "claude transcript not found",
         model=agent_model_from_metadata(metadata) or agent_model_from_command(process.command),
     )
+
+
+def select_claude_agent(
+    session: str,
+    pane: PaneInfo,
+    processes: list[ProcessInfo],
+    *,
+    sessions_root: Path | None = None,
+    projects_root: Path | None = None,
+) -> AgentInfo | None:
+    sessions_root = sessions_root or Path.home() / ".claude" / "sessions"
+    candidates: list[AgentInfo] = []
+    for process in processes:
+        if classify_agent(process.command) != "claude" and not (sessions_root / f"{process.pid}.json").is_file():
+            continue
+        candidates.append(
+            read_claude_agent(
+                session,
+                pane,
+                process,
+                sessions_root=sessions_root,
+                projects_root=projects_root,
+            )
+        )
+    if not candidates:
+        return None
+    with_transcript = [agent for agent in candidates if agent.transcript]
+    if not with_transcript:
+        return candidates[0]
+
+    def active_session_rank(agent: AgentInfo) -> tuple[float, bool, int]:
+        explicit_session_id = command_option_value(agent.command, "--session-id")
+        explicit_session_match = bool(explicit_session_id and explicit_session_id == agent.session_id)
+        transcript_activity = max(
+            (path_mtime(path) for path in claude_transcript_family_paths(Path(str(agent.transcript)))),
+            default=0.0,
+        )
+        # Claude's daemon-backed UI keeps the original launcher alive while a descendant owns the
+        # active --session-id. Transcript-family activity owns selection; the explicit owner breaks ties.
+        return transcript_activity, explicit_session_match, int(agent.pid or 0)
+
+    return max(with_transcript, key=active_session_rank)
 
 
 def agent_error(session: str, kind: str, pane: PaneInfo, process: ProcessInfo, error: str) -> AgentInfo:
@@ -622,15 +682,16 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
             process_label, process_label_pid = pane_process_label(raw_pane, candidates)
             pane = replace(raw_pane, process_label=process_label, process_label_pid=process_label_pid)
             session_panes.append(pane)
+            claude_agent = select_claude_agent(session, pane, candidates)
+            if claude_agent is not None and claude_agent.pid not in seen_pids:
+                seen_pids.add(claude_agent.pid)
+                agents.append(claude_agent)
             for process in candidates:
                 kind = classify_agent(process.command)
-                if not kind or process.pid in seen_pids:
+                if kind != "codex" or process.pid in seen_pids:
                     continue
                 seen_pids.add(process.pid)
-                if kind == "claude":
-                    agents.append(read_claude_agent(session, pane, process))
-                elif kind == "codex":
-                    agents.append(read_codex_agent(session, pane, process))
+                agents.append(read_codex_agent(session, pane, process))
         result[session] = SessionInfo(
             session=session,
             panes=session_panes,

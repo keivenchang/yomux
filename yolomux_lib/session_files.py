@@ -21,6 +21,7 @@ from .common import git
 from .common import git_ahead_behind_counts
 from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
+from .sessions import claude_transcript_family_paths
 from .sessions import find_recent_codex_transcript
 from .sessions import recent_codex_transcript_candidates
 from .types import RepoPayload
@@ -436,13 +437,18 @@ def codex_record_usage_generated_tokens(record: Any) -> tuple[float | None, floa
 def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -> float | None:
     agent_kind = str(kind or "").strip().lower()
     if agent_kind == "claude":
-        details = scan_claude_transcript_details(path, cwd)
+        generated_tokens = sum(
+            numeric_token_value(
+                scan_claude_transcript_details(transcript_path, cwd).get("usage", {}).get("generated_tokens")
+            )
+            for transcript_path in claude_transcript_family_paths(path)
+        )
     elif agent_kind == "codex":
         details = scan_codex_transcript_details(path, cwd)
+        usage = details.get("usage") if isinstance(details, dict) else {}
+        generated_tokens = numeric_token_value(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
     else:
         return None
-    usage = details.get("usage") if isinstance(details, dict) else {}
-    generated_tokens = numeric_token_value(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
     return generated_tokens if generated_tokens > 0 else None
 
 
