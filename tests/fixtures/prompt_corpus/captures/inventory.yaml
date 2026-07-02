@@ -300,6 +300,26 @@ fixtures:
   id: working_labelled_composer__claude-code-2.1.198_20260701
   scenario: working_labelled_composer
   source: screenshot-provided real Claude Code 2.1.198 capture from tmux 1:0.0 on 2026-07-01
+- agent: claude
+  capture_date: '2026-07-02'
+  case_name: compacting_conversation_unicode_ellipsis
+  client_name: Claude Code
+  client_version: 2.1.198 (Claude Code)
+  client_version_slug: claude-code-2.1.198
+  description: Claude compaction spinner remains working above a decorated empty composer
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702.yaml
+  id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
+  scenario: compacting_conversation_unicode_ellipsis
+  source: real Claude Code 2.1.198 compaction frame captured from tmux session 1:0.0 and screenshot 20260701-027.png
 - agent: codex
   capture_date: '2026-06-20'
   case_name: choice_question

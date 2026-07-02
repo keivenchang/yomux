@@ -526,9 +526,9 @@ _WORKING_LINE_RE = re.compile(
     rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+\S.*(?:…|\.{{3}}).*"
     r"(?:\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt|[↑↓]|\b\d+(?:\.\d+)?\s*[smh]\b)[^)]*\)|\b\d+(?:\.\d+)?\s*[smh]\b)"
     r"|^[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
-    # Claude Code auto-compact progress line: "Compacting conversation... (Nm Ns → Nk tokens) NN%"
+    # Claude Code auto-compact progress line: "Compacting conversation… (Nm Ns → Nk tokens) NN%"
     # Starts with a capital letter (no leading symbol), so the symbol-gated branch above misses it.
-    r"|^\s*Compacting\s+conversation\.{3}.*\([^)]*(?:tokens|→)[^)]*\)"
+    r"|^\s*Compacting\s+conversation(?:…|\.{3}).*\([^)]*(?:tokens|→)[^)]*\)"
     r")",
     re.IGNORECASE,
 )
@@ -855,13 +855,6 @@ def _parse_agent_goal_elapsed_seconds(line: str) -> float | None:
     return _parse_codex_goal_elapsed_seconds(line)
 
 
-def _parse_agent_active_goal_elapsed_seconds(line: str) -> float | None:
-    elapsed = _parse_claude_goal_elapsed_seconds(line)
-    if elapsed is not None:
-        return elapsed
-    return _parse_codex_pursuing_goal_elapsed_seconds(line)
-
-
 def _parse_status_token_count(line: str) -> int | None:
     matches = list(_STATUS_COUNTER_TOKEN_RE.finditer(line))
     if not matches:
@@ -960,7 +953,7 @@ def _last_agent_goal_elapsed_seconds(lines: list[str]) -> float | None:
 def _status_counter_advanced(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
     if not previous:
         return False
-    if previous.get("status_identity") != current.get("status_identity"):
+    if not _status_counter_same_position(previous, current) and previous.get("status_identity") != current.get("status_identity"):
         return False
     for key in ("status_elapsed_seconds", "status_tokens", "status_tool_uses"):
         old = previous.get(key)
@@ -968,6 +961,29 @@ def _status_counter_advanced(previous: dict[str, object] | None, current: dict[s
         if isinstance(old, (int, float)) and isinstance(new, (int, float)) and new > old:
             return True
     return False
+
+
+def _status_counter_same_position(previous: dict[str, object], current: dict[str, object]) -> bool:
+    previous_row = previous.get("status_row_from_bottom")
+    current_row = current.get("status_row_from_bottom")
+    previous_column = previous.get("status_column")
+    current_column = current.get("status_column")
+    return (
+        isinstance(previous_row, int)
+        and isinstance(current_row, int)
+        and isinstance(previous_column, int)
+        and isinstance(current_column, int)
+        and previous_row == current_row
+        and previous_column == current_column
+    )
+
+
+def _status_spinner_advanced(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
+    if not previous or not _status_counter_same_position(previous, current):
+        return False
+    previous_marker = str(previous.get("status_marker") or "")
+    current_marker = str(current.get("status_marker") or "")
+    return previous_marker in _WORKING_SPINNER_GLYPHS and current_marker in _WORKING_SPINNER_GLYPHS and previous_marker != current_marker
 
 
 def _status_counter_screen_state(counter: dict[str, object], pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
@@ -979,9 +995,10 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
         previous = _VISIBLE_STATUS_COUNTER_CACHE.get(pane_target)
         previous_counter = previous.get("counter") if previous else None
         advanced = _status_counter_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
+        spinner_advanced = _status_spinner_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
         previous_liveness = _status_counter_liveness_snapshot(previous_counter if isinstance(previous_counter, dict) else None)
         current_liveness = _status_counter_liveness_snapshot(counter)
-        if previous and previous_liveness == current_liveness and not advanced:
+        if previous and previous_liveness == current_liveness and not advanced and not spinner_advanced:
             last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now)
             stale = now - last_advanced_at > _STATUS_COUNTER_STALE_SECONDS
             last_counter_seen_at = float(previous.get("last_counter_seen_at") or now)
@@ -989,9 +1006,11 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
             _VISIBLE_STATUS_COUNTER_CACHE[pane_target] = {
                 "counter": dict(counter),
                 "first_seen_at": previous.get("first_seen_at") if previous else now,
-                "last_advanced_at": now if advanced or not previous else previous.get("last_advanced_at", now),
+                "last_advanced_at": now if advanced or spinner_advanced or not previous else previous.get("last_advanced_at", now),
                 "last_counter_seen_at": now,
             }
+    else:
+        spinner_advanced = False
 
     state = {
         "key": "idle" if stale else "working",
@@ -999,6 +1018,7 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
         "negative_reason": "stale visible status counter" if stale else "agent is working",
         "activity_source": "visible-counter",
         "status_counter_advanced": advanced,
+        "status_spinner_advanced": spinner_advanced,
         "last_counter_seen_at": last_counter_seen_at,
     }
     state.update(counter)
@@ -1006,7 +1026,7 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
 
 
 def _is_working_line(line: str) -> bool:
-    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _parse_agent_active_goal_elapsed_seconds(line) is not None)
+    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
 
 
 def visible_agent_working(visible_text: str) -> bool:
@@ -1045,13 +1065,14 @@ def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
     counter_index, counter = _last_status_counter(lines)
     if counter_index < 0 or counter is None or _working_line_has_later_prompt(lines, counter_index):
         return None
+    counter = dict(counter)
+    counter["status_row_from_bottom"] = len(lines) - counter_index - 1
+    counter["status_column"] = len(lines[counter_index]) - len(lines[counter_index].lstrip())
     goal_elapsed_seconds = _last_agent_goal_elapsed_seconds(lines)
     if goal_elapsed_seconds is not None:
-        counter = dict(counter)
         counter["goal_elapsed_seconds"] = goal_elapsed_seconds
         counter["display_elapsed_seconds"] = goal_elapsed_seconds
     else:
-        counter = dict(counter)
         counter["display_elapsed_seconds"] = counter.get("status_elapsed_seconds")
     return counter
 
@@ -1224,6 +1245,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if _is_footer_hint_line(stripped):
         return True
     if _is_working_line(line):
+        return True
+    if _parse_agent_goal_elapsed_seconds(stripped) is not None:
         return True
     if _is_box_drawing_chrome_line(stripped):
         return True

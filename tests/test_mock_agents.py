@@ -527,6 +527,37 @@ def test_claude_default_mock_list_has_no_unknown_or_generic_cases(monkeypatch):
         assert label == "idle"
 
 
+def test_claude_mock_lists_and_replays_compacting_spinner_capture(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", None)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "claude")
+
+    case = mock_agent_common.find_mock_fixture_case("compacting_conversation_unicode_ellipsis")
+
+    assert case is not None
+    assert case["expected"]["screen_key"] == "working"
+    assert classify_agent_pane(
+        {"pane_target": "%mock-compacting", "agent_kind": "claude"},
+        capture_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        capture_styled_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        include_composer=False,
+        include_transcript_activity=False,
+    ).screen["key"] == "working"
+
+    fields = mock_agent_common.claude_fixture_working_fields(case)
+    assert fields["marker"] == "✶"
+    assert fields["verb"] == "Compacting conversation"
+    assert fields["base_seconds"] == "674"
+    assert fields["base_tokens"] == "28600"
+    assert fields["token_suffix"] == "k"
+    assert fields["token_decimals"] == "1"
+    assert fields["direction"] == "↑"
+    assert fields["composer_label"] == "Check DIS-2310 status"
+    assert fields["footer_status"] == "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · PR #93 · esc to interrupt"
+
+    mock_agent_common.handle_command("mock list", {})
+    assert "compacting_conversation_unicode_ellipsis [Working]" in capsys.readouterr().out
+
+
 def test_mock_fixture_list_dedupes_same_fixture_identity(monkeypatch, capsys):
     duplicate_path = PROMPT_CORPUS_DIR / "captures" / "choice_question_real__codex-cli-0.141.0_20260620.yaml"
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 160)

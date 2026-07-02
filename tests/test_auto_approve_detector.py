@@ -858,6 +858,20 @@ VISIBLE_AGENT_WORKING_CASES = [
     ),
     pytest.param(
         "\n".join([
+            "✶ Compacting conversation… (11m 14s · ↑ 28.6k tokens)",
+            "  ⎿ Tip: /loop runs any prompt on a recurring schedule.",
+            "                                      100% context used",
+            "──────────────────────── Check DIS-2310 status ──",
+            "❯",
+            "────────────────────────────────────────────────",
+            "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · PR #93 · esc to interrupt",
+        ]),
+        True,
+        "working",
+        id="claude-compacting-spinner-with-composer-title",
+    ),
+    pytest.param(
+        "\n".join([
             "⠿ Running 2 agents…",
             "  ├ Verify detector fixtures · 14 tool uses · 31.2k tokens",
             "  └ Check current Claude pane state · 23 tool uses · 77.5k tokens",
@@ -1104,6 +1118,55 @@ def test_agent_screen_state_reports_token_counter_advancement():
     assert state["key"] == "working"
     assert state["status_counter_advanced"] is True
     assert state["status_tokens"] == 30200
+
+
+def test_agent_screen_state_tracks_spinner_movement_across_captures():
+    first = "✶ Wibbling… (13m 48s · ↓ 29.4k tokens)"
+    second = "✢ WhateverTheFuckItIs… (13m 48s · ↓ 29.4k tokens)"
+
+    first_state = prompt_detector.agent_screen_state(first, pane_target="%spinner-moves", now=1000.0)
+    second_state = prompt_detector.agent_screen_state(second, pane_target="%spinner-moves", now=1000.1)
+
+    assert first_state["key"] == "working"
+    assert first_state["status_spinner_advanced"] is False
+    assert second_state["key"] == "working"
+    assert second_state["status_spinner_advanced"] is True
+    assert second_state["status_counter_advanced"] is False
+
+
+def test_codex_spinner_movement_at_same_position_is_temporal_working_evidence():
+    first = "• Working (8m 20s • esc to interrupt)"
+    second = "◦ Working (8m 26s • esc to interrupt)"
+
+    prompt_detector.agent_screen_state(first, pane_target="%codex-spinner-moves", now=1000.0)
+    state = prompt_detector.agent_screen_state(second, pane_target="%codex-spinner-moves", now=1006.0)
+
+    assert state["key"] == "working"
+    assert state["status_spinner_advanced"] is True
+    assert state["status_counter_advanced"] is True
+    assert state["status_row_from_bottom"] == 0
+    assert state["status_column"] == 0
+
+
+@pytest.mark.parametrize(("first", "second", "expected_elapsed", "expected_tokens"), [
+    ("✢ Bloviating… (10s · ↓ 558 tokens)", "* Bloviating… (13s · ↓ 658 tokens)", 13, 658),
+    (
+        "✻ Bloviating… (57s · ↓ 3.7k tokens · thinking with high effort)",
+        "✢ Bloviating… (62s · ↓ 4.7k tokens · thinking with high effort)",
+        62,
+        4700,
+    ),
+])
+def test_agent_screen_state_tracks_spinner_and_counters_over_time(first, second, expected_elapsed, expected_tokens):
+    pane_target = f"%bloviating-moves-{expected_elapsed}"
+    prompt_detector.agent_screen_state(first, pane_target=pane_target, now=1000.0)
+    state = prompt_detector.agent_screen_state(second, pane_target=pane_target, now=1003.0)
+
+    assert state["key"] == "working"
+    assert state["status_spinner_advanced"] is True
+    assert state["status_counter_advanced"] is True
+    assert state["status_elapsed_seconds"] == expected_elapsed
+    assert state["status_tokens"] == expected_tokens
 
 
 def test_agent_screen_state_prefers_codex_pursuing_goal_elapsed_for_display():
@@ -1713,7 +1776,7 @@ def test_completed_claude_followup_beats_persistent_goal_active_footer():
 
     state = prompt_detector.agent_screen_state(visible_text)
 
-    assert prompt_detector.visible_agent_working(visible_text) is True
+    assert prompt_detector.visible_agent_working(visible_text) is False
     assert state["key"] == "needs-input"
     assert state["question_text"] == "Want me to remove the orphaned cache?"
 
@@ -1732,6 +1795,25 @@ def test_completed_goal_items_followup_beats_persistent_goal_active_footer():
 
     assert state["key"] == "needs-input"
     assert state["question_text"] == "want me to commit + push them?"
+
+
+def test_completed_claude_with_persistent_goal_footer_is_idle():
+    visible_text = "\n".join([
+        "Full state, wrapped up:",
+        "- Backups now cover everything.",
+        "Nothing outstanding.",
+        "✻ Worked for 30s · 2 shells still running",
+        "new task? /clear to save 934.6k tokens · ◎ /goal active (9h)",
+        "────────────────────────────────────────────────────────────────",
+        "❯\xa0confirm the next cron backup runs cleanly",
+        "────────────────────────────────────────────────────────────────",
+        "⏵⏵ bypass permissions on · 2 shells · ← for agents · ↓ to manage",
+    ])
+
+    assert prompt_detector.visible_agent_working(visible_text) is False
+    state = prompt_detector.agent_screen_state(visible_text, pane_target="%completed-goal-footer")
+    assert state["key"] == "idle"
+    assert state["negative_reason"] == "idle composer"
 
 
 def test_ask_user_question_footer_parts_are_recognized():

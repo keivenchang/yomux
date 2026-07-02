@@ -652,6 +652,17 @@ fixtures:
   fixture_id: working_visible_counter__claude-code-2.1.183_20260620
   id: claude-visible-working-counter-real
   provenance: real Claude Code 2.1.183 `Clauding…` visible counter capture
+- case_name: compacting_conversation_unicode_ellipsis
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702.yaml
+  fixture_id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
+  id: claude-compacting-conversation-real
+  provenance: real Claude Code 2.1.198 compaction frame with animated spinner and decorated composer title
 - case_name: working_command_counter
   expected:
     approval_visible: false
@@ -854,6 +865,9 @@ parity_groups:
   - agent: claude
     case_name: working_labelled_composer
     file: captures/working_labelled_composer__claude-code-2.1.198_20260701.yaml
+  - agent: claude
+    case_name: compacting_conversation_unicode_ellipsis
+    file: captures/compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702.yaml
   - agent: codex
     case_name: working_command_counter
     file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml

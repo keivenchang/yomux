@@ -519,7 +519,7 @@ CODEX_CAPTURED_STATUS_RE = re.compile(
 )
 CODEX_CAPTURED_PROMPT_RE = re.compile(r"^\s*[›>]\s+(?!\d+[.:]\s+)\S.*$")
 CLAUDE_CAPTURED_WORKING_RE = re.compile(
-    r"^(?P<marker>\S)\s+(?P<verb>[^…]+)…\s+\((?P<elapsed>[^)]*?)\s+·\s+↓\s+(?P<tokens>\d+(?:\.\d+)?)(?P<token_suffix>[kKmM]?)\s+tokens\)",
+    r"^(?P<marker>\S)\s+(?P<verb>.+?)(?:…|\.{3})\s+\((?P<elapsed>[^)]*?)\s+·\s+(?P<direction>[↑↓])\s+(?P<tokens>\d+(?:\.\d+)?)(?P<token_suffix>[kKmM]?)\s+tokens\)",
     re.IGNORECASE,
 )
 CLAUDE_CAPTURED_LABELLED_SEPARATOR_RE = re.compile(r"^\s*[─━═]{3,}\s+(?P<label>\S.*?\S)\s+[─━═]+\s*$")
@@ -1155,6 +1155,7 @@ def claude_fixture_working_fields(case: dict[str, object]) -> dict[str, str]:
         "base_tokens": "1",
         "token_suffix": "",
         "token_decimals": "0",
+        "direction": "↓",
         "footer_status": "  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt",
         "status_lines": "",
         "composer_label": "",
@@ -1173,6 +1174,7 @@ def claude_fixture_working_fields(case: dict[str, object]) -> dict[str, str]:
         fields["base_tokens"] = str(parse_working_token_count(token_text, match.group("token_suffix")))
         fields["token_suffix"] = match.group("token_suffix").lower()
         fields["token_decimals"] = str(len(token_text.partition(".")[2]))
+        fields["direction"] = match.group("direction")
     if working_index >= 0:
         status_lines: list[str] = []
         for line in capture_lines[working_index + 1:]:
@@ -1218,7 +1220,8 @@ def claude_working_line(seconds: float, state: dict[str, str]) -> str:
     decimals = max(0, int(state.get("claude_working_token_decimals", "0") or 0))
     divisor = {"k": 1000, "m": 1000000}.get(suffix)
     token_text = f"{token_count / divisor:.{decimals}f}{suffix}" if divisor else str(token_count)
-    return f"{marker} {verb}… ({format_working_elapsed(elapsed)} · ↓ {token_text} tokens)"
+    direction = state.get("claude_working_direction", "↓") or "↓"
+    return f"{marker} {verb}… ({format_working_elapsed(elapsed)} · {direction} {token_text} tokens)"
 
 
 def claude_live_working_block_lines(seconds: float, state: dict[str, str]) -> list[str]:
@@ -1341,6 +1344,7 @@ def start_claude_live_working_mock(state: dict[str, str], case: dict[str, object
     state["claude_working_token_decimals"] = fields["token_decimals"]
     state["claude_working_marker"] = fields["marker"]
     state["claude_working_verb"] = fields["verb"]
+    state["claude_working_direction"] = fields["direction"]
     state["claude_working_footer_status"] = fields["footer_status"]
     state["claude_working_status_lines"] = fields["status_lines"]
     state["claude_working_composer_label"] = fields["composer_label"]
