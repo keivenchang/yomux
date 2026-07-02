@@ -1867,18 +1867,14 @@ function infoPathLabel(git) {
   const label = compactHomePath(path);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return label;
-  return infoWorktreeText(label, compactHomePath(parent));
+  return worktreeDisplayText({name: label, parent_root: compactHomePath(parent)});
 }
 
 function infoPathTitle(git) {
   const path = infoGitRoot(git);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return path;
-  return infoWorktreeText(path, parent);
-}
-
-function infoWorktreeText(name, root) {
-  return t('popover.worktreeOf', {name, root});
+  return worktreeDisplayText({name: path, parent_root: parent});
 }
 
 function infoGitRoot(git) {

@@ -966,10 +966,7 @@ function windowMetadataBranchHtml(git) {
 }
 
 function worktreePopoverValueHtml(worktree) {
-  return esc(t('popover.worktreeOf', {
-    name: worktree?.name || worktree?.path || '',
-    root: worktree?.parent_root || '',
-  }));
+  return esc(worktreeDisplayText(worktree));
 }
 
 function windowMetadataRowsHtml(row) {

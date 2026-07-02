@@ -1940,6 +1940,13 @@ function userMessageSnapshot(value, fallback = '') {
   };
 }
 
+function worktreeDisplayText(worktree) {
+  const value = worktree && typeof worktree === 'object' ? worktree : {};
+  const name = String(value.name || value.path || '');
+  const root = String(value.parent_root || '');
+  return root ? t('popover.worktreeOf', {name, root}) : name;
+}
+
 function clientPushCanSupplyData() {
   return Boolean(clientEventsSource && location.protocol !== 'file:');
 }
@@ -23749,10 +23756,7 @@ function windowMetadataBranchHtml(git) {
 }
 
 function worktreePopoverValueHtml(worktree) {
-  return esc(t('popover.worktreeOf', {
-    name: worktree?.name || worktree?.path || '',
-    root: worktree?.parent_root || '',
-  }));
+  return esc(worktreeDisplayText(worktree));
 }
 
 function windowMetadataRowsHtml(row) {
@@ -54345,18 +54349,14 @@ function infoPathLabel(git) {
   const label = compactHomePath(path);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return label;
-  return infoWorktreeText(label, compactHomePath(parent));
+  return worktreeDisplayText({name: label, parent_root: compactHomePath(parent)});
 }
 
 function infoPathTitle(git) {
   const path = infoGitRoot(git);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return path;
-  return infoWorktreeText(path, parent);
-}
-
-function infoWorktreeText(name, root) {
-  return t('popover.worktreeOf', {name, root});
+  return worktreeDisplayText({name: path, parent_root: parent});
 }
 
 function infoGitRoot(git) {

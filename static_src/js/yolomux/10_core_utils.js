@@ -136,6 +136,13 @@ function userMessageSnapshot(value, fallback = '') {
   };
 }
 
+function worktreeDisplayText(worktree) {
+  const value = worktree && typeof worktree === 'object' ? worktree : {};
+  const name = String(value.name || value.path || '');
+  const root = String(value.parent_root || '');
+  return root ? t('popover.worktreeOf', {name, root}) : name;
+}
+
 function clientPushCanSupplyData() {
   return Boolean(clientEventsSource && location.protocol !== 'file:');
 }

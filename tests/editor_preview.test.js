@@ -98,13 +98,15 @@ async function runEditorPreviewSuite() {
 
   test('shared popover labels resolve through the active locale', () => {
     const source = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     assert.ok(source.includes("const title = options.title || t('contextmenu.copyPath');"), 'path copy buttons reuse the shared localized Copy path label');
     assert.ok(source.includes("const copyLabel = options.title || t('common.copy');"), 'generic popover copy buttons reuse one localized Copy label');
     assert.ok(source.includes("${esc(t('yoagent.emptyPerSession'))}"), 'empty per-session agent popovers reuse the localized empty-state label');
     assert.ok(source.includes("tPlural('common.tabs', count)"), 'pane drag previews use the localized tab count');
     assert.ok(source.includes("t('common.items', {count: normalizedPaths.length})"), 'multi-item file drags use the localized item count');
     assert.ok(source.includes("t('common.more', {count: normalizedPaths.length - 4})"), 'file drag previews reuse the localized count-aware more label');
-    assert.ok(/function worktreePopoverValueHtml\(worktree\)[\s\S]*t\('popover\.worktreeOf'/.test(source), 'every worktree relation reuses one localized renderer');
+    assert.ok(/function worktreeDisplayText\(worktree\)[\s\S]*t\('popover\.worktreeOf'/.test(coreSource)
+      && /function worktreePopoverValueHtml\(worktree\)[\s\S]*worktreeDisplayText\(worktree\)/.test(source), 'every worktree relation reuses one shared localized renderer');
     assert.ok(source.includes("title: t('popover.copySessionId')") && source.includes("title: t('common.copyTranscriptPath')"), 'transcript copy controls use localized tooltips');
     assert.ok(source.includes("popoverRow(t('info.field.linear'), linearValue)") && source.includes("popoverRow(t('common.pullRequestShort'), pullRequestPopoverRowHtml(session, pr))"), 'Linear and PR popover rows reuse shared localized field labels');
     assert.ok(source.includes("t('state.workingFor', {duration: compactElapsedDurationText(elapsed)})"), 'agent working duration uses the localized state label');
@@ -2421,6 +2423,15 @@ async function runEditorPreviewSuite() {
     assert.ok(/popover-label">PR<\/div><div class="popover-value"><a href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*<span class="ci-indicator tab-symbol pr-number-chip pr-status-merged[^"]*">#9961<\/span><\/a>/.test(popover), 'merged PR popover PR row links the same purple #number chip as the header');
     assert.equal(popover.includes('#9961 MERGED'), false, 'merged PR popover omits redundant MERGED text');
     assert.equal(popover.includes('PR #9961'), false, 'merged PR popover avoids repeating PR before the #number value');
+    const worktreePopover = api.sessionPopoverHtml('4', {
+      selected_pane: {current_path: '/home/test/yolomux.dev8001'},
+      project: {git: {
+        root: '/home/test/yolomux.dev8001',
+        branch: 'main',
+        worktree: {name: 'yolomux.dev8001', path: '/home/test/yolomux.dev8001', parent_root: '/home/test/yolomux'},
+      }},
+    }, '', false);
+    assert.ok(worktreePopover.includes(api.t('popover.worktreeOf', {name: 'yolomux.dev8001', root: '/home/test/yolomux'})), 'linked-worktree session popovers use the shared formatter without an Info Bar render error');
     assert.equal(popover.includes('popover-label">desc'), false, 'merged PR popover omits the desc row because the header already carries the PR title');
     assert.equal(popover.includes('Status check:'), false, 'merged PR popover removes the YO!agent status sentence when the dedicated git row is present');
     assert.ok(popover.includes('10 dirty · 18 behind'), 'merged PR popover keeps git facts in the dedicated git row');

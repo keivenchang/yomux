@@ -321,7 +321,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(sources.preview.includes("doc.title = t('preview.popout.title', {name: basenameOf(path)});"), 'preview popout document title is localized');
     assert.ok(/function renderClosedEditor[\s\S]*t\('editor\.fileClosed'\)/.test(sources.editor)
       && /async function saveFileEditor[\s\S]*editor\.autoSaving[\s\S]*dialog\.conflictTitle[\s\S]*editor\.saveFailed[\s\S]*editor\.autoSaved/.test(sources.editor), 'editor closed/save lifecycle statuses resolve through locale keys');
-    assert.ok(/function infoPathLabel[\s\S]*infoWorktreeText[\s\S]*function infoWorktreeText[\s\S]*popover\.worktreeOf/.test(sources.terminal)
+    assert.ok(/function worktreeDisplayText\(worktree\)[\s\S]*t\('popover\.worktreeOf'/.test(sources.core)
+      && /function infoPathLabel[\s\S]*worktreeDisplayText/.test(sources.terminal)
       && sources.terminal.includes("t('info.missing.tmuxSubWindow')"), 'Info worktree and missing-window metadata are localized through shared owners');
     assert.equal(/Hide dotfiles|Show hidden files \(dotfiles\)|No HTTPS\. Highly recommend|clipboard copy is unavailable|Find unavailable:| missing on disk|label: 'recent'|`\$\{basenameOf\(path\)\} preview`|file closed|failed to inspect preview file|auto-saving\.\.\.|save conflict: file changed on disk|save failed:|no Claude\/Codex tmux sub-window detected/.test(Object.values(sources).join('\n')), false, 'audited source files retain no raw-English display copies');
   });
