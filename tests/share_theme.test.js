@@ -362,7 +362,7 @@ async function runShareThemeSuite() {
     assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
     assert.ok(/function diffRefComparisonLineHtml[\s\S]*diffRefResetButtonHtml\(refs,\s*'diff-ref-inline-reset'\)/.test(changedFilesSource), 'Differ uses the shared reset button helper with its right-aligned row class');
     assert.ok(/function diffRefControlsHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'compact Editor FROM/TO controls use the shared reset button helper');
-    assert.ok(/function diffRefResetButtonHtml[\s\S]*t\('pref\.reset\.row'\)[\s\S]*<\/button>/.test(changedFilesSource), 'Diff reset button visibly says Reset');
+    assert.ok(/function diffRefResetButtonHtml[\s\S]*t\('common\.reset'\)[\s\S]*<\/button>/.test(changedFilesSource), 'Diff reset button visibly says Reset');
     assert.equal(/function diffRefResetButtonHtml[\s\S]*>⇤<\/button>/.test(changedFilesSource), false, 'Diff reset button does not use a glyph-only label');
     assert.equal(/function diffRefResetButtonHtml[\s\S]*>↺<\/button>/.test(changedFilesSource), false, 'Diff reset button does not use the reload-looking circular arrow');
     assert.ok(/diffRefReset\.closest\('\[data-diff-ref-controls\]'\)[\s\S]*diffRefReset\.parentElement\?\.querySelector/.test(changedFilesSource), 'Differ reset continues to resolve its sibling controls after right alignment');
@@ -692,12 +692,12 @@ async function runShareThemeSuite() {
     const finderSortPanel = api.fileExplorerChangesPanelHtml();
     assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
     assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(finderSortPanel), 'Finder embedded Differ header orders Date, Expand all, Collapse all, Reload');
-    const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'finder.sort.newest', oldest: 'finder.sort.oldest'};
+    const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'common.sort.recent', oldest: 'finder.sort.oldest'};
     for (const [value, key] of Object.entries(sortLabels)) {
       const label = api.t(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       assert.ok(new RegExp(`<option value="${value}"[^>]*>${label}</option>`).test(finderSortPanel), `Finder embedded Differ sort offers ${value}`);
     }
-    assert.ok(new RegExp(`<option value="newest"[^>]* selected[^>]*>${api.t('finder.sort.newest')}</option>`).test(finderSortPanel), 'Finder embedded Differ sort defaults to recent');
+    assert.ok(new RegExp(`<option value="newest"[^>]* selected[^>]*>${api.t('common.sort.recent')}</option>`).test(finderSortPanel), 'Finder embedded Differ sort defaults to recent');
     assert.equal(/changes-sort-toggle|changes-sort-seg|changes-sort-divider/.test(finderSortPanel), false, 'Finder embedded Differ no longer uses a separate segmented sort control');
     const sortItems = [
       {path: 'b.txt', repo: '/repo/app', mtime: 100},
@@ -1812,7 +1812,7 @@ async function runShareThemeSuite() {
     assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders mode tabs, immediate Session, spacer, and close control');
     assert.equal(finderPanelSource.includes('fileExplorerChangesCollapseToggleHtml()'), false, 'Finder panel primary row no longer renders a redundant Differ collapse/expand button next to close');
     assert.ok(/file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel/.test(finderPanelSource), 'Finder path row renders Sync, path, then Copy');
-    assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control[\s\S]*changes\.session[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Finder and Differ keep the Session dropdown in the shared top row');
+    assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control[\s\S]*common\.sessionLabel[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Finder and Differ keep the Session dropdown in the shared top row');
     assert.equal(finderPanelSource.includes('file-explorer-scope-row'), false, 'Finder no longer renders a separate scope row');
     assert.equal(finderPanelSource.includes('file-explorer-quick-access-panel'), false, 'Finder pane chrome no longer renders visible quick-root buttons');
     assert.ok(finderPanelBundle.includes("t('finder.toolbar.syncTitle')"), 'Finder Sync button has a dedicated tooltip/aria label string');
@@ -1825,7 +1825,7 @@ async function runShareThemeSuite() {
     assert.equal(finderPanelBundle.includes('renderQuickAccessInto(fileExplorerQuickAccess)'), false, 'legacy Finder quick-root container is not populated in visible UI');
     assert.ok(/const modes = \[[\s\S]*mode: 'files'[\s\S]*mode: 'diff'[\s\S]*mode: 'tabber'[\s\S]*data-file-explorer-mode-set="\$\{esc\(item\.mode\)\}"/.test(finderPanelBundle), 'Finder/Differ/Tabber switcher renders all mode tabs from one source');
     assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
-    assert.ok(/fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*changes\.refresh/.test(finderPanelSource), 'Finder date-mode button, Expand all, Collapse all, and Reload form a trailing cluster in the files-only action row');
+    assert.ok(/fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*common\.reload/.test(finderPanelSource), 'Finder date-mode button, Expand all, Collapse all, and Reload form a trailing cluster in the files-only action row');
     assert.equal(finderPanelSource.includes('file-explorer-repo-summary'), false, 'Finder files-only action row no longer prints repo/path text between sort and date display');
     const finderActionsRowStart = finderPanelSource.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
     const finderActionsRowSource = finderPanelSource.slice(finderActionsRowStart, finderPanelSource.indexOf('</div>', finderActionsRowStart));
@@ -1979,7 +1979,7 @@ async function runShareThemeSuite() {
       assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 3)"), 'runtime reads appearance.pane_spacing with a 3px fallback (matches the backend default)');
       assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
       assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
-      assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
+      assert.ok(/preferenceSettingItem\('appearance\.pane_spacing', \{type: 'number', min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field through the shared setting builder');
       assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_spacing.label'], 'Pane spacing', '#261: the pane spacing field has a localized label');
       // The terminal "follow" theme option reads "Follow global color theme" (NOT "app theme"), matching
       // the "Global color theme" setting it follows; the help references the global color theme too.
@@ -2219,14 +2219,14 @@ async function runShareThemeSuite() {
     assert.equal(diffBundle.includes('sessionFilesRefreshMsFromSettings'), false, 'Changed-files client-pull refresh setting helper is removed');
     assert.equal(diffBundle.includes("initialSetting('file_explorer.refresh_seconds'"), false, 'JS no longer reads the removed Finder fallback setting');
     assert.equal(diffBundle.includes("initialSetting('file_explorer.session_files_refresh_seconds'"), false, 'Changed-files/Differ fallback does not read a separate setting');
-    assert.ok(diffBundle.includes("path: 'performance.server_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server file-change poll stores milliseconds but displays 0.850-style seconds');
-    assert.ok(diffBundle.includes("path: 'performance.server_background_file_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server background file-change poll stores milliseconds but displays 5.000-style seconds');
-    assert.ok(diffBundle.includes("path: 'performance.server_directory_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server directory-change poll stores milliseconds but displays 0.850-style seconds');
-    assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
+    assert.ok(/preferenceSettingItem\('performance\.server_event_poll_ms', \{type: 'number',[^}]*displayDecimals: 3/.test(diffBundle), 'server file-change poll stores milliseconds but displays 0.850-style seconds');
+    assert.ok(/preferenceSettingItem\('performance\.server_background_file_event_poll_ms', \{type: 'number',[^}]*displayDecimals: 3/.test(diffBundle), 'server background file-change poll stores milliseconds but displays 5.000-style seconds');
+    assert.ok(/preferenceSettingItem\('performance\.server_directory_event_poll_ms', \{type: 'number',[^}]*displayDecimals: 3/.test(diffBundle), 'server directory-change poll stores milliseconds but displays 0.850-style seconds');
+    assert.ok(diffBundle.includes("preferenceSettingItem('performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
     assert.equal(diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default in bootstrap JS');
     assert.equal(diffBundle.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default on settings reload');
-    assert.ok(diffBundle.includes("path: 'performance.agent_status_pulse_period_ms'") && diffBundle.includes("initialSetting('performance.agent_status_pulse_period_ms')"), 'status ball pulse period is backed by settings defaults');
-    assert.ok(diffBundle.includes("path: 'performance.workflow_transition_glow_seconds'") && diffBundle.includes("initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow duration is backed by the Performance preference through settings defaults');
+    assert.ok(diffBundle.includes("preferenceSettingItem('performance.agent_status_pulse_period_ms'") && diffBundle.includes("initialSetting('performance.agent_status_pulse_period_ms')"), 'status ball pulse period is backed by settings defaults');
+    assert.ok(diffBundle.includes("preferenceSettingItem('performance.workflow_transition_glow_seconds'") && diffBundle.includes("initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow duration is backed by the Performance preference through settings defaults');
     assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the file transfer size cap');
     assert.ok(preferencesHtml.includes('Uploads/Downloads'), 'preferences rename Uploads to Uploads/Downloads');
     assert.ok(
@@ -5230,7 +5230,7 @@ async function runShareThemeSuite() {
       }
     }
     const sourceEnCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
-    assert.equal(sourceEnCatalog['popover.details'], 'details', 'W5: generic popover/YO!agent Details copy stays separate from pane Info Bar labels');
+    assert.equal(sourceEnCatalog['common.details'], 'details', 'W5: generic popover/YO!agent Details copy stays separate from pane Info Bar labels');
     assert.ok(controlsHtml.includes(`title="${hideDetailsLabel}" aria-label="${hideDetailsLabel}" aria-pressed="true"`), 'pane header Info Bar toggle starts as the hide Info Bar action');
     assert.equal(controlsHtml.includes('title="YO!info" aria-label="YO!info"'), false, 'pane header detail toggle is not mislabeled as the YO!info pane');
     const detailsPanel = new TestElement('panel-1');

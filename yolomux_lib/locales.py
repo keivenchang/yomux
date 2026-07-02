@@ -19,6 +19,7 @@ class LocaleSpec:
     code: str
     endonym: str
     plural_rule: str
+    aliases: tuple[str, ...] = ()
 
 
 _PLURAL_CATEGORIES_BY_RULE: dict[str, frozenset[str]] = {
@@ -34,25 +35,25 @@ _PLURAL_CATEGORIES_BY_RULE: dict[str, frozenset[str]] = {
 }
 
 LOCALE_SPECS: tuple[LocaleSpec, ...] = (
-    LocaleSpec("en", "English", "one"),
-    LocaleSpec("zh-Hant", "繁體中文", "other"),
-    LocaleSpec("zh-Hans", "简体中文", "other"),
-    LocaleSpec("ja", "日本語", "other"),
-    LocaleSpec("ko", "한국어", "other"),
-    LocaleSpec("es", "Español", "romance-million"),
-    LocaleSpec("de", "Deutsch", "one"),
-    LocaleSpec("fr", "Français", "french-million"),
-    LocaleSpec("it", "Italiano", "romance-million"),
-    LocaleSpec("pt-BR", "Português (BR)", "french-million"),
-    LocaleSpec("pl", "Polski", "polish"),
-    LocaleSpec("nl", "Nederlands", "one"),
-    LocaleSpec("he", "עברית", "hebrew"),
-    LocaleSpec("ar", "العربية", "arabic"),
-    LocaleSpec("ru", "Русский", "russian"),
-    LocaleSpec("hi", "हिन्दी", "hindi"),
-    LocaleSpec("vi", "Tiếng Việt", "other"),
-    LocaleSpec("th", "ไทย", "other"),
-    LocaleSpec("tr", "Türkçe", "one"),
+    LocaleSpec("en", "English", "one", ("english",)),
+    LocaleSpec("zh-Hant", "繁體中文", "other", ("traditional chinese",)),
+    LocaleSpec("zh-Hans", "简体中文", "other", ("simplified chinese", "中文")),
+    LocaleSpec("ja", "日本語", "other", ("japanese", "日本語")),
+    LocaleSpec("ko", "한국어", "other", ("korean", "한국어")),
+    LocaleSpec("es", "Español", "romance-million", ("espanol", "español", "spanish")),
+    LocaleSpec("de", "Deutsch", "one", ("deutsch", "german")),
+    LocaleSpec("fr", "Français", "french-million", ("francais", "français", "french")),
+    LocaleSpec("it", "Italiano", "romance-million", ("italian",)),
+    LocaleSpec("pt-BR", "Português (BR)", "french-million", ("portuguese", "portugues", "português")),
+    LocaleSpec("pl", "Polski", "polish", ("polish",)),
+    LocaleSpec("nl", "Nederlands", "one", ("dutch", "nederlands")),
+    LocaleSpec("he", "עברית", "hebrew", ("hebrew",)),
+    LocaleSpec("ar", "العربية", "arabic", ("arabic",)),
+    LocaleSpec("ru", "Русский", "russian", ("russian",)),
+    LocaleSpec("hi", "हिन्दी", "hindi", ("hindi",)),
+    LocaleSpec("vi", "Tiếng Việt", "other", ("vietnamese",)),
+    LocaleSpec("th", "ไทย", "other", ("thai",)),
+    LocaleSpec("tr", "Türkçe", "one", ("turkish",)),
 )
 LOCALE_ENDONYMS = tuple((spec.code, spec.endonym) for spec in LOCALE_SPECS)
 SHIPPED_LOCALES = tuple(locale for locale, _label in LOCALE_ENDONYMS)
@@ -60,6 +61,14 @@ FALLBACK_LOCALE = "en"
 PSEUDO_LOCALE = "en-XA"
 SYSTEM_LOCALE_PREFERENCE = "system"
 LANGUAGE_PREFERENCES = frozenset((SYSTEM_LOCALE_PREFERENCE, *SHIPPED_LOCALES, PSEUDO_LOCALE))
+LANGUAGE_VALUE_ALIASES = {
+    alias: spec.code
+    for spec in LOCALE_SPECS
+    for alias in spec.aliases
+} | {
+    "pseudo": PSEUDO_LOCALE,
+    "system language": SYSTEM_LOCALE_PREFERENCE,
+}
 RTL_LANGUAGE_BASES = frozenset({"ar", "fa", "he", "ur"})
 _LOCALE_BY_CASEFOLD = {locale.casefold(): locale for locale in (*SHIPPED_LOCALES, PSEUDO_LOCALE)}
 _LOCALE_SPEC_BY_CODE = {spec.code: spec for spec in LOCALE_SPECS}
@@ -67,6 +76,12 @@ PLURAL_CATEGORIES_BY_LOCALE = {
     spec.code: _PLURAL_CATEGORIES_BY_RULE[spec.plural_rule]
     for spec in LOCALE_SPECS
 }
+
+
+def language_preference_description() -> str:
+    """Describe accepted language values from the canonical registry."""
+    locale_values = ", ".join((*SHIPPED_LOCALES, f"{PSEUDO_LOCALE} pseudo"))
+    return f"UI language. {SYSTEM_LOCALE_PREFERENCE} matches the browser/OS; otherwise a locale code with a shipped catalog ({locale_values})."
 
 
 def _plural_operands(value: object) -> tuple[Decimal, int, int] | None:

@@ -449,9 +449,9 @@ async function runTabberSuite() {
     // #10: a global-theme change re-themes live editors via the compartment swap.
     assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id \|\| previousCursorColor !== fileEditorCursorColor\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
     // #12: Preferences field renamed. (Phase 0: the label is now i18n-keyed; en.json holds the text.)
-    assert.ok(source.includes("label: t('pref.appearance.theme.label')"), '#12: the global theme field is i18n-keyed');
+    assert.ok(source.includes("preferenceSettingItem('appearance.theme'") && source.includes('label: t(localeKeys.label, labelParams)'), '#12: the global theme field is i18n-keyed through the shared setting builder');
     assert.ok(source.includes("'appearance.date_time_hour_cycle': '24'") && source.includes("initialSetting('appearance.date_time_hour_cycle')"), 'date/time clock defaults through the shared setting fallback table');
-    assert.ok(source.includes("label: t('pref.appearance.date_time_hour_cycle.label')"), 'date/time clock Preferences field is i18n-keyed');
+    assert.ok(source.includes("preferenceSettingItem('appearance.date_time_hour_cycle'"), 'date/time clock Preferences field uses the shared i18n setting builder');
     const enThemeCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
     assert.equal(enThemeCatalog['pref.appearance.theme.label'], 'Global appearance', '#12: the Preferences field reads "Global appearance"');
     assert.equal(enThemeCatalog['pref.appearance.theme.label'] === 'Global app theme', false, '#12: no stale "Global app theme" label remains');
@@ -1107,7 +1107,7 @@ async function runTabberSuite() {
     // carries it (so toggling the pref rebuilds the decorations).
     assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'blame-all-lines is in the editor config signature');
     assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'all-lines blame decorates every visible line');
-    assert.ok(source.includes('data-setting-path="editor.blame_all_lines"') || source.includes("path: 'editor.blame_all_lines'"), 'Preferences exposes the all-lines blame toggle');
+    assert.ok(source.includes("preferenceSettingItem('editor.blame_all_lines'"), 'Preferences exposes the all-lines blame toggle through the shared setting builder');
     // Blame + Diff buttons are adjacent git-history controls, but Blame stays available after Diff learns
     // a file is clean so inline blame still works in normal edit mode.
     assert.ok(/file-editor-blame-panel[\s\S]{0,260}file-editor-diff-panel/.test(source), 'Blame and Diff buttons are adjacent toolbar controls');
@@ -1928,7 +1928,7 @@ async function runTabberSuite() {
     assert.ok(source.includes("apiFetchJson('/api/drop-action/run'"), 'server-side actions use the /api/drop-action/run endpoint');
     assert.ok(source.includes("appendContextMenuButton(menu, t('contextmenu.copyImage')"), 'Finder/Differ image context menus expose localized Copy image');
     assert.ok(source.includes('function commandPaletteDropActionItems()'), 'command palette reuses the drop-action registry for active file actions');
-    assert.ok(source.includes("path: 'uploads.custom_actions'") && source.includes("path: 'uploads.suggestion_autorun'") && source.includes("path: 'uploads.image_action_order'"), 'Uploads Preferences expose custom actions, image ordering, and autorun');
+    assert.ok(source.includes("preferenceSettingItem('uploads.custom_actions'") && source.includes("preferenceSettingItem('uploads.suggestion_autorun'") && source.includes("preferenceSettingItem('uploads.image_action_order'"), 'Uploads Preferences expose custom actions, image ordering, and autorun through the shared setting builder');
   }
 
   await testAsync('drop-action status reuses the localized display label', async () => {

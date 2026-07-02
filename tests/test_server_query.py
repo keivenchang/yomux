@@ -638,7 +638,7 @@ def test_unknown_get_localizes_plain_text_from_accept_language(monkeypatch):
     try:
         http_routes._write_not_found_after_default_auth(request, "GET")
         assert writes == [
-            (HTTPStatus.NOT_FOUND, web.server_string("zh-Hans", "request.error.notFound") + "\n"),
+            (HTTPStatus.NOT_FOUND, web.server_string("zh-Hans", "common.notFound") + "\n"),
         ]
     finally:
         web.bootstrap_locale_catalogs.cache_clear()

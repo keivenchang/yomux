@@ -173,7 +173,7 @@ class AutoApproveWorker:
         self.started_at = time.time()
         self.approved = 0
         self.blocked = 0
-        initial_message = message_fields("last_action", "yolo.status.starting", "starting")
+        initial_message = message_fields("last_action", "state.starting", "starting")
         self.last_action = str(initial_message["last_action"])
         self.last_action_key = str(initial_message["last_action_key"])
         self.last_action_params = dict(initial_message["last_action_params"])
@@ -650,11 +650,11 @@ class AutoApproveWorker:
         rule_name_param = yolo_rules.decision_rule_name_descriptor(decision)
         last_action = f"{rule_action} {prompt_type}: {rule_name}"
         last_action_params = {"action": rule_action, "promptType": prompt_type, "ruleName": rule_name_param}
-        self.update_last_action("yolo.status.rulePrompt", last_action, **last_action_params)
+        self.update_last_action("state.reason.yoloRulePrompt", last_action, **last_action_params)
         self.emit_event(
             "approval_blocked",
             last_action,
-            message_key="events.message.yolo.rulePrompt",
+            message_key="state.reason.yoloRulePrompt",
             message_params=last_action_params,
             **details,
         )

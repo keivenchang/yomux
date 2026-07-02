@@ -64,7 +64,7 @@ const jsDebugGraphAllClientsCombinedMetricKey = 'apiSseTotal';
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
   {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
-  {key: 'latency', labelKey: 'debug.graph.metric.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
+  {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
   {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
 const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
@@ -74,9 +74,9 @@ const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents'
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusSeriesLabelKeys = Object.freeze({
   askAgents: 'debug.graph.status.attention',
-  workingAgents: 'debug.graph.status.working',
+  workingAgents: 'state.working',
   transitionAgents: 'debug.graph.status.transition',
-  idleAgents: 'debug.graph.status.idle',
+  idleAgents: 'state.idle',
 });
 const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   askAgents: bucket => bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0,
@@ -113,7 +113,7 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'latency', labelKey: 'debug.graph.chart.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'latency', labelKey: 'common.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
@@ -325,7 +325,7 @@ function debugEventLineText(event) {
     status.padEnd(8),
     duration.padStart(8),
     sseMeta,
-    debugEventDetailText(event) || t('debug.event'),
+    debugEventDetailText(event) || t('common.eventLabel'),
     location,
   ].filter(Boolean).join(' ');
 }
@@ -1624,7 +1624,7 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
     <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
     <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
-    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('debug.graph.control.reset'))}</button>` : ''}
+    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('common.reset'))}</button>` : ''}
   </div>`;
 }
 
@@ -2392,8 +2392,8 @@ function debugPanelHtml() {
           ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
         </div>
         <div class="js-debug-actions">
-          <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('debug.copy'))}</button>
-          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('debug.clear'))}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('common.copy'))}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
         </div>
       </div>
       <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
@@ -2413,7 +2413,7 @@ function createDebugPanel() {
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
         ${virtualPanelControlsHtml(debugPaneItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
       </div>
       <div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
@@ -2774,7 +2774,7 @@ function bindDebugPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(jsDebugTextForClipboard())
         .then(() => { statusEl.textContent = t('debug.copied'); })
-        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+        .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
       return;
     }
     const clear = event.target.closest('[data-js-debug-clear]');

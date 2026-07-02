@@ -433,7 +433,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
-  const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
+  const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('state.off'));
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
@@ -570,8 +570,8 @@ function defaultBranchHeadPullRequestForGit(info, git) {
     url: existing.url || githubPullRequestUrlFromGit(git, number),
     checks: existing.checks || {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
-    // (it is in main's history) — so label it MERGED even though we only inferred it from the subject.
-    status_label: existing.status_label || t('pr.status.merged'),
+    // (it is in main's history). Keep that fact semantic; shared lifecycle rendering localizes it.
+    merged: true,
     source_only: true,
   };
 }
@@ -721,9 +721,9 @@ function filePopoverHtml(item) {
 
 function filePopoverRows(path, state = {}) {
   const kind = state.kind === 'image' ? t('popover.kind.image') : state.kind === 'text' ? t('popover.kind.text') : state.kind || t('popover.kind.file');
-  const status = state.dirty ? t('filetab.modified') : state.loading ? t('common.loading') : state.error ? String(state.error) : kind;
+  const status = state.dirty ? t('state.modified') : state.loading ? t('common.loading') : state.error ? String(state.error) : kind;
   const rows = [
-    popoverRow(t('popover.path'), filePopoverPathHtml(path)),
+    popoverRow(t('common.field.path'), filePopoverPathHtml(path)),
   ];
   if (status && status !== kind) rows.push(popoverPairRow(t('popover.type'), esc(kind), t('popover.status'), esc(status)));
   else rows.push(popoverRow(t('popover.type'), esc(kind)));
@@ -741,7 +741,7 @@ function pathCopyButtonHtml(path, options = {}) {
 function popoverCopyValueHtml(value, options = {}) {
   const text = String(value || '').trim();
   if (!text) return '';
-  const copyLabel = options.title || t('debug.copy');
+  const copyLabel = options.title || t('common.copy');
   return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: copyLabel, ariaLabel: options.ariaLabel || copyLabel})}`;
 }
 
@@ -978,8 +978,8 @@ function windowMetadataRowsHtml(row) {
   const rows = [];
   const paths = Array.isArray(row.paths) ? row.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
   const displayPaths = paths.length ? paths : (row.path ? [String(row.path)] : []);
-  for (const path of displayPaths) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(path)));
-  if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
+  for (const path of displayPaths) rows.push(popoverRow(t('common.field.path'), filePopoverPathHtml(path)));
+  if (git.branch) rows.push(popoverRow(t('common.field.branch'), windowMetadataBranchHtml(git)));
   if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), git.root));
   if (git.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
@@ -1001,7 +1001,7 @@ function agentTranscriptRowsHtml(agent) {
   const transcriptId = agentTranscriptId(agent);
   const rows = [];
   if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: t('popover.copySessionId')})));
-  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: t('transcript.copyPath')})));
+  rows.push(popoverRow(t('common.transcript'), popoverCopyValueHtml(transcript, {title: t('common.copyTranscriptPath')})));
   return rows.join('');
 }
 
@@ -1028,12 +1028,12 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
   const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows, windowMetadataItems);
   const perWindowMetadata = Boolean(windowMetadataItems.length);
-  if (!perWindowMetadata) rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
+  if (!perWindowMetadata) rows.push(popoverPairRow(t('common.stateLabel'), stateValue, t('common.agentLabel'), agentValue));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
   if (!perWindowMetadata) {
-    rows.push(popoverRow(t('popover.path'), displayPath));
-    if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+    rows.push(popoverRow(t('common.field.path'), displayPath));
+    if (git?.branch) rows.push(popoverRow(t('common.field.branch'), sessionBranchValueHtml(session, info)));
   }
   let linearValue = '';
   let linearDesc = '';
@@ -1041,13 +1041,13 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     linearValue = linearInlineHtml(linear);
     linearDesc = linearDescriptionsInlineHtml(linear);
     if (linearValue) rows.push(popoverRow(t('info.field.linear'), linearValue));
-    if (linearDesc) rows.push(popoverRow(t('popover.details'), linearDesc));
+    if (linearDesc) rows.push(popoverRow(t('common.details'), linearDesc));
   }
   if (pr?.number) {
-    rows.push(popoverRow(t('searchHistory.pr'), pullRequestPopoverRowHtml(session, pr)));
+    rows.push(popoverRow(t('common.pullRequestShort'), pullRequestPopoverRowHtml(session, pr)));
   }
   const subject = currentBranchSubject(git);
-  if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
+  if (subject && !pr?.number) rows.push(popoverRow(t('common.descriptionShort'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
   if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
@@ -1183,7 +1183,7 @@ function branchPullRequestMetaHtml(session, pr) {
   if (!pr?.number) return '';
   const parts = [pullRequestNumberChipLinkHtml(session, pr)];
   const status = pullRequestInlineStatusDisplay(pr);
-  if (status) parts.push(`<span class="meta-pr-status ${esc(pullRequestStatusClass(pr))}">${esc(status)}</span>`);
+  if (status) parts.push(pullRequestStatusBadgeHtml('', status, pullRequestStatusClass(pr), {variant: 'meta'}));
   return metaJoin(parts);
 }
 

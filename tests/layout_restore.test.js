@@ -57,13 +57,15 @@ async function runLayoutRestoreSuite() {
     assert.ok(/group: t\('palette\.group\.fileActions'\)[\s\S]*group: options\.group \|\| t\('palette\.group\.files'\)/.test(layoutSource), 'quick-open groups use localized labels');
     assert.ok(/commandPaletteDropActionItems\(\)[\s\S]*const label = dropActionDisplayLabel\(action\)[\s\S]*label,[\s\S]*searchFields: \[t\('palette\.group\.fileActions'\), label/.test(layoutSource), 'command-palette drop actions reuse one localized label for display and search');
     assert.ok(/function fileQuickOpenScopeLabel[\s\S]*tPlural\('palette\.scope\.indexedRoot', roots\.length - 1, \{path: compactHomePath\(roots\[0\]\)\}\)/.test(layoutSource), 'quick-open indexed-root scope uses the shared plural locale family');
+    assert.ok((layoutSource.match(/fileQuickOpenError = userMessageSnapshot\(/g) || []).length === 2
+      && !/fileQuickOpenError = error;/.test(layoutSource), 'quick-open retains every search failure through the shared relocalizable user-message snapshot');
     assert.ok(/function runDropAction[\s\S]*const displayLabel = dropActionDisplayLabel\(action\)[\s\S]*status\.insertedDropAction[\s\S]*\{name: displayLabel\}/.test(dropSource), 'drop-action status reuses the same localized display-label owner as menus and search');
     assert.ok(/label: t\(previewMediaKindForPath\(path\) === 'image' \? 'palette\.openImage' : 'palette\.openFile', \{name\}\)/.test(layoutSource)
-      && /t\('palette\.group\.indexed', \{path: compactHomePath\(indexedRoot\)\}\)/.test(layoutSource), 'quick-open file and indexed-root labels resolve lazily');
+      && /t\('common\.indexedPath', \{path: compactHomePath\(indexedRoot\)\}\)/.test(layoutSource), 'quick-open file and indexed-root labels resolve lazily');
     assert.ok(/startupHelperNavigationGroup[\s\S]*t\('startupHelper\.navigation'\)[\s\S]*t\('startupHelper\.action\.previous'\)/.test(layoutSource), 'startup-tip navigation aria text is localized');
     assert.ok(/function compactNotificationTitle[\s\S]*const product = t\('app\.documentTitle'\)[\s\S]*`\$\{product\}\[\$\{label\}\]/.test(layoutSource), 'OS notification titles preserve product[session] form with the localized product name');
     assert.ok(/keyboard-legend-meta-branch[\s\S]*esc\(t\('info\.field\.gitBranch'\)\)/.test(layoutSource), 'Help legend reuses the localized Git branch label');
-    assert.ok(/function updateFileEditorDiffButton[\s\S]*button\.textContent = t\('changes\.title'\)/.test(editorSource), 'editor Differ control reuses the shared localized title');
+    assert.ok(/function updateFileEditorDiffButton[\s\S]*button\.textContent = t\('brand\.tab\.changes'\)/.test(editorSource), 'editor Differ control reuses the shared localized title');
   });
 
   test('t@1160', () => {
@@ -116,22 +118,25 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function layoutModeStatusMessage[\s\S]*t\(`menu\.view\.layout\.\$\{normalized\}`\)/.test(layoutSource), 'layout mode status reuses the existing menu labels');
     assert.ok(/function dropPreviewLabel[\s\S]*layout\.drop\.swap[\s\S]*layout\.drop\.fullZone[\s\S]*layout\.drop\.fullSpan[\s\S]*layout\.drop\.takeOver/.test(layoutSource), 'drop-preview labels resolve through one localized semantic helper');
     assert.equal(/const stateDefs = \{[\s\S]*label: ['"]Needs approval/.test(layoutStateSource), false, 'state definitions do not retain a duplicate raw-English label source beside locale keys');
-    assert.ok(/function summaryContextHtml[\s\S]*t\('popover\.agent'\)[\s\S]*t\('tab\.transcript'\)[\s\S]*t\('yoagent\.action\.row\.pane'\)[\s\S]*t\('popover\.branch'\)[\s\S]*t\('popover\.repo'\)[\s\S]*t\('pref\.section\.github'\)[\s\S]*t\('info\.field\.linear'\)/.test(layoutSource), 'summary context reuses shared localized field labels');
+    assert.ok(/function summaryContextHtml[\s\S]*t\('common\.agentLabel'\)[\s\S]*t\('common\.transcript'\)[\s\S]*t\('yoagent\.action\.row\.pane'\)[\s\S]*t\('common\.field\.branch'\)[\s\S]*t\('popover\.repo'\)[\s\S]*t\('pref\.section\.github'\)[\s\S]*t\('info\.field\.linear'\)/.test(layoutSource), 'summary context reuses shared localized field labels');
     assert.ok(/function summaryAgentContextText[\s\S]*summary\.agentDetailsWithStatus[\s\S]*summary\.agentDetails/.test(layoutSource), 'summary agent details localize pid and status through one semantic template family');
     assert.ok(layoutSource.includes("summaryContextLine(t('popover.worktree'), worktreeDisplayText(git.worktree))"), 'summary context reuses the shared plain worktree formatter');
     assert.ok(panelSource.includes("return t('tab.terminal.short');") && panelSource.includes("t('terminal.tab.title'"), 'terminal labels resolve through shared locale keys');
     assert.ok(panelSource.includes("t('terminal.window.title', {name: label})") && panelSource.includes("t('terminal.window.previous')") && panelSource.includes("t('terminal.window.next')"), 'tmux direct and step controls localize from one window-label family');
     assert.ok(panelSource.includes("t('terminal.window.unnamed', {index: pane?.window ?? ''})") && panelSource.includes("t('terminal.window.pid', {pid: Math.floor(value)})"), 'tmux window fallbacks and PID metadata use semantic locale keys');
-    assert.ok(panelSource.includes("window.prompt(t('rename.title', {name: currentName}), currentName)"), 'fallback file rename prompt reuses the existing localized rename title');
+    assert.ok(panelSource.includes("window.prompt(t('common.renameNamed', {name: currentName}), currentName)"), 'fallback file rename prompt reuses the existing localized rename title');
     assert.ok(panelSource.includes("t('finder.close', {name: itemLabel(item)})") && panelSource.includes("t('finder.hideFromLayout', {name: itemLabel(item)})") && panelSource.includes('title: closeLabel') && panelSource.includes('ariaLabel: closeLabel'), 'pane-tab close and hide labels share existing localized templates for title and aria text');
     assert.equal(/`(?:Close|hide|Hide) \$\{itemLabel\(item\)\}/.test(panelSource), false, 'pane-tab controls retain no raw-English close or hide label');
     assert.ok(fileActionsSource.includes("fileErrorMessageSnapshot(null, 'common.pathNotFound', {path})"), 'file inspection retains the shared missing-path locale descriptor for relocalization');
     assert.equal(fileActionsSource.includes('`path not found: ${path}`'), false, 'file inspection retains no raw-English missing-path copy');
     assert.ok(fileActionsSource.includes("tPlural('editor.status.selections', selections)") && fileActionsSource.includes("tPlural('editor.status.selectedChars', selectedChars)"), 'cursor selection counts use plural-aware locale families');
     assert.ok(fileActionsSource.includes("tPlural('editor.status.characters', count)"), 'text-file status uses the shared plural character family');
-    assert.ok(/function codeMirrorPhraseValues\(\)[\s\S]*Find: t\('editor\.search\.find'\)[\s\S]*'replace all': t\('editor\.search\.replaceAll'\)[\s\S]*function codeMirrorLocaleExtensions[\s\S]*EditorState\.phrases\.of\(codeMirrorPhraseValues\(\)\)/.test(fileActionsSource), 'CodeMirror search chrome resolves through one phrase-map parent');
+    assert.ok(/function codeMirrorPhraseValues\(\)[\s\S]*Find: t\('common\.find'\)[\s\S]*'replace all': t\('editor\.search\.replaceAll'\)[\s\S]*function codeMirrorLocaleExtensions[\s\S]*EditorState\.phrases\.of\(codeMirrorPhraseValues\(\)\)/.test(fileActionsSource), 'CodeMirror search chrome resolves through one phrase-map parent');
     const codeMirrorEditorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
     assert.ok(/_cmLocaleCompartment[\s\S]*reconfigureCodeMirrorPanelLocale/.test(codeMirrorEditorSource), 'mounted CodeMirror editors reconfigure localized phrases without rebuilding the editor');
+    assert.ok(/function trackCodeMirrorViews\(panel, api, views\)[\s\S]*panel\._cmViews = views\.filter\(Boolean\)/.test(codeMirrorEditorSource)
+      && (codeMirrorEditorSource.match(/Array\.isArray\(panel\?\._cmViews\)/g) || []).length === 3
+      && !/_cm(?:Theme|EditorOption|Locale)Views/.test(codeMirrorEditorSource), 'theme, editor-option, and locale compartments consume one shared live CodeMirror view list');
     assert.ok(/function updateCodeMirrorViewPreservingState[\s\S]*requestMeasure[\s\S]*requestAnimationFrame[\s\S]*function syncCodeMirrorDocument[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*function reconfigureCodeMirrorPanelLocale[\s\S]*updateCodeMirrorViewPreservingState/.test(codeMirrorEditorSource), 'document sync and locale compartment refresh share one selection/scroll preservation parent');
     assert.ok(fileActionsSource.includes("t('editor.codemirrorBundleLoadFailed', {url: script.src})") && fileActionsSource.includes("t('editor.codemirrorBundleMissingExports')") && fileActionsSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loader errors localize each leaf reason while retaining URL and path parameters');
     assert.equal(/CodeMirror bundle failed to load:|CodeMirror bundle missing critical exports|CodeMirror local bundle is unavailable or incomplete/.test(fileActionsSource), false, 'CodeMirror loader retains no raw-English visible reason');
@@ -146,7 +151,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function shareReplayMirrorLabel[\s\S]*share\.replay\.mirrorAria/.test(shareStateSource), 'share replay mirror aria text has one shared localized owner');
     assert.ok(shareStateSource.includes("root.setAttribute('aria-label', shareReplayMirrorLabel());") && shareReplaySource.includes("root.setAttribute('aria-label', shareReplayMirrorLabel());"), 'both replay-root paths consume the same mirror-label helper');
     assert.ok(shareReplaySource.includes("t('share.replay.sharedTerminalAria', {session: entry.session})"), 'replayed terminal placeholders expose a localized accessibility label');
-    assert.ok(shareAdminSource.includes("debug.textContent = t('debug.copy');") && shareAdminSource.includes("debug.title = t('share.debug.copyDiagnostics');"), 'share diagnostics control reuses the existing Copy label and localizes its specific tooltip');
+    assert.ok(shareAdminSource.includes("debug.textContent = t('common.copy');") && shareAdminSource.includes("debug.title = t('share.debug.copyDiagnostics');"), 'share diagnostics control reuses the existing Copy label and localizes its specific tooltip');
     assert.ok(/function terminalTmuxWindowShortcut\(key, options = \{\}\)[\s\S]*terminalTmuxWindowShortcutDefs[\s\S]*t\(definition\.labelKey\)/.test(terminalBootSource), 'tmux prefix and Alt shortcuts share one lazy localized semantic classifier');
     assert.ok(/function terminalTmuxPrefixWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key, \{includePrefixOnly: true, includeNumbers: true\}\)[\s\S]*function terminalTmuxAltWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key\)/.test(terminalBootSource), 'tmux prefix and Alt wrappers contain no duplicated shortcut labels');
     assert.ok(/function infoDimensionCountText[\s\S]*tPlural\(infoDimensionCountKeys\[key\]/.test(terminalBootSource), 'YO!info child counts use plural-aware locale keys');
@@ -181,10 +186,10 @@ async function runLayoutRestoreSuite() {
     const codeMirrorLocaleApi = loadYolomux('', ['1']);
     codeMirrorLocaleApi.i18nSetCatalogForTest('cm-test', {
       'editor.search.all': 'ALL-T',
-      'editor.search.find': 'FIND-T',
+      'common.find': 'FIND-T',
       'editor.search.matchCase': 'CASE-T',
       'editor.search.regexp': 'REGEXP-T',
-      'editor.search.replace': 'REPLACE-T',
+      'common.replace': 'REPLACE-T',
       'editor.search.replaceAll': 'REPLACE-ALL-T',
       'editor.search.wholeWord': 'WORD-T',
       'editor.search.wholeWordShort': 'WORD-SHORT-T',
@@ -228,8 +233,8 @@ async function runLayoutRestoreSuite() {
     api.i18nSetCatalogForTest('terminal-test', {
       'common.tabs.one': '{count} tab test',
       'common.tabs.other': '{count} tabs test',
-      'info.count.path.one': '{count} path test',
-      'info.count.path.other': '{count} paths test',
+      'common.pathCount.one': '{count} path test',
+      'common.pathCount.other': '{count} paths test',
       'terminal.window.next': 'next test',
       'terminal.window.previous': 'previous test',
       'terminal.window.last': 'last test',
@@ -248,16 +253,16 @@ async function runLayoutRestoreSuite() {
     const actionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const differSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
 
-    assert.ok(finderSource.includes("`${t('popover.branch')}: ${data.branchText}`"), 'Tabber branch hover metadata uses the shared localized branch label');
+    assert.ok(finderSource.includes("`${t('common.field.branch')}: ${data.branchText}`"), 'Tabber branch hover metadata uses the shared localized branch label');
     assert.ok(/data\.label \|\| stripTrailingEllipsisText\(t\('common\.loading'\)\)/.test(finderSource), 'Tabber loading fallback uses the shared localized loading label');
     assert.ok(/button\.title = t\('finder\.quickAccess\.openPath', \{path\}\)/.test(finderSource), 'Finder quick paths use their exact localized path-opening label');
     assert.ok(/function repoInfoSummary[\s\S]*t\('git\.dirty'[\s\S]*t\('git\.ahead'[\s\S]*t\('git\.behind'/.test(finderSource), 'Finder repo summaries reuse shared localized git counts');
     assert.ok(/function repoBranchDisplayText\(repo\)[\s\S]*t\('git\.detached'\)/.test(finderSource)
       && /function setFileExplorerRepoSummary[\s\S]*repoBranchDisplayText\(repo\)/.test(finderSource), 'Finder repo title metadata shares the exact localized detached-branch fallback');
     assert.ok(/function repoInfoPopoverHtml[\s\S]*repoBranchDisplayText\(repo\)[\s\S]*t\('git\.ahead'[\s\S]*t\('git\.behind'[\s\S]*t\('git\.dirty'/.test(finderSource), 'Finder repo popovers use the same localized git metadata');
-    assert.ok(/function gitStatusBadgeTitle[\s\S]*M: t\('git\.status\.modified'\)[\s\S]*A: t\('git\.status\.added'\)[\s\S]*D: t\('git\.status\.deleted'\)[\s\S]*T: t\('git\.status\.transcriptTouched'\)[\s\S]*C: t\('git\.status\.copied'\)/.test(finderSource), 'Finder git badges resolve every semantic status through the shared localized git-status key family');
+    assert.ok(/function gitStatusBadgeTitle[\s\S]*M: t\('state\.modified'\)[\s\S]*A: t\('git\.status\.added'\)[\s\S]*D: t\('git\.status\.deleted'\)[\s\S]*T: t\('git\.status\.transcriptTouched'\)[\s\S]*C: t\('git\.status\.copied'\)/.test(finderSource), 'Finder git badges resolve every semantic status through the shared localized git-status key family');
     assert.ok(/function fileExplorerIndexBadgeTitle[\s\S]*finder\.index\.indexing[\s\S]*finder\.index\.indexed/.test(finderSource)
-      && /function setFileExplorerDirectoryIndexed[\s\S]*finder\.index\.alreadyIndexedBy[\s\S]*finder\.index\.added[\s\S]*finder\.index\.removed/.test(finderSource), 'Finder index titles and completion statuses resolve through one localized key family');
+      && /function setFileExplorerDirectoryIndexed[\s\S]*finder\.index\.alreadyIndexedBy[\s\S]*common\.indexedPath[\s\S]*finder\.index\.removed/.test(finderSource), 'Finder index titles and completion statuses resolve through one localized key family');
     assert.ok(/function fileEntryStatusFromWatchFilePayload[\s\S]*common\.pathNotFound[\s\S]*finder\.invalidFileSignature/.test(finderSource), 'filesystem watch errors localize missing paths and invalid signatures');
     assert.ok(/function showFileOpenError[\s\S]*showToast\(t\('editor\.fileOpenFailedTitle'\)/.test(actionsSource), 'file-open error toast uses the existing localized title');
     assert.ok(/function reloadOpenFileFromDisk[\s\S]*window\.confirm\(t\('dialog\.externalMessage', \{name: basenameOf\(path\)\}\)\)/.test(actionsSource), 'dirty reload confirmation reuses the localized external-change question');
@@ -270,13 +275,13 @@ async function runLayoutRestoreSuite() {
       && /function fileDiffRefHistoryItems[\s\S]*const suggestions = defaultDiffRefSuggestions\(\)/.test(differSource), 'Differ and file-editor history reuse the same localized default refs');
     assert.ok(/appendContextMenuButton\(menu, t\('contextmenu\.copyRelativePath'\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copyFullPath'\)/.test(differSource), 'Differ directory context menu reuses shared localized copy actions');
     assert.ok(/async function copyChangedPath\(path, statusKey\)[\s\S]*statusEl\.textContent = t\(statusKey\)/.test(differSource), 'Differ copy completion resolves the matching localized status key');
-    assert.ok(/function fileExplorerModeButtonLabel[\s\S]*mode === 'diff'\) return t\('changes\.title'\)/.test(differSource), 'Differ mode label resolves from the shared localized title');
+    assert.ok(/function fileExplorerModeButtonLabel[\s\S]*mode === 'diff'\) return t\('brand\.tab\.changes'\)/.test(differSource), 'Differ mode label resolves from the shared localized title');
     assert.ok(/function fileExplorerModeButtonTitle[\s\S]*t\('tabber\.description'\)/.test(differSource)
       && /function fileExplorerModeButtonLabel[\s\S]*t\('tabber\.title'\)/.test(differSource), 'Tabber title and description resolve lazily through locale keys');
     assert.ok(/const changesOutsideRepoKey = 'Outside repo'[\s\S]*repo === changesOutsideRepoKey \? t\('changes\.outsideRepo'\)/.test(differSource), 'Differ keeps one internal outside-repo sentinel and localizes only its display label');
     assert.ok(/function sessionFileStatusCountParts[\s\S]*t\('common\.files'\)/.test(differSource), 'directory status count suffix reuses the shared localized files label');
-    assert.ok(/className: 'file-editor-diff-panel'[\s\S]*label: t\('changes\.title'\)/.test(differSource), 'editor Differ button reuses the same localized title');
-    assert.ok(/function changedFileAgentTitle[\s\S]*const prefix = t\('filetab\.modified'\)[\s\S]*`\$\{prefix\}: \$\{name\}/.test(differSource), 'Differ agent hover text reuses the localized modified label');
+    assert.ok(/className: 'file-editor-diff-panel'[\s\S]*label: t\('brand\.tab\.changes'\)/.test(differSource), 'editor Differ button reuses the same localized title');
+    assert.ok(/function changedFileAgentTitle[\s\S]*const prefix = t\('state\.modified'\)[\s\S]*`\$\{prefix\}: \$\{name\}/.test(differSource), 'Differ agent hover text reuses the localized modified label');
     assert.ok(/function savePreferenceControl[\s\S]*t\('status\.settingSaved', \{path\}\)/.test(differSource), 'preference save completion reuses the localized saved-path status');
   });
 
@@ -302,7 +307,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(sources.menus.includes("label: t('pref.general.language.system')"), 'language fallback reuses the localized System label');
     assert.ok(sources.editorSettings.includes("t('editor.findUnavailable', {error})"), 'both CodeMirror find failure paths reuse one locale key');
     assert.ok(/function paneTabAriaLabel[\s\S]*t\('filetab\.missingTitle'\)/.test(sources.panel) && /function dockviewTabAriaLabel[\s\S]*return paneTabAriaLabel\(item\)/.test(sources.dockview), 'DOM and Dockview tabs share one localized aria-label owner');
-    assert.ok(sources.info.includes("label: t('changes.sort.recent')"), 'Info sort fallback reuses the localized recent label');
+    assert.ok(sources.info.includes("label: t('common.sort.recent')"), 'Info sort fallback reuses the localized recent label');
     assert.ok(sources.markdown.includes("new Error(t('preview.mermaid.renderFailed'))") && !/Mermaid bundle missing critical exports|Mermaid unavailable/.test(sources.markdown), 'Mermaid loader failures resolve through the shared preview error key');
     assert.ok(sources.preview.includes("doc.title = t('preview.popout.title', {name: basenameOf(path)});"), 'preview popout document title is localized');
     assert.ok(/function renderClosedEditor[\s\S]*t\('editor\.fileClosed'\)/.test(sources.editor)
@@ -322,8 +327,9 @@ async function runLayoutRestoreSuite() {
     const actionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const editorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
     assert.ok(/function messageDescriptorText\(descriptor, fallback = ''\)[\s\S]*i18nResolve\(key\)[\s\S]*i18nInterpolate\(template, params\)[\s\S]*function userMessageText\(value, fallback = ''\)[\s\S]*payload\.user_message[\s\S]*messageDescriptorText\(descriptor, payload\.error \|\| source\.message \|\| fallback/.test(coreSource), 'one shared descriptor parent localizes frontend user messages and retains raw diagnostics as fallback');
-    assert.ok(/async function apiFetchJson\([\s\S]*new Error\(userMessageText\(payload, response\.statusText \|\| `HTTP \$\{response\.status\}`\)\)/.test(coreSource)
-      && /async function apiFetchJsonQuiet\([\s\S]*new Error\(userMessageText\(payload, response\.statusText \|\| `HTTP \$\{response\.status\}`\)\)/.test(coreSource), 'shared JSON API helpers localize structured backend errors before callers render them');
+    assert.ok(/async function apiJsonResponse\(response\)[\s\S]*new Error\(userMessageText\(payload, response\.statusText \|\| `HTTP \$\{response\.status\}`\)\)/.test(coreSource)
+      && /async function apiFetchJson\([\s\S]*apiJsonResponse\(await apiFetch\(url, options\)\)/.test(coreSource)
+      && /async function apiFetchJsonQuiet\([\s\S]*apiJsonResponse\(await fetch\(url, requestOptions\)\)/.test(coreSource), 'shared JSON API helpers localize structured backend errors through one response parent before callers render them');
     assert.ok(/function yoagentJobRowsHtml\([\s\S]*userMessageText\(job\?\.result\?\.send \|\| job\?\.result \|\| job, ''\)/.test(yoagentSource), 'YO!agent job rows consume the shared message descriptor, including nested send failures');
     assert.ok(/function runServerDropAction[\s\S]*userMessageText\(error, error\)/.test(dropSource)
       && /function showDropActionResult[\s\S]*dropActionResultPresentation\(payload\)/.test(dropSource)
@@ -1592,7 +1598,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
     assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');
     // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
-    assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.wordmark\.yo'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
+    assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.marker'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
     assert.ok(/function updateBrandTitles\(\)[\s\S]*brand\.title = topbarServerUptimeTitle\(\)[\s\S]*version\.title = topbarVersionTitle\(\)/.test(source), 'top-left brand hover shows server uptime and version hover shows the commit SHA');
     assert.ok(/function topbarVersionTitle\(\)[\s\S]*t\('menu\.help\.about\.sha', \{sha\}\)[\s\S]*t\('menu\.help\.about\.commits', \{count: commitCount\}\)/.test(source), 'top-left version title localizes the SHA and commit count');
     // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
@@ -1621,7 +1627,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/fileExplorerIndexStatus\.set\(normalized, 'building'\);\s*refreshFileIndexStatus\(normalized\)/.test(source), '#30: indexing a directory eagerly warms its backend index (no cold first-query live walk)');
     const loadAutoStatusesFn = source.slice(source.indexOf('async function loadAutoStatuses'), source.indexOf('async function loadAutoStatuses') + 1700);
     assert.ok(loadAutoStatusesFn.includes('updateDocumentTitle();') && loadAutoStatusesFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll re-syncs the YO markers (renderAutoApproveButtons) alongside the tab title, so a done pane stops spinning on the same poll');
-    assert.ok(source.includes("{path: 'file_explorer.indexed_dirs'"), '#32: Preferences exposes an editable indexed-directories list');
+    assert.ok(/preferenceSettingItem\('file_explorer\.indexed_dirs', \{type: 'list'\}\)/.test(source), '#32: Preferences exposes indexed directories through the shared setting builder');
     assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*setFileExplorerDirectoryIndexed\(dir, true\)[\s\S]*setFileExplorerDirectoryIndexed\(dir, false\)/.test(source), '#32: editing the indexed-dirs setting adds/removes indexed dirs (bi-directional sync)');
     assert.ok(source.includes('/api/fs/unindex?root='), '#32: removing an indexed dir wires to the backend unindex');
     // C11: the indexed-dirs setting save MERGES a single add/remove into the shared list instead of
@@ -2429,7 +2435,7 @@ async function runLayoutRestoreSuite() {
     const editorPressedStart = css.indexOf('.file-editor-mode-control-panel button.active');
     const editorPressedBlock = css.slice(editorPressedStart, css.indexOf('{', editorPressedStart));
     assert.ok(editorPressedBlock.includes('.file-editor-gutter-panel.active') && editorPressedBlock.includes('.file-editor-find-panel[aria-pressed="true"]') && editorPressedBlock.includes('.file-editor-wrap-panel[aria-pressed="true"]'), '#, Search, and wrap active states share the pressed control treatment');
-    assert.ok(/className: 'file-editor-diff-panel'[\s\S]*label: t\('changes\.title'\)/.test(editorToolbarTemplate), 'editor Diff toolbar button renders through the localized Differ title');
+    assert.ok(/className: 'file-editor-diff-panel'[\s\S]*label: t\('brand\.tab\.changes'\)/.test(editorToolbarTemplate), 'editor Diff toolbar button renders through the localized Differ title');
     assert.ok(/className: 'file-editor-wrap-panel'[\s\S]*file-editor-icon-wrap/.test(editorToolbarTemplate), 'editor Wrap toolbar button renders the original icon in the left zone');
     assert.ok(/function updateEditorWrapButton\(button\)[\s\S]*setFileEditorIcon\(button, 'file-editor-icon-wrap'\)/.test(source), 'wrap button renderer preserves the original icon');
     assert.ok(source.includes('toggleEditorFind(panel);'), 'Search toolbar button toggles the CodeMirror search panel');

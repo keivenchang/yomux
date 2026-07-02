@@ -918,12 +918,11 @@ function pullRequestStatusLabel(pr) {
 function pullRequestStatusDisplay(pr) {
   const status = pullRequestStatusLabel(pr);
   if (!status) return '';
-  if (pullRequestIsMerged(pr)) return t('pr.status.merged');
+  const lifecycle = pullRequestLifecycleStatus(pr);
+  if (lifecycle.state && lifecycle.state !== 'open') return lifecycle.text;
   const key = status.toLowerCase();
   if (key === 'unknown') return '';
-  if (key === 'draft') return t('pr.status.draft');
-  if (key === 'closed') return t('pr.status.closed');
-  if (key === 'open') return t('pr.status.open');
+  if (['draft', 'closed', 'open'].includes(key)) return lifecycle.text;
   const ci = pullRequestCiStatus(pr);
   if (ci) return ci.text;
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
@@ -935,10 +934,33 @@ function pullRequestIsMerged(pr) {
   return /\bmerged\b/.test(pullRequestStatusLabel(pr).toLowerCase());
 }
 
+const PULL_REQUEST_LIFECYCLE_SPECS = Object.freeze({
+  merged: Object.freeze({className: 'pr-status-merged', key: 'pr.status.merged'}),
+  draft: Object.freeze({className: 'pr-status-draft', key: 'pr.status.draft'}),
+  closed: Object.freeze({className: 'pr-status-closed', key: 'pr.status.closed'}),
+  open: Object.freeze({className: 'pr-status-open', key: 'pr.status.open'}),
+});
+
+function pullRequestLifecycleState(pr) {
+  if (!pr?.number) return '';
+  if (pullRequestIsMerged(pr)) return 'merged';
+  const status = pullRequestStatusLabel(pr).toLowerCase();
+  if (pr.draft === true || /\bdraft\b/.test(status)) return 'draft';
+  if (/\bclosed\b/.test(status)) return 'closed';
+  return 'open';
+}
+
+function pullRequestLifecycleStatus(pr) {
+  const state = pullRequestLifecycleState(pr);
+  const spec = PULL_REQUEST_LIFECYCLE_SPECS[state];
+  return spec ? {state, className: spec.className, text: t(spec.key)} : {state: '', className: '', text: ''};
+}
+
 function pullRequestInlineStatusDisplay(pr) {
-  if (pullRequestIsMerged(pr)) return '';
-  const key = pullRequestStatusLabel(pr).toLowerCase();
-  if (key === 'open') return '';
+  const lifecycle = pullRequestLifecycleState(pr);
+  if (lifecycle === 'merged') return '';
+  const status = pullRequestStatusLabel(pr).trim().toLowerCase();
+  if (lifecycle === 'open' && status === 'open') return '';
   return pullRequestStatusDisplay(pr);
 }
 
@@ -976,10 +998,8 @@ function pullRequestCiStatus(pr) {
 }
 
 function pullRequestStatusClass(pr) {
-  if (pullRequestIsMerged(pr)) return 'pr-status-merged';
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (status.includes('draft')) return 'pr-status-draft';
-  if (status.includes('closed')) return 'pr-status-closed';
+  const lifecycle = pullRequestLifecycleStatus(pr);
+  if (lifecycle.state && lifecycle.state !== 'open') return lifecycle.className;
   const ci = pullRequestCiStatus(pr);
   if (ci) return ci.className;
   return 'pr-status-unknown';
@@ -989,20 +1009,34 @@ function pullRequestStatusBadgeHtml(session, text, statusClass, options = {}) {
   const label = String(text || '').trim();
   if (!label) return '';
   const labelHtml = options.labelHtml === undefined ? esc(label) : String(options.labelHtml || '');
-  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${statusClass || 'pr-status-unknown'}`)}">${labelHtml}</span>`;
+  const stateClass = statusClass || 'pr-status-unknown';
+  let classes;
+  if (options.variant === 'meta') {
+    classes = `meta-pr-status ${stateClass}`;
+  } else if (options.variant === 'muted') {
+    classes = 'meta-muted';
+  } else {
+    const extraClass = String(options.extraClass || '').trim();
+    classes = metadataBadgeClasses(
+      session,
+      options.kind || 'status',
+      ['ci-indicator', 'tab-symbol', extraClass, stateClass].filter(Boolean).join(' '),
+    );
+  }
+  return `<span class="${esc(classes)}">${labelHtml}</span>`;
 }
 
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (!['draft', 'closed'].includes(status)) return '';
-  return pullRequestStatusBadgeHtml(session, pullRequestStatusDisplay(pr), pullRequestStatusClass(pr));
+  const lifecycle = pullRequestLifecycleStatus(pr);
+  if (!['draft', 'closed'].includes(lifecycle.state)) return '';
+  return pullRequestStatusBadgeHtml(session, lifecycle.text, lifecycle.className);
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
   const ci = pullRequestCiStatus(pr);
   if (!ci) return '';
-  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${ci.className}`)}">CI</span>`;
+  return pullRequestStatusBadgeHtml(session, 'CI', ci.className, {kind: 'ci'});
 }
 
 function pullRequestNumberIndicatorHtml(session, pr) {
@@ -1037,13 +1071,13 @@ function pullRequestApprovalLabel(decision) {
 function pullRequestApprovalIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   // No review badge once the PR is merged/closed (review state no longer actionable).
-  if (['merged', 'closed'].includes(pullRequestStatusLabel(pr).toLowerCase())) return '';
+  if (['merged', 'closed'].includes(pullRequestLifecycleState(pr))) return '';
   const decision = pullRequestReviewDecision(pr);
   const cls = pullRequestApprovalClass(decision);
   if (!cls) return '';
   const label = pullRequestApprovalLabel(decision);
   // No native title — the session popover carries the review state (no duplicate tooltip).
-  return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}">${esc(label)}</span>`;
+  return pullRequestStatusBadgeHtml(session, label, cls, {kind: 'review', extraClass: 'pr-review-chip'});
 }
 
 // review status + reviewer(s) for the session popover PR row ("Approved by alice" /
@@ -1056,10 +1090,18 @@ function pullRequestReviewInlineHtml(pr) {
     .filter(reviewer => String(reviewer?.state || '').toUpperCase() === state)
     .map(reviewer => reviewer.login)
     .filter(Boolean);
-  const by = logins => (logins.length ? t('pr.by', {logins: esc(logins.join(', '))}) : '');
-  if (decision === 'APPROVED') return `<span class="meta-pr-status pr-status-passing">${esc(t('pr.approved'))}${by(loginsFor('APPROVED'))}</span>`;
-  if (decision === 'CHANGES_REQUESTED') return `<span class="meta-pr-status pr-status-failing">${esc(t('pr.changesRequested'))}${by(loginsFor('CHANGES_REQUESTED'))}</span>`;
-  if (decision === 'REVIEW_REQUIRED') return `<span class="meta-muted">${esc(t('pr.reviewRequired'))}</span>`;
+  const by = logins => (logins.length ? t('pr.by', {logins: logins.join(', ')}) : '');
+  if (decision === 'APPROVED') {
+    const text = `${t('pr.approved')}${by(loginsFor('APPROVED'))}`;
+    return pullRequestStatusBadgeHtml('', text, 'pr-status-passing', {variant: 'meta'});
+  }
+  if (decision === 'CHANGES_REQUESTED') {
+    const text = `${t('pr.changesRequested')}${by(loginsFor('CHANGES_REQUESTED'))}`;
+    return pullRequestStatusBadgeHtml('', text, 'pr-status-failing', {variant: 'meta'});
+  }
+  if (decision === 'REVIEW_REQUIRED') {
+    return pullRequestStatusBadgeHtml('', t('pr.reviewRequired'), '', {variant: 'muted'});
+  }
   return '';
 }
 
@@ -1072,15 +1114,11 @@ function pullRequestAuthorHtml(pr) {
   return author ? `<span class="meta-muted">${esc(t('pr.authorBy', {author}))}</span>` : '';
 }
 
-function pullRequestColumnLinkHtml(pr) {
-  return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
-}
-
 function pullRequestChecksHtml(pr) {
   const ci = pullRequestCiStatus(pr);
   if (!ci) return '';
   const checks = pr?.checks && typeof pr.checks === 'object' ? pr.checks : {};
-  const parts = [`<span class="meta-pr-status ${ci.className}">${esc(ci.text)}</span>`];
+  const parts = [pullRequestStatusBadgeHtml('', ci.text, ci.className, {variant: 'meta'})];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
   )).filter(Boolean).join(', ');
@@ -1237,7 +1275,7 @@ function projectMetaParts(session, info, options = {}) {
   if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (pr?.number) {
     const ci = pullRequestCiStatus(pr);
-    if (ci) metadataParts.push(`<span class="meta-pr-status ${ci.className}">${esc(ci.text)}</span>`);
+    if (ci) metadataParts.push(pullRequestStatusBadgeHtml('', ci.text, ci.className, {variant: 'meta'}));
   }
   const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
   if (desc) {
@@ -1304,7 +1342,7 @@ function showRepoChipMenu(session, x, y) {
 
 function summaryAgentContextText(agent) {
   const params = {
-    agent: agent?.kind || t('popover.agent'),
+    agent: agent?.kind || t('common.agentLabel'),
     pid: agent?.pid || '',
     status: agent?.status || '',
   };
@@ -1315,11 +1353,11 @@ function summaryContextHtml(session, info, agent) {
   const lines = [];
   const pane = info?.selected_pane;
   if (agent) {
-    lines.push(summaryContextLine(t('popover.agent'), summaryAgentContextText(agent)));
-    if (agent.transcript) lines.push(summaryContextLine(t('tab.transcript'), agent.transcript));
-    if (agent.error && !agent.transcript) lines.push(summaryContextLine(t('tab.transcript'), agent.error));
+    lines.push(summaryContextLine(t('common.agentLabel'), summaryAgentContextText(agent)));
+    if (agent.transcript) lines.push(summaryContextLine(t('common.transcript'), agent.transcript));
+    if (agent.error && !agent.transcript) lines.push(summaryContextLine(t('common.transcript'), agent.error));
   } else {
-    lines.push(summaryContextLine(t('popover.agent'), t('agent.notDetected')));
+    lines.push(summaryContextLine(t('common.agentLabel'), t('agent.notDetected')));
   }
   if (pane) {
     lines.push(summaryContextLine(t('yoagent.action.row.pane'), t('summary.paneLocation', {
@@ -1332,7 +1370,7 @@ function summaryContextHtml(session, info, agent) {
   const project = info?.project || {};
   const git = project.git;
   if (git) {
-    lines.push(summaryContextLine(t('popover.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
+    lines.push(summaryContextLine(t('common.field.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine(t('popover.repo'), git.root));
     // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
     if (git.worktree) lines.push(summaryContextLine(t('popover.worktree'), worktreeDisplayText(git.worktree)));
@@ -1405,7 +1443,7 @@ async function createNextSession(agent) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
   }
-  const agentLabel = agentName(agent) || t('popover.agent');
+  const agentLabel = agentName(agent) || t('common.agentLabel');
   statusEl.textContent = t('status.sessionCreating', {agent: agentLabel});
   try {
     const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
@@ -1537,13 +1575,13 @@ function showSessionRenameDialog(session) {
   overlay.setAttribute('role', 'presentation');
   const titleName = sessionLabel(session);
   overlay.innerHTML = `
-    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
-      <div class="session-rename-title">${esc(t('rename.title', {name: titleName}))}</div>
+    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('common.renameTmuxSession'))}">
+      <div class="session-rename-title">${esc(t('common.renameNamed', {name: titleName}))}</div>
       <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="${esc(t('rename.inputAria'))}" autocomplete="off">
       <div class="session-rename-error" hidden></div>
       <div class="session-rename-actions">
-        <button type="button" class="session-rename-cancel">${esc(t('rename.cancel'))}</button>
-        <button type="submit" class="session-rename-submit">${esc(t('rename.submit'))}</button>
+        <button type="button" class="session-rename-cancel">${esc(t('common.cancel'))}</button>
+        <button type="submit" class="session-rename-submit">${esc(t('common.rename'))}</button>
       </div>
     </form>`;
   const form = overlay.querySelector('form');
@@ -1611,7 +1649,7 @@ async function renameTmuxSession(session, proposedName) {
     await ensureTerminalRunning(renamed);
     refreshTranscripts({force: true});
     renderAutoApproveButtons();
-    statusOk(localizedHtml('status.sessionRenamed', {oldName: session, newName: renamed}));
+    statusOk(localizedHtml('common.renamed', {oldName: session, newName: renamed}));
     return true;
   } catch (error) {
     if (error?.status) {

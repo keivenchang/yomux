@@ -146,18 +146,28 @@ function yoagentToolItemBodyHtml(item) {
     : esc(text);
 }
 
+function yoagentStreamItemLabel(item) {
+  const source = item?.label && typeof item.label === 'object'
+    ? item.label
+    : {key: item?.labelKey, params: item?.labelParams, fallback: item?.fallback};
+  return {
+    key: String(source?.key || ''),
+    params: source?.params && typeof source.params === 'object' ? {...source.params} : {},
+    fallback: String(source?.fallback || ''),
+  };
+}
+
 function yoagentStreamItems(message) {
   const items = (Array.isArray(message?.streamItems) ? message.streamItems : [])
     .map(item => {
       const text = String(item?.text || '');
       const sourceIndex = Number(item?.sourceIndex);
+      const label = yoagentStreamItemLabel(item);
       return {
         kind: String(item?.kind || '').trim(),
         text,
         eventKind: String(item?.eventKind || ''),
-        labelKey: String(item?.labelKey || ''),
-        labelParams: item?.labelParams && typeof item.labelParams === 'object' ? {...item.labelParams} : {},
-        fallback: String(item?.fallback || ''),
+        label,
         tokenCount: Math.max(0, Number(item?.tokenCount) || 0),
         toolName: String(item?.toolName || ''),
         command: String(item?.command || ''),
@@ -166,13 +176,13 @@ function yoagentStreamItems(message) {
       };
     })
     .filter(item => ['assistant', 'thinking', 'tool', 'diagnostic'].includes(item.kind)
-      && (item.text.trim() || item.labelKey || item.fallback))
+      && (item.text.trim() || item.label.key || item.label.fallback))
     .map((item, index) => ({...item, sourceIndex: item.sourceIndex == null ? index : item.sourceIndex}));
   const coalesced = [];
   for (const item of items) {
     const previous = coalesced[coalesced.length - 1];
-    if (previous && previous.kind === item.kind && previous.labelKey === item.labelKey
-      && JSON.stringify(previous.labelParams) === JSON.stringify(item.labelParams)
+    if (previous && previous.kind === item.kind
+      && JSON.stringify(previous.label) === JSON.stringify(item.label)
       && (item.kind === 'thinking' || item.kind === 'tool')) {
       previous.text = `${previous.text.replace(/\s+$/, '')}\n${item.text.replace(/^\s+/, '')}`;
       previous.tokenCount = Math.max(previous.tokenCount, item.tokenCount);
@@ -193,7 +203,7 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index, options = {}) {
   if (!['thinking', 'tool', 'diagnostic'].includes(kind)) return '';
   const tool = kind === 'tool';
   const diagnostic = kind === 'diagnostic';
-  const descriptorLabel = messageDescriptorText({key: item.labelKey, params: item.labelParams, fallback: item.fallback});
+  const descriptorLabel = messageDescriptorText(item.label);
   const label = kind === 'thinking' ? yoagentThinkingLabel(text, item.tokenCount) : descriptorLabel;
   const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingDetailsPreview(text, {...options, tokenCount: item.tokenCount});
   const previewHtml = yoagentDetailsPreviewHtml(preview, tool ? '' : 'yoagent-thinking-live-preview');
@@ -252,7 +262,7 @@ function yoagentMessageDetailsHtml(message, key = '') {
     : '';
   const detailsLabel = hasAuxiliary
     ? yoagentThinkingLabel(auxiliaryBodyText || auxiliaryPreview)
-    : t('popover.details');
+    : t('common.details');
   const thinkingDetails = (text || hasAuxiliary)
     ? `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
     <summary><span>${esc(`${detailsLabel}…`)}</span>${preview}</summary>
@@ -270,7 +280,7 @@ function yoagentMessageDetailRowsHtml(message) {
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
-  if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
+  if (!Number.isFinite(ts) || ts <= 0) return {text: t('state.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
   // Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
   // locale phrasing, wrapped by the localized "last updated {rel}" string.
@@ -397,11 +407,11 @@ function yoagentActionCardHtml(action) {
     ? `<button type="button" class="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
     : `<span class="yoagent-action-state">${esc(yoagentActionStatusText(action))}</span>`;
   const rows = [
-    [t('yoagent.action.row.session'), target.session || action.session || ''],
+    [t('common.sessionLabel'), target.session || action.session || ''],
     [t('yoagent.action.row.agent'), [target.agent_kind, target.agent_model].filter(Boolean).join(' ')],
     [t('yoagent.action.row.transport'), transportLabel],
     [t('yoagent.action.row.pane'), target.pane_target || ''],
-    [t('yoagent.action.row.path'), target.cwd || ''],
+    [t('common.pathLabel'), target.cwd || ''],
   ].filter(row => row[1]);
   const rowHtml = rows.map(([label, value]) => `<div class="yoagent-action-row"><span>${esc(label)}</span><code>${esc(value)}</code></div>`).join('');
   return `<div class="yoagent-action-card ${esc(status)}" data-yoagent-action-card="${esc(action.id || '')}">
@@ -539,7 +549,7 @@ function yoagentPendingWaitsHtml() {
     const transcript = String(wait?.transcript || '');
     const id = String(wait?.id || '');
     const clearButton = id && !readOnlyMode
-      ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('yoagent.clear'))}" aria-label="${esc(t('yoagent.clear'))}">${esc(t('yoagent.clear'))}</button>`
+      ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
     return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
       <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
@@ -621,7 +631,7 @@ function yoagentJobRowsHtml() {
     ].filter(Boolean).join(' · ');
     const controls = [
       canConfirm ? `<button type="button" class="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
-      canCancel ? `<button type="button" class="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('yoagent.jobs.cancel'))}</button>` : '',
+      canCancel ? `<button type="button" class="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('common.cancel'))}</button>` : '',
     ].filter(Boolean).join('');
     return `<li class="yoagent-job-item yoagent-job-${esc(status || 'unknown')}" data-yoagent-job-row="${esc(id)}">
       <div class="yoagent-job-main">
@@ -653,7 +663,7 @@ function yoagentChatQueueHtml() {
     return `<li class="yoagent-chat-queue-item" data-yoagent-chat-queue-row="${esc(id)}">
       <span class="yoagent-chat-queue-index">${esc(String(index + 1))}</span>
       <span class="yoagent-chat-queue-text">${esc(label)}</span>
-      <button type="button" class="yoagent-chat-queue-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('yoagent.queue.cancel'))}" aria-label="${esc(t('yoagent.queue.cancel'))}">${esc(t('yoagent.queue.cancel'))}</button>
+      <button type="button" class="yoagent-chat-queue-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
     </li>`;
   }).join('');
   return `<div class="yoagent-chat-queue" aria-live="polite" aria-label="${esc(t('yoagent.queue.title'))}">
@@ -798,10 +808,10 @@ function yoagentTranscriptPathHtml() {
   const display = yoagentConversationDisplayPath || path;
   if (!path && !yoagentConversationLoading && !yoagentConversationLoaded) return '';
   const value = path
-    ? `<code class="yoagent-transcript-value" title="${esc(path)}">${esc(display)}</code>${pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy', title: t('yoagent.transcript.copy')})}`
+    ? `<code class="yoagent-transcript-value" title="${esc(path)}">${esc(display)}</code>${pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy', title: t('common.copyTranscriptPath')})}`
     : `<span class="yoagent-transcript-loading">${esc(t('yoagent.transcript.loading'))}</span>`;
   return `<div class="yoagent-transcript-path">
-    <span class="yoagent-transcript-label">${esc(t('yoagent.transcript.label'))}</span>
+    <span class="yoagent-transcript-label">${esc(t('common.transcript'))}</span>
     ${value}
   </div>`;
 }
@@ -914,7 +924,7 @@ function yoagentRecentAgentsHtml(payload = yoagentStartupActivityPayload()) {
       tmuxSignalWindowClientNames(signal.window).length ? t('yoagent.tooltip.tmuxViewers', {viewers: tmuxSignalWindowClientNames(signal.window).join(', ')}) : '',
       signal.window?.layout ? t('yoagent.tooltip.tmuxLayout', {layout: signal.window.layout}) : '',
       signal.window?.visible_layout ? t('yoagent.tooltip.tmuxVisibleLayout', {layout: signal.window.visible_layout}) : '',
-      signal.window?.bell_flag ? t('yoagent.tooltip.tmuxBellAlert') : '',
+      signal.window?.bell_flag ? t('state.reason.tmuxBellAlert') : '',
       signal.window?.silence_flag ? t('yoagent.tooltip.tmuxSilenceAlert') : '',
       signal.pane?.dead ? tmuxSignalDeadText(signal.pane) : '',
       tmuxSignalPaneModeLabels(signal.pane).join(', '),
@@ -1006,10 +1016,10 @@ async function refreshYoagentAgentAvailability(options = {}) {
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
   if (key === 'auto') return t('yoagent.backend.auto');
-  if (key === 'deterministic') return t('yoagent.backend.none');
+  if (key === 'deterministic') return t('state.noAgent');
   if (key === 'codex') return 'Codex';
   if (key === 'claude') return 'Claude';
-  return value || t('yoagent.backend.none');
+  return value || t('state.noAgent');
 }
 
 function yoagentBackendKey() {
@@ -1062,7 +1072,7 @@ function yoagentChoiceValue(path, choices) {
 }
 
 function yoagentComposerSelectHtml({kind, title, path, value, choices, disabled, noneLabel, dot = false}) {
-  const effectiveChoices = choices.length ? choices : [{value: '', label: noneLabel || t('yoagent.backend.none')}];
+  const effectiveChoices = choices.length ? choices : [{value: '', label: noneLabel || t('state.noAgent')}];
   const disabledAttr = disabled || !choices.length ? ' disabled' : '';
   const options = effectiveChoices
     .map(choice => `<option value="${esc(choice.value)}"${choice.value === value ? ' selected' : ''}>${esc(choice.label)}</option>`)
@@ -1084,30 +1094,30 @@ function yoagentComposerControlsHtml(disabled) {
     value: backend,
     choices: backendChoices,
     disabled,
-    noneLabel: t('yoagent.backend.none'),
+    noneLabel: t('state.noAgent'),
     dot: true,
   });
   const modelPath = backend ? `yoagent.${backend}_model` : 'yoagent.backend';
   const modelChoices = backend ? yoagentModelPreferenceChoicesForBackend(backend) : [];
   const modelHtml = yoagentComposerSelectHtml({
     kind: 'model',
-    title: backend === 'claude' ? t('pref.yoagent.claude_model.label') : backend === 'codex' ? t('pref.yoagent.codex_model.label') : t('yoagent.backend.none'),
+    title: backend === 'claude' ? t('pref.yoagent.claude_model.label') : backend === 'codex' ? t('pref.yoagent.codex_model.label') : t('state.noAgent'),
     path: modelPath,
     value: yoagentChoiceValue(modelPath, modelChoices),
     choices: modelChoices,
     disabled,
-    noneLabel: t('yoagent.backend.none'),
+    noneLabel: t('state.noAgent'),
   });
   const effortPath = backend ? `yoagent.${backend}_effort` : 'yoagent.backend';
   const effortChoices = backend ? yoagentEffortPreferenceChoicesForBackend(backend) : [];
   const effortHtml = yoagentComposerSelectHtml({
     kind: 'effort',
-    title: backend === 'claude' ? t('pref.yoagent.claude_effort.label') : backend === 'codex' ? t('pref.yoagent.codex_effort.label') : t('yoagent.backend.none'),
+    title: backend === 'claude' ? t('pref.yoagent.claude_effort.label') : backend === 'codex' ? t('pref.yoagent.codex_effort.label') : t('state.noAgent'),
     path: effortPath,
     value: yoagentChoiceValue(effortPath, effortChoices),
     choices: effortChoices,
     disabled,
-    noneLabel: t('yoagent.backend.none'),
+    noneLabel: t('state.noAgent'),
   });
   return backendHtml + modelHtml + effortHtml;
 }
@@ -1140,7 +1150,7 @@ function yoagentChatHtml() {
       <div class="yoagent-chat-controls">
         ${yoagentComposerControlsHtml(backendDisabled)}
         <span class="yoagent-chat-controls-spacer"></span>
-        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('yoagent.clear'))}</button>
+        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>
         ${submitButton}
       </div>
     </form>`;

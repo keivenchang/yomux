@@ -1346,3 +1346,11 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 ### YO!info session work descriptions
 
 - Completed and removed `DOIT.yoinfo_session_work_description.md`. YO!info Tab group headers and leaf values now show the shared 200-character session work description through the compact Tab detail renderer, compute it once per session, suppress empty or already-included descriptions, and preserve the bare session identity for grouping, sorting, and search. Verified with the 135-assertion Node suite, focused Chrome regression and live 8001 visual geometry, generated-bundle check, and the canonical gate; every lane passed except the documented unrelated editor-preview baseline failure (256 browser tests passed, 4 skipped).
+
+## 2026-07-02 Work Queue Drain
+
+### Internationalization and shared locale ownership
+
+- Completed and removed `DOIT.i18n-refactor.md`. All 19 source catalogs now share one Python-owned locale registry, exact key/placeholder/protected-token/Chinese-brand semantics, locale-correct CLDR plural categories, and full translations for the app, Help, YO!stats, auxiliary shells, panels, previews, notifications, accessibility text, and structured error paths. Live locale changes preserve mounted Finder, editor, terminal, pane, and scroll state.
+- Collapsed 85 ordinary duplicate concepts plus the duplicate path-count plural family into neutral `common.*`, `brand.*`, and `state.*` parents across every catalog and consumer. The validator rejects new unowned ordinary or plural duplicates; the remaining context-sensitive equal strings use narrow reasoned allowlists. Preferences labels come from backend catalog descriptors, stream labels use the canonical message descriptor with legacy compatibility, and PR lifecycle/CI/review rendering uses one classifier and badge/link renderer.
+- Rebuilt generated catalogs/bundle and verified zero semantic, literal-key, removed-key, or dynamic-prefix errors. Focused verification passed 138 Python tests and the relevant Node suites; the final canonical eight-lane gate passed compile, static, syntax, Node layout, non-browser pytest, browser pytest, E2E, and whitespace in 119.56 seconds.

@@ -293,7 +293,7 @@ class YoagentStreamPublisher:
                 state["stream_items"] = items
             same_descriptor = items and all(
                 items[-1].get(field) == next_item.get(field)
-                for field in ("kind", "eventKind", "labelKey", "labelParams", "toolName")
+                for field in ("kind", "eventKind", "label", "toolName")
             )
             if merge and same_descriptor:
                 joiner = "" if safe_kind == "assistant" else "\n"
@@ -328,7 +328,10 @@ class YoagentStreamPublisher:
 
         def hidden_work_stream_item(event: dict[str, Any]) -> dict[str, Any]:
             item = yoagent_stream_event_auxiliary_item(event)
-            descriptor = "\0".join((str(item.get("eventKind") or ""), str(item.get("labelKey") or "")))
+            descriptor = {
+                "eventKind": str(item.get("eventKind") or ""),
+                "label": item.get("label") if isinstance(item.get("label"), dict) else {},
+            }
             previous_text = str(state.get("hidden_work_text") or "") if descriptor == state.get("hidden_work_descriptor") else ""
             incoming_text = str(event.get("text") or "")
             if event.get("heartbeat"):

@@ -475,10 +475,10 @@ function markdownImageFallbackNode(path, label = '') {
     open.href = rawFileUrl(path);
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
-    open.textContent = t('preview.action.open');
+    open.textContent = t('common.open');
     const download = document.createElement('a');
     download.href = rawFileDownloadUrl(path);
-    download.textContent = t('preview.action.download');
+    download.textContent = t('common.download');
     node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
   }
   return node;

@@ -882,10 +882,10 @@ function renderPdfPreviewInto(container, path) {
   open.href = rawFileUrl(path);
   open.target = '_blank';
   open.rel = 'noopener noreferrer';
-  open.textContent = t('preview.action.open');
+  open.textContent = t('common.open');
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
-  download.textContent = t('preview.action.download');
+  download.textContent = t('common.download');
   detail.append(open, document.createTextNode(' · '), download);
   fallback.append(title, detail);
   container.replaceChildren(frame, fallback);
@@ -905,10 +905,10 @@ function previewActionFallbackNode(titleText, detailText, path) {
     open.href = rawFileUrl(path);
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
-    open.textContent = t('preview.action.open');
+    open.textContent = t('common.open');
     const download = document.createElement('a');
     download.href = rawFileDownloadUrl(path);
-    download.textContent = t('preview.action.download');
+    download.textContent = t('common.download');
     detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
   }
   fallback.append(title, detail);

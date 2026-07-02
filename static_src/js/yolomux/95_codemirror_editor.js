@@ -23,12 +23,10 @@ function destroyCodeMirrorPanel(panel) {
   if (panel) {
     panel._cmApi = null;
     panel._cmThemeCompartment = null;
-    panel._cmThemeViews = [];
     panel._cmEditorOptionCompartment = null;
-    panel._cmEditorOptionViews = [];
     panel._cmEditorOptionConfig = null;
     panel._cmLocaleCompartment = null;
-    panel._cmLocaleViews = [];
+    panel._cmViews = [];
     panel._cmPath = '';
     panel._cmSignature = '';
     panel._cmMode = '';
@@ -316,19 +314,16 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
   }
 }
 
-function trackCodeMirrorThemeViews(panel, api, views) {
+function trackCodeMirrorViews(panel, api, views) {
   if (!panel) return;
   panel._cmApi = api;
-  const liveViews = views.filter(Boolean);
-  panel._cmThemeViews = liveViews;
-  panel._cmEditorOptionViews = liveViews;
-  panel._cmLocaleViews = liveViews;
+  panel._cmViews = views.filter(Boolean);
 }
 
 function reconfigureCodeMirrorPanelLocale(panel) {
   const api = panel?._cmApi;
   const compartment = panel?._cmLocaleCompartment;
-  const views = Array.isArray(panel?._cmLocaleViews) ? panel._cmLocaleViews : [];
+  const views = Array.isArray(panel?._cmViews) ? panel._cmViews : [];
   if (!api || !compartment || !views.length) return false;
   const effect = compartment.reconfigure(codeMirrorLocaleExtensions(api, null));
   for (const view of views) {
@@ -343,7 +338,7 @@ function reconfigureCodeMirrorPanelTheme(panel) {
   const api = panel?._cmApi;
   const path = panel?._cmPath;
   const compartment = panel?._cmThemeCompartment;
-  const views = Array.isArray(panel?._cmThemeViews) ? panel._cmThemeViews : [];
+  const views = Array.isArray(panel?._cmViews) ? panel._cmViews : [];
   if (!api || !path || !compartment || !views.length) return false;
   const extensions = codeMirrorThemeExtensions(api, path);
   const effect = compartment.reconfigure(extensions);
@@ -356,7 +351,7 @@ function reconfigureCodeMirrorPanelTheme(panel) {
 function reconfigureCodeMirrorPanelEditorOptions(panel) {
   const api = panel?._cmApi;
   const compartment = panel?._cmEditorOptionCompartment;
-  const views = Array.isArray(panel?._cmEditorOptionViews) ? panel._cmEditorOptionViews : [];
+  const views = Array.isArray(panel?._cmViews) ? panel._cmViews : [];
   if (!api || !compartment || !views.length) return false;
   const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, panel._cmEditorOptionConfig || {}));
   for (const view of views) {
@@ -944,7 +939,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
       });
       panel._cmView = panel._cmMergeView.b;
-      trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
+      trackCodeMirrorViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
       panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => {
         scheduleFileEditorSplitScrollSync(panel, 'editor');
         scheduleFileEditorPanelViewStateCapture(item, panel);
@@ -1001,7 +996,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         scheduleFileEditorSplitScrollSync(panel, 'editor');
         scheduleFileEditorPanelViewStateCapture(item, panel);
       });
-      trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
+      trackCodeMirrorViews(panel, api, [panel._cmView]);
     }
     panel._cmPath = path;
     panel._cmSignature = signature;
@@ -1066,7 +1061,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
         scheduleFileEditorSplitScrollSync(panel, 'editor');
         scheduleFileEditorPanelViewStateCapture(item, panel);
       });
-      trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
+      trackCodeMirrorViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
       if (createdState.plain) {
         setFileEditorPanelStatus(panel, t('editor.codemirrorPlainText'), 'warn');

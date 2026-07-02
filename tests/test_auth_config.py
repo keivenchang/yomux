@@ -205,7 +205,7 @@ def test_setup_auth_page_recommends_https(monkeypatch):
     assert recommendation in setup_html
     assert "--self-signed" in setup_html
     assert "--host 0.0.0.0" not in setup_html
-    edit_label = web.server_string("en", "setup.edit")
+    edit_label = web.server_string("en", "common.edit")
     assert setup_html.index(recommendation) < setup_html.index(f"{edit_label} <code>")
 
 
@@ -377,6 +377,12 @@ def test_main_page_bootstrap_defers_preferences_metadata():
     assert "defaults" in settings_payload
     assert "catalog" not in settings_payload
     assert "choices" not in settings_payload
+    assert settings_payload["localeKeyOverrides"] == {
+        "appearance.preview_font_size": {"label": "common.previewFontSize"},
+        "file_explorer.quick_access_paths": {"label": "common.quickPaths"},
+        "general.language": {"label": "common.language"},
+        "github.watched_prs": {"label": "common.watchedPrs"},
+    }
 
 
 def test_main_page_has_logout_button():

@@ -42,10 +42,10 @@ function updateEditorModeControl(control, path, state, item = null) {
 }
 
 function editorModeLabel(mode) {
-  if (mode === 'diff') return t('editor.diff');
-  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'diff') return t('common.diff');
+  if (mode === 'preview') return t('common.preview');
   if (mode === 'split') return t('editor.mode.split');
-  return t('editor.mode.edit');
+  return t('common.edit');
 }
 
 function editorModeIconClass(mode) {
@@ -99,7 +99,7 @@ function editorPreviewThemeStateLabel(state = editorPreviewThemeState()) {
 
 function editorPreviewThemeShortLabel(state = editorPreviewThemeState()) {
   if (state === 'vanilla') return t('editor.previewVanillaShort');
-  return state === 'light' ? t('editor.previewBrightShort') : t('editor.previewDarkShort');
+  return state === 'light' ? t('editor.previewBrightShort') : t('common.theme.dark');
 }
 
 function editorSchemeCssVariables(scheme = activeEditorScheme()) {
@@ -509,9 +509,9 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const visible = fileEditorGitActionControlsVisible(path, state, item);
   button.hidden = !visible;
   button.disabled = !visible || (!active && loading);
-  const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
+  const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('common.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
-  button.textContent = t('changes.title');
+  button.textContent = t('brand.tab.changes');
 }
 
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
@@ -1048,7 +1048,7 @@ function refreshMetaButtonChrome() {
   if (!refreshMeta) return;
   const loading = transcriptMetaLoading === true;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.textContent = t('meta.refresh');
+  refreshMeta.textContent = t('common.refresh');
   refreshMeta.title = loading
     ? t('info.loadingRepo')
     : t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});

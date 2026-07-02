@@ -71,13 +71,13 @@ TMUX_WALL_CATALOG_KEYS = (
     "state.working",
     "tmuxWall.action.openSummary",
     "tmuxWall.action.pause",
-    "tmuxWall.action.refresh",
+    "common.refresh",
     "tmuxWall.action.resume",
     "tmuxWall.column.backend",
-    "tmuxWall.column.branch",
+    "common.branchLabel",
     "tmuxWall.column.container",
     "tmuxWall.column.gitHead",
-    "tmuxWall.column.path",
+    "common.pathLabel",
     "tmuxWall.column.projectSha",
     "tmuxWall.column.repo",
     "tmuxWall.column.user",
@@ -87,7 +87,7 @@ TMUX_WALL_CATALOG_KEYS = (
     "tmuxWall.error.containerMetadataFailed",
     "tmuxWall.error.emptySlot",
     "tmuxWall.error.linesInteger",
-    "tmuxWall.error.notFound",
+    "common.notFound",
     "tmuxWall.error.staticAssetMissing",
     "tmuxWall.error.targetRequired",
     "tmuxWall.error.tmuxDiscoveryFailed",
@@ -560,7 +560,7 @@ def html_page(locale: str = "en") -> str:
   </div>
   <div class="actions">
     <button id="pauseBtn">{tmux_wall_html_string(locale, "tmuxWall.action.pause")}</button>
-    <button id="refreshBtn">{tmux_wall_html_string(locale, "tmuxWall.action.refresh")}</button>
+    <button id="refreshBtn">{tmux_wall_html_string(locale, "common.refresh")}</button>
     <button id="summaryBtn">{tmux_wall_html_string(locale, "tmuxWall.action.openSummary")}</button>
     <div id="status" class="status">{tmux_wall_html_string(locale, "tmuxWall.status.connecting")}</div>
   </div>
@@ -569,7 +569,7 @@ def html_page(locale: str = "en") -> str:
   <section id="grid" class="grid"></section>
   <section class="containers">
     <table>
-      <thead><tr><th>{tmux_wall_html_string(locale, "tmuxWall.column.repo")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.backend")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.user")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.container")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.gitHead")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.projectSha")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.branch")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.path")}</th></tr></thead>
+      <thead><tr><th>{tmux_wall_html_string(locale, "tmuxWall.column.repo")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.backend")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.user")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.container")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.gitHead")}</th><th>{tmux_wall_html_string(locale, "tmuxWall.column.projectSha")}</th><th>{tmux_wall_html_string(locale, "common.branchLabel")}</th><th>{tmux_wall_html_string(locale, "common.pathLabel")}</th></tr></thead>
       <tbody id="containers"></tbody>
     </table>
   </section>
@@ -641,7 +641,7 @@ class Handler(BaseHTTPRequestHandler):
             self.stream_events()
             return
         self.write_text(
-            server_string(self.request_locale(), "tmuxWall.error.notFound") + "\n",
+            server_string(self.request_locale(), "common.notFound") + "\n",
             status=HTTPStatus.NOT_FOUND,
         )
 

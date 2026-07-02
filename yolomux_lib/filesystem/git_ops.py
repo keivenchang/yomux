@@ -145,8 +145,8 @@ def _refs_requested(from_ref: str | None, to_ref: str | None) -> bool:
 
 def _diff_ref_resolution_error(error: Exception) -> bool:
     return isinstance(error, paths.FilesystemError) and error.message_key in {
-        "fs.error.unknownFromRef",
-        "fs.error.unknownToRef",
+        "common.unknownFromRef",
+        "common.unknownToRef",
         "fs.error.refOrderCurrent",
         "fs.error.refOrder",
     }
@@ -167,7 +167,7 @@ def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
         if not _ref_exists(repo, from_ref):
             raise paths.FilesystemError(
                 f"unknown FROM ref: {from_ref}",
-                message_key="fs.error.unknownFromRef",
+                message_key="common.unknownFromRef",
                 message_params={"ref": from_ref},
             )
         return
@@ -179,13 +179,13 @@ def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
     if not _ref_exists(repo, from_ref):
         raise paths.FilesystemError(
             f"unknown FROM ref: {from_ref}",
-            message_key="fs.error.unknownFromRef",
+            message_key="common.unknownFromRef",
             message_params={"ref": from_ref},
         )
     if not _ref_exists(repo, to_ref):
         raise paths.FilesystemError(
             f"unknown TO ref: {to_ref}",
-            message_key="fs.error.unknownToRef",
+            message_key="common.unknownToRef",
             message_params={"ref": to_ref},
         )
     order = git(["merge-base", "--is-ancestor", from_ref, to_ref], cwd=str(repo), timeout=5.0)

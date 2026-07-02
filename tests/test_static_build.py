@@ -8,6 +8,7 @@ from tools.static_build import check_css_braces
 from tools.static_build import i18n_untranslated_entries
 from tools.static_build import i18n_untranslated_report
 from tools.static_build import i18n_literal_key_errors
+from tools.static_build import i18n_duplicate_ownership_errors
 from tools.static_build import i18n_visible_literal_sink_errors
 from tools.static_build import locale_expected_keys
 from tools.static_build import locale_registry_errors
@@ -69,10 +70,10 @@ def test_locale_key_parity_requires_exact_locale_plural_categories():
     assert locale_key_errors({"en": source, "fr": unexpected}) == ["fr.json has unknown keys: item.few"]
 
 
-def test_shipped_catalogs_have_all_611_locale_specific_plural_forms():
+def test_shipped_catalogs_have_all_598_locale_specific_plural_forms():
     catalogs = source_catalogs()
     source = catalogs["en"]
-    assert len(plural_family_bases(source)) == 47
+    assert len(plural_family_bases(source)) == 46
     extras = 0
     for locale, catalog in catalogs.items():
         if locale == "en":
@@ -80,7 +81,7 @@ def test_shipped_catalogs_have_all_611_locale_specific_plural_forms():
         expected = locale_expected_keys(source, locale)
         assert set(catalog) == expected
         extras += len(expected) - len(source)
-    assert extras == 611
+    assert extras == 598
 
 
 def test_i18n_literal_key_errors_checks_exact_and_plural_calls_but_skips_dynamic_prefixes(tmp_path):
@@ -214,13 +215,13 @@ def test_i18n_untranslated_report_fails_every_unintended_fallback():
 
 def test_i18n_untranslated_report_does_not_hide_graph_labels_by_locale():
     catalogs = {
-        "en": {"debug.graph.chart.clientLatency": "Client latency"},
-        "fr": {"debug.graph.chart.clientLatency": "Client latency"},
-        "zh-Hant": {"debug.graph.chart.clientLatency": "Client latency"},
+        "en": {"common.clientLatency": "Client latency"},
+        "fr": {"common.clientLatency": "Client latency"},
+        "zh-Hant": {"common.clientLatency": "Client latency"},
     }
     entries = i18n_untranslated_entries(catalogs)
-    assert entries["fr"] == ["debug.graph.chart.clientLatency"]
-    assert entries["zh-Hant"] == ["debug.graph.chart.clientLatency"]
+    assert entries["fr"] == ["common.clientLatency"]
+    assert entries["zh-Hant"] == ["common.clientLatency"]
 
 
 def test_locale_semantic_errors_enforces_placeholders_and_protected_syntax():
@@ -237,6 +238,43 @@ def test_locale_semantic_errors_enforces_placeholders_and_protected_syntax():
     errors = [error for error in locale_semantic_errors(catalogs) if not error.startswith("missing registered locale catalogs:")]
     assert any("fr.json placeholder drift at a" in error for error in errors)
     assert any("fr.json protected-token drift at a" in error for error in errors)
+
+
+def test_i18n_duplicate_ownership_rejects_parallel_concepts_but_allows_reviewed_contexts_and_plurals():
+    source = {
+        "feature.cancel": "Cancel",
+        "dialog.cancel": "Cancel",
+        "item.one": "{count} item",
+        "item.other": "{count} item",
+        "toast.keep": "Keep",
+        "update.dismiss": "Keep",
+    }
+    assert i18n_duplicate_ownership_errors(source) == [
+        "en.json duplicate locale concept lacks a shared owner: dialog.cancel, feature.cancel = 'Cancel'",
+    ]
+
+
+def test_i18n_duplicate_ownership_rejects_parallel_plural_families_but_allows_reviewed_contexts():
+    duplicate = {
+        "first.one": "{count} item",
+        "first.other": "{count} items",
+        "second.one": "{count} item",
+        "second.other": "{count} items",
+    }
+    assert i18n_duplicate_ownership_errors(duplicate) == [
+        "en.json duplicate plural locale concept lacks a shared owner: first, second = ('{count} item', '{count} items')",
+    ]
+    reviewed = {
+        "relative.compact.day.one": "{count} day ago",
+        "relative.compact.day.other": "{count} days ago",
+        "summary.relative.day.one": "{count} day ago",
+        "summary.relative.day.other": "{count} days ago",
+    }
+    assert i18n_duplicate_ownership_errors(reviewed) == []
+
+
+def test_shipped_catalog_has_no_unowned_duplicate_locale_concepts():
+    assert i18n_duplicate_ownership_errors(source_catalogs()["en"]) == []
 
 
 def test_locale_semantic_errors_validate_locale_only_plural_forms_against_other():

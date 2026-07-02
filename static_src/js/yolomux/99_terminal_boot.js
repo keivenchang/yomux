@@ -11,8 +11,8 @@ function paneFrameControlsHtml(session, options = {}) {
   const includePopout = options.popout === true;
   if (includeActions) {
     controls.push(disabled
-      ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
-      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+      ? `<button class="tab pane-actions" ${disabledAttrs(t('common.sessionActions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
+      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('common.sessionActions'))}" aria-label="${esc(t('common.sessionActions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
   }
   if (includeDetails) {
     const detailsLabel = t('pane.details.hide');
@@ -99,7 +99,7 @@ function virtualPanelControlsHtml(session, options = {}) {
 
 function relocalizeVirtualPanelChrome(panel, label = '') {
   if (!panel) return false;
-  panel.querySelectorAll('.pane-tabs[role="tablist"]').forEach(tablist => tablist.setAttribute('aria-label', t('pane.tabs.aria')));
+  panel.querySelectorAll('.pane-tabs[role="tablist"]').forEach(tablist => tablist.setAttribute('aria-label', t('common.tabsLabel')));
   panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
     button.title = t('pane.minimize');
     button.setAttribute('aria-label', t('pane.minimize'));
@@ -161,7 +161,7 @@ function createPanel(session) {
   panel.innerHTML = `
       <div class="panel-head">
         ${panelControlsHtml(session)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
       </div>
       <div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
@@ -180,7 +180,7 @@ function createPanel(session) {
       </div>
       <div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
-          <div class="transcript-head">${esc(t('tab.transcript'))}</div>
+          <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
           <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
         </div>
@@ -215,7 +215,7 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
 
 function syncTranscriptMetaLoadingUi() {
   document.getElementById(panelDomId(infoItemId))?.querySelectorAll('[data-info-refresh]').forEach(button => {
-    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('meta.refresh'), t('meta.refresh'));
+    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('common.refresh'), t('common.refresh'));
   });
   const metaRefreshButton = refreshMeta;
   if (metaRefreshButton) {
@@ -619,17 +619,17 @@ const infoSearchMaxLength = 240;
 const infoSortDefs = Object.freeze([
   {key: 'name', dir: 'asc', value: 'name:asc', labelKey: 'finder.sort.az'},
   {key: 'name', dir: 'desc', value: 'name:desc', labelKey: 'finder.sort.za'},
-  {key: 'date', dir: 'desc', value: 'date:desc', labelKey: 'finder.sort.newest'},
+  {key: 'date', dir: 'desc', value: 'date:desc', labelKey: 'common.sort.recent'},
   {key: 'date', dir: 'asc', value: 'date:asc', labelKey: 'finder.sort.oldest'},
 ]);
 const infoDimensionDefs = Object.freeze([
   {key: 'tab', labelKey: 'info.dimension.tab'},
   {key: 'tmux-window', labelKey: 'info.field.tmuxSubWindow'},
   {key: 'ai', labelKey: 'info.dimension.ai'},
-  {key: 'path', labelKey: 'yoagent.action.row.path'},
-  {key: 'branch', labelKey: 'info.dimension.branch'},
+  {key: 'path', labelKey: 'common.pathLabel'},
+  {key: 'branch', labelKey: 'common.branchLabel'},
   {key: 'linear', labelKey: 'info.field.linear'},
-  {key: 'pr', labelKey: 'searchHistory.pr'},
+  {key: 'pr', labelKey: 'common.pullRequestShort'},
 ]);
 const infoPresetDefs = Object.freeze([
   {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
@@ -1369,24 +1369,6 @@ function infoRecordTabValueHtml(record = {}, options = {}) {
   });
 }
 
-function infoPullRequestLifecycleText(pr) {
-  if (!pr?.number) return '';
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (status === 'merged' || pr.merged || pr.merged_at) return t('pr.status.merged');
-  if (status === 'draft' || pr.draft) return t('pr.status.draft');
-  if (status === 'closed') return t('pr.status.closed');
-  return t('pr.status.open');
-}
-
-function infoPullRequestLifecycleClass(pr) {
-  if (!pr?.number) return '';
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (status === 'merged' || pr.merged || pr.merged_at) return 'pr-status-merged';
-  if (status === 'draft' || pr.draft) return 'pr-status-draft';
-  if (status === 'closed') return 'pr-status-closed';
-  return 'pr-status-open';
-}
-
 function infoStatusBadgeHtml(record, text, className, options = {}) {
   const label = String(text || '').trim();
   if (!label) return '';
@@ -1466,14 +1448,14 @@ function infoRecordLinearDescHtml(record) {
 
 function infoFieldLabel(kind) {
   const labels = {
-    path: 'info.field.path',
+    path: 'common.field.path',
     branch: 'info.field.gitBranch',
     pr: 'info.field.githubPr',
     linear: 'info.field.linear',
     tab: 'info.field.tabTmuxSession',
     ai: 'info.field.tmuxSubWindow',
     'tmux-window': 'info.field.tmuxSubWindow',
-    updated: 'info.field.updated',
+    updated: 'common.updated',
   };
   return t(labels[kind] || kind);
 }
@@ -1687,7 +1669,7 @@ const infoDimensionCountKeys = Object.freeze({
   tab: 'common.tabs',
   'tmux-window': 'info.count.tmuxWindow',
   ai: 'info.count.ai',
-  path: 'info.count.path',
+  path: 'common.pathCount',
   branch: 'info.count.branch',
   pr: 'info.count.pr',
   linear: 'info.count.linear',
@@ -2179,7 +2161,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const linearHtml = linearSourceItems.length
     ? linearSourceItems.map(issue => linearIssueHtml(issue)).join(' ')
     : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-  const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
+  const prHtml = currentPr?.number ? pullRequestLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
   const prValue = currentPr?.number ? currentPr : branch.pull_request;
   const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
   const prNumber = infoPrNumberFromValue(prValue?.number);
@@ -2190,8 +2172,9 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
   const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
-  const prLifecycleText = prValue?.number ? infoPullRequestLifecycleText(prValue) : '';
-  const prLifecycleClass = prValue?.number ? infoPullRequestLifecycleClass(prValue) : '';
+  const prLifecycle = prValue?.number ? pullRequestLifecycleStatus(prValue) : null;
+  const prLifecycleText = prLifecycle?.text || '';
+  const prLifecycleClass = prLifecycle?.className || '';
   const prCiStatus = prValue?.number ? pullRequestCiStatus(prValue) : null;
   const prCiText = prCiStatus?.text || '';
   const prCiClass = prCiStatus?.className || '';
@@ -2472,7 +2455,7 @@ function hasUploadableDrag(event) {
 
 function bindFileUpload(panel, session) {
   if (readOnlyMode) return;
-  panel.dataset.fileDropLabel = t('drop.uploadOverlay');
+  setFileUploadDropLabel(panel);
   panel.addEventListener('dragenter', event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
@@ -2504,9 +2487,13 @@ function bindFileUpload(panel, session) {
   });
 }
 
+function setFileUploadDropLabel(panel) {
+  if (panel) panel.dataset.fileDropLabel = t('drop.uploadOverlay');
+}
+
 function relocalizeFileUploadDropLabels() {
   document.querySelectorAll?.('.panel[data-file-drop-label]').forEach(panel => {
-    panel.dataset.fileDropLabel = t('drop.uploadOverlay');
+    setFileUploadDropLabel(panel);
   });
 }
 
@@ -2514,7 +2501,7 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
   const references = terminalFileReferences(session, payload);
   if (!references.length) return;
   const inserted = insertIntoTerminal(session, `${references.map(shellQuote).join(' ')} `);
-  const label = references.length === 1 ? references[0] : tPlural('files.pathCount', references.length);
+  const label = references.length === 1 ? references[0] : tPlural('common.pathCount', references.length);
   statusEl.innerHTML = inserted
     ? `<span class="ok">${localizedHtml('status.insertedInto', {name: label, session: sessionLabel(session)})}</span>`
     : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
@@ -4240,7 +4227,7 @@ function showServerUpdateBanner(version) {
   const reload = document.createElement('button');
   reload.type = 'button';
   reload.className = 'server-update-banner-reload';
-  reload.textContent = t('update.reload');
+  reload.textContent = t('common.reload');
   reload.addEventListener('click', () => location.reload());
   const dismiss = document.createElement('button');
   dismiss.type = 'button';
@@ -4547,8 +4534,8 @@ function relocalizeTerminalPanelChrome(session) {
     terminalTab.setAttribute('aria-label', title);
   }
   panel.querySelectorAll('.pane-actions').forEach(button => {
-    button.title = t('pane.actions');
-    button.setAttribute('aria-label', t('pane.actions'));
+    button.title = t('common.sessionActions');
+    button.setAttribute('aria-label', t('common.sessionActions'));
   });
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
   panel.querySelectorAll('[data-locale-text-key]').forEach(node => {
@@ -4557,7 +4544,7 @@ function relocalizeTerminalPanelChrome(session) {
   const statusToggle = panel.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
   if (statusToggle) statusToggle.outerHTML = tmuxStatusToggleHtml(session);
   const transcriptHead = panel.querySelector(`#transcript-pane-${cssEscape(session)} .transcript-head`);
-  if (transcriptHead) transcriptHead.textContent = t('tab.transcript');
+  if (transcriptHead) transcriptHead.textContent = t('common.transcript');
   const summaryHead = panel.querySelector(`#summary-pane-${cssEscape(session)} .transcript-head`);
   if (summaryHead) summaryHead.textContent = t('menu.tmux.aiTranscript', {session: sessionLabel(session)});
   const eventsHead = panel.querySelector(`#events-pane-${cssEscape(session)} .transcript-head`);
@@ -4568,7 +4555,7 @@ function relocalizeTerminalPanelChrome(session) {
 
 function transcriptPathRowHtml(path, fallback = '') {
   if (!path) return `<span class="transcript-path-missing">${esc(fallback || t('transcript.noPath'))}</span>`;
-  return `<span class="transcript-path-label">${esc(t('transcript.path'))}</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: t('transcript.copyPath')})}`;
+  return `<span class="transcript-path-label">${esc(t('common.field.path'))}</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: t('common.copyTranscriptPath')})}`;
 }
 
 function updateTranscriptPathRow(session, path, fallback = '') {
@@ -4768,7 +4755,7 @@ function eventItemHtml(event) {
   const title = detailText ? `${message}\n${detailText}` : message;
   return `<div class="event-item" title="${esc(title)}">
     <span class="event-time">${esc(formatEventTime(event.time))}</span>
-    <span class="event-type">${esc(event.type || t('events.typeFallback'))}</span>
+    <span class="event-type">${esc(event.type || t('common.eventLabel'))}</span>
     <span class="event-message">${esc(message)}${detailText ? ` · ${esc(detailText)}` : ''}</span>
   </div>`;
 }

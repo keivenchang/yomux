@@ -1,5 +1,7 @@
+import json
 import os
 from pathlib import Path
+import re
 import threading
 
 
@@ -366,23 +368,27 @@ def test_summary_settings_reject_invalid_backend_defaults():
 
 def test_preferences_source_paths_are_in_backend_catalog():
     source = (REPO_ROOT / "static_src/js/yolomux/82_preferences_panel.js").read_text(encoding="utf-8")
-    paths = set()
-    for line in source.splitlines():
-        if "{path:" not in line:
-            continue
-        for part in line.split("{path:")[1:]:
-            quote = "'" if "'" in part[:2] else '"'
-            if quote not in part:
-                continue
-            value = part.split(quote, 2)[1]
-            if "." in value:
-                paths.add(value)
+    paths = set(re.findall(r"preferenceSettingItem\(['\"]([^'\"]+)['\"]", source))
 
     catalog = settings_catalog(default_settings())
     assert paths, "Preferences source should declare setting paths"
     assert paths <= set(catalog), sorted(paths - set(catalog))
     assert "general.default_layout" in paths
     assert "wall" not in catalog["general.default_layout"]["choices"]
+    assert "function preferenceSettingLocaleKeys(path)" in source
+    assert "settingCatalogEntry(path).locale_keys" in source
+    assert re.search(r"\{\s*path\s*:", source) is None, "path-backed Preferences rows must use preferenceSettingItem()"
+    assert "t(`common.effort.${value}`)" in source
+    assert "pref.yoagent.codex_effort.${value}" not in source
+    assert "pref.yoagent.claude_effort.${value}" not in source
+    english = json.loads((REPO_ROOT / "static_src/locales/en.json").read_text(encoding="utf-8"))
+    for path in paths:
+        for locale_key in catalog[path]["locale_keys"].values():
+            assert locale_key in english, (path, locale_key)
+    assert catalog["general.language"]["locale_keys"]["label"] == "common.language"
+    assert catalog["appearance.preview_font_size"]["locale_keys"]["label"] == "common.previewFontSize"
+    assert catalog["file_explorer.quick_access_paths"]["locale_keys"]["label"] == "common.quickPaths"
+    assert catalog["github.watched_prs"]["locale_keys"]["label"] == "common.watchedPrs"
 
 
 def test_startup_helpers_setting_migrates_to_startup_tips():

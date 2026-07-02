@@ -81,11 +81,10 @@ I18N_ALLOWED_IDENTICAL_TERMS = {
 I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "brand.marker",
     "brand.tab.agent",
+    "brand.tab.changes",
     "brand.tab.info",
     "brand.tab.summary",
     "brand.wordmark.lo",
-    "brand.wordmark.yo",
-    "changes.title",
     "changes.titleForSession",
     "debug.graph.chart.cpu",
     "debug.graph.meta.rss",
@@ -94,7 +93,6 @@ I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "finder.label.finder",
     "shortcuts.keys.pinTab",
     "shortcuts.section.finderDiffer",
-    "tab.changes",
 })
 I18N_ALLOWED_IDENTICAL_LOCALE_KEYS: dict[str, frozenset[str]] = {
     "de": frozenset({"transcript.role.system"}),
@@ -117,6 +115,26 @@ I18N_PROTECTED_TOKEN_RE = re.compile(
 I18N_PSEUDO_TOKEN_RE = re.compile(f"({I18N_PLACEHOLDER_PATTERN}|{I18N_PROTECTED_TOKEN_RE.pattern})")
 I18N_TRANSLATABLE_CODE_KEYS = frozenset({"yoagent.prompt.format"})
 I18N_REQUIRED_YO_MARKERS = {"zh-Hans": "优", "zh-Hant": "優"}
+I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
+    frozenset({"debug.summary", "searchHistory.summary", "transcript.role.summary"}): "view labels and a transcript role need different grammar",
+    frozenset({"dialog.delete.kindFile", "popover.kind.file", "yolo.rule.source.file"}): "file kind, popover metadata, and rule source need different grammar",
+    frozenset({"branch.current", "summary.state.active"}): "current branch and active work are different states",
+    frozenset({"finder.dateMode.none", "info.group.none"}): "no date and no grouping are different choices",
+    frozenset({"git.status.copied", "status.copied"}): "git copied status and clipboard completion are different events",
+    frozenset({"legend.icon.share.label", "share.create"}): "share legend noun and create-share action are different parts of speech",
+    frozenset({"menu.view.theme", "pref.appearance.editor_cursor_color.theme"}): "theme heading and inherit-theme cursor option are different concepts",
+    frozenset({"pr.approved", "pr.review.approvedShort"}): "full review state and compact badge have different display constraints",
+    frozenset({"state.blocked", "state.short.blocked"}): "full and compact blocked states have different display constraints",
+    frozenset({"summary.state.idle", "yolo.status.idle"}): "summary state and inline worker status need different grammar",
+    frozenset({"summary.stream.effortDefault", "yolo.rule.default"}): "effort default and rule name are different concepts",
+    frozenset({"common.theme.system", "pref.general.language.system", "transcript.role.system"}): "theme, language, and transcript-role meanings of system are different concepts",
+    frozenset({"tmuxWall.column.user", "transcript.role.user"}): "user column and transcript role need different grammar",
+    frozenset({"toast.keep", "update.dismiss"}): "keep action and update dismissal are different actions",
+    frozenset({"yoagent.stream.error", "yolo.rule.source.error"}): "stream state and rule source are different concepts",
+}
+I18N_ALLOWED_DUPLICATE_PLURAL_FAMILY_GROUPS: dict[frozenset[str], str] = {
+    frozenset({"relative.compact.day", "summary.relative.day"}): "compact relative time and summary prose use different grammar",
+}
 I18N_LITERAL_CALL_RE = re.compile(
     r"\b(?P<function>t|localizedHtml|tPlural)\(\s*(?P<quote>['\"])(?P<key>[A-Za-z0-9_.-]+)(?P=quote)"
 )
@@ -767,10 +785,52 @@ def i18n_protected_tokens(value: object, key: str = "") -> Counter[str]:
     return Counter(tokens)
 
 
+def i18n_duplicate_ownership_errors(source: dict[str, object]) -> list[str]:
+    """Reject source-locale synonyms that bypass one neutral semantic owner."""
+    plural_categories = set().union(*PLURAL_CATEGORIES_BY_LOCALE.values())
+    plural_keys = {
+        f"{base}.{category}"
+        for base in plural_family_bases(source)
+        for category in plural_categories
+        if f"{base}.{category}" in source
+    }
+    keys_by_value: dict[str, list[str]] = defaultdict(list)
+    for key, raw_value in source.items():
+        value = str(raw_value or "").strip()
+        if value and key not in plural_keys:
+            keys_by_value[value].append(key)
+    errors: list[str] = []
+    for value, keys in sorted(keys_by_value.items()):
+        if len(keys) < 2:
+            continue
+        group = frozenset(keys)
+        if group in I18N_ALLOWED_DUPLICATE_KEY_GROUPS:
+            continue
+        errors.append(
+            f"{SOURCE_LOCALE}.json duplicate locale concept lacks a shared owner: "
+            f"{', '.join(sorted(group))} = {value!r}"
+        )
+    plural_families_by_value: dict[tuple[object, object], list[str]] = defaultdict(list)
+    for base in plural_family_bases(source):
+        plural_families_by_value[(source.get(f"{base}.one"), source.get(f"{base}.other"))].append(base)
+    for values, bases in sorted(plural_families_by_value.items(), key=lambda item: str(item[0])):
+        if len(bases) < 2:
+            continue
+        group = frozenset(bases)
+        if group in I18N_ALLOWED_DUPLICATE_PLURAL_FAMILY_GROUPS:
+            continue
+        errors.append(
+            f"{SOURCE_LOCALE}.json duplicate plural locale concept lacks a shared owner: "
+            f"{', '.join(sorted(group))} = {values!r}"
+        )
+    return errors
+
+
 def locale_semantic_errors(catalogs: dict[str, dict]) -> list[str]:
     """Validate one shared semantic contract for every translated catalog."""
     errors = [*locale_registry_errors(catalogs), *locale_key_errors(catalogs)]
     source = catalogs.get(SOURCE_LOCALE) or {}
+    errors.extend(i18n_duplicate_ownership_errors(source))
     for locale, catalog in sorted(catalogs.items()):
         if locale == SOURCE_LOCALE:
             continue

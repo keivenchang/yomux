@@ -27,7 +27,7 @@ const context = {
   i18nInterpolate: (text, params) => String(text).replace(/\{(\w+)\}/g, (match, name) => Object.prototype.hasOwnProperty.call(params || {}, name) ? String(params[name]) : match),
   esc: value => String(value),
   formatEventTime: value => String(value),
-  t: key => key === 'events.typeFallback' ? 'event' : key === 'yolo.ownerFallback' ? 'another YOLOmux' : key,
+  t: key => key === 'common.eventLabel' ? 'event' : key === 'yolo.ownerFallback' ? 'another YOLOmux' : key,
 };
 vm.runInNewContext(
   `${coreSource.slice(coreStart, coreEnd)}\n${terminalSource.slice(eventStart, eventEnd)}\n${terminalSource.slice(ownerStart, ownerEnd)}\nthis.api = {eventItemHtml, structuredMessageText, structuredMessageSnapshot, userMessageSnapshot, userMessageText, autoApproveOwnerLabel};`,

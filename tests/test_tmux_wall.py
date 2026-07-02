@@ -148,7 +148,7 @@ def test_tmux_wall_catalog_and_html_use_server_locale_parent(monkeypatch):
         "tmuxWall.title": "لوحة <YOLOmux>",
         "tmuxWall.subtitle": "لقطات حية",
         "tmuxWall.action.pause": "إيقاف مؤقت",
-        "tmuxWall.action.refresh": "تحديث",
+        "common.refresh": "تحديث",
         "tmuxWall.action.openSummary": "فتح JSON",
         "tmuxWall.status.connecting": "جارٍ الاتصال...",
         "tmuxWall.column.repo": "المستودع",

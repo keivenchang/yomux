@@ -3897,7 +3897,7 @@ class TmuxWebtermApp:
                 share_sessions = self.share_record_sessions(record)
                 if requested_session and requested_session not in share_sessions:
                     diagnostic = "share token is scoped to a different session"
-                    return user_message_payload("share.error.differentSession", diagnostic), HTTPStatus.FORBIDDEN
+                    return user_message_payload("share.error.sessionScope", diagnostic), HTTPStatus.FORBIDDEN
                 if record.get("revoked") or not self.share_record_sessions_are_active(record):
                     diagnostic = "share token expired or revoked"
                     return user_message_payload("share.error.tokenExpired", diagnostic), HTTPStatus.UNAUTHORIZED
@@ -9345,7 +9345,7 @@ class TmuxWebtermApp:
             "session_renamed",
             f"renamed {session} to {new_name}",
             {"old_session": session, "new_session": new_name},
-            message_key="status.sessionRenamed",
+            message_key="common.renamed",
             message_params={"oldName": session, "newName": new_name},
         )
         return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
@@ -9401,7 +9401,7 @@ class TmuxWebtermApp:
                 "session": session,
                 "target": target,
                 "errors": errors,
-                **user_message_payload("status.copyFailed", error, error=error),
+                **user_message_payload("common.copyFailed", error, error=error),
             }, HTTPStatus.INTERNAL_SERVER_ERROR
         if mode.stdout.strip() != "1":
             diagnostic = "tmux copy mode is not active"
@@ -9425,7 +9425,7 @@ class TmuxWebtermApp:
                 "copied": False,
                 "text": "",
                 "errors": errors,
-                **user_message_payload("status.copyFailed", error, error=error),
+                **user_message_payload("common.copyFailed", error, error=error),
             }, HTTPStatus.OK
 
         after = tmux(["display-message", "-p", "-t", target, "#{buffer_created}:#{buffer_size}:#{buffer_sample}"], timeout=1.0)
@@ -9435,7 +9435,7 @@ class TmuxWebtermApp:
                 "session": session,
                 "target": target,
                 "errors": errors,
-                **user_message_payload("status.copyFailed", error, error=error),
+                **user_message_payload("common.copyFailed", error, error=error),
             }, HTTPStatus.INTERNAL_SERVER_ERROR
         if after.stdout.strip() == before_signature:
             cancel_copy_mode_selection()
@@ -9457,7 +9457,7 @@ class TmuxWebtermApp:
                 "session": session,
                 "target": target,
                 "errors": errors,
-                **user_message_payload("status.copyFailed", error, error=error),
+                **user_message_payload("common.copyFailed", error, error=error),
             }, HTTPStatus.INTERNAL_SERVER_ERROR
 
         text = buffer_result.stdout
@@ -10877,7 +10877,7 @@ class TmuxWebtermApp:
                 "locked": False,
                 "approved": 0,
                 "blocked": 0,
-                **message_fields("last_action", "yolo.status.off", "off"),
+                **message_fields("last_action", "state.off", "off"),
             }
             owner = self.auto_approve_session_lock_owner(session, discovered_sessions=discovered_sessions)
             if owner:

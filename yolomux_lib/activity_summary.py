@@ -405,7 +405,7 @@ def changed_file_lines(files_payload: dict[str, Any], limit: int = 6, locale: st
     lines = [file_label(item) for item in files[:limit]]
     extra = len(files) - limit
     if extra > 0:
-        lines.append(server_string(locale, "summary.files.more", count=extra))
+        lines.append(server_string(locale, "common.more", count=extra))
     return lines
 
 
@@ -415,7 +415,7 @@ def agent_label(agent_name: str, locale: str = "en") -> str:
         "claude": "Claude",
         "term": server_string(locale, "shortcuts.section.terminal"),
         "terminal": server_string(locale, "shortcuts.section.terminal"),
-    }.get(agent_name.lower(), agent_name or server_string(locale, "yoagent.backend.none"))
+    }.get(agent_name.lower(), agent_name or server_string(locale, "state.noAgent"))
 
 
 def agent_display_label(agent: AgentInfo | None, fallback_kind: str = "", locale: str = "en") -> str:
@@ -593,7 +593,7 @@ def ci_summary(project: dict[str, Any], locale: str = "en") -> str:
         if isinstance(summary, str) and summary:
             return summary
         if isinstance(state, str) and state and state != "unknown":
-            return server_string(locale, "summary.ci.state", state=state)
+            return server_string(locale, "common.ciState", state=state)
     state = pr.get("state")
     if isinstance(state, str) and state:
         return server_string(locale, "summary.pr.state", state=state)
@@ -636,17 +636,17 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
     lines = [local]
     if repos:
         branch = f" @ {git.get('branch')}" if isinstance(git, dict) and git.get("branch") else ""
-        lines.append(server_string(locale, "summary.line.repo", repo=f"{repo_label(repos[0])}{branch}"))
+        lines.append(server_string(locale, "common.repoDetail", repo=f"{repo_label(repos[0])}{branch}"))
     if goal:
         lines.append(server_string(locale, "summary.line.goal", goal=goal))
     if work:
-        lines.append(server_string(locale, "summary.line.work", work=truncate_text(work, 180)))
+        lines.append(server_string(locale, "common.workDetail", work=truncate_text(work, 180)))
     if latest_tool:
         lines.append(server_string(locale, "summary.line.latestTool", tool=latest_tool))
     if ci:
         lines.append(ci)
     if files["count"]:
-        lines.append(server_string(locale, "summary.line.files", files=files_sentence(files, locale)))
+        lines.append(server_string(locale, "common.filesDetail", files=files_sentence(files, locale)))
     return {
         "locale": locale,
         "session": info.session,
@@ -756,7 +756,7 @@ def yoagent_context_lines(activity_payload: dict[str, Any], locale: str = "en") 
             if last_activity:
                 parts.append(server_string(locale, "summary.context.lastWorked", time=last_activity))
             if work:
-                parts.append(server_string(locale, "summary.context.work", work=truncate_text(work, 180)))
+                parts.append(server_string(locale, "common.workDetail", work=truncate_text(work, 180)))
             if status:
                 parts.append(server_string(locale, "summary.context.status", status=truncate_text(status, 160)))
             rolling_summary = str(summary.get("rolling_summary") or "").strip()
@@ -765,7 +765,7 @@ def yoagent_context_lines(activity_payload: dict[str, Any], locale: str = "en") 
                 parts.append(server_string(locale, "summary.context.transcript", state=rolling_state, text=truncate_text(rolling_summary, 260)))
             file_lines = [str(item) for item in summary.get("file_lines") or [] if item]
             if file_lines:
-                parts.append(server_string(locale, "summary.context.files", files=", ".join(file_lines[:6])))
+                parts.append(server_string(locale, "common.filesDetail", files=", ".join(file_lines[:6])))
             lines.append("; ".join(parts))
     if isinstance(skills, dict):
         for line in skills.get("context_lines") or []:
@@ -774,7 +774,7 @@ def yoagent_context_lines(activity_payload: dict[str, Any], locale: str = "en") 
                 lines.append(server_string(locale, "summary.context.skill", text=text))
     errors = activity_payload.get("errors") if isinstance(activity_payload, dict) else []
     for error in errors or []:
-        lines.append(server_string(locale, "summary.context.error", error=error))
+        lines.append(server_string(locale, "common.errorDetail", error=error))
     return lines
 
 
@@ -993,7 +993,7 @@ def yoagent_session_details(summary: dict[str, Any], locale: str = "en") -> str:
         extras.append(server_string(locale, "summary.context.status", status=truncate_text(status, 120)))
     file_lines = [str(item) for item in summary.get("file_lines") or [] if item]
     if file_lines:
-        extras.append(server_string(locale, "summary.context.files", files=", ".join(file_lines[:3])))
+        extras.append(server_string(locale, "common.filesDetail", files=", ".join(file_lines[:3])))
     if extras:
         return server_string(locale, "summary.table.detailsWithExtras", details=details, extras="; ".join(extras))
     return server_string(locale, "summary.table.detailsOnly", details=details)
@@ -1015,7 +1015,7 @@ def compact_last_worked_text(text: Any, locale: str = "en", timestamp: Any = Non
 def yoagent_session_table(summaries: list[dict[str, Any]], locale: str = "en") -> list[str]:
     """One Markdown table for session summary/list answers."""
     lines = [
-        f"| {server_string(locale, 'summary.table.session')} | {server_string(locale, 'summary.table.path')} | {server_string(locale, 'summary.table.lastWorked')} | {server_string(locale, 'summary.table.detailsHeader')} |",
+        f"| {server_string(locale, 'summary.table.session')} | {server_string(locale, 'summary.table.path')} | {server_string(locale, 'summary.table.lastWorked')} | {server_string(locale, 'common.details')} |",
         "|---|---|---|---|",
     ]
     for summary in summaries:

@@ -221,7 +221,7 @@ def nested_setting(settings: dict[str, Any], path: str) -> Any:
 
 def format_setting_value(value: Any, locale: str = "en") -> str:
     if isinstance(value, bool):
-        return yoagent_text(locale, "notify.state.on" if value else "notify.state.off")
+        return yoagent_text(locale, "notify.state.on" if value else "state.off")
     if isinstance(value, list):
         return ", ".join(f"`{item}`" for item in value) if value else yoagent_text(locale, "yoagent.prompt.none")
     return f"`{value}`"
@@ -762,7 +762,7 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "read_action": "explain current/default/choices/ranges",
             "write_action": "save validated settings patch",
             "auth": "readonly for reads, admin for writes",
-            "locale_keys": {"name": "menu.file.preferences"},
+            "locale_keys": {"name": "common.preferences"},
             "backing": "settings_catalog + TmuxWebtermApp.save_settings",
             "setting_keys": ["appearance.theme", "appearance.tab_width", "updates.notify_level", "uploads.subdir"],
             "examples": ["what is my tab width?", "set theme to light", "change update notify level to patch"],

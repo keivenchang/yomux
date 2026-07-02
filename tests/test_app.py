@@ -1791,7 +1791,7 @@ def test_share_viewer_registration_enforces_cap_and_decrements():
         wrong_session, wrong_status = webapp.register_share_viewer(payload["token"], "8")
         assert wrong_status == HTTPStatus.FORBIDDEN
         assert wrong_session["error"] == "share token is scoped to a different session"
-        assert wrong_session["user_message"]["key"] == "share.error.differentSession"
+        assert wrong_session["user_message"]["key"] == "share.error.sessionScope"
 
         rejected, rejected_status = webapp.register_share_viewer(payload["token"], "6", "viewer-b")
         assert rejected_status == HTTPStatus.FORBIDDEN

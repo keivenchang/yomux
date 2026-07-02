@@ -18,6 +18,7 @@ from ..atomic_file import file_lock
 from ..common import STATE_DIR
 from ..common import tail_file_lines
 from ..common import truncate_text
+from ..locales import message_descriptor
 
 
 YOAGENT_STATE_DIR = STATE_DIR / "yoagent"
@@ -85,7 +86,7 @@ def sanitized_detail_rows(value: Any) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             clean_params = {}
         if key or fallback:
-            rows.append({"key": key, "params": clean_params, "fallback": fallback})
+            rows.append(message_descriptor(key, fallback, clean_params))
     return rows
 
 
@@ -159,9 +160,16 @@ def bounded_stream_items(value: Any) -> tuple[list[dict[str, Any]], bool]:
         text = redacted_auxiliary_text(str(item.get("text") or ""))
         bounded = truncate_text(text, YOAGENT_STREAM_ITEM_TEXT_LIMIT)
         truncated = truncated or bounded != text
-        label_key = truncate_text(str(item.get("labelKey") or item.get("label_key") or "").strip(), 160)
-        fallback = truncate_text(redacted_auxiliary_text(str(item.get("fallback") or "").strip()), 240)
-        label_params = item.get("labelParams", item.get("label_params"))
+        raw_label = item.get("label") if isinstance(item.get("label"), dict) else None
+        if raw_label is None:
+            raw_label = {
+                "key": item.get("labelKey") or item.get("label_key") or "",
+                "params": item.get("labelParams", item.get("label_params")),
+                "fallback": item.get("fallback") or "",
+            }
+        label_key = truncate_text(str(raw_label.get("key") or "").strip(), 160)
+        fallback = truncate_text(redacted_auxiliary_text(str(raw_label.get("fallback") or "").strip()), 240)
+        label_params = raw_label.get("params")
         try:
             clean_params = json.loads(json.dumps(label_params, ensure_ascii=False)) if isinstance(label_params, dict) else {}
         except (TypeError, ValueError):
@@ -174,11 +182,13 @@ def bounded_stream_items(value: Any) -> tuple[list[dict[str, Any]], bool]:
         token_count = item.get("tokenCount")
         if isinstance(token_count, (int, float)) and token_count > 0:
             clean_item["tokenCount"] = int(token_count)
-        if label_key:
-            clean_item["labelKey"] = label_key
-            clean_item["labelParams"] = clean_params
-        if fallback:
-            clean_item["fallback"] = fallback
+        if label_key or fallback:
+            label = message_descriptor(label_key, fallback, clean_params)
+            clean_item["label"] = label
+            # Keep old readers working, but derive their fields from the canonical nested descriptor.
+            clean_item["labelKey"] = label["key"]
+            clean_item["labelParams"] = label["params"]
+            clean_item["fallback"] = label["fallback"]
         if bounded.strip() or label_key or fallback:
             result.append(clean_item)
     if len(result) > YOAGENT_STREAM_ITEMS_LIMIT:

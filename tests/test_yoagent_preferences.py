@@ -511,7 +511,7 @@ def test_product_capability_registry_mentions_preferences_and_orchestration():
     by_key = {item["key"]: item for item in registry}
     for key in ["panesTabs", "finderDifferTabber", "uploads"]:
         assert product_capability_locale_key(by_key[key], "auth") == "yoagent.capability.auth.adminForWrites"
-    assert product_capability_locale_key(preferences, "name") == "menu.file.preferences"
+    assert product_capability_locale_key(preferences, "name") == "common.preferences"
     assert product_capability_locale_key(by_key["share"], "name") == "brand.share"
     assert product_capability_locale_key(by_key["recentWork"], "write") == "common.readOnly"
     assert product_capability_locale_key(by_key["orchestration"], "name") == "yoagent.capability.orchestration.name"
@@ -572,7 +572,7 @@ def test_app_yoagent_action_details_use_locale_catalog(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert "zh-Hans:yoagent.action.row.session" in details
+    assert "zh-Hans:common.sessionLabel" in details
     assert "zh-Hans:yoagent.action.detail.screenState" in details
     assert "zh-Hans:yoagent.action.detail.composerText" in details
     assert "zh-Hans:yoagent.action.detail.sendBlocker" in details

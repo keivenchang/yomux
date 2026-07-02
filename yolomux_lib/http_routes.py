@@ -241,12 +241,12 @@ def _write_not_found_after_default_auth(request: Any, method: str) -> None:
         if not request.require_auth("readonly"):
             return
         locale = resolve_locale_preference(request.request_locale_pref(), request.headers.get("Accept-Language", ""))
-        request.write_text(server_string(locale, "request.error.notFound") + "\n", status=HTTPStatus.NOT_FOUND)
+        request.write_text(server_string(locale, "common.notFound") + "\n", status=HTTPStatus.NOT_FOUND)
         return
     if not request.require_auth("admin"):
         return
     request.write_json(
-        error_payload("not found", message_key="request.error.notFound", status=HTTPStatus.NOT_FOUND),
+        error_payload("not found", message_key="common.notFound", status=HTTPStatus.NOT_FOUND),
         status=HTTPStatus.NOT_FOUND,
     )
 
@@ -341,7 +341,7 @@ def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
     del route
     if not getattr(request.server, "dev", False):
         request.write_json(
-            error_payload("not found", message_key="request.error.notFound", status=HTTPStatus.NOT_FOUND),
+            error_payload("not found", message_key="common.notFound", status=HTTPStatus.NOT_FOUND),
             status=HTTPStatus.NOT_FOUND,
         )
         return

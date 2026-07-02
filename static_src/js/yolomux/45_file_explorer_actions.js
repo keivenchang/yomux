@@ -87,12 +87,12 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, t('contextmenu.copyImage'), () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
-  appendContextMenuButton(menu, t('contextmenu.download'), () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  appendContextMenuButton(menu, t('common.download'), () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   if (entry?.kind === 'dir') {
     appendContextMenuButton(menu, t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
   }
   appendContextMenuButton(menu, t(fileExplorerDirectoryIsIndexed(fullPath) ? 'contextmenu.disallowIndex' : 'contextmenu.allowIndex'), () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
-  appendContextMenuButton(menu, t('contextmenu.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
+  appendContextMenuButton(menu, t('common.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
   fileContextMenu.open(menu, x, y);
 }
@@ -124,7 +124,7 @@ async function copyFilePath(path, label) {
     await copyTextToClipboard(text);
     statusEl.textContent = t(label === 'relative' ? 'status.copiedRelativePath' : 'status.copiedPath');
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    statusErr(localizedHtml('common.copyFailed', {error}));
   }
 }
 
@@ -137,7 +137,7 @@ async function copyImageFileToClipboard(path) {
   try {
     const response = await apiFetch(rawFileUrl(path), {cache: 'no-store'});
     if (!response.ok) {
-      await showFileTransferResponseError(response, t('status.copyFailed', {error: t('common.requestFailed')}));
+      await showFileTransferResponseError(response, t('common.copyFailed', {error: t('common.requestFailed')}));
       return;
     }
     const blob = await response.blob();
@@ -145,7 +145,7 @@ async function copyImageFileToClipboard(path) {
     await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
     statusEl.textContent = t('status.copiedImage', {name: basenameOf(path)});
   } catch (error) {
-    showFileTransferError(error, {fallback: t('status.copyFailed', {error: userMessageText(error, t('common.requestFailed'))})});
+    showFileTransferError(error, {fallback: t('common.copyFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -294,7 +294,7 @@ async function createFileExplorerFolder() {
 
 function fileTreeExpandCollapseAllButtonHtml(action, extraClass = '') {
   const expand = action === 'expand';
-  const title = t(expand ? 'changes.expandAll' : 'changes.collapseAll');
+  const title = t(expand ? 'changes.expandAll' : 'common.collapseAll');
   const classes = ['file-explorer-header-action', 'file-tree-expand-collapse-all', extraClass].filter(Boolean).join(' ');
   return `<button type="button" class="${esc(classes)}" data-file-tree-expand-collapse-all="${expand ? 'expand' : 'collapse'}" title="${esc(title)}" aria-label="${esc(title)}">${fileTreeExpandCollapseAllIconHtml(action)}</button>`;
 }
@@ -777,7 +777,7 @@ function beginFileTreeRename(row, fullPath, entry) {
   const input = document.createElement('input');
   input.className = 'file-tree-rename-input';
   input.value = currentName;
-  input.setAttribute('aria-label', t('contextmenu.renameNamed', {name: currentName}));
+  input.setAttribute('aria-label', t('common.renameNamed', {name: currentName}));
   nameNode.replaceChildren(input);
   let finished = false;
   let commitInFlight = false;
@@ -847,7 +847,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       if (path === fullPath) renameOpenFilePath(path, newPath);
       else if (path.startsWith(`${fullPath}/`)) renameOpenFilePath(path, `${newPath}${path.slice(fullPath.length)}`);
     }
-    statusEl.textContent = t('status.renamed', {oldName: currentName, newName: trimmed});
+    statusEl.textContent = t('common.renamed', {oldName: currentName, newName: trimmed});
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
@@ -1339,7 +1339,7 @@ function openFileStatus(state) {
   if (state.externalMissing) return {message: state.dirty ? `${t('dialog.missingOnDisk')} · ${t('dialog.unsavedChanges')}` : t('dialog.missingOnDisk'), level: 'warn'};
   if (state.externalError) return {message: `${t('dialog.unableLoadDisk')}: ${fileErrorText(state.externalError, 'editor.refreshFailed')}`, level: 'warn'};
   if (state.externalChanged) return {message: state.dirty ? t('dialog.staleStatus') : t('dialog.externalTitle'), level: 'warn'};
-  if (state.dirty) return {message: t('filetab.modified'), level: ''};
+  if (state.dirty) return {message: t('state.modified'), level: ''};
   if (state.kind === 'text') {
     const count = String(state.original ?? '').length;
     return {message: tPlural('editor.status.characters', count), level: ''};
@@ -1520,7 +1520,7 @@ function bindFileConflictCompareScroll(root) {
 function showFileEditorDecisionDialog(options = {}) {
   const actions = Array.isArray(options.actions) && options.actions.length
     ? options.actions
-    : [{id: 'cancel', label: t('dialog.cancel')}];
+    : [{id: 'cancel', label: t('common.cancel')}];
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
     backdrop.className = `app-modal-overlay file-editor-dialog-backdrop ${options.className || ''}`.trim();
@@ -1575,7 +1575,7 @@ async function showFileConflictCompareDialog(path, panel = null) {
     actions: [
       {id: 'overwrite', label: t('dialog.overwriteDisk'), variant: 'danger'},
       {id: 'reload', label: t('dialog.keepDisk')},
-      {id: 'cancel', label: t('dialog.cancel')},
+      {id: 'cancel', label: t('common.cancel')},
     ],
     className: 'file-editor-compare-dialog',
     onMount: bindFileConflictCompareScroll,
@@ -1604,7 +1604,7 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
         {id: 'overwrite', label: t('dialog.overwriteDisk'), variant: 'danger'},
         {id: 'reload', label: t('dialog.keepDisk')},
         {id: 'compare', label: t('dialog.compare')},
-        {id: 'cancel', label: t('dialog.cancel')},
+        {id: 'cancel', label: t('common.cancel')},
       ],
       className: 'file-editor-conflict-dialog',
     });
@@ -1631,7 +1631,7 @@ async function promptExternalChangeBeforeEditing(path, panel = null) {
     title: t('dialog.externalTitle'),
     message: t('dialog.externalMessage', {name: basenameOf(path)}),
     actions: [
-      {id: 'reload', label: t('dialog.reload')},
+      {id: 'reload', label: t('common.reload')},
       {id: 'dismiss', label: t('dialog.keepEditing')},
     ],
     className: 'file-editor-external-change-dialog',
@@ -1660,9 +1660,9 @@ async function confirmDirtyFileClose(path, panel = null) {
     title: t('dialog.closeTitle', {name: basenameOf(path)}),
     message: fileEditorAutosaveEnabled ? t('dialog.autosaveFailed') : t('dialog.unsavedChanges'),
     actions: [
-      {id: 'save', label: t('dialog.save')},
+      {id: 'save', label: t('common.save')},
       {id: 'discard', label: t('dialog.discard'), variant: 'danger'},
-      {id: 'cancel', label: t('dialog.cancel')},
+      {id: 'cancel', label: t('common.cancel')},
     ],
     className: 'file-editor-close-dialog',
   });
@@ -3113,8 +3113,8 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
 
 function codeMirrorPhraseValues() {
   return {
-    Find: t('editor.search.find'),
-    Replace: t('editor.search.replace'),
+    Find: t('common.find'),
+    Replace: t('common.replace'),
     next: t('preview.find.next'),
     previous: t('preview.find.previous'),
     all: t('editor.search.all'),
@@ -3122,7 +3122,7 @@ function codeMirrorPhraseValues() {
     regexp: t('editor.search.regexp'),
     'by word': t('editor.search.wholeWord'),
     'whole word short': t('editor.search.wholeWordShort'),
-    replace: t('editor.search.replace'),
+    replace: t('common.replace'),
     'replace all': t('editor.search.replaceAll'),
     close: t('preview.find.close'),
   };

@@ -724,7 +724,7 @@ function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   const resetHidden = isDefault ? ' hidden' : '';
   const label = esc(t('diff.ref.reset'));
   const className = `diff-ref-reset${extraClass ? ` ${extraClass}` : ''}`;
-  return `<button type="button" class="${className}" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('pref.reset.row'))}</button>`;
+  return `<button type="button" class="${className}" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('common.reset'))}</button>`;
 }
 
 function invalidateSessionFilesCaches() {
@@ -1049,7 +1049,7 @@ async function fetchSessionFiles(options = {}) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
-    const issue = err?.payload?.user_message || {key: '', params: {}, fallback: String(err?.message || err)};
+    const issue = userMessageSnapshot(err, String(err?.message || err)).user_message;
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
@@ -1270,7 +1270,7 @@ function fileExplorerChangesAllReposCollapsed(payload = fileExplorerSessionFiles
 }
 
 function fileExplorerChangesCollapseToggleTitle() {
-  return fileExplorerChangesAllReposCollapsed() ? t('changes.expandAll') : t('changes.collapseAll');
+  return fileExplorerChangesAllReposCollapsed() ? t('changes.expandAll') : t('common.collapseAll');
 }
 
 function fileExplorerChangesCollapseToggleIcon() {
@@ -1430,7 +1430,7 @@ function changesRepoCount(payload, files) {
 
 function changesSummaryHtml(payload, files, session, loading, loaded) {
   if (loading) return changesLoadingHtml(session);
-  if (!loaded) return t('changes.notLoaded');
+  if (!loaded) return t('state.notLoaded');
   const fileCount = Array.isArray(files) ? files.length : 0;
   const repoCount = changesRepoCount(payload, files);
   const repos = tPlural('changes.repoCount', repoCount);
@@ -1440,7 +1440,7 @@ function changesSummaryHtml(payload, files, session, loading, loaded) {
 }
 
 function changesLoadingHtml(session = '') {
-  const base = t('changes.loading');
+  const base = t('common.loading');
   const label = session ? sessionLabel(session) : '';
   const loadingText = label ? `${stripTrailingEllipsisText(base)} ${label}` : base;
   return `<span class="changes-loading" aria-live="polite" aria-busy="true">
@@ -1487,7 +1487,7 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
   if (loading && options.inlineLoading === true) return '';
   if (options.compact) {
     if (loading) return `<section class="changes-comparison-head compact">${changesLoadingHtml(payload?.session || '')}</section>`;
-    if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
+    if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('state.notLoaded'))}</section>`;
     return '';
   }
   const summary = changesSummaryHtml(payload, files, payload?.session || '', loading, loaded);
@@ -1597,7 +1597,7 @@ function changedFileAgentTitle(kind, item) {
   const name = agentLabel(kind);
   if (!name) return '';
   const timeText = sessionFileRelativeTimeText(item?.mtime);
-  const prefix = t('filetab.modified');
+  const prefix = t('state.modified');
   return timeText ? `${prefix}: ${name} ${timeText}` : `${prefix}: ${name}`;
 }
 
@@ -1716,7 +1716,7 @@ function sessionFilesSortSelectHtml(extraClass = '') {
   return `<select class="${esc(classes)}" data-session-files-sort title="${esc(t('changes.sort'))}" aria-label="${esc(t('changes.sort'))}">
         <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
         <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-        <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
+        <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
         <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
       </select>`;
 }
@@ -1727,7 +1727,7 @@ function fileExplorerTreeSortSelectHtml(extraClass = '') {
   return `<select class="${esc(classes)}" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
               <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-              <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
+              <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
               <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
             </select>`;
 }
@@ -1743,7 +1743,7 @@ function sessionFilesSessionSelectHtml(target, options = {}) {
 }
 
 function fileExplorerDiffSessionControlHtml(session) {
-  return `<label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">${esc(t('changes.session'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
+  return `<label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">${esc(t('common.sessionLabel'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
 }
 
 function syncFileExplorerDiffSessionControls() {
@@ -1786,21 +1786,21 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
         <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
         ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
-        <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
+        <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       </div>
       ${changesComparisonHeaderHtml(payload, files, {loading, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
       ${errorHtml}
       ${warningHtml}
       ${empty ? empty : '<div class="changes-groups"></div>'}`;
   }
-  const titleText = session ? t('changes.titleForSession', {session: sessionLabel(session) || session}) : t('changes.title');
+  const titleText = session ? t('changes.titleForSession', {session: sessionLabel(session) || session}) : t('brand.tab.changes');
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">${esc(titleText)}</span>
       ${sessionFilesSortSelectHtml('changes-sort-select-compact')}
       ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
       ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
-      <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
+      <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading, compact: true, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
@@ -1888,7 +1888,7 @@ function fileExplorerModeButtonTitle(mode) {
 }
 
 function fileExplorerModeButtonLabel(mode) {
-  if (mode === 'diff') return t('changes.title');
+  if (mode === 'diff') return t('brand.tab.changes');
   if (mode === 'tabber') return t('tabber.title');
   return t('finder.label.finder');
 }
@@ -2367,7 +2367,7 @@ async function copyChangedPath(path, statusKey) {
     await copyTextToClipboard(path);
     statusEl.textContent = t(statusKey);
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    statusErr(localizedHtml('common.copyFailed', {error}));
   }
 }
 
@@ -2525,10 +2525,10 @@ function showUploadRsyncRecommendation(options = {}) {
     event.stopPropagation();
     copyTextToClipboard(command)
       .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
-      .catch(error => { statusErr(`${esc(t('upload.copyFailed', {error}))}`); });
+      .catch(error => { statusErr(`${esc(t('common.copyFailed', {error}))}`); });
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
-  return showToast(t('upload.toastTitle'), [
+  return showToast(t('common.rsyncLargeFiles'), [
     t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}),
     command,
   ], {
@@ -2652,7 +2652,7 @@ function createFileExplorerPanel() {
   const label = fileExplorerLabel();
   panel.innerHTML = `
       <div class="panel-head file-explorer-head">
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
         <div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
             ${fileExplorerModeSwitcherHtml()}
@@ -2683,7 +2683,7 @@ function createFileExplorerPanel() {
             <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
               ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
-              <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('finder.toolbar.refresh'))}" aria-label="${esc(t('finder.toolbar.refresh'))}">${esc(t('changes.refresh'))}</button>
+              <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>
             </span>
           </div>
         </div>
@@ -2953,9 +2953,9 @@ function fileEditorToolbarHtml(item) {
             {
               className: 'file-editor-diff-panel',
               action: 'editor-diff',
-              label: t('changes.title'),
-              title: t('editor.diff'),
-              ariaLabel: t('editor.diff'),
+              label: t('brand.tab.changes'),
+              title: t('common.diff'),
+              ariaLabel: t('common.diff'),
               hidden: true,
             },
             {
@@ -2986,7 +2986,7 @@ function fileEditorToolbarHtml(item) {
           ${segmentedControlHtml({
             className: 'file-editor-preview-font-panel',
             role: 'group',
-            ariaLabel: t('editor.previewFont.aria'),
+            ariaLabel: t('common.previewFontSize'),
             hidden: true,
             items: [
               {
@@ -3035,15 +3035,15 @@ function fileEditorToolbarHtml(item) {
                   action: 'editor-mode',
                   dataset: {editorMode: 'edit'},
                   html: '<span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span>',
-                  title: t('editor.mode.edit'),
-                  ariaLabel: t('editor.mode.edit'),
+                  title: t('common.edit'),
+                  ariaLabel: t('common.edit'),
                 }),
                 toolbarButtonHtml({
                   action: 'editor-mode',
                   dataset: {editorMode: 'preview'},
                   html: '<span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span>',
-                  title: t('editor.mode.preview'),
-                  ariaLabel: t('editor.mode.preview'),
+                  title: t('common.preview'),
+                  ariaLabel: t('common.preview'),
                 }),
                 toolbarButtonHtml({
                   action: 'editor-mode',
@@ -3095,7 +3095,7 @@ function fileEditorToolbarHtml(item) {
             {
               className: 'file-editor-reload-panel',
               action: 'editor-reload',
-              label: t('editor.reload'),
+              label: t('common.reload'),
               title: t('editor.reloadFromDisk'),
               ariaLabel: t('editor.reloadFromDisk'),
               hidden: true,
@@ -3110,7 +3110,7 @@ function fileEditorToolbarHtml(item) {
               className: 'file-editor-save-panel',
               action: 'editor-save',
               html: '<span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span>',
-              title: t('editor.save'),
+              title: t('common.save'),
               ariaLabel: t('editor.saveFile'),
               hidden: readOnlyMode,
             },
@@ -3142,12 +3142,12 @@ function relocalizeFileEditorPanel(panel, item) {
   setFileEditorLocalizedLabel(panel, '.file-editor-panel-close', 'editor.closePane');
   setFileEditorLocalizedLabel(panel, '.file-editor-toolbar', 'editor.toolbar.aria', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-mode-control-panel', 'editor.mode.aria', {title: false});
-  setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'editor.previewFont.aria', {title: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-preview-font-panel', 'common.previewFontSize', {title: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-popout-preview-panel', 'editor.popoutPreview');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reloadFromDisk');
-  setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reload', {text: true, title: false, aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'common.reload', {text: true, title: false, aria: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-diff-expand-panel', 'editor.diffExpand');
-  setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.save', {aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'common.save', {aria: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.saveFile', {text: false, title: false});
   const findPanel = panel.querySelector('.file-editor-preview-find-panel');
   if (findPanel) {
@@ -3184,7 +3184,7 @@ function createFileEditorPanel(item) {
             closeLabel: t('editor.closePane'),
           })}
         </div>
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
       </div>
       ${fileEditorToolbarHtml(item)}
       <div class="file-editor-panel-body panel-overlay-root">

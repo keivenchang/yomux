@@ -797,7 +797,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(shareDifferApi.i18nActiveLocaleId(), 'zh-Hant', 'DOIT.67: mirrored appearance frames apply the host language to read-only viewers');
       const afterLocaleFrame = shareDifferApi.fileExplorerChangesPanelHtml();
       assert.ok(afterLocaleFrame.includes('data-open-change-file="/repo/app/README.md"'), 'DOIT.67: Differ rows stay visible after a mirrored language frame');
-      assert.ok(afterLocaleFrame.includes(zhHant['changes.refresh']), 'DOIT.67: Differ chrome is localized after a mirrored language frame');
+      assert.ok(afterLocaleFrame.includes(zhHant['common.reload']), 'DOIT.67: Differ chrome is localized after a mirrored language frame');
       assert.equal(afterLocaleFrame.includes('No Differ results for this session.'), false, 'DOIT.67: Differ does not blank to the empty-state during mirrored locale apply');
     }
 

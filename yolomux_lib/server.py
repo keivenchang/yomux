@@ -1301,7 +1301,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
         locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-        title = html.escape(server_string(locale, "preview.popout.title", name=Path(raw_path).name or server_string(locale, "tab.preview")))
+        title = html.escape(server_string(locale, "preview.popout.title", name=Path(raw_path).name or server_string(locale, "common.preview")))
         body = f"""<!doctype html>
 <html {html_lang_dir_attrs(locale)}>
 <head>

@@ -269,7 +269,7 @@ function shareEntryHtml(share) {
       </span>
       <span class="share-url-control">
         <input type="text" readonly value="${esc(share.url)}" data-share-secret>
-        <button type="button" class="path-copy-button share-url-copy-button" data-share-copy data-share-secret title="${esc(t('share.copy'))}" aria-label="${esc(t('share.copy'))}"></button>
+        <button type="button" class="path-copy-button share-url-copy-button" data-share-copy data-share-secret title="${esc(t('common.copy'))}" aria-label="${esc(t('common.copy'))}"></button>
       </span>
     </label>
     <div class="share-result-meta">
@@ -522,7 +522,7 @@ function updateShareViewerBanner() {
     debug.type = 'button';
     debug.className = 'share-view-fit-toggle share-debug-copy control-active-hover';
     debug.dataset.shareViewerControl = 'debug';
-    debug.textContent = t('debug.copy');
+    debug.textContent = t('common.copy');
     debug.title = t('share.debug.copyDiagnostics');
     debug.setAttribute('aria-label', debug.title);
     debug.addEventListener('click', event => {

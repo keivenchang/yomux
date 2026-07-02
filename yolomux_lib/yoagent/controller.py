@@ -1616,7 +1616,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         screen = action.get("screen") if isinstance(action.get("screen"), dict) else {}
         screen_key = str(screen.get("key") or "").strip()
         if session:
-            lines.append(f"- {yoagent_text(locale, 'yoagent.action.row.session')}: `{session}`")
+            lines.append(f"- {yoagent_text(locale, 'common.sessionLabel')}: `{session}`")
         if screen_key:
             lines.append(f"- {yoagent_text(locale, 'yoagent.action.detail.screenState')}: `{screen_key}`")
         if screen_key == "input-draft":
@@ -2592,11 +2592,11 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 backend_used = backend
         elif backend in {"codex", "claude"} and invocation != "cli":
             fallback_reason = yoagent_text(ctx.locale, "yoagent.tools.invocationUnavailable", backend=backend, invocation=invocation)
-            cli_status["fallback_reason_message"] = {
-                "key": "yoagent.tools.invocationUnavailable",
-                "params": {"backend": backend, "invocation": invocation},
-                "fallback": fallback_reason,
-            }
+            cli_status["fallback_reason_message"] = message_descriptor(
+                "yoagent.tools.invocationUnavailable",
+                fallback_reason,
+                {"backend": backend, "invocation": invocation},
+            )
         if not answer:
             answer = deterministic_yoagent_reply(ctx.question, activity_payload if include_model_activity else ctx.get_activity_payload(), ctx.settings, ctx.locale)
         if tool_capabilities:

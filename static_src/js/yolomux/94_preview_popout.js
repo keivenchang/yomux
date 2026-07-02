@@ -186,7 +186,7 @@ function previewPopoutVariableStyle() {
 
 function previewPopoutToolbarHtml() {
   return `
-      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
+      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('common.previewFontSize'))}">
         <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
         <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
         <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>

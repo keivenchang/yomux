@@ -32,8 +32,7 @@ async function apiFetch(url, options = {}) {
   return response;
 }
 
-async function apiFetchJson(url, options = {}) {
-  const response = await apiFetch(url, options);
+async function apiJsonResponse(response) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
@@ -44,6 +43,10 @@ async function apiFetchJson(url, options = {}) {
     throw error;
   }
   return payload;
+}
+
+async function apiFetchJson(url, options = {}) {
+  return apiJsonResponse(await apiFetch(url, options));
 }
 
 async function apiFetchJsonQuiet(url, options = {}) {
@@ -58,17 +61,7 @@ async function apiFetchJsonQuiet(url, options = {}) {
       requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
     }
   }
-  const response = await fetch(url, requestOptions);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
-    error.status = response.status;
-    error.statusText = response.statusText || '';
-    error.payload = payload || {};
-    error.response = response;
-    throw error;
-  }
-  return payload;
+  return apiJsonResponse(await fetch(url, requestOptions));
 }
 
 function messageDescriptorText(descriptor, fallback = '') {
@@ -2834,7 +2827,7 @@ function writeTerminalTextToClipboard(text, options = {}) {
     })
     .catch(error => {
       copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
-      statusErr(localizedHtml('status.copyFailed', {error}));
+      statusErr(localizedHtml('common.copyFailed', {error}));
     });
   cleanup();
 }
@@ -2939,7 +2932,7 @@ function activateCopyPathButton(event, button) {
   if (!path) return;
   copyTextToClipboard(path)
     .then(() => { statusOk(localizedHtml('status.copied')); })
-    .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+    .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
 }
 
 function handleCopyPathPointerUp(event, button) {
@@ -3227,7 +3220,7 @@ function withTerminalVisibleSelectionCleanup(session, term, container, reason, h
 
 const TERMINAL_COPY_ACTIONS = Object.freeze({
   selected: Object.freeze({
-    labelKey: 'terminal.copySelected',
+    labelKey: 'common.copy',
     statusKey: 'status.copied',
     reason: 'copy-selection',
     dedent: false,
@@ -3239,7 +3232,7 @@ const TERMINAL_COPY_ACTIONS = Object.freeze({
     dedent: true,
   }),
   tmux: Object.freeze({
-    labelKey: 'terminal.copyTmuxSelection',
+    labelKey: 'common.copyTmuxSelection',
     statusPluralKey: 'status.copiedTmuxSelection',
     reason: 'copy-tmux-selection',
   }),
@@ -3396,7 +3389,7 @@ function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = n
     });
   }
   if (reference.type === 'file' && fileTarget) {
-    appendContextMenuButton(menu, t('contextmenu.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
+    appendContextMenuButton(menu, t('common.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
     appendContextMenuButton(menu, t('contextmenu.copyPath'), () => copyTextToClipboard(fileTarget.path), closeTerminalContextMenu);
     return true;
   }
@@ -3417,7 +3410,7 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
     await copyTextToClipboard(text);
     statusEl.textContent = terminalCopyStatusText(action);
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    statusErr(localizedHtml('common.copyFailed', {error}));
   } finally {
     clearTerminalVisibleSelection(session, term, container, action.reason);
   }
@@ -3461,7 +3454,7 @@ async function copyTmuxSelectionToClipboard(session, term = null, container = nu
       statusEl.textContent = error.message || t('status.nothingSelected');
       return false;
     }
-    statusErr(esc(userMessageText(error, t('status.copyFailed', {error}))));
+    statusErr(esc(userMessageText(error, t('common.copyFailed', {error}))));
     return false;
   } finally {
     clearTerminalVisibleSelection(session, term, container, 'copy-tmux-selection');

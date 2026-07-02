@@ -20,6 +20,9 @@ from .common import DEFAULT_UPLOAD_SUBDIR
 from .common import UPDATE_NOTIFY_LEVELS
 from .common import UPLOAD_MAX_BYTES
 from .locales import LANGUAGE_PREFERENCES
+from .locales import LANGUAGE_VALUE_ALIASES
+from .locales import SYSTEM_LOCALE_PREFERENCE
+from .locales import language_preference_description
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
@@ -109,40 +112,7 @@ IMAGE_DROP_ACTION_ORDER_SPECS: tuple[dict[str, Any], ...] = (
 )
 DEFAULT_IMAGE_DROP_ACTION_ORDER: tuple[str, ...] = tuple(str(spec["canonical"]) for spec in IMAGE_DROP_ACTION_ORDER_SPECS)
 SETTING_VALUE_ALIASES: dict[tuple[str, str], dict[str, str]] = {
-    ("general", "language"): {
-        "arabic": "ar",
-        "deutsch": "de",
-        "dutch": "nl",
-        "english": "en",
-        "espanol": "es",
-        "español": "es",
-        "francais": "fr",
-        "français": "fr",
-        "french": "fr",
-        "german": "de",
-        "hebrew": "he",
-        "hindi": "hi",
-        "italian": "it",
-        "japanese": "ja",
-        "korean": "ko",
-        "nederlands": "nl",
-        "polish": "pl",
-        "portuguese": "pt-BR",
-        "portugues": "pt-BR",
-        "português": "pt-BR",
-        "pseudo": "en-XA",
-        "russian": "ru",
-        "simplified chinese": "zh-Hans",
-        "spanish": "es",
-        "system language": "system",
-        "thai": "th",
-        "traditional chinese": "zh-Hant",
-        "turkish": "tr",
-        "vietnamese": "vi",
-        "中文": "zh-Hans",
-        "日本語": "ja",
-        "한국어": "ko",
-    },
+    ("general", "language"): dict(LANGUAGE_VALUE_ALIASES),
     ("appearance", "editor_color_scheme"): {
         f"{LEGACY_EDITOR_SCHEME_PREFIX}-dark-plus": POPULAR_IDE_DARK_SCHEME,
         f"{LEGACY_EDITOR_SCHEME_PREFIX}-light-plus": POPULAR_IDE_LIGHT_SCHEME,
@@ -160,7 +130,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auto_focus": False,
         "default_layout": "split",
         "default_sessions": [],
-        "language": "system",
+        "language": SYSTEM_LOCALE_PREFERENCE,
         "reload_on_update": True,
         "reload_on_update_auto": False,
         "startup_tips": True,
@@ -485,7 +455,7 @@ SETTING_HIDDEN_CHOICES: dict[tuple[str, str], set[str]] = {
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | split | grid. Reserved default for new visits.",
-    ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, ja, ko, es, de, fr, it, pt-BR, pl, nl, he, ar, ru, hi, vi, th, tr, en-XA pseudo).",
+    ("general", "language"): language_preference_description(),
     ("general", "default_sessions"): "Legacy reserved list of tmux sessions. The running server defaults to all discovered sessions unless launched with --sessions.",
     ("general", "reload_on_update"): "true/false. Default true. When true, an open client asks whether to reload the browser once the running server reports a YOLOMUX_VERSION or client bundle revision that differs from the page boot values. This does not check origin/main.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing the browser reload prompt — but only when it is safe (no unsaved editor changes and not mid-typing).",
@@ -682,9 +652,16 @@ SETTING_GUI_SECTION_LOCALE_KEYS = {
     "Performance": "pref.section.performance",
     "Terminal and Editor": "pref.section.terminal_editor",
     "Uploads/Downloads": "pref.section.uploads",
-    "YO!agent": "pref.section.yoagent",
+    "YO!agent": "brand.tab.agent",
     "YO!share": "brand.share",
-    "YOLO": "pref.section.yolo",
+    "YOLO": "brand.yolo",
+}
+
+SETTING_LOCALE_KEY_OVERRIDES: dict[tuple[str, str], dict[str, str]] = {
+    ("appearance", "preview_font_size"): {"label": "common.previewFontSize"},
+    ("file_explorer", "quick_access_paths"): {"label": "common.quickPaths"},
+    ("general", "language"): {"label": "common.language"},
+    ("github", "watched_prs"): {"label": "common.watchedPrs"},
 }
 
 SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
@@ -1128,15 +1105,17 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
             lower_upper = SETTING_LIMITS.get((section, key))
             limits = {"min": lower_upper[0], "max": lower_upper[1]} if lower_upper else None
             list_limit = SETTING_LIST_LIMITS.get((section, key))
+            locale_keys = {
+                "description": f"pref.{path}.help",
+                "label": f"pref.{path}.label",
+                **SETTING_LOCALE_KEY_OVERRIDES.get((section, key), {}),
+            }
             catalog[path] = {
                 "path": path,
                 "section": section,
                 "key": key,
                 "label": setting_catalog_label(section, key),
-                "locale_keys": {
-                    "description": f"pref.{path}.help",
-                    "label": f"pref.{path}.label",
-                },
+                "locale_keys": locale_keys,
                 "current": current.get(section, {}).get(key, default),
                 "default": default,
                 "type": setting_value_type(default),

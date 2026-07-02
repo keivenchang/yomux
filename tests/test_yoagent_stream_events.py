@@ -9,6 +9,7 @@ from yolomux_lib.yoagent.stream_events import TOOL_CALL_STARTED
 from yolomux_lib.yoagent.stream_events import TURN_DONE
 from yolomux_lib.yoagent.stream_events import ClaudeStreamJsonNormalizer
 from yolomux_lib.yoagent.stream_events import normalize_codex_app_server_message
+from yolomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_item
 from yolomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_line
 
 
@@ -153,3 +154,20 @@ def test_tool_auxiliary_lines_preserve_multiline_output():
     })
 
     assert line == "tool done: command: line 1\nline 2"
+
+
+def test_stream_auxiliary_label_owns_legacy_compatibility_fields():
+    item = yoagent_stream_event_auxiliary_item({
+        "kind": TOOL_CALL_STARTED,
+        "tool_name": "command",
+        "command": "python3 tools/check.py",
+    })
+
+    assert item["label"] == {
+        "key": "yoagent.stream.toolStart",
+        "params": {"tool": "command"},
+        "fallback": "tool start: command",
+    }
+    assert item["labelKey"] == item["label"]["key"]
+    assert item["labelParams"] == item["label"]["params"]
+    assert item["fallback"] == item["label"]["fallback"]

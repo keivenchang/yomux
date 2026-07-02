@@ -1504,12 +1504,12 @@ def test_session_files_payload_reports_invalid_ref_order(tmp_path):
 
 def test_diff_ref_issue_uses_one_structured_classifier():
     assert session_files.diff_ref_issue("unknown FROM ref: missing", "missing", "current") == {
-        "key": "diff.error.unknownFrom",
+        "key": "common.unknownFromRef",
         "params": {"ref": "missing"},
         "fallback": "unknown FROM ref: missing",
     }
     assert session_files.diff_ref_issue("unknown TO ref: future", "HEAD", "future") == {
-        "key": "diff.error.unknownTo",
+        "key": "common.unknownToRef",
         "params": {"ref": "future"},
         "fallback": "unknown TO ref: future",
     }

@@ -354,7 +354,7 @@ async function runServerDropAction(action, paths) {
     });
     showDropActionResult(payload);
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error: userMessageText(error, error)}));
+    statusErr(localizedHtml('common.copyFailed', {error: userMessageText(error, error)}));
   }
 }
 

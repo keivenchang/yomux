@@ -716,7 +716,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   const currentName = basenameOf(path);
-  const nextName = window.prompt(t('rename.title', {name: currentName}), currentName);
+  const nextName = window.prompt(t('common.renameNamed', {name: currentName}), currentName);
   if (nextName === null) return;
   renameFileTreePath(path, entry, nextName);
 }
@@ -869,7 +869,7 @@ function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
 }
 
 function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.preferences'))}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('common.preferences'))}</span></span>`;
 }
 
 function debugPaneTabHtml(item = debugPaneItemId, options = {}) {
@@ -887,7 +887,7 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
   const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
-  const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
+  const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('state.modified'))}" aria-label="${esc(t('state.modified'))}"></span>` : '';
   const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
@@ -2097,7 +2097,7 @@ function runHistoryPrLabel(row) {
   const pr = row?.pr && typeof row.pr === 'object' ? row.pr : null;
   if (!pr?.number) return '';
   const status = pullRequestStatusDisplay(pr);
-  return `${t('searchHistory.pr')} #${pr.number}${status ? ` ${status}` : ''}`;
+  return `${t('common.pullRequestShort')} #${pr.number}${status ? ` ${status}` : ''}`;
 }
 
 function runHistoryStateLabel(value) {
@@ -2149,7 +2149,7 @@ function runHistoryMetaParts(row) {
     runHistoryAgentLabel(row),
     started ? `${t('searchHistory.started')}: ${started}` : '',
     ended ? `${t('searchHistory.ended')}: ${ended}` : '',
-    row?.final_state ? `${t('searchHistory.finalState')}: ${runHistoryStateLabel(row.final_state)}` : '',
+    row?.final_state ? `${t('common.stateLabel')}: ${runHistoryStateLabel(row.final_state)}` : '',
     runHistoryPrLabel(row),
   ].filter(Boolean);
 }
@@ -2210,8 +2210,8 @@ function searchHistoryPanelHtml() {
   return `
     <form class="search-history-search" data-search-history-form>
       <input class="search-history-input" data-search-history-query value="${esc(searchHistoryQuery)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
-      <button type="submit" class="preferences-search-button">${esc(t('searchHistory.search'))}</button>
-      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('searchHistory.refresh'))}</button>
+      <button type="submit" class="preferences-search-button">${esc(t('common.search'))}</button>
+      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('common.refresh'))}</button>
     </form>
     ${errorHtml}
     <section class="search-history-section" aria-label="${esc(t('searchHistory.results'))}">
@@ -2348,7 +2348,7 @@ function createSearchHistoryPanel() {
   panel.innerHTML = `
       <div class="panel-head search-history-panel-head">
         ${virtualPanelControlsHtml(searchHistoryItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
       </div>
       <div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">

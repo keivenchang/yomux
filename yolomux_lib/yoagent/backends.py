@@ -25,7 +25,11 @@ from ..common import YOAGENT_CLAUDE_SUMMARY_MODEL
 from ..common import codex_exec_argv
 from ..common import codex_runtime_env
 from ..common import truncate_text
+from ..locales import FALLBACK_LOCALE
+from ..locales import PSEUDO_LOCALE
+from ..locales import SYSTEM_LOCALE_PREFERENCE
 from ..locales import message_descriptor
+from ..locales import normalize_locale
 from ..transcripts import codex_event_text
 from ..web import server_string
 from ..workdir import AGENT_LOGIN_COMMANDS
@@ -174,8 +178,8 @@ def yoagent_cli_fallback_reason(backend: str, error: str, locale: str = "en") ->
 
 
 def yoagent_language_directive(locale: str) -> str:
-    locale_id = str(locale or "").strip()
-    if locale_id in {"", "en", "en-XA", "system"}:
+    locale_id = normalize_locale(locale, default=FALLBACK_LOCALE, allow_system=True)
+    if locale_id in {FALLBACK_LOCALE, PSEUDO_LOCALE, SYSTEM_LOCALE_PREFERENCE}:
         return ""
     directive = server_string(locale_id, "yoagent.prompt.answerLanguage").strip()
     return f"\n\n{directive}" if directive else ""

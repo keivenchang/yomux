@@ -18,7 +18,7 @@ function infoGroupingControlsHtml() {
   const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
   const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
   const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];
-  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: t('changes.sort.recent')}];
+  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: t('common.sort.recent')}];
   const dimensionsForLevel = level => typeof infoGroupDimensionsForLevel === 'function'
     ? infoGroupDimensionsForLevel(level, grouping)
     : (typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : []);
@@ -35,7 +35,7 @@ function infoGroupingControlsHtml() {
     const active = grouping.join('|') === preset.grouping.join('|');
     return `<button type="button" class="info-tree-preset${active ? ' active' : ''}" data-info-preset="${esc(preset.key)}" aria-pressed="${active ? 'true' : 'false'}" title="${esc(preset.title)}">${esc(preset.label)}</button>`;
   }).join('');
-  const searchHtml = `<label class="info-tree-search-control"><span>${esc(t('info.search.label'))}</span><input type="search" data-info-search value="${esc(search)}" placeholder="${esc(t('info.search.placeholder'))}" aria-label="${esc(t('info.search.placeholder'))}"></label>`;
+  const searchHtml = `<label class="info-tree-search-control"><span>${esc(t('common.search'))}</span><input type="search" data-info-search value="${esc(search)}" placeholder="${esc(t('info.search.placeholder'))}" aria-label="${esc(t('info.search.placeholder'))}"></label>`;
   const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="${esc(t('info.group.orderByLevel', {level: index + 1}))}">${optionHtml(index)}</select></label>`).join('');
   const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="${esc(t('info.sort.order'))}">
           <label class="info-tree-group-select"><span>${esc(t('changes.sort'))}</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
@@ -142,12 +142,12 @@ function createInfoPanel() {
   panel.innerHTML = `
       <div class="panel-head">
         ${virtualPanelControlsHtml(infoItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
       </div>
       <div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
-          <button type="button" class="info-refresh" data-info-refresh title="${esc(t('meta.refresh'))}" aria-label="${esc(t('meta.refresh'))}">${esc(t('meta.refresh'))}</button>
+          <button type="button" class="info-refresh" data-info-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.refresh'))}</button>
         </div>
       </div>
       <div class="info-pane panel-overlay-root">
@@ -167,7 +167,7 @@ function createYoagentPanel() {
   panel.innerHTML = `
       <div class="panel-head">
         ${virtualPanelControlsHtml(yoagentItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
       </div>
       <div class="info-actions-bar">
         <div class="info-subtab-actions">
@@ -291,9 +291,9 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
   const refresh = panel.querySelector('[data-info-refresh]');
   if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
-      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('meta.refresh'), t('meta.refresh'));
+      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('common.refresh'), t('common.refresh'));
     } else {
-      const label = t('meta.refresh');
+      const label = t('common.refresh');
       refresh.textContent = label;
       refresh.title = label;
       refresh.setAttribute('aria-label', label);

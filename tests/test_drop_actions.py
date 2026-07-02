@@ -23,8 +23,8 @@ def test_drop_action_server_head_and_info_use_validated_files(monkeypatch, tmp_p
     assert "kind: file" in info["body"]
     assert info["result"]["title_key"] == "drop.result.title.fileInformation"
     assert info["result"]["blocks"][0]["sections"][0][:2] == [
-        {"key": "drop.result.info.path", "params": {"path": str(path)}},
-        {"key": "drop.result.info.kind", "params": {"kind": "file"}},
+        {"key": "drop.result.info.path", "params": {"path": str(path)}, "fallback": ""},
+        {"key": "drop.result.info.kind", "params": {"kind": "file"}, "fallback": ""},
     ]
 
 
@@ -44,7 +44,7 @@ def test_drop_action_server_log_errors_counts_warning_tokens(monkeypatch, tmp_pa
     assert result["result"]["blocks"][0] == {
         "path": str(path),
         "sections": [
-            [{"key": "drop.result.log.summary", "params": {"summary": "warn=1, traceback=1, failed=1, fatal=1"}}],
+            [{"key": "drop.result.log.summary", "params": {"summary": "warn=1, traceback=1, failed=1, fatal=1"}, "fallback": ""}],
             [
                 {"raw": "2: WARN slow request"},
                 {"raw": "3: Traceback follows"},
@@ -70,15 +70,15 @@ def test_drop_action_server_data_stats_handles_csv_and_json(monkeypatch, tmp_pat
     assert "chart:" in csv_result["body"]
     assert csv_result["result"]["title_key"] == "drop.result.title.dataStats"
     csv_messages = csv_result["result"]["blocks"][0]["sections"][0]
-    assert csv_messages[0] == {"key": "drop.result.data.rowsScanned", "params": {"count": 3}}
+    assert csv_messages[0] == {"key": "drop.result.data.rowsScanned", "params": {"count": 3}, "fallback": ""}
     assert any(message["key"] == "drop.result.data.numericField" for message in csv_messages)
     assert json_status == 200
     assert "type: JSON array" in json_result["body"]
     assert "object keys:" in json_result["body"]
     assert json_result["result"]["blocks"][0]["sections"][0] == [
-        {"key": "drop.result.data.typeJsonArray", "params": {}},
-        {"key": "drop.result.data.items", "params": {"count": 2}},
-        {"key": "drop.result.data.objectKeys", "params": {"keys": "kind(2), count(1)"}},
+        {"key": "drop.result.data.typeJsonArray", "params": {}, "fallback": ""},
+        {"key": "drop.result.data.items", "params": {"count": 2}, "fallback": ""},
+        {"key": "drop.result.data.objectKeys", "params": {"keys": "kind(2), count(1)"}, "fallback": ""},
     ]
 
 
@@ -101,6 +101,7 @@ def test_drop_action_server_ocr_reports_unavailable_without_tesseract(monkeypatc
             "sections": [[{
                 "key": "drop.result.ocr.unavailable",
                 "params": {"executable": "tesseract"},
+                "fallback": "",
             }]],
         }],
     }

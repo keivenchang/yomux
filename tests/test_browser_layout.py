@@ -918,7 +918,7 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
             const expectedChartTitles = jsDebugGraphChartGroups.map(group => catalog[group.labelKey]);
             surfaceMatrix[locale] = {
               activeLocale: i18nActiveLocale,
-              resolvedHelpHeading: t('shortcuts.title'),
+              resolvedHelpHeading: t('common.keyboardShortcuts'),
               helpHeading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
               helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
               statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
@@ -935,10 +935,10 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
                 visibleSurfaceValues([help, stats, finder, editor, terminal]),
               ),
               expected: {
-                helpHeading: catalog['shortcuts.title'],
+                helpHeading: catalog['common.keyboardShortcuts'],
                 statsTitle: catalog['tab.debug'],
                 chartTitles: expectedChartTitles,
-                languageTitle: catalog['language.switcher'],
+                languageTitle: catalog['common.language'],
               },
             };
           }
@@ -8748,7 +8748,7 @@ def test_codemirror_word_wrap_toggle_keeps_existing_content_visible(browser, tmp
             contentWhiteSpace: getComputedStyle(content).whiteSpace,
             reconfigCalls: window.__wrapRegressionReconfigCalls,
             errors: window.__wrapRegressionErrors,
-            optionViews: panel._cmEditorOptionViews?.length || 0,
+            optionViews: panel._cmViews?.length || 0,
             loadingText: panel.querySelector('.file-editor-codemirror-panel').textContent,
           };
           if (metrics.lineWrapping || attempts > 20) done(metrics);

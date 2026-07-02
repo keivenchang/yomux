@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import filesystem
+from .locales import message_descriptor
 from .locales import user_message_payload
 
 
@@ -41,7 +42,7 @@ def _payload_paths(payload: dict[str, Any]) -> list[str]:
 
 
 def _message(key: str, **params: Any) -> dict[str, Any]:
-    return {"key": key, "params": params}
+    return message_descriptor(key, "", params)
 
 
 def _raw(value: object) -> dict[str, str]:
@@ -114,7 +115,7 @@ def _info_messages(info: dict[str, Any]) -> list[dict[str, Any]]:
     if info["modified"] is not None:
         messages.append(_message("drop.result.info.modified", modified=info["modified"]))
     if info["repo"]:
-        messages.append(_message("drop.result.info.repo", repo=info["repo"]))
+        messages.append(_message("common.repoDetail", repo=info["repo"]))
     if info["relative"]:
         messages.append(_message("drop.result.info.relative", relative=info["relative"]))
     return messages

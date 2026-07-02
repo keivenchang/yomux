@@ -36,6 +36,7 @@ def test_yoagent_stream_callback_uses_extracted_stream_owner(monkeypatch):
         "kind": "thinking",
         "text": "Checking stream owner",
         "eventKind": "hidden_work_delta",
+        "label": {"key": "yoagent.stream.thinking", "params": {}, "fallback": "thinking"},
         "labelKey": "yoagent.stream.thinking",
         "labelParams": {},
         "fallback": "thinking",
@@ -139,6 +140,7 @@ def test_yoagent_stream_callback_preserves_approval_request_descriptor():
         "eventKind": "approval_requested",
         "command": "python3 tools/check.py",
         "path": "/repo",
+        "label": {"key": "yoagent.stream.approvalRequested", "params": {}, "fallback": "approval requested"},
         "labelKey": "yoagent.stream.approvalRequested",
         "labelParams": {},
         "fallback": "approval requested",
@@ -163,6 +165,7 @@ def test_yoagent_stream_callback_preserves_raw_thinking_detail_text():
         "kind": "thinking",
         "text": "First line\n  second line",
         "eventKind": "hidden_work_delta",
+        "label": {"key": "yoagent.stream.thinking", "params": {}, "fallback": "thinking"},
         "labelKey": "yoagent.stream.thinking",
         "labelParams": {},
         "fallback": "thinking",
@@ -264,10 +267,11 @@ def test_yoagent_stream_callback_keeps_claude_token_progress_after_empty_thinkin
     assert payloads[-1]["stream_items"] == [
         {
             "kind": "thinking",
-            "text": "",
-            "eventKind": "hidden_work_delta",
-            "tokenCount": 200,
-            "labelKey": "yoagent.stream.thinking",
+                "text": "",
+                "eventKind": "hidden_work_delta",
+                "tokenCount": 200,
+                "label": {"key": "yoagent.stream.thinking", "params": {}, "fallback": "thinking"},
+                "labelKey": "yoagent.stream.thinking",
             "labelParams": {},
             "fallback": "thinking",
         },
@@ -373,6 +377,26 @@ def test_yoagent_conversation_persists_stream_items_without_auxiliary_lines(tmp_
         {"kind": "thinking", "text": "thinking: raw\n  detail"},
     ]
     assert loaded == [written]
+
+
+def test_yoagent_conversation_normalizes_legacy_stream_label_to_canonical_descriptor():
+    items, truncated = app_module.yoagent_conversation.bounded_stream_items([{
+        "kind": "tool",
+        "text": "passed",
+        "labelKey": "yoagent.stream.toolDone",
+        "labelParams": {"tool": "command"},
+        "fallback": "tool done: command",
+    }])
+
+    assert truncated is False
+    assert items[0]["label"] == {
+        "key": "yoagent.stream.toolDone",
+        "params": {"tool": "command"},
+        "fallback": "tool done: command",
+    }
+    assert items[0]["labelKey"] == items[0]["label"]["key"]
+    assert items[0]["labelParams"] == items[0]["label"]["params"]
+    assert items[0]["fallback"] == items[0]["label"]["fallback"]
 
 
 def test_yoagent_conversation_caps_oversized_auxiliary_fields(tmp_path):

@@ -116,7 +116,7 @@ function updateBrandTitles() {
 }
 
 function aboutBrandHtml() {
-  return `<span class="about-brand-yo">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+  return `<span class="about-brand-yo">${esc(t('brand.marker'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
 }
 
 function showAboutModal() {
@@ -235,7 +235,7 @@ function tmuxSessionActionCommands(session, options = {}) {
   const yoloLabel = hasSession
     ? t(autoHere ? 'menu.tmux.yolo.disableFor' : 'menu.tmux.yolo.enableFor', {session})
     : t(autoHere ? 'menu.tmux.yolo.disable' : 'menu.tmux.yolo.enable');
-  const renameLabel = hasSession ? t('menu.tmux.rename.for', {session}) : t('menu.tmux.rename');
+  const renameLabel = hasSession ? t('menu.tmux.rename.for', {session}) : t('common.renameTmuxSession');
   const renameAction = options.renameAction || (() => renameTmuxSession(session));
   const commands = [];
   if (includeYolo) commands.push(menuCommand(yoloLabel, async () => {
@@ -323,7 +323,7 @@ function yoloRuleStatusDetail() {
   const countText = tPlural('menu.yolo.ruleCount', count);
   const dryRun = yoloRulesPayload.dry_run ? t('menu.yolo.dryRunSuffix') : '';
   return yoloRulesPayload.error
-    ? t('menu.yolo.errorDetail', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)})
+    ? t('common.errorDetail', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)})
     : t('menu.yolo.statusDetail', {source, rules: countText, dryRun});
 }
 
@@ -353,7 +353,7 @@ async function reloadYoloRules() {
     statusEl.innerHTML = payload.error
       ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: errorText})}</span>`
       : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
-    showToast(t('status.yoloToastTitle'), errorText || yoloRuleStatusDetail(), {level});
+    showToast(t('brand.yoloRules'), errorText || yoloRuleStatusDetail(), {level});
   } catch (error) {
     statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
@@ -674,7 +674,7 @@ function appMenuTree() {
       label: t('menu.file'),
       items: menuGroups(
         [
-          menuCommand(t('menu.file.openFile'), openFileQuickOpen, {
+          menuCommand(t('common.openFile'), openFileQuickOpen, {
             detail: appShortcutText('P'),
             iconHtml: appMenuUiIcon('document'),
           }),
@@ -693,7 +693,7 @@ function appMenuTree() {
             detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
             iconHtml: appMenuUiIcon('share', shareMenuActive),
           }),
-          menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
+          menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
             checked: itemInLayout(prefsItemId),
             detail: compactHomePath(settingsConfigPath()),
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
@@ -721,13 +721,13 @@ function appMenuTree() {
           iconHtml: appMenuUiIcon('notify', notificationDeliveryEnabled()),
           keepOpen: true,
         }),
-        menuCommand(t('menu.view.refresh'), refreshAll, {
+        menuCommand(t('common.refresh'), refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
         }),
         menuSubmenu(t('menu.view.theme'), [
-          menuCommand(t('menu.view.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: t('menu.view.theme.system.detail', {mode: t('menu.view.theme.' + resolvedGlobalThemeMode())})}),
-          menuCommand(t('menu.view.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
-          menuCommand(t('menu.view.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
+          menuCommand(t('common.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: t('menu.view.theme.system.detail', {mode: t('common.theme.' + resolvedGlobalThemeMode())})}),
+          menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
+          menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
         menuSubmenu(t('menu.view.layout'), layoutModeValues.map(layoutMenuCommand)),
         menuSubmenu(t('menu.view.sortTabs'), [
@@ -752,13 +752,13 @@ function appMenuTree() {
           }),
         ],
         [
-          menuSubmenu(t('menu.tmux.yoloSubmenu'), tmuxYoloMenuItems()),
+          menuSubmenu(t('brand.yolo'), tmuxYoloMenuItems()),
         ]
       ),
     },
     {
       id: 'tabs',
-      label: t('menu.tabs'),
+      label: t('common.tabsLabel'),
       badgeText: String(yoloCount),
       badgeTitle: tPlural('menu.tabs.yoloBadge', yoloCount),
       items: tabMenuItems(openItems),
@@ -767,15 +767,15 @@ function appMenuTree() {
       id: 'help',
       label: t('menu.help'),
       items: menuGroups(
-        [menuCommand(t('menu.help.commandPalette'), openCommandPalette, {
+        [menuCommand(t('common.commandPalette'), openCommandPalette, {
           detail: appShortcutText('P', {shift: true}),
         })],
         [
-          menuCommand(t('menu.help.version', {version: bootstrap.version || ''}).trim(), null, {
+          menuCommand(t('brand.version', {version: bootstrap.version || ''}).trim(), null, {
             disabled: true,
             detail: bootstrap.versionCommitTime ? t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}) : '',
           }),
-          menuCommand(t('menu.help.shortcuts'), openKeyboardShortcutsOverlay, {
+          menuCommand(t('common.keyboardShortcuts'), openKeyboardShortcutsOverlay, {
             detail: '?',
           }),
           menuCommand(t('menu.help.openReadme'), openProjectReadme, {
@@ -875,10 +875,10 @@ function renderSessionButtonsMeasured(options = {}) {
 // Chinese locale shows 優樂mux / 优乐mux (優/优 boxed-green, 樂/乐 green) and updates on a language switch
 // without a reload. The m/u/x colorful spans and the version are untouched.
 function renderBrandWordmark() {
-  for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
+  for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.marker');
   for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
   for (const brand of document.querySelectorAll('.brand-title')) {
-    brand.setAttribute('aria-label', t('brand.aria', {version: bootstrap.version || ''}));
+    brand.setAttribute('aria-label', t('brand.version', {version: bootstrap.version || ''}));
   }
   updateBrandTitles();
 }
@@ -989,8 +989,8 @@ function createTopbarLanguageSwitcher() {
   const button = wrapper.querySelector(':scope > .app-menu-button');
   if (button) {
     button.classList.add('topbar-language');
-    button.title = t('language.switcher');
-    button.setAttribute('aria-label', t('language.switcher'));
+    button.title = t('common.language');
+    button.setAttribute('aria-label', t('common.language'));
     button.addEventListener('blur', flushPendingSessionButtonsRender);
   }
   wrapper.querySelector(':scope > .app-menu-popover')?.classList.add('topbar-language-popover');

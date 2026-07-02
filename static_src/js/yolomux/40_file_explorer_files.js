@@ -1219,7 +1219,7 @@ function setFileExplorerRepoSummary(path, repo, error = '') {
   const summary = error ? '' : repoInfoSummary(repo);
   const title = error || (repo?.root ? [
     `${t('popover.repo')}: ${repo.root}`,
-    `${t('popover.branch')}: ${repoBranchDisplayText(repo)}`,
+    `${t('common.field.branch')}: ${repoBranchDisplayText(repo)}`,
     repo.upstream ? `↗ ${repo.upstream}` : '',
     Number.isFinite(Number(repo.dirty_count)) ? t('git.dirty', {count: repo.dirty_count}) : '',
     Number(repo.ahead) ? t('git.ahead', {count: repo.ahead}) : '',
@@ -2148,7 +2148,7 @@ function fileTreeGitStatusBadgeClass(status) {
 function gitStatusBadgeTitle(status) {
   const key = normalizeGitStatus(status);
   const labels = {
-    M: t('git.status.modified'),
+    M: t('state.modified'),
     A: t('git.status.added'),
     D: t('git.status.deleted'),
     T: t('git.status.transcriptTouched'),
@@ -3350,7 +3350,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (!applyingIndexedDirsSetting) persistIndexedDirsSetting(indexed ? {add: normalized} : {remove: normalized});
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
-    statusEl.textContent = t(indexed ? 'finder.index.added' : 'finder.index.removed', {path: compactHomePath(normalized)});
+    statusEl.textContent = t(indexed ? 'common.indexedPath' : 'finder.index.removed', {path: compactHomePath(normalized)});
   }
 }
 
@@ -4150,7 +4150,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const titleParts = [
     label,
     description && description !== label ? description : '',
-    data.branchText ? `${t('popover.branch')}: ${data.branchText}` : '',
+    data.branchText ? `${t('common.field.branch')}: ${data.branchText}` : '',
     data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
   const titleText = titleParts.join('\n');

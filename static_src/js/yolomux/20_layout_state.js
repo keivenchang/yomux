@@ -2631,8 +2631,8 @@ function renderNotifyToggle() {
   const label = t('pref.section.notifications');
   syncPressedButton(notifyToggle, notificationDeliveryEnabled(), {labelOn: label, labelOff: label});
   notifyToggle.title = t('notify.delivery.summary', {
-    inApp: t(notificationDeliveryEnabled('inApp') ? 'notify.state.on' : 'notify.state.off'),
-    system: t(notificationDeliveryEnabled('system') ? 'notify.state.on' : 'notify.state.off'),
+    inApp: t(notificationDeliveryEnabled('inApp') ? 'notify.state.on' : 'state.off'),
+    system: t(notificationDeliveryEnabled('system') ? 'notify.state.on' : 'state.off'),
   });
   notifyToggle.onclick = event => {
     event.preventDefault();
@@ -2706,31 +2706,31 @@ async function openProjectReadme() {
 function keyboardShortcutCatalog() {
   return [
     {section: t('shortcuts.section.app'), items: [
-      {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
+      {label: t('common.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
       {label: t('brand.share'), keys: appShortcutText('K')},
       {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
-      {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
+      {label: t('common.keyboardShortcuts'), keys: '?'},
       {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
     {section: t('shortcuts.section.terminal'), items: [
       {label: t('shortcuts.copyVisibleTerminalSelection'), keys: appShortcutText('C')},
-      {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
+      {label: t('common.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
     ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},
-      {label: t('shortcuts.find'), keys: appShortcutText('F')},
-      {label: t('shortcuts.replace'), keys: appShortcutText('H')},
+      {label: t('common.find'), keys: appShortcutText('F')},
+      {label: t('common.replace'), keys: appShortcutText('H')},
       {label: t('shortcuts.goToLine'), keys: appShortcutText('G')},
       {label: t('shortcuts.toggleComment'), keys: appShortcutText('/')},
       {label: t('shortcuts.indentOutdent'), keys: 'Tab / Shift+Tab'},
       {label: t('shortcuts.undoRedo'), keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
       {label: t('shortcuts.editorNav'), keys: `${appShortcutText('[', {alt: true})} / ${appShortcutText(']', {alt: true})}`},
     ]},
-    {section: t('shortcuts.section.diff'), items: [
+    {section: t('common.diff'), items: [
       {label: t('shortcuts.undoChunk'), keys: appShortcutText('Z')},
       {label: t('shortcuts.redoChunk'), keys: appShortcutText('Z', {shift: true})},
     ]},
@@ -2738,9 +2738,9 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.pinTab'), keys: t('shortcuts.keys.pinTab', {k: appShortcutText('K', {shift: true})})},
       {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}`})},
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
-      {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
+      {label: t('common.sessionActions'), keys: t('shortcuts.keys.rightClick')},
     ]},
-    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel(), differ: t('changes.title')}), items: [
+    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel(), differ: t('brand.tab.changes')}), items: [
       {label: t('shortcuts.finderDiffer.moveSelection'), keys: '↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.extendSelection'), keys: 'Shift+↑ / ↓ / Home / End'},
       {label: t('shortcuts.finderDiffer.expandCollapseFolders'), keys: '→ / ←'},
@@ -2877,9 +2877,9 @@ function ensureKeyboardShortcutsOverlay() {
   node.className = 'app-modal-overlay keyboard-shortcuts-overlay';
   node.hidden = true;
   node.innerHTML = `
-    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('shortcuts.title'))}">
+    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('common.keyboardShortcuts'))}">
       <div class="keyboard-shortcuts-head">
-        <h2>${esc(t('shortcuts.title'))}</h2>
+        <h2>${esc(t('common.keyboardShortcuts'))}</h2>
         <button type="button" class="keyboard-shortcuts-close" aria-label="${esc(t('shortcuts.close'))}">×</button>
       </div>
       <div class="keyboard-shortcuts-body"></div>
@@ -2899,8 +2899,8 @@ function renderKeyboardShortcutsOverlay(node = keyboardShortcutsNode) {
   const heading = node.querySelector('.keyboard-shortcuts-head h2');
   const close = node.querySelector('.keyboard-shortcuts-close');
   const body = node.querySelector('.keyboard-shortcuts-body');
-  if (dialog) dialog.setAttribute('aria-label', t('shortcuts.title'));
-  if (heading) heading.textContent = t('shortcuts.title');
+  if (dialog) dialog.setAttribute('aria-label', t('common.keyboardShortcuts'));
+  if (heading) heading.textContent = t('common.keyboardShortcuts');
   if (close) close.setAttribute('aria-label', t('shortcuts.close'));
   if (body) body.innerHTML = keyboardShortcutsHtml();
   return true;
@@ -3010,10 +3010,10 @@ function commandPaletteKeybinding(label, detail = '') {
 
 // a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
 function commandPaletteViewModeLabel(mode) {
-  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'preview') return t('common.preview');
   if (mode === 'split') return t('editor.mode.split');
-  if (mode === 'diff') return t('editor.diff');
-  return t('editor.mode.edit');
+  if (mode === 'diff') return t('common.diff');
+  return t('common.edit');
 }
 
 function commandPaletteNumericTime(value) {
@@ -3036,7 +3036,7 @@ function commandPaletteCommandItems() {
   // Group FILE items by path and emit ONE row per file; non-file tabs (sessions, Finder/Info/Prefs)
   // stay one row each.
   const tabRow = (item, extra = {}) => ({
-    group: t('palette.group.tabs'),
+    group: t('common.tabsLabel'),
     category: 'pane',
     label: itemLabel(item),
     detail: commandPaletteTabDetail(item),
@@ -3459,7 +3459,7 @@ function fileQuickOpenItems() {
     const isImage = (file.kind || 'file') !== 'dir' && previewMediaKindForPath(path) === 'image';
     if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {
-      group: externalIndexed ? t('palette.group.indexed', {path: compactHomePath(indexedRoot)}) : t('palette.group.files'),
+      group: externalIndexed ? t('common.indexedPath', {path: compactHomePath(indexedRoot)}) : t('palette.group.files'),
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
       imageIndex,
@@ -3469,12 +3469,12 @@ function fileQuickOpenItems() {
     }));
   }
   if (fileQuickOpenError) {
-    const errorText = userMessageText(fileQuickOpenError, t('palette.searchFailed'));
+    const errorText = userMessageText(fileQuickOpenError, t('common.searchFailed'));
     items.push({
       group: t('palette.group.files'),
-      label: t('search.failed'),
+      label: t('common.searchFailed'),
       detail: errorText,
-      searchFields: [t('palette.searchFailed'), errorText],
+      searchFields: [t('common.searchFailed'), errorText],
       disabled: true,
       run: null,
     });
@@ -3787,7 +3787,7 @@ function ensureCommandPalette() {
   node.className = 'app-modal-overlay command-palette';
   node.hidden = true;
   node.innerHTML = `
-    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('palette.aria'))}">
+    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('common.commandPalette'))}">
       <input type="search" class="command-palette-input" placeholder="${esc(t('palette.placeholder'))}" aria-label="${esc(t('palette.placeholder'))}">
       <div class="command-palette-status" aria-live="polite" hidden></div>
       <div class="command-palette-results" role="listbox"></div>
@@ -4003,11 +4003,8 @@ async function refreshFileQuickOpenCandidates(query = '') {
       if (!successful.length) {
         const firstError = results.find(result => result.error)?.error;
         if (firstError) throw firstError;
-        const fallback = t('palette.searchFailed');
-        fileQuickOpenError = userMessageSnapshot({
-          error: fallback,
-          user_message: {key: 'palette.searchFailed', params: {}, fallback},
-        });
+        const fallback = t('common.searchFailed');
+        fileQuickOpenError = userMessageSnapshot('', {key: 'common.searchFailed', params: {}, fallback});
         return;
       }
       fileQuickOpenRoot = root;
@@ -4020,7 +4017,11 @@ async function refreshFileQuickOpenCandidates(query = '') {
     if (requestId !== fileQuickOpenRequestId) return;
     if (error?.name === 'AbortError') return;
     fileQuickOpenCandidates = [];
-    fileQuickOpenError = error;
+    fileQuickOpenError = userMessageSnapshot(error, {
+      key: 'common.searchFailed',
+      params: {},
+      fallback: t('common.searchFailed'),
+    });
   } finally {
     if (requestId === fileQuickOpenRequestId) {
       fileQuickOpenAbortController = null;
@@ -4252,7 +4253,7 @@ function startupHelperCatalog() {
     {title: t('startupHelper.tip.watchedPrs.title'), lines: [t('startupHelper.tip.watchedPrs.body')]},
     {title: t('startupHelper.tip.quickOpen.title'), lines: [t('startupHelper.tip.quickOpen.body')]},
     {title: t('startupHelper.tip.markdownPreview.title'), lines: [t('startupHelper.tip.markdownPreview.body')]},
-    {title: t('startupHelper.tip.largeUpload.title'), lines: [t('startupHelper.tip.largeUpload.body')]},
+    {title: t('common.rsyncLargeFiles'), lines: [t('startupHelper.tip.largeUpload.body')]},
   ];
 }
 
@@ -4611,9 +4612,9 @@ function maybeNotifyState(session, state, options = {}) {
 // a stable snapshot of the watched-PR status dimensions we diff for notifications.
 function watchedPrStatusSnapshot(pr) {
   return {
-    merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
+    merged: pullRequestIsMerged(pr),
     ci: pullRequestCiState(pr),
-    review: String(pr?.review_decision || '').toUpperCase(),
+    review: pullRequestReviewDecision(pr),
   };
 }
 

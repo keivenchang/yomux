@@ -736,9 +736,9 @@ def diff_ref_issue(message: str, from_ref: str, to_ref: str, repo: str = "") -> 
     fallback = str(message or "")
     params = {"from": from_ref, "to": to_ref, "repo": repo, "error": fallback}
     if fallback.startswith("unknown FROM ref:"):
-        return message_descriptor("diff.error.unknownFrom", fallback, {"ref": from_ref})
+        return message_descriptor("common.unknownFromRef", fallback, {"ref": from_ref})
     if fallback.startswith("unknown TO ref:"):
-        return message_descriptor("diff.error.unknownTo", fallback, {"ref": to_ref})
+        return message_descriptor("common.unknownToRef", fallback, {"ref": to_ref})
     if fallback.startswith("FROM ref must be older than TO ref"):
         return message_descriptor("diff.error.fromNotOlder", fallback, params)
     return message_descriptor("diff.error.git", fallback, params)
