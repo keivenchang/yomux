@@ -197,6 +197,8 @@
   "debug.graph.series.tokensPerAgent": "權杖/代理/分鐘",
   "debug.graph.status.attention": "需要關注",
   "debug.graph.status.transition": "轉換中",
+  "debug.graph.sumDisplayedBandwidth": "（所顯示頻寬的總和 = {count}）",
+  "debug.graph.sumDisplayedClientRequests": "（所顯示的所有用戶端要求總和 = {count}）",
   "debug.graph.sumDisplayedTokens": "（所顯示項目的權杖總和 = {count}）",
   "debug.graph.unit.tokens": "{count} 個權杖",
   "debug.graph.unit.tokensPerMinute": "{count} 個權杖/分鐘",

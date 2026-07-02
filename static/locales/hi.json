@@ -197,6 +197,8 @@
   "debug.graph.series.tokensPerAgent": "टोकन/एजेंट/मिनट",
   "debug.graph.status.attention": "ध्यान दें",
   "debug.graph.status.transition": "संक्रमण",
+  "debug.graph.sumDisplayedBandwidth": "(प्रदर्शित बैंडविड्थ का योग = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(प्रदर्शित सभी क्लाइंट अनुरोधों का योग = {count})",
   "debug.graph.sumDisplayedTokens": "(प्रदर्शित टोकन का योग = {count})",
   "debug.graph.unit.tokens": "{count} टोकन",
   "debug.graph.unit.tokensPerMinute": "{count} टोकन/मिनट",

@@ -197,6 +197,8 @@
   "debug.graph.series.tokensPerAgent": "โทเค็น/ตัวแทน/นาที",
   "debug.graph.status.attention": "ความสนใจ",
   "debug.graph.status.transition": "การเปลี่ยนสถานะ",
+  "debug.graph.sumDisplayedBandwidth": "(ผลรวมแบนด์วิดท์ที่แสดง = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(ผลรวมคำขอของไคลเอนต์ทั้งหมดที่แสดง = {count})",
   "debug.graph.sumDisplayedTokens": "(ผลรวมของโทเค็นจากที่แสดง = {count}) โทเค็น",
   "debug.graph.unit.tokens": "{count} โทเค็น",
   "debug.graph.unit.tokensPerMinute": "{count} โทเค็น/นาที",

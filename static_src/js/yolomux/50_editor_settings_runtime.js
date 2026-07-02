@@ -571,6 +571,12 @@ async function openEditorFindShortcut(host = null) {
   return openEditorFind(host);
 }
 
+async function focusFileEditorSearch(panel = null) {
+  const opened = await openEditorFindShortcut(panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(panel)), panel);
+  return opened;
+}
+
 function applyEditorWrapPreference() {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);

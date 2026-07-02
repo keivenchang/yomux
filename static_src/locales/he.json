@@ -150,6 +150,8 @@
   "debug.graph.status.transition": "מעבר",
   "state.working": "עובד",
   "debug.graph.sumDisplayedTokens": "(סכום האסימונים המוצגים = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(סכום רוחב הפס המוצג = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(סכום כל בקשות הלקוחות המוצגות = {count})",
   "debug.graph.unit.tokens": "אסימוני {count}",
   "debug.graph.unit.tokensPerMinute": "{count} אסימונים/דקה",
   "debug.meta": "debug=1 - {count} אירועים",

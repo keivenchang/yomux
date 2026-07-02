@@ -3,6 +3,42 @@ import time
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
+
+def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const api = dockviewLayoutState.api;
+        const originalFromJson = api.fromJSON.bind(api);
+        let fromJsonCalls = 0;
+        api.fromJSON = (...args) => {
+          fromJsonCalls += 1;
+          return originalFromJson(...args);
+        };
+        const firstPanel = panelNodes.get('1');
+        const secondPanel = panelNodes.get('2');
+        const started = performance.now();
+        activatePaneTab('left', '2');
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          done({
+            active: activeItemForSide('left'),
+            fromJsonCalls,
+            firstPanelPreserved: panelNodes.get('1') === firstPanel,
+            secondPanelPreserved: panelNodes.get('2') === secondPanel,
+            secondPanelConnected: secondPanel?.isConnected === true,
+            elapsedMs: performance.now() - started,
+          });
+        }));
+        """
+    )
+    assert result["active"] == "2", result
+    assert result["fromJsonCalls"] == 0, result
+    assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True and result["secondPanelConnected"] is True, result
+    assert result["elapsedMs"] < 300, result
+
+
 def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)

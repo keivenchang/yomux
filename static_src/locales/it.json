@@ -150,6 +150,8 @@
   "debug.graph.status.transition": "Transizione",
   "state.working": "In esecuzione",
   "debug.graph.sumDisplayedTokens": "(somma dei token visualizzati = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(somma della larghezza di banda visualizzata = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(somma di tutte le richieste client visualizzate = {count})",
   "debug.graph.unit.tokens": "{count} gettoni",
   "debug.graph.unit.tokensPerMinute": "{count} gettoni/min",
   "debug.meta": "debug=1 - {count} eventi",

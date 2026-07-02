@@ -203,6 +203,8 @@
   "debug.graph.series.tokensPerAgent": "אסימונים/סוכן/דקה",
   "debug.graph.status.attention": "תשומת לב",
   "debug.graph.status.transition": "מעבר",
+  "debug.graph.sumDisplayedBandwidth": "(סכום רוחב הפס המוצג = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(סכום כל בקשות הלקוחות המוצגות = {count})",
   "debug.graph.sumDisplayedTokens": "(סכום האסימונים המוצגים = {count})",
   "debug.graph.unit.tokens": "אסימוני {count}",
   "debug.graph.unit.tokensPerMinute": "{count} אסימונים/דקה",

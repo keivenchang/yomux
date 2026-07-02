@@ -203,6 +203,8 @@
   "debug.graph.series.tokensPerAgent": "Jetons/agent/min",
   "debug.graph.status.attention": "À surveiller",
   "debug.graph.status.transition": "En transition",
+  "debug.graph.sumDisplayedBandwidth": "(somme de la bande passante affichée = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(somme de toutes les requêtes client affichées = {count})",
   "debug.graph.sumDisplayedTokens": "(somme des jetons affichés = {count})",
   "debug.graph.unit.tokens": "Jetons {count}",
   "debug.graph.unit.tokensPerMinute": "Jetons {count}/min",

@@ -155,6 +155,8 @@
   "debug.graph.status.transition": "Переход",
   "state.working": "Работает",
   "debug.graph.sumDisplayedTokens": "(сумма токенов из отображаемых = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(сумма отображаемой пропускной способности = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(сумма всех отображаемых запросов клиентов = {count})",
   "debug.graph.unit.tokens": "Токены {count}",
   "debug.graph.unit.tokensPerMinute": "{count} токенов/мин",
   "debug.meta": "debug=1 — события {count}",

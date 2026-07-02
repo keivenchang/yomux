@@ -145,6 +145,8 @@
   "debug.graph.status.transition": "Overgang",
   "state.working": "Bezig",
   "debug.graph.sumDisplayedTokens": "(som van de weergegeven tokens = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(som van de weergegeven bandbreedte = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(som van alle weergegeven clientverzoeken = {count})",
   "debug.graph.unit.tokens": "Aantal tokens: {count}",
   "debug.graph.unit.tokensPerMinute": "Aantal tokens per minuut: {count}",
   "debug.meta": "debug=1 - {count} gebeurtenissen",

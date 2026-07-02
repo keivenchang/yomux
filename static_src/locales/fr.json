@@ -150,6 +150,8 @@
   "debug.graph.status.transition": "En transition",
   "state.working": "En cours",
   "debug.graph.sumDisplayedTokens": "(somme des jetons affichés = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(somme de la bande passante affichée = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(somme de toutes les requêtes client affichées = {count})",
   "debug.graph.unit.tokens": "Jetons {count}",
   "debug.graph.unit.tokensPerMinute": "Jetons {count}/min",
   "debug.meta": "debug=1 - Événements {count}",

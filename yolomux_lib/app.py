@@ -268,6 +268,10 @@ SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 1.5
 SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 AUTO_APPROVE_CACHE_MAX_AGE_SECONDS = 5.003
+# Stats can safely use the last agent-status snapshot while the existing asynchronous refresher
+# collects the next one. This keeps the one-second sampler from synchronously recapturing every
+# tmux pane when the UI cache ages out.
+AUTO_APPROVE_STATS_CACHE_MAX_AGE_SECONDS = 15.0
 SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
 INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
@@ -278,6 +282,13 @@ STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 30
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
+# Per-server CPU history shares one durable 24-hour snapshot with every browser client. Coalesce
+# thirty one-second measurements before rewriting that multi-megabyte snapshot to keep sampler I/O
+# from competing with interactive requests, while preserving every one-second bucket in the batch.
+STATS_PROCESS_HISTORY_WRITE_SECONDS = 30.0
+# The elected owner still retains one-second samples in memory. Followers only need a fresh durable
+# snapshot within a few seconds, so avoid serializing the entire 24-hour shared history every tick.
+STATS_SHARED_HISTORY_WRITE_SECONDS = 5.0
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
 STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS = 60.0
 STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS = STATS_HISTORY_SAMPLER_SECONDS
@@ -1291,6 +1302,9 @@ class TmuxWebtermApp:
         self.stats_sample_last_system_cpu_times: tuple[float, float] | None = None
         self.stats_sample_cached_monotonic: float | None = None
         self.stats_sample_cached_payload: dict[str, Any] | None = None
+        self.stats_process_history_lock = threading.Lock()
+        self.stats_process_history_pending_samples: list[dict[str, Any]] = []
+        self.stats_process_history_next_write_at = 0.0
         self.stats_history_sampler_lock = threading.Lock()
         self.stats_history_sampler_thread: threading.Thread | None = None
         self.stats_history_sampler_stop_event = threading.Event()
@@ -1301,6 +1315,8 @@ class TmuxWebtermApp:
         self.stats_history_sequence = 0
         self.stats_history_shared_rev = -1
         self.stats_history_shared_loaded = False
+        self.stats_history_shared_write_lock = threading.Lock()
+        self.stats_history_shared_next_write_at = 0.0
         self.stats_client_history_shared_rev = -1
         self.attention_ack_lock = threading.RLock()
         self.attention_ack_keys: dict[str, float] = {}
@@ -1951,6 +1967,12 @@ class TmuxWebtermApp:
             return
         buckets = self.stats_history_rollup_buckets if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS else self.stats_history_raw_buckets
         bucket = buckets.get((start, duration))
+        source_sequence = int(source.get("sequence") or 0)
+        # The shared snapshot carries the full 24-hour history even though normal writes change
+        # only one bucket. Do not rebuild every local client/server map for unchanged buckets;
+        # that transient object churn was retaining hundreds of MiB in the stats owner.
+        if bucket is not None and source_sequence <= int(bucket.get("sequence") or 0):
+            return
         if bucket is None:
             bucket = stats_history_empty_bucket(start, duration)
             buckets[(start, duration)] = bucket
@@ -1983,10 +2005,6 @@ class TmuxWebtermApp:
         self.stats_history_refresh_bucket_sequence_locked(bucket)
 
     def stats_client_history_apply_snapshot_locked(self, snapshot: dict[str, Any]) -> None:
-        for bucket in [*self.stats_history_raw_buckets.values(), *self.stats_history_rollup_buckets.values()]:
-            bucket["clients"] = {}
-            bucket["servers"] = {}
-            self.stats_history_refresh_bucket_sequence_locked(bucket)
         raw_buckets = snapshot.get("raw_buckets") if isinstance(snapshot.get("raw_buckets"), list) else []
         rollup_buckets = snapshot.get("rollup_buckets") if isinstance(snapshot.get("rollup_buckets"), list) else []
         for bucket in [*rollup_buckets, *raw_buckets]:
@@ -2033,22 +2051,34 @@ class TmuxWebtermApp:
 
     def record_stats_process_sample(self, sample: dict[str, Any]) -> None:
         now = float(sample.get("time") or time.time())
+        with self.stats_process_history_lock:
+            self.stats_process_history_pending_samples.append(dict(sample))
+            if now < self.stats_process_history_next_write_at:
+                return
+            pending_samples = self.stats_process_history_pending_samples
+            self.stats_process_history_pending_samples = []
+            self.stats_process_history_next_write_at = now + STATS_PROCESS_HISTORY_WRITE_SECONDS
         process_id, label, port = self.stats_history_process_identity()
 
-        def merge_sample() -> None:
-            bucket = self.stats_history_bucket_locked(now, now)
+        def merge_sample(persisted_sample: dict[str, Any]) -> None:
+            sample_time = float(persisted_sample.get("time") or now)
+            bucket = self.stats_history_bucket_locked(sample_time, now)
             if bucket is None:
                 return
             process_bucket = self.stats_history_process_bucket_locked(bucket, process_id)
             process_bucket["label"] = label
-            process_bucket["pid"] = int(sample.get("pid") or os.getpid())
+            process_bucket["pid"] = int(persisted_sample.get("pid") or os.getpid())
             process_bucket["port"] = port
-            process_bucket["started_at"] = float(sample.get("started_at") or SERVER_STARTED_AT)
-            process_bucket["cpu_total_percent"] = float(process_bucket.get("cpu_total_percent") or 0.0) + clamp_cpu_percent(float(sample.get("cpu_percent") or 0.0))
+            process_bucket["started_at"] = float(persisted_sample.get("started_at") or SERVER_STARTED_AT)
+            process_bucket["cpu_total_percent"] = float(process_bucket.get("cpu_total_percent") or 0.0) + clamp_cpu_percent(float(persisted_sample.get("cpu_percent") or 0.0))
             process_bucket["cpu_count"] = float(process_bucket.get("cpu_count") or 0.0) + 1.0
             sequence = self.stats_history_next_sequence_locked()
             process_bucket["sequence"] = sequence
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), sequence)
+
+        def merge_pending_samples() -> None:
+            for persisted_sample in pending_samples:
+                merge_sample(persisted_sample)
             self.stats_history_compact_locked(now)
 
         if self.stats_history_uses_shared_status():
@@ -2061,11 +2091,11 @@ class TmuxWebtermApp:
                     existing = {}
                 with self.stats_history_lock:
                     self.stats_client_history_apply_snapshot_locked(existing)
-                    merge_sample()
+                    merge_pending_samples()
                 self.write_shared_stats_client_history_locked(existing, now)
             return
         with self.stats_history_lock:
-            merge_sample()
+            merge_pending_samples()
 
     def stats_history_shared_agent_state_snapshot(self, value: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         snapshot: dict[str, dict[str, Any]] = {}
@@ -2128,6 +2158,15 @@ class TmuxWebtermApp:
             existing = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
             self.stats_history_merge_shared_snapshot(existing)
             return self.write_shared_stats_history_locked(status, sample)
+
+    def write_shared_stats_history_if_due(self, sample: dict[str, Any]) -> bool:
+        now = float(sample.get("time") or time.time())
+        with self.stats_history_shared_write_lock:
+            if now < self.stats_history_shared_next_write_at:
+                return False
+            self.write_shared_stats_history(sample)
+            self.stats_history_shared_next_write_at = now + STATS_SHARED_HISTORY_WRITE_SECONDS
+            return True
 
     def write_shared_stats_history_locked(self, status: dict[str, Any], sample: dict[str, Any]) -> int:
         existing = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
@@ -2366,7 +2405,11 @@ class TmuxWebtermApp:
                 merge_records()
 
         with self.stats_history_lock:
-            return {"ok": True, "history": self.stats_history_payload_locked(max(0, since), client_id=client_id)}, HTTPStatus.OK
+            # The browser's POST only submits its local deltas; its regular GET poll receives the
+            # server history. Returning the whole 24-hour aggregate here turns a small upload into
+            # a multi-megabyte response on every reload.
+            response_since = self.stats_history_sequence if payload.get("ack_only") is True else max(0, since)
+            return {"ok": True, "history": self.stats_history_payload_locked(response_since, client_id=client_id)}, HTTPStatus.OK
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
         cached_payload = self.fresh_auto_approve_payload_for_stats()
@@ -2404,11 +2447,14 @@ class TmuxWebtermApp:
             stored_at, (payload, status) = cached
             if status != HTTPStatus.OK:
                 return None
-            if time.monotonic() - stored_at > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
+            age_seconds = time.monotonic() - stored_at
+            if age_seconds > AUTO_APPROVE_STATS_CACHE_MAX_AGE_SECONDS:
                 return None
             if not isinstance(payload, dict):
                 return None
-            return copy.deepcopy(payload)
+        if age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
+            self.start_auto_approve_cache_refresh()
+        return copy.deepcopy(payload)
 
     @staticmethod
     def stats_agent_window_rows_from_auto_approve_payload(payload: AutoApproveStatusPayload) -> list[dict[str, Any]]:
@@ -2691,9 +2737,12 @@ class TmuxWebtermApp:
 
     def record_stats_global_sample(self, trigger: str = "sampler", token_consumer: bool = False, defer_token_scan: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
+        phase_started = started
+        phase_ms: dict[str, float] = {}
         shared_enabled = self.stats_history_uses_shared_status()
         if shared_enabled and not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
             shared = self.merge_shared_stats_history(max_age_seconds=None)
+            phase_ms["shared_read_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
             sample = shared.get("sample") if isinstance(shared.get("sample"), dict) else {}
             self.record_performance_sample(
                 BACKGROUND_ROLE_STATS_SAMPLER,
@@ -2703,20 +2752,31 @@ class TmuxWebtermApp:
                 payload=sample,
                 cache_status="follower",
                 record_time=shared.get("updated_at") if shared.get("updated_at") else None,
-                details={"shared": bool(shared.get("ok")), "fresh": bool(shared.get("fresh")), "token_consumer": bool(token_consumer)},
+                details={"shared": bool(shared.get("ok")), "fresh": bool(shared.get("fresh")), "token_consumer": bool(token_consumer), **phase_ms},
             )
             return dict(sample)
-        if shared_enabled:
+        # The elected sampler is the only writer of server-owned stats. It merges durable history
+        # during startup/ownership transitions, then must not deserialize that same full snapshot
+        # again every second before writing its next local sample.
+        if shared_enabled and not self.stats_history_shared_loaded:
             self.merge_shared_stats_history(max_age_seconds=None)
+            phase_ms["shared_read_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
+            phase_started = time.perf_counter()
         sample, record_cpu_sample = self.current_stats_sample()
+        phase_ms["sample_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         if record_cpu_sample:
+            phase_started = time.perf_counter()
             self.record_stats_process_sample(sample)
+            phase_ms["process_history_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         # A first stats HTTP response must never wait for a cold transcript scan. The sampler sees the
         # same consumer interest and fills token history on its next pass.
         include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample and not defer_token_scan else False
+        phase_started = time.perf_counter()
         agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample else None
+        phase_ms["agent_activity_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         agent_token_records = list(agent_record.pop("_agent_token_records", [])) if isinstance(agent_record, dict) else []
         now = float(sample.get("time") or time.time())
+        phase_started = time.perf_counter()
         with self.stats_history_lock:
             if record_cpu_sample:
                 record = {
@@ -2733,8 +2793,11 @@ class TmuxWebtermApp:
                     if isinstance(token_record, dict):
                         self.stats_history_merge_record_locked(token_record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
             self.stats_history_compact_locked(now)
+        phase_ms["history_merge_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         if shared_enabled and record_cpu_sample:
-            self.write_shared_stats_history(sample)
+            phase_started = time.perf_counter()
+            shared_written = self.write_shared_stats_history_if_due(sample)
+            phase_ms["shared_write_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         self.record_performance_sample(
             BACKGROUND_ROLE_STATS_SAMPLER,
             "global-sample",
@@ -2743,7 +2806,7 @@ class TmuxWebtermApp:
             payload=sample,
             cache_status="sampled" if record_cpu_sample else "cached",
             record_time=sample["time"],
-            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates), "token_deferred": bool(defer_token_scan)},
+            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates), "token_deferred": bool(defer_token_scan), "shared_written": shared_enabled and record_cpu_sample and shared_written, **phase_ms},
         )
         return sample
 

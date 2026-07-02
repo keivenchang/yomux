@@ -35,6 +35,24 @@ const {
 } = require('./layout_test_helper');
 
 async function runLayoutAsyncSuite() {
+  await testAsync('session metadata distinguishes fetch failure from a client apply failure', async () => {
+    const api = loadYolomux('', ['1']);
+    const fetchFailure = await api.fetchAndApplySessionMetadataForTest(
+      () => Promise.reject(new Error('network unavailable')),
+      () => { throw new Error('must not apply after a fetch failure'); },
+    );
+    assert.equal(fetchFailure.stage, 'fetch', 'a rejected metadata request is classified as fetch failure');
+
+    const applyFailure = await api.fetchAndApplySessionMetadataForTest(
+      () => Promise.resolve({sessions: {}}),
+      () => { throw new Error('render failed'); },
+    );
+    assert.equal(applyFailure.stage, 'apply', 'a successful metadata response with a client exception is classified as apply failure');
+    api.setTranscriptMetadataLoadErrorForTest(api.transcriptMetadataLoadErrorSnapshotForTest(applyFailure.error, applyFailure.stage));
+    assert.equal(api.transcriptMetadataLoadErrorTextForTest(), 'render failed', 'the client apply error remains visible instead of becoming a fake transcript lookup failure');
+    assert.equal(api.transcriptMetadataLoadErrorLabelForTest(), 'render failed', 'the pane header uses the actual apply error rather than the transcript lookup label');
+  });
+
     {
       const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
       const transcriptPath = '/home/test/.local/state/yolomux/yoagent/conversation.jsonl';

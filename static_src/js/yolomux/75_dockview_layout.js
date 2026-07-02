@@ -19,6 +19,7 @@ const dockviewLayoutState = {
   hostLayoutFrame: 0,
   lastHostLayoutSignature: '',
   lastAppliedLayoutSignature: '',
+  lastAppliedActiveOnlySignature: '',
   groupSlots: new Map(),
   pendingRootBoundaryDrop: null,
   reloadAfterAdoption: false,
@@ -1004,6 +1005,7 @@ function dockviewDispose() {
   dockviewLayoutState.hostLayoutFrame = 0;
   dockviewLayoutState.lastHostLayoutSignature = '';
   dockviewLayoutState.lastAppliedLayoutSignature = '';
+  dockviewLayoutState.lastAppliedActiveOnlySignature = '';
   dockviewLayoutState.groupSlots.clear();
 }
 
@@ -1018,7 +1020,12 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   dockviewLayoutToHost(api);
   const signature = layoutSlotsSignature(layoutSlots);
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
-    dockviewLoadLayout(layoutSlots);
+    const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
+    if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
+      dockviewLoadLayout(layoutSlots);
+    } else {
+      dockviewLayoutState.lastAppliedLayoutSignature = signature;
+    }
   }
   dockviewRefreshTabs();
   dockviewSyncMountedPanels();
@@ -1049,14 +1056,33 @@ function dockviewLoadLayout(slots = layoutSlots) {
     if (!items.length) {
       api.clear();
       dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
+      dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
       return;
     }
     api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
     dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
+    dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
     dockviewSyncMountedPanels();
   } finally {
     dockviewLayoutState.applyingFromLayout = false;
   }
+}
+
+// An active-tab change does not alter the Dockview topology or its mounted panel contents. Calling
+// fromJSON in that case rebuilds the whole layout and is the visible tab-switch delay; activate the
+// existing panel in each group instead, which is Dockview's native pre-rendered-panel path.
+function dockviewActivateLayoutTabs(slots = layoutSlots) {
+  const api = dockviewLayoutState.api;
+  if (!api || !dockviewLayoutActive()) return false;
+  const activeItems = layoutSlotKeys(slots)
+    .map(slot => activeItemForSide(slot, slots))
+    .filter(Boolean);
+  if (!activeItems.length && paneItems(slots).length) return false;
+  const panels = activeItems.map(item => api.getPanel?.(item));
+  if (panels.some(panel => typeof panel?.api?.setActive !== 'function')) return false;
+  for (const panel of panels) panel.api.setActive();
+  dockviewSyncMountedPanels();
+  return true;
 }
 
 function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
@@ -1304,6 +1330,17 @@ function dockviewLayoutContentSignature(slots = layoutSlots) {
     .map(slot => `${slot}:${paneTabs(slot, slots).slice().sort().join(',')}`)
     .join('|');
   return `${nodeSignature(slots?.[layoutTreeKey])}::${paneSignature}`;
+}
+
+// Tab order is observable in Dockview (including pinning); only the active item is safe to change
+// without fromJSON. Keep this distinct from the unordered content signature used for resize math.
+function dockviewLayoutActiveOnlySignature(slots = layoutSlots) {
+  const paneSignature = layoutSlotKeys(slots)
+    .slice()
+    .sort()
+    .map(slot => `${slot}:${paneTabs(slot, slots).join(',')}`)
+    .join('|');
+  return `${layoutShapeSignature(slots)}::${paneSignature}`;
 }
 
 function dockviewLayoutTreeFromChildren(children, direction) {

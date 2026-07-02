@@ -420,7 +420,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
   assert.ok(bootStart > 0, 'could not find browser boot section');
-  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts'].includes(key)));
+  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort'].includes(key)));
   const fireAllTimeouts = options.fireAllTimeouts === true;
 
   const bootstrapPayload = {
@@ -462,14 +462,15 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setItem(key, value) { sessionStorageMap.set(String(key), String(value)); },
     removeItem(key) { sessionStorageMap.delete(String(key)); },
   };
+  const locationPort = String(options.locationPort || '7777');
   const location = {
     search,
     pathname: '/',
     hash: '',
     protocol,
     hostname: 'localhost',
-    port: '7777',
-    host: 'localhost:7777',
+    port: locationPort,
+    host: `localhost:${locationPort}`,
     reload() { context.__reloadCount = (context.__reloadCount || 0) + 1; },
   };
   const testSetTimeout = options.setTimeout || ((callback, ms) => {
@@ -672,6 +673,9 @@ globalThis.__layoutTestApi = {
   transcriptAgentErrorTextForTest: transcriptAgentErrorText,
   transcriptContextLoadErrorTextForTest: transcriptContextLoadErrorText,
   transcriptMetadataLoadErrorTextForTest: transcriptMetadataLoadErrorText,
+  transcriptMetadataLoadErrorLabelForTest: transcriptMetadataLoadErrorLabel,
+  transcriptMetadataLoadErrorSnapshotForTest: transcriptMetadataLoadErrorSnapshot,
+  fetchAndApplySessionMetadataForTest: fetchAndApplySessionMetadata,
   setTranscriptMetadataLoadErrorForTest(value) { transcriptMetaLoadError = value; },
   repoComparisonErrorHtmlForTest: repoComparisonErrorHtml,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },

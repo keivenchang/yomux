@@ -388,7 +388,7 @@ def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(b
     assert metrics["values"] == grid_values
     assert metrics["hiddenValues"] == [11, 9, 7, 5, 3, 1]
     assert metrics["fullWidth"] is True
-    assert all(0.6 <= width <= 0.8 for width in metrics["strokeWidths"]), metrics
+    assert all(0.25 <= width <= 0.35 for width in metrics["strokeWidths"]), metrics
     assert metrics["colorDistance"] >= 20, metrics
 
 
@@ -8382,6 +8382,58 @@ def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tm
         """
     )
     assert metrics == {"prevented": True, "visible": True, "focused": True}
+
+
+def test_focused_panel_search_shortcut_routes_to_each_registered_search(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const makePanel = (className, item, inputMarkup) => {
+          const panel = document.createElement('section');
+          panel.className = `panel ${className}`;
+          panel.dataset.layoutItem = item;
+          panel.innerHTML = inputMarkup;
+          document.body.append(panel);
+          return panel;
+        };
+        const trigger = (item, panel, selector) => {
+          focusedPanelItem = item;
+          const input = panel.querySelector(selector);
+          input.value = 'existing query';
+          const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+          panel.dispatchEvent(event);
+          return {
+            prevented: event.defaultPrevented,
+            focused: document.activeElement === input,
+            selected: input.selectionStart === 0 && input.selectionEnd === input.value.length,
+          };
+        };
+        const info = makePanel('info-tree-panel', infoItemId, '<input data-info-search>');
+        const preferences = makePanel('preferences-panel', prefsItemId, '<input data-preferences-search>');
+        const history = makePanel('search-history-panel', searchHistoryItemId, '<input data-search-history-query>');
+        const results = {
+          info: trigger(infoItemId, info, '[data-info-search]'),
+          preferences: trigger(prefsItemId, preferences, '[data-preferences-search]'),
+          history: trigger(searchHistoryItemId, history, '[data-search-history-query]'),
+        };
+        const unsupported = makePanel('debug-panel', debugPaneItemId, '<input>');
+        focusedPanelItem = debugPaneItemId;
+        const unsupportedEvent = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        unsupported.dispatchEvent(unsupportedEvent);
+        results.unsupportedPrevented = unsupportedEvent.defaultPrevented;
+        info.remove();
+        preferences.remove();
+        history.remove();
+        unsupported.remove();
+        return results;
+        """
+    )
+    assert metrics == {
+        "info": {"prevented": True, "focused": True, "selected": True},
+        "preferences": {"prevented": True, "focused": True, "selected": True},
+        "history": {"prevented": True, "focused": True, "selected": True},
+        "unsupportedPrevented": False,
+    }
 
 
 def test_codemirror_find_uses_the_shared_scrollbar_overview(browser, tmp_path):

@@ -203,6 +203,8 @@
   "debug.graph.series.tokensPerAgent": "Fichas/agente/min",
   "debug.graph.status.attention": "Atención",
   "debug.graph.status.transition": "Transición",
+  "debug.graph.sumDisplayedBandwidth": "(suma del ancho de banda mostrado = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(suma de todas las solicitudes de clientes mostradas = {count})",
   "debug.graph.sumDisplayedTokens": "(suma de tokens mostrados = {count})",
   "debug.graph.unit.tokens": "Fichas {count}",
   "debug.graph.unit.tokensPerMinute": "{count} fichas/min",

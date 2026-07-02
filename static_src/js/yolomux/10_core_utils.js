@@ -1975,6 +1975,24 @@ function fuzzyFieldStartsWithQuery(query, text) {
   return Boolean(needle) && fuzzyCanonicalPrefixText(text).startsWith(needle);
 }
 
+function focusPanelSearchInput(panel, inputSelector, options = {}) {
+  const panelSelector = String(options.panelSelector || '');
+  const root = panel && panel.isConnected !== false
+    ? panel
+    : (panelSelector
+      ? (Array.from(document.querySelectorAll(panelSelector)).find(candidate => candidate.offsetParent !== null) || document.querySelector(panelSelector))
+      : null);
+  const search = root?.querySelector?.(inputSelector);
+  if (!search) return false;
+  search.focus?.({preventScroll: true});
+  if (options.select === true) search.select?.();
+  else {
+    const position = String(search.value || '').length;
+    search.setSelectionRange?.(position, position);
+  }
+  return true;
+}
+
 function fuzzySearchScore(query, fields) {
   const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return 0;

@@ -145,6 +145,8 @@
   "debug.graph.status.transition": "Geçiş",
   "state.working": "Çalışıyor",
   "debug.graph.sumDisplayedTokens": "(gösterilen = {count}'dan jeton toplamı)",
+  "debug.graph.sumDisplayedBandwidth": "(gösterilen bant genişliği toplamı = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(gösterilen tüm istemci isteklerinin toplamı = {count})",
   "debug.graph.unit.tokens": "{count} jetonlar",
   "debug.graph.unit.tokensPerMinute": "{count} jeton/min",
   "debug.meta": "hata hata ayıklama=1 - {count} olaylar",

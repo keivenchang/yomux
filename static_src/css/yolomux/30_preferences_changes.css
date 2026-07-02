@@ -379,8 +379,8 @@ body.theme-light .js-debug-graph-view {
 .js-debug-chart-summary {
   min-width: 0;
   margin-inline-start: auto;
-  color: var(--muted);
-  font: var(--ui-font-size-2xs)/1.15 var(--ui-font);
+  color: var(--active-accent-bright);
+  font: 700 var(--ui-font-size-xs)/1.15 var(--ui-font);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -453,7 +453,7 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-grid-line--integer {
   stroke: color-mix(in srgb, var(--text) 55%, var(--line));
-  stroke-width: 0.7;
+  stroke-width: 0.3;
 }
 .js-debug-line {
   stroke-width: 1;

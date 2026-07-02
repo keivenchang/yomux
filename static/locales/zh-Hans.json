@@ -197,6 +197,8 @@
   "debug.graph.series.tokensPerAgent": "令牌/代理/分钟",
   "debug.graph.status.attention": "需要关注",
   "debug.graph.status.transition": "转换中",
+  "debug.graph.sumDisplayedBandwidth": "（所显示带宽的总和 = {count}）",
+  "debug.graph.sumDisplayedClientRequests": "（所显示的所有客户端请求总和 = {count}）",
   "debug.graph.sumDisplayedTokens": "（所显示项目的令牌总和 = {count}）",
   "debug.graph.unit.tokens": "{count} 个令牌",
   "debug.graph.unit.tokensPerMinute": "{count} 个令牌/分钟",

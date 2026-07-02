@@ -1001,7 +1001,7 @@ function fileEditorCopyItemPath(item) {
   return path.startsWith('/') ? path : null;
 }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
-function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank}) {
+function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
   const matchPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
   return {
     key,
@@ -1028,6 +1028,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
     },
+    focusSearch,
     className,
     icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1059,6 +1060,7 @@ const TAB_TYPES = [
       renderInfoPanel({force: true});
       relocalizeInfoPanelChrome(panel);
     },
+    focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-info-search]', {panelSelector: '.info-tree-panel', select: true}),
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1129,6 +1131,7 @@ const TAB_TYPES = [
     createPanel: () => createSearchHistoryPanel(),
     renderAttached: () => loadSearchHistoryPanelData({silent: true}),
     relocalize: (_item, panel) => renderSearchHistoryPanel(panel),
+    focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-search-history-query]', {panelSelector: '.search-history-panel', select: true}),
     className: () => 'search-history-item',
     icon: 'document',
     popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: searchHistoryTabLabel()}),
@@ -1149,6 +1152,7 @@ const TAB_TYPES = [
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
     relocalize: () => renderPreferencesPanels({force: true}),
+    focusSearch: (_item, panel) => focusPreferencesSearch(panel, {select: true}),
     popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('common.preferences')}),
     className: () => 'preferences-item',
     icon: 'gear',
@@ -1199,6 +1203,7 @@ const TAB_TYPES = [
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.text')}),
     sortRank: 0.75,
     className: () => 'file-editor-item',
+    focusSearch: (_item, panel) => focusFileEditorSearch(panel),
   }),
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }

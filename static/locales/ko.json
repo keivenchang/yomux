@@ -197,6 +197,8 @@
   "debug.graph.series.tokensPerAgent": "토큰/에이전트/분",
   "debug.graph.status.attention": "주의",
   "debug.graph.status.transition": "전환",
+  "debug.graph.sumDisplayedBandwidth": "(표시된 대역폭의 합계 = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(표시된 모든 클라이언트 요청의 합계 = {count})",
   "debug.graph.sumDisplayedTokens": "(표시된 토큰의 합계 = {count})",
   "debug.graph.unit.tokens": "{count} 토큰",
   "debug.graph.unit.tokensPerMinute": "{count} 토큰/분",

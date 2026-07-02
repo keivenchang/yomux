@@ -4319,6 +4319,29 @@ function applyTranscriptsPayload(payload, options = {}) {
   return applySessionMetadataPayload(payload, options);
 }
 
+async function fetchAndApplySessionMetadata(fetchPayload, applyPayload) {
+  let payload;
+  try {
+    payload = await fetchPayload();
+  } catch (error) {
+    return {ok: false, stage: 'fetch', error};
+  }
+  try {
+    await applyPayload(payload);
+  } catch (error) {
+    return {ok: false, stage: 'apply', error};
+  }
+  return {ok: true, payload};
+}
+
+function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
+  const normalizedStage = stage === 'apply' ? 'apply' : 'fetch';
+  const fallback = normalizedStage === 'fetch'
+    ? {key: 'transcript.lookupFailed', params: {}, fallback: ''}
+    : {key: '', params: {}, fallback: String(error?.message || error || '')};
+  return {...userMessageSnapshot(error, fallback), stage: normalizedStage};
+}
+
 async function refreshSessionMetadata(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
@@ -4330,16 +4353,20 @@ async function refreshSessionMetadata(options = {}) {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
-      const payload = await apiFetchJson(`/api/session-metadata${suffix ? `?${suffix}` : ''}`);
-      await applySessionMetadataPayload(payload, {
-        refreshAuto: options.refreshAuto !== false,
-        refreshContext: true,
-        refreshActivity: options.refreshActivity !== false,
-      });
-    } catch (error) {
-      transcriptMetaLoadError = userMessageSnapshot(error, {key: 'transcript.lookupFailed', params: {}, fallback: ''});
-      for (const session of activeSessions.filter(isTmuxSession)) {
-        renderTranscriptMetadataLoadError(session);
+      const result = await fetchAndApplySessionMetadata(
+        () => apiFetchJson(`/api/session-metadata${suffix ? `?${suffix}` : ''}`),
+        payload => applySessionMetadataPayload(payload, {
+          refreshAuto: options.refreshAuto !== false,
+          refreshContext: true,
+          refreshActivity: options.refreshActivity !== false,
+        }),
+      );
+      if (!result.ok) {
+        transcriptMetaLoadError = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
+        console.error(`session metadata ${result.stage} failed`, result.error);
+        for (const session of activeSessions.filter(isTmuxSession)) {
+          renderTranscriptMetadataLoadError(session);
+        }
       }
     } finally {
       transcriptMetaLoading = false;
@@ -4569,7 +4596,16 @@ function updateTranscriptPathRow(session, path, fallback = '') {
 }
 
 function transcriptMetadataLoadErrorText() {
-  return userMessageText(transcriptMetaLoadError, t('transcript.lookupFailed'));
+  const fallback = transcriptMetaLoadError?.stage === 'apply'
+    ? t('common.requestFailed')
+    : t('transcript.lookupFailed');
+  return userMessageText(transcriptMetaLoadError, fallback);
+}
+
+function transcriptMetadataLoadErrorLabel() {
+  return transcriptMetaLoadError?.stage === 'apply'
+    ? transcriptMetadataLoadErrorText()
+    : t('transcript.lookupFailed');
 }
 
 function transcriptAgentErrorText(agent) {
@@ -4603,11 +4639,14 @@ function renderTranscriptMetadataLoadError(session) {
   const meta = document.getElementById(`meta-${session}`);
   const preview = document.getElementById(transcriptDomId(session));
   const error = transcriptMetadataLoadErrorText();
-  if (meta) meta.innerHTML = `<span class="err">${esc(t('transcript.lookupFailed'))}</span>`;
-  updateTranscriptPathRow(session, '', t('transcript.lookupFailed'));
+  const label = transcriptMetadataLoadErrorLabel();
+  if (meta) meta.innerHTML = `<span class="err">${esc(label)}</span>`;
+  updateTranscriptPathRow(session, '', label);
   if (preview) {
     clearTranscriptContextLoadError(preview);
-    preview.textContent = t('transcript.lookupFailedWithError', {error});
+    preview.textContent = transcriptMetaLoadError?.stage === 'apply'
+      ? error
+      : t('transcript.lookupFailedWithError', {error});
   }
 }
 
@@ -5615,6 +5654,31 @@ topbar?.addEventListener('pointerenter', () => {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
 });
+
+function focusedPanelSearchTarget(event, item) {
+  const direct = event.target?.closest?.('[data-layout-item]');
+  if (direct?.dataset?.layoutItem === item && direct.offsetParent !== null) return direct;
+  const registered = panelNodes.get(item);
+  if (registered?.offsetParent !== null) return registered;
+  return Array.from(document.querySelectorAll('[data-layout-item]'))
+    .find(panel => panel.dataset.layoutItem === item && panel.offsetParent !== null) || null;
+}
+
+function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key = String(event.key || '').toLowerCase()} = {}) {
+  if (!mod || event.shiftKey || key !== 'f') return false;
+  const item = focusedPanelItem;
+  const focusSearch = tabTypeForItem(item)?.focusSearch;
+  if (typeof focusSearch !== 'function') return false;
+  const panel = focusedPanelSearchTarget(event, item);
+  if (!panel) return false;
+  // The tab-type registry owns which panels have an app find control. This single dispatcher keeps
+  // Cmd/Ctrl-F aligned across those panels while leaving native Find intact elsewhere.
+  event.preventDefault();
+  event.stopPropagation();
+  Promise.resolve(focusSearch(item, panel)).catch(error => console.warn('panel search shortcut failed', error));
+  return true;
+}
+
 function handleGlobalShortcutKeydown(event) {
   if (handleFocusedTerminalCopyShortcut(event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
@@ -5626,20 +5690,7 @@ function handleGlobalShortcutKeydown(event) {
   if (handleFileExplorerArrowNav(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
-  const focusedEditorPanel = (() => {
-    const direct = event.target?.closest?.('.file-editor-panel');
-    if (direct && direct.offsetParent !== null) return direct;
-    if (!isFileEditorItem(focusedPanelItem)) return null;
-    return [...document.querySelectorAll('.file-editor-panel')].find(panel => panel.dataset.layoutItem === focusedPanelItem && panel.offsetParent !== null) || null;
-  })();
-  if (mod && !event.shiftKey && key === 'f' && focusedEditorPanel) {
-    event.preventDefault();
-    event.stopPropagation();
-    openEditorFindShortcut(focusedEditorPanel).then(() => {
-      updateEditorFindButton(focusedEditorPanel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(focusedEditorPanel)), focusedEditorPanel);
-    });
-    return;
-  }
+  if (handleFocusedPanelSearchShortcut(event, {mod, key})) return;
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
   if (handlePendingGlobalShortcutChord(event, key)) return;
   const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection(event);

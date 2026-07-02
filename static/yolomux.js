@@ -1002,7 +1002,7 @@ function fileEditorCopyItemPath(item) {
   return path.startsWith('/') ? path : null;
 }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
-function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank}) {
+function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
   const matchPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
   return {
     key,
@@ -1029,6 +1029,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
     },
+    focusSearch,
     className,
     icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1060,6 +1061,7 @@ const TAB_TYPES = [
       renderInfoPanel({force: true});
       relocalizeInfoPanelChrome(panel);
     },
+    focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-info-search]', {panelSelector: '.info-tree-panel', select: true}),
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
@@ -1130,6 +1132,7 @@ const TAB_TYPES = [
     createPanel: () => createSearchHistoryPanel(),
     renderAttached: () => loadSearchHistoryPanelData({silent: true}),
     relocalize: (_item, panel) => renderSearchHistoryPanel(panel),
+    focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-search-history-query]', {panelSelector: '.search-history-panel', select: true}),
     className: () => 'search-history-item',
     icon: 'document',
     popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: searchHistoryTabLabel()}),
@@ -1150,6 +1153,7 @@ const TAB_TYPES = [
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
     relocalize: () => renderPreferencesPanels({force: true}),
+    focusSearch: (_item, panel) => focusPreferencesSearch(panel, {select: true}),
     popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('common.preferences')}),
     className: () => 'preferences-item',
     icon: 'gear',
@@ -1200,6 +1204,7 @@ const TAB_TYPES = [
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.text')}),
     sortRank: 0.75,
     className: () => 'file-editor-item',
+    focusSearch: (_item, panel) => focusFileEditorSearch(panel),
   }),
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
@@ -3772,6 +3777,24 @@ function fuzzyCanonicalPrefixText(value) {
 function fuzzyFieldStartsWithQuery(query, text) {
   const needle = fuzzyCanonicalPrefixText(query);
   return Boolean(needle) && fuzzyCanonicalPrefixText(text).startsWith(needle);
+}
+
+function focusPanelSearchInput(panel, inputSelector, options = {}) {
+  const panelSelector = String(options.panelSelector || '');
+  const root = panel && panel.isConnected !== false
+    ? panel
+    : (panelSelector
+      ? (Array.from(document.querySelectorAll(panelSelector)).find(candidate => candidate.offsetParent !== null) || document.querySelector(panelSelector))
+      : null);
+  const search = root?.querySelector?.(inputSelector);
+  if (!search) return false;
+  search.focus?.({preventScroll: true});
+  if (options.select === true) search.select?.();
+  else {
+    const position = String(search.value || '').length;
+    search.setSelectionRange?.(position, position);
+  }
+  return true;
 }
 
 function fuzzySearchScore(query, fields) {
@@ -10347,7 +10370,7 @@ function mergePendingLayoutRender(current, next) {
 function layoutRenderCanUseCheap(request) {
   return !request.forceFull
     && request.prevShape === request.nextShape
-    && grid.querySelector('.drop-slot[data-slot]');
+    && (grid.querySelector('.drop-slot[data-slot]') || dockviewLayoutActive());
 }
 
 function performLayoutRender(request = {}) {
@@ -22067,6 +22090,12 @@ async function openEditorFindShortcut(host = null) {
   return openEditorFind(host);
 }
 
+async function focusFileEditorSearch(panel = null) {
+  const opened = await openEditorFindShortcut(panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(panel)), panel);
+  return opened;
+}
+
 function applyEditorWrapPreference() {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
@@ -27639,6 +27668,7 @@ const dockviewLayoutState = {
   hostLayoutFrame: 0,
   lastHostLayoutSignature: '',
   lastAppliedLayoutSignature: '',
+  lastAppliedActiveOnlySignature: '',
   groupSlots: new Map(),
   pendingRootBoundaryDrop: null,
   reloadAfterAdoption: false,
@@ -28624,6 +28654,7 @@ function dockviewDispose() {
   dockviewLayoutState.hostLayoutFrame = 0;
   dockviewLayoutState.lastHostLayoutSignature = '';
   dockviewLayoutState.lastAppliedLayoutSignature = '';
+  dockviewLayoutState.lastAppliedActiveOnlySignature = '';
   dockviewLayoutState.groupSlots.clear();
 }
 
@@ -28638,7 +28669,12 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   dockviewLayoutToHost(api);
   const signature = layoutSlotsSignature(layoutSlots);
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
-    dockviewLoadLayout(layoutSlots);
+    const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
+    if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
+      dockviewLoadLayout(layoutSlots);
+    } else {
+      dockviewLayoutState.lastAppliedLayoutSignature = signature;
+    }
   }
   dockviewRefreshTabs();
   dockviewSyncMountedPanels();
@@ -28669,14 +28705,33 @@ function dockviewLoadLayout(slots = layoutSlots) {
     if (!items.length) {
       api.clear();
       dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
+      dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
       return;
     }
     api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
     dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
+    dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
     dockviewSyncMountedPanels();
   } finally {
     dockviewLayoutState.applyingFromLayout = false;
   }
+}
+
+// An active-tab change does not alter the Dockview topology or its mounted panel contents. Calling
+// fromJSON in that case rebuilds the whole layout and is the visible tab-switch delay; activate the
+// existing panel in each group instead, which is Dockview's native pre-rendered-panel path.
+function dockviewActivateLayoutTabs(slots = layoutSlots) {
+  const api = dockviewLayoutState.api;
+  if (!api || !dockviewLayoutActive()) return false;
+  const activeItems = layoutSlotKeys(slots)
+    .map(slot => activeItemForSide(slot, slots))
+    .filter(Boolean);
+  if (!activeItems.length && paneItems(slots).length) return false;
+  const panels = activeItems.map(item => api.getPanel?.(item));
+  if (panels.some(panel => typeof panel?.api?.setActive !== 'function')) return false;
+  for (const panel of panels) panel.api.setActive();
+  dockviewSyncMountedPanels();
+  return true;
 }
 
 function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
@@ -28924,6 +28979,17 @@ function dockviewLayoutContentSignature(slots = layoutSlots) {
     .map(slot => `${slot}:${paneTabs(slot, slots).slice().sort().join(',')}`)
     .join('|');
   return `${nodeSignature(slots?.[layoutTreeKey])}::${paneSignature}`;
+}
+
+// Tab order is observable in Dockview (including pinning); only the active item is safe to change
+// without fromJSON. Keep this distinct from the unordered content signature used for resize math.
+function dockviewLayoutActiveOnlySignature(slots = layoutSlots) {
+  const paneSignature = layoutSlotKeys(slots)
+    .slice()
+    .sort()
+    .map(slot => `${slot}:${paneTabs(slot, slots).join(',')}`)
+    .join('|');
+  return `${layoutShapeSignature(slots)}::${paneSignature}`;
 }
 
 function dockviewLayoutTreeFromChildren(children, direction) {
@@ -34640,19 +34706,11 @@ function createPreferencesPanel() {
   return panel;
 }
 
-function focusPreferencesSearch(panel = null) {
+function focusPreferencesSearch(panel = null, options = {}) {
   // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
   if (dragSession != null) return false;
-  const root = panel && panel.isConnected !== false
-    ? panel
-    : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
-  const search = root?.querySelector?.('[data-preferences-search]');
-  if (!search) return false;
-  search.focus?.({preventScroll: true});
-  const position = String(search.value || '').length;
-  search.setSelectionRange?.(position, position);
-  return true;
+  return focusPanelSearchInput(panel, '[data-preferences-search]', {panelSelector: '.preferences-panel', ...options});
 }
 
 function preferencesScrollIsActive(now = Date.now()) {
@@ -34959,6 +35017,26 @@ const jsDebugGraphAllClientsTotalId = 'all-clients-total';
 const jsDebugGraphOtherClientsAverageLinePattern = 'dot';
 const jsDebugGraphAllClientsTotalLinePattern = 'dot';
 const jsDebugGraphAllClientsCombinedMetricKey = 'apiSseTotal';
+const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
+  clientRequests: {
+    attribute: 'displayed-client-request-sum',
+    labelKey: 'debug.graph.sumDisplayedClientRequests',
+    value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['apiCount', 'sseCount']),
+    format: debugGraphTokenNumberText,
+  },
+  bandwidth: {
+    attribute: 'displayed-bandwidth-sum',
+    labelKey: 'debug.graph.sumDisplayedBandwidth',
+    value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['bandwidthBytes']),
+    format: value => debugGraphValueText(value, 'bytes'),
+  },
+  agentTokens: {
+    attribute: 'displayed-token-sum',
+    labelKey: 'debug.graph.sumDisplayedTokens',
+    value: debugGraphAgentTokenDisplayedSum,
+    format: debugGraphTokenNumberText,
+  },
+});
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
   {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
@@ -34991,12 +35069,12 @@ const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--js-debug-agent-token-rose)',
   'var(--js-debug-agent-token-violet)',
 ]);
-const jsDebugGraphProcessCpuColors = Object.freeze([
-  'var(--active-accent-bright)',
-  'var(--accent-gold)',
-  'var(--accent-lime)',
-  'var(--link-soft)',
-]);
+const jsDebugGraphProcessCpuColors = Object.freeze({
+  current: 'var(--active-accent-bright)',
+  // Green is reserved for the server that is serving this browser. Peers must remain
+  // distinguishable without being mistaken for the current YOLOmux process.
+  peers: Object.freeze(['var(--bad)', 'var(--accent-gold)', 'var(--link-soft)']),
+});
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
 const jsDebugGraphAgentTokenBuckets = new Map();
@@ -35012,11 +35090,11 @@ const jsDebugGraphSeries = Object.freeze([
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'latency', labelKey: 'common.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
 
 function debugGraphLocalizedLabel(item = {}) {
@@ -36080,6 +36158,30 @@ function debugGraphAgentTokenDisplayedSum(buckets) {
   return Math.max(0, total);
 }
 
+function debugGraphBucketFieldSum(bucket, fields) {
+  return fields.reduce((bucketTotal, field) => (
+    bucketTotal + Math.max(0, Number(bucket?.[field]) || 0)
+  ), 0);
+}
+
+function debugGraphDisplayedClientFieldSum(buckets, fields) {
+  return (buckets || []).reduce((total, bucket) => {
+    const clientBuckets = bucket?.clients instanceof Map && bucket.clients.size ? [...bucket.clients.values()] : [bucket];
+    return total + clientBuckets.reduce((clientTotal, clientBucket) => clientTotal + debugGraphBucketFieldSum(clientBucket, fields), 0);
+  }, 0);
+}
+
+function debugGraphDisplayedSummary(group, buckets) {
+  const spec = jsDebugGraphDisplayedSummarySpecs[group?.displayedSummary];
+  if (!spec) return null;
+  const value = Math.max(0, Number(spec.value(buckets)) || 0);
+  return {
+    attribute: spec.attribute,
+    text: t(spec.labelKey, {count: spec.format(value)}),
+    value,
+  };
+}
+
 function debugGraphBucketValue(bucket, key) {
   if (key === 'api') return debugGraphBucketRate(bucket, bucket.apiCount);
   if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
@@ -36489,20 +36591,27 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
   if (!processes.size) return [{key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid'}];
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
+  let peerIndex = 0;
   return [...processes.entries()]
     .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
-    .map(([processId, label], index) => ({
-      key: `cpu:${processId}`,
-      labelKey: 'debug.graph.series.processCpu',
-      labelParams: {process: label},
-      unit: 'percent',
-      cssKey: 'cpu',
-      chartMetricKey: 'cpu',
-      processCpu: true,
-      processId,
-      linePattern: processId === currentProcessId ? 'solid' : 'dot',
-      color: jsDebugGraphProcessCpuColors[index % jsDebugGraphProcessCpuColors.length],
-    }));
+    .map(([processId, label]) => {
+      const current = processId === currentProcessId;
+      const color = current
+        ? jsDebugGraphProcessCpuColors.current
+        : jsDebugGraphProcessCpuColors.peers[peerIndex++ % jsDebugGraphProcessCpuColors.peers.length];
+      return {
+        key: `cpu:${processId}`,
+        labelKey: 'debug.graph.series.processCpu',
+        labelParams: {process: label},
+        unit: 'percent',
+        cssKey: 'cpu',
+        chartMetricKey: 'cpu',
+        processCpu: true,
+        processId,
+        linePattern: current ? 'solid' : 'dot',
+        color,
+      };
+    });
 }
 
 function debugGraphSeriesData(buckets) {
@@ -37002,15 +37111,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   if (group.dynamicAgentTokens === true) chartClasses.push('js-debug-chart--token-agents');
   const bucketSeconds = Number(group.bucketSeconds);
   const bucketAttr = Number.isFinite(bucketSeconds) && bucketSeconds > 0 ? ` data-js-debug-chart-bucket-seconds="${esc(bucketSeconds)}"` : '';
-  const displayedTokenSum = group.dynamicAgentTokens === true ? debugGraphAgentTokenDisplayedSum(buckets) : null;
-  const displayedTokenSumHtml = displayedTokenSum === null
+  const displayedSummary = debugGraphDisplayedSummary(group, buckets);
+  const displayedSummaryHtml = displayedSummary === null
     ? ''
-    : `<span class="js-debug-chart-summary" data-js-debug-displayed-token-sum="${esc(displayedTokenSum)}">${esc(t('debug.graph.sumDisplayedTokens', {count: debugGraphTokenNumberText(displayedTokenSum)}))}</span>`;
+    : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
-        ${displayedTokenSumHtml}
+        ${displayedSummaryHtml}
       </div>
       ${debugGraphLegendHtml(legendSeries)}
     </div>
@@ -37197,7 +37306,7 @@ async function flushJsDebugStatsHistory() {
     const payload = await apiFetchJsonQuiet('/api/stats-history', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, records: chunk}),
+      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
     });
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
@@ -56688,6 +56797,29 @@ function applyTranscriptsPayload(payload, options = {}) {
   return applySessionMetadataPayload(payload, options);
 }
 
+async function fetchAndApplySessionMetadata(fetchPayload, applyPayload) {
+  let payload;
+  try {
+    payload = await fetchPayload();
+  } catch (error) {
+    return {ok: false, stage: 'fetch', error};
+  }
+  try {
+    await applyPayload(payload);
+  } catch (error) {
+    return {ok: false, stage: 'apply', error};
+  }
+  return {ok: true, payload};
+}
+
+function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
+  const normalizedStage = stage === 'apply' ? 'apply' : 'fetch';
+  const fallback = normalizedStage === 'fetch'
+    ? {key: 'transcript.lookupFailed', params: {}, fallback: ''}
+    : {key: '', params: {}, fallback: String(error?.message || error || '')};
+  return {...userMessageSnapshot(error, fallback), stage: normalizedStage};
+}
+
 async function refreshSessionMetadata(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
@@ -56699,16 +56831,20 @@ async function refreshSessionMetadata(options = {}) {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
-      const payload = await apiFetchJson(`/api/session-metadata${suffix ? `?${suffix}` : ''}`);
-      await applySessionMetadataPayload(payload, {
-        refreshAuto: options.refreshAuto !== false,
-        refreshContext: true,
-        refreshActivity: options.refreshActivity !== false,
-      });
-    } catch (error) {
-      transcriptMetaLoadError = userMessageSnapshot(error, {key: 'transcript.lookupFailed', params: {}, fallback: ''});
-      for (const session of activeSessions.filter(isTmuxSession)) {
-        renderTranscriptMetadataLoadError(session);
+      const result = await fetchAndApplySessionMetadata(
+        () => apiFetchJson(`/api/session-metadata${suffix ? `?${suffix}` : ''}`),
+        payload => applySessionMetadataPayload(payload, {
+          refreshAuto: options.refreshAuto !== false,
+          refreshContext: true,
+          refreshActivity: options.refreshActivity !== false,
+        }),
+      );
+      if (!result.ok) {
+        transcriptMetaLoadError = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
+        console.error(`session metadata ${result.stage} failed`, result.error);
+        for (const session of activeSessions.filter(isTmuxSession)) {
+          renderTranscriptMetadataLoadError(session);
+        }
       }
     } finally {
       transcriptMetaLoading = false;
@@ -56938,7 +57074,16 @@ function updateTranscriptPathRow(session, path, fallback = '') {
 }
 
 function transcriptMetadataLoadErrorText() {
-  return userMessageText(transcriptMetaLoadError, t('transcript.lookupFailed'));
+  const fallback = transcriptMetaLoadError?.stage === 'apply'
+    ? t('common.requestFailed')
+    : t('transcript.lookupFailed');
+  return userMessageText(transcriptMetaLoadError, fallback);
+}
+
+function transcriptMetadataLoadErrorLabel() {
+  return transcriptMetaLoadError?.stage === 'apply'
+    ? transcriptMetadataLoadErrorText()
+    : t('transcript.lookupFailed');
 }
 
 function transcriptAgentErrorText(agent) {
@@ -56972,11 +57117,14 @@ function renderTranscriptMetadataLoadError(session) {
   const meta = document.getElementById(`meta-${session}`);
   const preview = document.getElementById(transcriptDomId(session));
   const error = transcriptMetadataLoadErrorText();
-  if (meta) meta.innerHTML = `<span class="err">${esc(t('transcript.lookupFailed'))}</span>`;
-  updateTranscriptPathRow(session, '', t('transcript.lookupFailed'));
+  const label = transcriptMetadataLoadErrorLabel();
+  if (meta) meta.innerHTML = `<span class="err">${esc(label)}</span>`;
+  updateTranscriptPathRow(session, '', label);
   if (preview) {
     clearTranscriptContextLoadError(preview);
-    preview.textContent = t('transcript.lookupFailedWithError', {error});
+    preview.textContent = transcriptMetaLoadError?.stage === 'apply'
+      ? error
+      : t('transcript.lookupFailedWithError', {error});
   }
 }
 
@@ -57984,6 +58132,31 @@ topbar?.addEventListener('pointerenter', () => {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
 });
+
+function focusedPanelSearchTarget(event, item) {
+  const direct = event.target?.closest?.('[data-layout-item]');
+  if (direct?.dataset?.layoutItem === item && direct.offsetParent !== null) return direct;
+  const registered = panelNodes.get(item);
+  if (registered?.offsetParent !== null) return registered;
+  return Array.from(document.querySelectorAll('[data-layout-item]'))
+    .find(panel => panel.dataset.layoutItem === item && panel.offsetParent !== null) || null;
+}
+
+function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key = String(event.key || '').toLowerCase()} = {}) {
+  if (!mod || event.shiftKey || key !== 'f') return false;
+  const item = focusedPanelItem;
+  const focusSearch = tabTypeForItem(item)?.focusSearch;
+  if (typeof focusSearch !== 'function') return false;
+  const panel = focusedPanelSearchTarget(event, item);
+  if (!panel) return false;
+  // The tab-type registry owns which panels have an app find control. This single dispatcher keeps
+  // Cmd/Ctrl-F aligned across those panels while leaving native Find intact elsewhere.
+  event.preventDefault();
+  event.stopPropagation();
+  Promise.resolve(focusSearch(item, panel)).catch(error => console.warn('panel search shortcut failed', error));
+  return true;
+}
+
 function handleGlobalShortcutKeydown(event) {
   if (handleFocusedTerminalCopyShortcut(event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
@@ -57995,20 +58168,7 @@ function handleGlobalShortcutKeydown(event) {
   if (handleFileExplorerArrowNav(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
-  const focusedEditorPanel = (() => {
-    const direct = event.target?.closest?.('.file-editor-panel');
-    if (direct && direct.offsetParent !== null) return direct;
-    if (!isFileEditorItem(focusedPanelItem)) return null;
-    return [...document.querySelectorAll('.file-editor-panel')].find(panel => panel.dataset.layoutItem === focusedPanelItem && panel.offsetParent !== null) || null;
-  })();
-  if (mod && !event.shiftKey && key === 'f' && focusedEditorPanel) {
-    event.preventDefault();
-    event.stopPropagation();
-    openEditorFindShortcut(focusedEditorPanel).then(() => {
-      updateEditorFindButton(focusedEditorPanel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(focusedEditorPanel)), focusedEditorPanel);
-    });
-    return;
-  }
+  if (handleFocusedPanelSearchShortcut(event, {mod, key})) return;
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
   if (handlePendingGlobalShortcutChord(event, key)) return;
   const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection(event);

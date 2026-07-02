@@ -175,6 +175,20 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
     assert incremental["history"]["records"] == []
 
 
+def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
+    webapp = app_module.TmuxWebtermApp([])
+    now = time.time()
+    records = [{"start": now + index, "api_count": 1} for index in range(20)]
+    try:
+        payload, status = webapp.record_stats_history_payload({"ack_only": True, "records": records})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["history"]["records"] == []
+    assert payload["history"]["sequence"] >= 20
+
+
 def test_stats_history_wide_token_history_is_server_aggregated(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     now = 200000.0
@@ -289,7 +303,9 @@ def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypat
     assert sum(record["system_cpu_count"] for record in history["records"]) == 2
     assert sum(record["api_count"] for record in history["records"]) == 0
     with webapp.performance_record_lock:
-        assert any(record["role"] == app_module.BACKGROUND_ROLE_STATS_SAMPLER for record in webapp.performance_records)
+        samples = [record for record in webapp.performance_records if record["role"] == app_module.BACKGROUND_ROLE_STATS_SAMPLER]
+    assert samples
+    assert {"sample_ms", "process_history_ms", "agent_activity_ms", "history_merge_ms"} <= set(samples[-1]["details"])
 
 
 def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monkeypatch, tmp_path):
@@ -384,7 +400,7 @@ def test_shared_stats_client_history_survives_other_server_writes_and_restart(mo
     assert len(persisted_bucket) == len(app_module.STATS_CLIENT_HISTORY_BUCKET_FIELDS)
     assert app_module.stats_history_client_id("client-b") in persisted_bucket[-2]
     process_key = f"port:{owner.background_owner.port}"
-    assert persisted_bucket[-1][process_key]["cpu_total_percent"] == 24.0
+    assert persisted_bucket[-1][process_key]["cpu_total_percent"] == 12.0
 
 
 def test_shared_stats_history_keeps_cpu_for_every_yolomux_server(monkeypatch, tmp_path):
@@ -418,6 +434,39 @@ def test_shared_stats_history_keeps_cpu_for_every_yolomux_server(monkeypatch, tm
     assert processes["port:9101"]["label"] == "yolomux.py :9101"
     assert processes["port:9102"]["cpu_total_percent"] == 12.0
     assert processes["port:9103"]["cpu_count"] == 1.0
+
+
+def test_stats_process_history_batches_disk_writes_without_losing_one_second_cpu_samples(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "stats_history_uses_shared_status", lambda: False)
+    try:
+        for offset, cpu_percent in enumerate((10.0, *([40.0] * 30))):
+            webapp.record_stats_process_sample({"time": 1000.0 + offset, "pid": 1, "cpu_percent": cpu_percent})
+        with webapp.stats_history_lock:
+            history = webapp.stats_history_payload_locked()
+    finally:
+        webapp.control_server.stop()
+
+    records = [record for record in history["records"] if record["servers"]]
+    assert len(records) == 31
+    process_key = next(iter(records[0]["servers"]))
+    assert records[0]["servers"][process_key]["cpu_total_percent"] == 10.0
+    assert [record["servers"][process_key]["cpu_total_percent"] for record in records[1:]] == [40.0] * 30
+    assert all(record["servers"][process_key]["cpu_count"] == 1.0 for record in records)
+
+
+def test_shared_stats_history_write_is_batched_without_losing_the_first_sample(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    writes = []
+    monkeypatch.setattr(webapp, "write_shared_stats_history", lambda sample: writes.append(dict(sample)) or 1)
+    try:
+        assert webapp.write_shared_stats_history_if_due({"time": 1000.0}) is True
+        assert webapp.write_shared_stats_history_if_due({"time": 1001.0}) is False
+        assert webapp.write_shared_stats_history_if_due({"time": 1005.0}) is True
+    finally:
+        webapp.control_server.stop()
+
+    assert [sample["time"] for sample in writes] == [1000.0, 1005.0]
 
 
 def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch, tmp_path):
@@ -1417,6 +1466,42 @@ def test_stats_agent_window_rows_reuses_fresh_auto_approve_cache(monkeypatch):
         {"kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl", "session": "1"},
     ]
     assert "session" not in cached_payload["sessions"]["1"]["agent_windows"][0]
+
+
+def test_stats_agent_window_rows_uses_briefly_stale_cache_while_refreshing(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    cached_payload = {
+        "session_order": ["1"],
+        "sessions": {"1": {"agent_windows": [{"kind": "codex", "state": "working", "window_index": 0}]}},
+    }
+    refreshes = []
+    with webapp.auto_approve_cache_condition:
+        webapp.auto_approve_cache = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (cached_payload, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append(True) or True)
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stats should keep the briefly stale cache")))
+    try:
+        rows = webapp.stats_agent_window_rows()
+    finally:
+        webapp.control_server.stop()
+
+    assert rows == [{"kind": "codex", "state": "working", "window_index": 0, "session": "1"}]
+    assert refreshes == [True]
+
+
+def test_stats_owner_does_not_remerge_its_own_loaded_shared_history(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.background_owner = StatsRoleOwner(owner=True, port=8001)
+    webapp.stats_history_shared_loaded = True
+    sample = {"time": 1000.0, "pid": 8001, "cpu_percent": 1.0, "system_cpu_percent": 2.0}
+    monkeypatch.setattr(webapp, "current_stats_sample", lambda: (dict(sample), True))
+    monkeypatch.setattr(webapp, "record_stats_process_sample", lambda _sample: None)
+    monkeypatch.setattr(webapp, "stats_agent_activity_record", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(webapp, "merge_shared_stats_history", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("owner should not remerge its own history")))
+    monkeypatch.setattr(webapp, "write_shared_stats_history", lambda _sample: 1)
+    try:
+        webapp.record_stats_global_sample()
+    finally:
+        webapp.control_server.stop()
 
 
 def test_auto_approve_session_status_skips_roster_cache(monkeypatch):

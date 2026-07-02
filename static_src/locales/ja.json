@@ -145,6 +145,8 @@
   "debug.graph.status.transition": "移行",
   "state.working": "作業中",
   "debug.graph.sumDisplayedTokens": "(表示されるトークンの合計 = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(表示中の帯域幅の合計 = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(表示中のすべてのクライアント要求の合計 = {count})",
   "debug.graph.unit.tokens": "{count} トークン",
   "debug.graph.unit.tokensPerMinute": "{count} トークン/分",
   "debug.meta": "デバッグ=1 - {count} イベント",

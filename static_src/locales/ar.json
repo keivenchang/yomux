@@ -165,6 +165,8 @@
   "debug.graph.status.transition": "الانتقال",
   "state.working": "يعمل",
   "debug.graph.sumDisplayedTokens": "(مجموع الرموز المعروضة = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(مجموع النطاق الترددي المعروض = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(مجموع كل طلبات العملاء المعروضة = {count})",
   "debug.graph.unit.tokens": "الرموز المميزة {count}",
   "debug.graph.unit.tokensPerMinute": "{count} الرموز/دقيقة",
   "debug.meta": "debug=1 - أحداث {count}",

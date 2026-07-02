@@ -1650,7 +1650,7 @@ async function runLayoutRestoreSuite() {
     const focusPreferencesStart = source.indexOf('function focusPreferencesSearch(');
     const focusPreferencesEnd = source.indexOf('function preferencesScrollIsActive(', focusPreferencesStart);
     assert.ok(focusPreferencesStart > 0 && focusPreferencesEnd > focusPreferencesStart, 'could not locate focusPreferencesSearch body');
-    assert.ok(source.slice(focusPreferencesStart, focusPreferencesEnd).includes('panel && panel.isConnected !== false'), 'explicit Preferences search focus falls back to the rendered panel when called without a panel');
+    assert.ok(source.slice(focusPreferencesStart, focusPreferencesEnd).includes("focusPanelSearchInput(panel, '[data-preferences-search]', {panelSelector: '.preferences-panel', ...options})"), 'Preferences delegates focus and rendered-panel fallback to the shared search-input helper');
     assert.equal(source.includes('function focusPreferencesSearchSoon('), false, 'Preferences no longer has delayed search auto-focus');
     assert.equal(source.includes('function focusFreshPreferencesSearchSoon('), false, 'Preferences no longer has fresh-pane search auto-focus');
     const focusedPanelStart = source.indexOf('function setFocusedPanelItem(');
@@ -2448,7 +2448,13 @@ async function runLayoutRestoreSuite() {
     assert.ok(/className: 'file-editor-wrap-panel'[\s\S]*file-editor-icon-wrap/.test(editorToolbarTemplate), 'editor Wrap toolbar button renders the original icon in the left zone');
     assert.ok(/function updateEditorWrapButton\(button\)[\s\S]*setFileEditorIcon\(button, 'file-editor-icon-wrap'\)/.test(source), 'wrap button renderer preserves the original icon');
     assert.ok(source.includes('toggleEditorFind(panel);'), 'Search toolbar button toggles the CodeMirror search panel');
-    assert.ok(/mod && !event\.shiftKey && key === 'f' && focusedEditorPanel[\s\S]*openEditorFindShortcut\(focusedEditorPanel\)/.test(source), 'Cmd/Ctrl-F claims Find for the focused file editor before the browser can open native Find');
+    const tabTypesSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.ok(source.includes('function handleFocusedPanelSearchShortcut'), 'Cmd/Ctrl-F has one focused-panel search dispatcher');
+    assert.ok(source.includes('const focusSearch = tabTypeForItem(item)?.focusSearch;'), 'the shortcut dispatches through the focused tab type rather than a per-panel branch');
+    assert.ok(tabTypesSource.includes("focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-info-search]', {panelSelector: '.info-tree-panel', select: true})"), 'YO!info registers its existing search control with the shared shortcut dispatcher');
+    assert.ok(tabTypesSource.includes("focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-search-history-query]', {panelSelector: '.search-history-panel', select: true})"), 'Search & Runs registers its existing search control with the shared shortcut dispatcher');
+    assert.ok(tabTypesSource.includes('focusSearch: (_item, panel) => focusPreferencesSearch(panel, {select: true})'), 'Preferences registers its existing search control with the shared shortcut dispatcher');
+    assert.ok(tabTypesSource.includes('focusSearch: (_item, panel) => focusFileEditorSearch(panel)'), 'text editor/preview registers its existing find control with the shared shortcut dispatcher');
     assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
     assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
     assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');

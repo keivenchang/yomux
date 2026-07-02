@@ -4830,7 +4830,7 @@ function mergePendingLayoutRender(current, next) {
 function layoutRenderCanUseCheap(request) {
   return !request.forceFull
     && request.prevShape === request.nextShape
-    && grid.querySelector('.drop-slot[data-slot]');
+    && (grid.querySelector('.drop-slot[data-slot]') || dockviewLayoutActive());
 }
 
 function performLayoutRender(request = {}) {

@@ -155,6 +155,8 @@
   "debug.graph.status.transition": "Przejście",
   "state.working": "Pracuje",
   "debug.graph.sumDisplayedTokens": "(suma żetonów z wyświetlanych = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(suma wyświetlanej przepustowości = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(suma wszystkich wyświetlanych żądań klientów = {count})",
   "debug.graph.unit.tokens": "{count} żetony",
   "debug.graph.unit.tokensPerMinute": "{count} tokenów/min",
   "debug.meta": "debug=1 - {count} zdarzenia",

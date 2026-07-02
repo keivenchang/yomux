@@ -197,6 +197,8 @@
   "debug.graph.series.tokensPerAgent": "⟦Ťóķéñš/áǧéñť/ɱíñ······⟧",
   "debug.graph.status.attention": "⟦Áťťéñťíóñ····⟧",
   "debug.graph.status.transition": "⟦Ťřáñšíťíóñ····⟧",
+  "debug.graph.sumDisplayedBandwidth": "⟦(šúɱ óƒ ƀáñđŵíđťĥ ƒřóɱ đíšƥłáýéđ = {count})··············⟧",
+  "debug.graph.sumDisplayedClientRequests": "⟦(šúɱ óƒ áłł çłíéñť řéɋúéšťš ƒřóɱ đíšƥłáýéđ = {count})··················⟧",
   "debug.graph.sumDisplayedTokens": "⟦(šúɱ óƒ ťóķéñš ƒřóɱ đíšƥłáýéđ = {count})·············⟧",
   "debug.graph.unit.tokens": "⟦{count} ťóķéñš···⟧",
   "debug.graph.unit.tokensPerMinute": "⟦{count} ťóķéñš/ɱíñ····⟧",

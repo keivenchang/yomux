@@ -145,6 +145,8 @@
   "debug.graph.status.transition": "Chuyển đổi",
   "state.working": "Đang chạy",
   "debug.graph.sumDisplayedTokens": "(tổng số token từ hiển thị = {count})",
+  "debug.graph.sumDisplayedBandwidth": "(tổng băng thông từ hiển thị = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(tổng mọi yêu cầu khách hàng từ hiển thị = {count})",
   "debug.graph.unit.tokens": "{count} mã thông báo",
   "debug.graph.unit.tokensPerMinute": "{count} token/phút",
   "debug.meta": "debug=1 - {count} sự kiện",

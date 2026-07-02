@@ -197,6 +197,8 @@
   "debug.graph.series.tokensPerAgent": "Tokens/Agent/min",
   "debug.graph.status.attention": "Achtung",
   "debug.graph.status.transition": "Übergang",
+  "debug.graph.sumDisplayedBandwidth": "(Summe der angezeigten Bandbreite = {count})",
+  "debug.graph.sumDisplayedClientRequests": "(Summe aller angezeigten Client-Anfragen = {count})",
   "debug.graph.sumDisplayedTokens": "(Summe der angezeigten Token = {count})",
   "debug.graph.unit.tokens": "{count}-Token",
   "debug.graph.unit.tokensPerMinute": "{count} Token/Min",

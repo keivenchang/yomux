@@ -2893,7 +2893,7 @@ async function runEditorPreviewSuite() {
     assert.equal(debugPaneCss.includes('.js-debug-chart--legend-footer') || debugPaneCss.includes('.js-debug-chart-legend-footer'), false, 'YO!stats has one shared header legend layout for every chart');
     assert.ok(/\.js-debug-y-axis span\s*\{[\s\S]*position:\s*absolute[\s\S]*top:\s*var\(--js-debug-axis-y/.test(debugPaneCss), 'YO!stats Y-axis labels use chart-coordinate positioning');
     assert.ok(/\.js-debug-grid-line\s*\{[\s\S]*stroke-width:\s*0\.4/.test(debugPaneCss), 'YO!stats default grid guide lines stay very thin');
-    assert.ok(/\.js-debug-grid-line--integer\s*\{[\s\S]*stroke:\s*color-mix\(in srgb, var\(--text\) 55%, var\(--line\)\)[\s\S]*stroke-width:\s*0\.7/.test(debugPaneCss), 'YO!stats integer guides reuse theme tokens with a clearer stroke');
+    assert.ok(/\.js-debug-grid-line--integer\s*\{[\s\S]*stroke:\s*color-mix\(in srgb, var\(--text\) 55%, var\(--line\)\)[\s\S]*stroke-width:\s*0\.3/.test(debugPaneCss), 'YO!stats integer guides reuse theme tokens with a subtle stroke');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*#3f4754/.test(debugPaneCss), 'YO!stats idle agent status uses a visible dark gray token');
     assert.ok(/body\.theme-light \.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*var\(--editor-line-number\)/.test(debugPaneCss), 'YO!stats idle agent status uses a brighter light-mode gray token');
     assert.ok(/\.js-debug-area--idleAgents\s*\{[\s\S]*fill:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle stacked area uses the darker idle status fill');
@@ -3443,6 +3443,11 @@ async function runEditorPreviewSuite() {
     assert.equal(totalSeries[0].clientLinePattern, 'dot', 'the combined all-client total uses the dotted line pattern');
     assert.equal(totalSeries[0].color, 'var(--bad)', 'the combined total reuses the shared red status color');
     assert.ok(peerSeries.every(series => series.clientLinePattern === 'dot'), 'every peer comparison uses the dotted line pattern');
+    const html = api.debugPanelHtmlForTest();
+    assert.match(html, /data-js-debug-displayed-client-request-sum="20"[^>]*>\(sum of all client requests from displayed = 20\)<\/span>/, 'Client API & SSE shows the displayed all-client request sum');
+    assert.match(html, /data-js-debug-displayed-bandwidth-sum="900"[^>]*>\(sum of bandwidth from displayed = 900 B\)<\/span>/, 'Client bandwidth shows the displayed all-client bandwidth sum');
+    const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.match(debugPaneCss, /\.js-debug-chart-summary\s*\{[\s\S]*color:\s*var\(--active-accent-bright\);[\s\S]*font:\s*700 var\(--ui-font-size-xs\)/, 'all displayed chart sums share a contrasty treatment');
     assert.equal(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8').includes('.js-debug-line--client-dash'), false, 'YO!stats no longer ships a dashed client comparison variant');
   });
 
@@ -3460,7 +3465,7 @@ async function runEditorPreviewSuite() {
   });
 
   test('YO!stats graph renders one persisted CPU series per yolomux server', () => {
-    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const api = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {locationPort: '8001'});
     const now = Date.now();
     api.clearJsDebugEventsForTest();
     api.debugGraphApplyServerHistoryForTest({
@@ -3487,14 +3492,14 @@ async function runEditorPreviewSuite() {
       'yolomux.py :8003 CPU %',
     ], 'CPU series are stable and ordered by server label');
     assert.deepStrictEqual([...cpuSeries.map(series => series.values.at(-1))], [7, 11, 22, 33], 'each server keeps its own CPU samples');
-    assert.deepStrictEqual([...cpuSeries.map(series => series.linePattern)], ['solid', 'dot', 'dot', 'dot'], 'only the YOLOmux server on the current browser port uses a solid CPU line');
-    assert.equal(new Set(cpuSeries.map(series => series.color)).size, 4, 'server CPU lines use distinct colors from the shared palette');
+    assert.deepStrictEqual([...cpuSeries.map(series => series.linePattern)], ['dot', 'solid', 'dot', 'dot'], 'only the YOLOmux server on the current browser port uses a solid CPU line');
+    assert.deepStrictEqual([...cpuSeries.map(series => series.color)], ['var(--bad)', 'var(--active-accent-bright)', 'var(--accent-gold)', 'var(--link-soft)'], 'the current server is envy green regardless of sort position and peers use the shared non-green palette');
     const html = api.debugPanelHtmlForTest();
     for (const port of ['7777', '8001', '8002', '8003']) {
       assert.ok(html.includes(`data-js-debug-series="cpu:port:${port}"`) && html.includes(`yolomux.py :${port} CPU %`), `CPU chart renders server ${port}`);
     }
-    assert.match(html, /data-js-debug-series="cpu:port:7777"[^>]*data-js-debug-line-pattern="solid"/, 'current YOLOmux CPU plot is solid');
-    for (const port of ['8001', '8002', '8003']) {
+    assert.match(html, /data-js-debug-series="cpu:port:8001"[^>]*data-js-debug-line-pattern="solid"/, 'current YOLOmux CPU plot is solid');
+    for (const port of ['7777', '8002', '8003']) {
       assert.match(html, new RegExp(`data-js-debug-series="cpu:port:${port}"[^>]*data-js-debug-line-pattern="dot"`), `peer YOLOmux ${port} CPU plot is dotted`);
     }
     assert.match(html, /data-js-debug-series="systemCpu"[^>]*data-js-debug-line-pattern="solid"/, 'system CPU plot is solid');

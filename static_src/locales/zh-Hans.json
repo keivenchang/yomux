@@ -145,6 +145,8 @@
   "debug.graph.status.transition": "转换中",
   "state.working": "运行中",
   "debug.graph.sumDisplayedTokens": "（所显示项目的令牌总和 = {count}）",
+  "debug.graph.sumDisplayedBandwidth": "（所显示带宽的总和 = {count}）",
+  "debug.graph.sumDisplayedClientRequests": "（所显示的所有客户端请求总和 = {count}）",
   "debug.graph.unit.tokens": "{count} 个令牌",
   "debug.graph.unit.tokensPerMinute": "{count} 个令牌/分钟",
   "debug.meta": "debug=1 - {count} 个事件",

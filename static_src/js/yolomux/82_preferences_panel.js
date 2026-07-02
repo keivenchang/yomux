@@ -744,19 +744,11 @@ function createPreferencesPanel() {
   return panel;
 }
 
-function focusPreferencesSearch(panel = null) {
+function focusPreferencesSearch(panel = null, options = {}) {
   // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
   if (dragSession != null) return false;
-  const root = panel && panel.isConnected !== false
-    ? panel
-    : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
-  const search = root?.querySelector?.('[data-preferences-search]');
-  if (!search) return false;
-  search.focus?.({preventScroll: true});
-  const position = String(search.value || '').length;
-  search.setSelectionRange?.(position, position);
-  return true;
+  return focusPanelSearchInput(panel, '[data-preferences-search]', {panelSelector: '.preferences-panel', ...options});
 }
 
 function preferencesScrollIsActive(now = Date.now()) {

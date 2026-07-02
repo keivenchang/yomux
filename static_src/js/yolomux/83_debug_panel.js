@@ -61,6 +61,26 @@ const jsDebugGraphAllClientsTotalId = 'all-clients-total';
 const jsDebugGraphOtherClientsAverageLinePattern = 'dot';
 const jsDebugGraphAllClientsTotalLinePattern = 'dot';
 const jsDebugGraphAllClientsCombinedMetricKey = 'apiSseTotal';
+const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
+  clientRequests: {
+    attribute: 'displayed-client-request-sum',
+    labelKey: 'debug.graph.sumDisplayedClientRequests',
+    value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['apiCount', 'sseCount']),
+    format: debugGraphTokenNumberText,
+  },
+  bandwidth: {
+    attribute: 'displayed-bandwidth-sum',
+    labelKey: 'debug.graph.sumDisplayedBandwidth',
+    value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['bandwidthBytes']),
+    format: value => debugGraphValueText(value, 'bytes'),
+  },
+  agentTokens: {
+    attribute: 'displayed-token-sum',
+    labelKey: 'debug.graph.sumDisplayedTokens',
+    value: debugGraphAgentTokenDisplayedSum,
+    format: debugGraphTokenNumberText,
+  },
+});
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
   {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
@@ -93,12 +113,12 @@ const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--js-debug-agent-token-rose)',
   'var(--js-debug-agent-token-violet)',
 ]);
-const jsDebugGraphProcessCpuColors = Object.freeze([
-  'var(--active-accent-bright)',
-  'var(--accent-gold)',
-  'var(--accent-lime)',
-  'var(--link-soft)',
-]);
+const jsDebugGraphProcessCpuColors = Object.freeze({
+  current: 'var(--active-accent-bright)',
+  // Green is reserved for the server that is serving this browser. Peers must remain
+  // distinguishable without being mistaken for the current YOLOmux process.
+  peers: Object.freeze(['var(--bad)', 'var(--accent-gold)', 'var(--link-soft)']),
+});
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
 const jsDebugGraphAgentTokenBuckets = new Map();
@@ -114,11 +134,11 @@ const jsDebugGraphSeries = Object.freeze([
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'latency', labelKey: 'common.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
-  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
 
 function debugGraphLocalizedLabel(item = {}) {
@@ -1182,6 +1202,30 @@ function debugGraphAgentTokenDisplayedSum(buckets) {
   return Math.max(0, total);
 }
 
+function debugGraphBucketFieldSum(bucket, fields) {
+  return fields.reduce((bucketTotal, field) => (
+    bucketTotal + Math.max(0, Number(bucket?.[field]) || 0)
+  ), 0);
+}
+
+function debugGraphDisplayedClientFieldSum(buckets, fields) {
+  return (buckets || []).reduce((total, bucket) => {
+    const clientBuckets = bucket?.clients instanceof Map && bucket.clients.size ? [...bucket.clients.values()] : [bucket];
+    return total + clientBuckets.reduce((clientTotal, clientBucket) => clientTotal + debugGraphBucketFieldSum(clientBucket, fields), 0);
+  }, 0);
+}
+
+function debugGraphDisplayedSummary(group, buckets) {
+  const spec = jsDebugGraphDisplayedSummarySpecs[group?.displayedSummary];
+  if (!spec) return null;
+  const value = Math.max(0, Number(spec.value(buckets)) || 0);
+  return {
+    attribute: spec.attribute,
+    text: t(spec.labelKey, {count: spec.format(value)}),
+    value,
+  };
+}
+
 function debugGraphBucketValue(bucket, key) {
   if (key === 'api') return debugGraphBucketRate(bucket, bucket.apiCount);
   if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
@@ -1591,20 +1635,27 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
   if (!processes.size) return [{key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid'}];
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
+  let peerIndex = 0;
   return [...processes.entries()]
     .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
-    .map(([processId, label], index) => ({
-      key: `cpu:${processId}`,
-      labelKey: 'debug.graph.series.processCpu',
-      labelParams: {process: label},
-      unit: 'percent',
-      cssKey: 'cpu',
-      chartMetricKey: 'cpu',
-      processCpu: true,
-      processId,
-      linePattern: processId === currentProcessId ? 'solid' : 'dot',
-      color: jsDebugGraphProcessCpuColors[index % jsDebugGraphProcessCpuColors.length],
-    }));
+    .map(([processId, label]) => {
+      const current = processId === currentProcessId;
+      const color = current
+        ? jsDebugGraphProcessCpuColors.current
+        : jsDebugGraphProcessCpuColors.peers[peerIndex++ % jsDebugGraphProcessCpuColors.peers.length];
+      return {
+        key: `cpu:${processId}`,
+        labelKey: 'debug.graph.series.processCpu',
+        labelParams: {process: label},
+        unit: 'percent',
+        cssKey: 'cpu',
+        chartMetricKey: 'cpu',
+        processCpu: true,
+        processId,
+        linePattern: current ? 'solid' : 'dot',
+        color,
+      };
+    });
 }
 
 function debugGraphSeriesData(buckets) {
@@ -2104,15 +2155,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   if (group.dynamicAgentTokens === true) chartClasses.push('js-debug-chart--token-agents');
   const bucketSeconds = Number(group.bucketSeconds);
   const bucketAttr = Number.isFinite(bucketSeconds) && bucketSeconds > 0 ? ` data-js-debug-chart-bucket-seconds="${esc(bucketSeconds)}"` : '';
-  const displayedTokenSum = group.dynamicAgentTokens === true ? debugGraphAgentTokenDisplayedSum(buckets) : null;
-  const displayedTokenSumHtml = displayedTokenSum === null
+  const displayedSummary = debugGraphDisplayedSummary(group, buckets);
+  const displayedSummaryHtml = displayedSummary === null
     ? ''
-    : `<span class="js-debug-chart-summary" data-js-debug-displayed-token-sum="${esc(displayedTokenSum)}">${esc(t('debug.graph.sumDisplayedTokens', {count: debugGraphTokenNumberText(displayedTokenSum)}))}</span>`;
+    : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
-        ${displayedTokenSumHtml}
+        ${displayedSummaryHtml}
       </div>
       ${debugGraphLegendHtml(legendSeries)}
     </div>
@@ -2299,7 +2350,7 @@ async function flushJsDebugStatsHistory() {
     const payload = await apiFetchJsonQuiet('/api/stats-history', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, records: chunk}),
+      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
     });
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
