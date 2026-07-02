@@ -965,6 +965,16 @@ def test_claude_working_line_increments_from_capture(monkeypatch):
     assert mock_agent_common.claude_working_line(11 + mock_agent_common.CLAUDE_WORKING_FRAME_SECONDS * 5, state) == "* Clauding… (11s · ↓ 485 tokens)"
     assert mock_agent_common.claude_working_line(13, state) == "✽ Clauding… (13s · ↓ 519 tokens)"
 
+    compact_state = {
+        **state,
+        "claude_working_base_seconds": "73",
+        "claude_working_base_tokens": "1000",
+        "claude_working_token_suffix": "k",
+        "claude_working_token_decimals": "1",
+        "claude_working_verb": "Channelling",
+    }
+    assert mock_agent_common.claude_working_line(73, compact_state) == "· Channelling… (1m 13s · ↓ 1.0k tokens)"
+
 
 def test_claude_working_composer_omits_idle_suggestion_until_text(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
@@ -2544,6 +2554,43 @@ def test_tmux_claude_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_a
     assert "…" not in resized_rows
     assert "..." not in resized_rows
     assert long_fixture_file in resized
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_claude_labelled_composer_fixture_stays_live_and_working(visual_tmux):
+    session = visual_tmux.launch(
+        "claude-labelled-composer-working",
+        [sys.executable, "tools/claude.py", "--mock", "-C", str(REPO_ROOT)],
+        width=96,
+        height=54,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: '❯ Try "fix typecheck errors"' in text)
+    assert booted, pane
+    visual_tmux.send_keys(session, "mock working_labelled_composer", "Enter")
+    rendered, pane = visual_tmux.wait_until(
+        session,
+        lambda text: "Channelling" in text
+        and "babysitting PRs, or polling status." in text
+        and "Check DIS-2310 status" in text,
+    )
+    assert rendered, pane
+    assert pane.count("Channelling") == 1
+    assert "Clauding" not in pane
+
+    state = classify_mockcase_until(
+        {"pane_target": f"{session}:", "agent_kind": "claude"},
+        "working",
+        session=session,
+        prompt_source="pane",
+        include_composer=True,
+        include_transcript_activity=False,
+        capture_full_for_bash=False,
+        expected_composer_key="empty",
+    )
+    assert state.screen["key"] == "working", state.capture.visible_text
+    assert state.composer.key == "empty"
 
 
 @pytest.mark.e2e

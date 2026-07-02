@@ -280,6 +280,26 @@ fixtures:
   id: working_empty_prompt_below_counter__claude-code-2.1.186_20260623
   scenario: working_empty_prompt_below_counter
   source: real Claude Code 2.1.186 working capture from tmux 2:0.0 with an empty composer prompt below the status counter
+- agent: claude
+  capture_date: '2026-07-01'
+  case_name: working_labelled_composer
+  client_name: Claude Code
+  client_version: 2.1.198 (Claude Code)
+  client_version_slug: claude-code-2.1.198
+  description: Claude working counter remains RUNNING above a wrapped Tip and labelled composer border
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_labelled_composer__claude-code-2.1.198_20260701.yaml
+  id: working_labelled_composer__claude-code-2.1.198_20260701
+  scenario: working_labelled_composer
+  source: screenshot-provided real Claude Code 2.1.198 capture from tmux 1:0.0 on 2026-07-01
 - agent: codex
   capture_date: '2026-06-20'
   case_name: choice_question

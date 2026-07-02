@@ -1,0 +1,51 @@
+agent: claude
+capture_date: '2026-07-01'
+capture_mode: visible
+captured_at: '2026-07-02T04:13:00+00:00'
+case_name: working_labelled_composer
+claude_version: 2.1.198 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.198 (Claude Code)
+client_version_slug: claude-code-2.1.198
+codex_version: ''
+cursor:
+  character: ' '
+  current_command: claude
+  pane_in_mode: false
+  x: 2
+  y: 51
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: Working
+  composer_key: empty
+  reason_code: busy
+  screen_key: working
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Claude working counter remains RUNNING above a wrapped Tip and labelled composer border
+fixture_id: working_labelled_composer__claude-code-2.1.198_20260701
+fixture_scenario: working_labelled_composer
+height: 54
+id: working_labelled_composer__claude-code-2.1.198_20260701
+raw_capture: |
+  ● All four subagents done — conformance tabs merged into "Tool Calling (batch data)" + "Tool
+    Calling (stream data)". Final integrated verification: full test suite + render both + confirm
+    the merged tab and parity relabel:
+
+    Running 1 shell command…
+    └ $ cd /home/keivenc/dynamo/frontend-crates1
+
+  ✻ Channelling… (1m 13s · ↓ 1.0k tokens)
+    ⎿  Tip: /loop runs any prompt on a recurring schedule. Great for monitoring deploys,
+       babysitting PRs, or polling status.
+  98% context used
+  ─────────────────────────────────────────────────────────────────────── Check DIS-2310 status ──
+  ❯
+  ───────────────────────────────────────────────────────────────────────────────────────────────
+    ▶▶ auto mode on (shift+tab to cycle) · ← for agents · PR #93 · esc to interrupt
+source: screenshot-provided real Claude Code 2.1.198 capture from tmux 1:0.0 on 2026-07-01
+styled_capture: ''
+width: 96

@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 from yolomux_lib import sessions
-from yolomux_lib.common import PaneInfo, ProcessInfo
+from yolomux_lib.common import AgentInfo, PaneInfo, ProcessInfo
 from yolomux_lib.sessions import list_processes
 from yolomux_lib.sessions import pane_process_label
 
@@ -230,6 +230,36 @@ def test_select_claude_agent_follows_daemon_delegated_session(tmp_path):
     assert agent.pid == 104
     assert agent.session_id == "current-session"
     assert agent.transcript == str(current_transcript)
+
+
+def test_discover_sessions_emits_one_claude_agent_for_launcher_and_daemon_descendant(monkeypatch):
+    pane = _pane(100)
+    processes = {
+        100: ProcessInfo(pid=100, ppid=1, command="bash"),
+        101: ProcessInfo(pid=101, ppid=100, command="claude --dangerously-skip-permissions"),
+        102: ProcessInfo(pid=102, ppid=101, command="claude daemon run"),
+        103: ProcessInfo(pid=103, ppid=102, command="2.1.198 --session-id current-session"),
+    }
+    selected = AgentInfo(
+        session="1",
+        kind="claude",
+        pid=103,
+        pane_target=pane.target,
+        command=processes[103].command,
+        cwd="/repo",
+        status="busy",
+        session_id="current-session",
+        transcript="/repo/current-session.jsonl",
+        error=None,
+    )
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: ([pane], None))
+    monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
+    monkeypatch.setattr(sessions, "select_claude_agent", lambda _session, _pane, _processes: selected)
+
+    discovered, errors = sessions.discover_sessions(["1"])
+
+    assert errors == []
+    assert discovered["1"].agents == [selected]
 
 
 def test_claude_transcript_family_paths_include_nested_subagents(tmp_path):

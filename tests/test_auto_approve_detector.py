@@ -978,6 +978,12 @@ VISIBLE_AGENT_WORKING_CASES = [
         id="claude-counter-tip-and-idle-composer",
     ),
     pytest.param(
+        fixture_visible_text(PROMPT_CORPUS_DIR / "captures/working_labelled_composer__claude-code-2.1.198_20260701.yaml"),
+        True,
+        "working",
+        id="claude-session-1-working-with-labelled-composer-border",
+    ),
+    pytest.param(
         "\n".join([
             ". Tomfoolering… (10m 35s · ↓ 55.4K tokens)",
             "Tip: /ultrareview runs a deep, multi-agent review of your changes",
@@ -1070,6 +1076,22 @@ def test_agent_screen_state_reports_visible_counter_evidence_and_advancement():
     assert second_state["key"] == "working"
     assert second_state["status_counter_advanced"] is True
     assert second_state["status_elapsed_seconds"] == 433
+
+
+def test_agent_screen_state_counter_advances_across_animated_codex_marker():
+    first = "◦ Waiting for background terminal (1m 10s • esc to interrupt) · 1 background terminal running · /ps to view"
+    second = "• Waiting for background terminal (1m 18s • esc to interrupt) · 1 background terminal running · /ps to view"
+
+    first_state = prompt_detector.agent_screen_state(first, pane_target="%counter-marker-advances", now=1000.0)
+    second_state = prompt_detector.agent_screen_state(second, pane_target="%counter-marker-advances", now=1008.0)
+
+    assert first_state["key"] == "working"
+    assert second_state["key"] == "working"
+    assert first_state["status_identity"] == second_state["status_identity"]
+    assert first_state["status_marker"] == "◦"
+    assert second_state["status_marker"] == "•"
+    assert second_state["status_elapsed_seconds"] == 78
+    assert second_state["status_counter_advanced"] is True
 
 
 def test_agent_screen_state_reports_token_counter_advancement():

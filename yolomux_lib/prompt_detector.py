@@ -541,8 +541,7 @@ _CLAUDE_AGENT_TOKEN_SUBLINE_RE = re.compile(
     re.IGNORECASE,
 )
 _STATUS_COUNTER_STALE_SECONDS = 75.0
-_STATUS_COUNTER_LEADING_MARKERS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*+·•◦∙⋅.☉○◯●"
-_STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>[{re.escape(_STATUS_COUNTER_LEADING_MARKERS)}])\s*(?P<body>\S.*)$")
+_STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>{_WORKING_LEADING_SYMBOL_RE})\s*(?P<body>\S.*)$")
 _STATUS_COUNTER_ELAPSED_RE = re.compile(r"\b(?:\d+(?:\.\d+)?[hms]\s*)+\b", re.IGNORECASE)
 _STATUS_COUNTER_DURATION_TOKEN_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>[hms])\b", re.IGNORECASE)
 _STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)\s*(?P<suffix>[kKmM])?\s+tokens?\b", re.IGNORECASE)
@@ -551,6 +550,7 @@ _STATUS_COUNTER_PAYLOAD_RE = re.compile(r"\b(?:thinking|effort|tokens?|tool uses
 _STATUS_COUNTER_BACKGROUND_RE = re.compile(r"^\s*[○◯]\s*\S.*\b\d+(?:\.\d+)?s\s*·\s*(?:[↑↓]\s*)?\d", re.IGNORECASE)
 _VISIBLE_STATUS_COUNTER_CACHE: dict[str, dict[str, object]] = {}
 _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├┤┬┴┼─━═╔╗╚╝╠╣╦╩╬]+$")
+_BOX_DRAWING_LABELLED_LINE_RE = re.compile(r"^\s*[─━═]{3,}\s+\S.*?\s+[─━═]+\s*$")
 _BOXED_EMPTY_INPUT_LINE_RE = re.compile(r"^\s*[│┃]\s*[❯›>]?\s*[█▉▊▋▌▍▎▏_ ]*[│┃]\s*$")
 _EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:[^\w\s]\s*)?\S+\s+/effort\b", re.IGNORECASE)
 _WORK_QUEUE_HINT_RE = re.compile(r"(?:↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)", re.IGNORECASE)
@@ -569,6 +569,7 @@ _CLAUDE_GOAL_ACTIVE_RE = re.compile(
     r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
     re.IGNORECASE,
 )
+_TIP_LINE_RE = re.compile(r"^\s*(?:[⎿└]\s*)?Tip:", re.IGNORECASE)
 _COMPLETED_TASKS_RE = re.compile(
     r"\b(?:all\s+\d+\s+tasks?|both\s+goal\s+items)\s+(?:are\s+)?(?:complete|completed|done|finished)\b",
     re.IGNORECASE,
@@ -883,7 +884,10 @@ def _parse_status_tool_uses(line: str) -> int | None:
 
 
 def _status_counter_identity(line: str) -> str:
-    identity = _STATUS_COUNTER_ELAPSED_RE.sub("<elapsed>", line.strip())
+    stripped = line.strip()
+    marker_match = _STATUS_COUNTER_MARKER_RE.match(stripped)
+    identity = marker_match.group("body") if marker_match else stripped
+    identity = _STATUS_COUNTER_ELAPSED_RE.sub("<elapsed>", identity)
     identity = _STATUS_COUNTER_TOKEN_RE.sub("<tokens>", identity)
     identity = _STATUS_COUNTER_TOOL_USE_RE.sub("<tool-uses>", identity)
     return re.sub(r"\s+", " ", identity).lower()
@@ -1054,6 +1058,7 @@ def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
 
 def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
     in_codex_queued_followup = False
+    in_wrapped_tip = False
     for line in lines[working_index + 1:]:
         stripped = line.strip()
         # Same bounded-overlay rule as approval_prompt_has_later_activity: a Ctrl-T task list below a
@@ -1070,6 +1075,12 @@ def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool
             if stripped.startswith("↳") or _CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE.match(stripped) or line.startswith(("    ", "  ")):
                 continue
             in_codex_queued_followup = False
+        if _is_tip_line(line):
+            in_wrapped_tip = True
+            continue
+        if in_wrapped_tip and stripped and line[:1].isspace():
+            continue
+        in_wrapped_tip = False
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
             continue
         if re.match(r"^[❯›>]\s*$", stripped):
@@ -1175,8 +1186,21 @@ def _is_separator_or_footer(line: str) -> bool:
         not stripped
         or _is_footer_hint_line(stripped)
         or bool(re.fullmatch(r"[─\-]{10,}", stripped))
-        or bool(_BOX_DRAWING_ONLY_LINE_RE.fullmatch(stripped))
+        or _is_box_drawing_chrome_line(stripped)
     )
+
+
+def _is_box_drawing_chrome_line(line: str) -> bool:
+    """Return True for plain or labelled borders drawn around the live composer."""
+    stripped = line.strip()
+    return bool(
+        _BOX_DRAWING_ONLY_LINE_RE.fullmatch(stripped)
+        or _BOX_DRAWING_LABELLED_LINE_RE.fullmatch(stripped)
+    )
+
+
+def _is_tip_line(line: str) -> bool:
+    return bool(_TIP_LINE_RE.match(line))
 
 
 def _is_footer_hint_line(line: str) -> bool:
@@ -1201,7 +1225,7 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _is_working_line(line):
         return True
-    if _BOX_DRAWING_ONLY_LINE_RE.fullmatch(stripped):
+    if _is_box_drawing_chrome_line(stripped):
         return True
     if _BOXED_EMPTY_INPUT_LINE_RE.match(stripped):
         return True
@@ -1217,7 +1241,7 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True
-    if re.match(r"^(?:[⎿└]\s*)?Tip:", stripped, re.IGNORECASE):
+    if _is_tip_line(line):
         return True
     if re.match(r"^tmux\s+focus-events\s+off\b", stripped, re.IGNORECASE):
         return True

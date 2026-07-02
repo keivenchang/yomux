@@ -851,6 +851,9 @@ parity_groups:
   - agent: claude
     case_name: working_empty_prompt_below_counter
     file: captures/working_empty_prompt_below_counter__claude-code-2.1.186_20260623.yaml
+  - agent: claude
+    case_name: working_labelled_composer
+    file: captures/working_labelled_composer__claude-code-2.1.198_20260701.yaml
   - agent: codex
     case_name: working_command_counter
     file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml
