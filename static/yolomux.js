@@ -20377,6 +20377,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
   return [
     api.history(),
     api.drawSelection(),
+    codeMirrorContextMenuSelectionExtension(api),
     api.dropCursor(),
     api.rectangularSelection(),
     api.crosshairCursor(),
@@ -43835,6 +43836,7 @@ function codeMirrorDiffLayout(_container) {
 function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
   return [
     api.drawSelection(),
+    codeMirrorContextMenuSelectionExtension(api),
     api.highlightActiveLine(),
     codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
     api.EditorState.readOnly.of(true),
@@ -43858,6 +43860,41 @@ function codeMirrorWorkingUpdateExtension(api, panel, path) {
     if (update.docChanged) {
       handleFileEditorContentChanged(panel, path, update.state.doc.toString(), {syntax: false});
     }
+  });
+}
+
+function codeMirrorContextMenuSelectionExtension(api) {
+  return safeCodeMirrorExtension('context menu selection', () => {
+    let pending = null;
+    let clearTimer = null;
+    const handlers = api.EditorView.domEventHandlers({
+      contextmenu(event, view) {
+        // Chrome may collapse contenteditable's native DOM selection before opening its context menu.
+        // CodeMirror then observes that DOM change and replaces its own selection, which is especially
+        // visible in unified diffs where folded/deleted rows make the native selection discontinuous.
+        const selection = view.state.selection;
+        const position = view.posAtCoords({x: event.clientX, y: event.clientY});
+        const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
+        if (!clickedSelection) return false;
+        const captured = {selection};
+        pending = captured;
+        clearTimeout(clearTimer);
+        clearTimer = setTimeout(() => {
+          if (pending === captured) pending = null;
+        }, 250);
+        return false;
+      },
+    });
+    const restore = api.EditorView.updateListener.of(update => {
+      const captured = pending;
+      if (!captured || !update.selectionSet || update.state.selection.eq(captured.selection)) return;
+      pending = null;
+      clearTimeout(clearTimer);
+      queueMicrotask(() => {
+        if (update.view.dom?.isConnected) update.view.dispatch({selection: captured.selection});
+      });
+    });
+    return [handlers, restore];
   });
 }
 
@@ -43938,6 +43975,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
   return [
     safeCodeMirrorExtension('history', () => api.history?.()),
     safeCodeMirrorExtension('selection drawing', () => api.drawSelection()),
+    codeMirrorContextMenuSelectionExtension(api),
     safeCodeMirrorExtension('drop cursor', () => api.dropCursor?.()),
     safeCodeMirrorExtension('active line', () => api.highlightActiveLine()),
     codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
@@ -44597,6 +44635,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           doc: original,
           extensions: [
             api.drawSelection(),
+            codeMirrorContextMenuSelectionExtension(api),
             api.highlightActiveLine(),
             ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
             api.EditorState.readOnly.of(true),

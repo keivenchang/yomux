@@ -3327,6 +3327,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
   return [
     api.history(),
     api.drawSelection(),
+    codeMirrorContextMenuSelectionExtension(api),
     api.dropCursor(),
     api.rectangularSelection(),
     api.crosshairCursor(),

@@ -5774,6 +5774,89 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
     assert metrics["snapshotHead"] == metrics["expectedAnchor"], metrics
 
 
+def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof fileEditorItemFor === 'function' && typeof applyLayoutSlots === 'function' && document.querySelector('#grid') !== null;"
+        )
+    )
+    setup = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          autoFocusEnabled = false;
+          const path = '/home/test/right-click-selection.md';
+          const item = fileEditorItemFor(path);
+          const original = Array.from({length: 24}, (_value, index) => `Original line ${index + 1} has enough text for right-click coverage.`).join('\\n');
+          const content = original.replace('Original line 1', 'Changed line 1');
+          setFileState(path, {
+            kind: 'text',
+            content,
+            original: content,
+            dirty: false,
+            language: 'markdown',
+            gitRoot: '/home/test',
+            gitTracked: true,
+            gitHasHistory: true,
+            gitHistory: [{sha: 'HEAD'}],
+            diffLoaded: true,
+            diffUnavailable: false,
+            diff: 'diff --git a/right-click-selection.md b/right-click-selection.md',
+            diffOriginal: original,
+            diffWorking: content,
+          });
+          setFileEditorViewMode(path, 'diff', item);
+          registerFileEditorLayoutItem(path, {item});
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([item], item);
+          applyLayoutSlots(next, {focusSession: item, forceFull: true});
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          for (let attempt = 0; attempt < 220; attempt += 1) {
+            const panel = panelNodes.get(item);
+            if (panel?._cmMode === 'diff' && panel._cmView?.contentDOM) {
+              const view = panel._cmView;
+              view.focus();
+              view.dispatch({selection: {anchor: 0, head: content.length}});
+              await frame();
+              await frame();
+              window.__editorContextMenuCount = 0;
+              view.contentDOM.addEventListener('contextmenu', () => { window.__editorContextMenuCount += 1; });
+              return {item, anchor: view.state.selection.main.anchor, head: view.state.selection.main.head};
+            }
+            await frame();
+          }
+          return {error: 'CodeMirror diff editor did not initialize'};
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in setup, setup
+    content = browser.find_element("css selector", ".file-editor-panel .cm-content")
+    ActionChains(browser).context_click(content).perform()
+    after = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const panel = [...panelNodes.values()].find(node => node?._cmMode === 'diff' && node?._cmView?.contentDOM);
+          const selection = panel._cmView.state.selection.main;
+          done({
+            anchor: selection.anchor,
+            head: selection.head,
+            selectedChars: Math.abs(selection.to - selection.from),
+            contextMenus: window.__editorContextMenuCount,
+            status: panel.querySelector('.file-editor-cursor-status')?.textContent || '',
+          });
+        }));
+        """
+    )
+    assert after["anchor"] == setup["anchor"], after
+    assert after["head"] == setup["head"], after
+    assert after["selectedChars"] > 100, after
+    assert after["contextMenus"] == 1, after
+    assert f"{after['selectedChars']} chars" in after["status"], after
+
+
 def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
