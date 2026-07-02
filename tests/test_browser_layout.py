@@ -339,9 +339,11 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <path class="js-debug-line js-debug-line--api" d="M0 1L20 1"></path>
           <path class="js-debug-line js-debug-line--sse" d="M0 3L20 3"></path>
           <path class="js-debug-line js-debug-line--cpu" d="M0 5L20 5"></path>
+          <path data-cpu-server="peer" class="js-debug-line js-debug-line--cpu" style="--js-debug-series-color: var(--accent-gold)" d="M0 6L20 6"></path>
           <path class="js-debug-line js-debug-line--systemCpu" d="M0 7L20 7"></path>
           <path data-client-line="solid" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-solid" d="M0 8L20 8"></path>
           <path data-client-line="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" d="M0 10L20 10"></path>
+          <path data-client-line="dot" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--js-debug-api-sse-total-series)" d="M0 11L20 11"></path>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="cyan" style="--js-debug-series-color: var(--js-debug-agent-token-cyan)" x="0" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="orange" style="--js-debug-series-color: var(--js-debug-agent-token-orange)" x="2" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="magenta" style="--js-debug-series-color: var(--js-debug-agent-token-magenta)" x="4" y="9" width="1" height="1"></rect>
@@ -357,6 +359,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--agentTokenTotal" style="--js-debug-series-color: var(--js-debug-agent-token-total)"></span>
         <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" x1="0" y1="2" x2="18" y2="2"></line></svg>
+        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="dot" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--js-debug-api-sse-total-series)" x1="0" y1="2" x2="18" y2="2"></line></svg>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
@@ -385,11 +388,12 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         };
         const read = () => {
           const values = {
-            line: {api: line('api'), sse: line('sse'), cpu: line('cpu'), systemCpu: line('systemCpu')},
+            line: {api: line('api'), sse: line('sse'), apiSseTotal: line('apiSseTotal'), cpu: line('cpu'), peerCpu: getComputedStyle(document.querySelector('[data-cpu-server="peer"]')).stroke, systemCpu: line('systemCpu')},
             legend: {api: swatch('api'), sse: swatch('sse'), cpu: swatch('cpu'), systemCpu: swatch('systemCpu')},
             expected: {
               api: colorFor('var(--js-debug-api-series)'),
               sse: colorFor('var(--js-debug-sse-series)'),
+              apiSseTotal: colorFor('var(--js-debug-api-sse-total-series)'),
               cpu: colorFor('var(--active-accent-bright)'),
               systemCpu: colorFor('var(--bad)'),
             },
@@ -402,8 +406,8 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               swatchWidth: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).width,
               swatchBackground: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).backgroundImage,
             },
-            clientLines: Object.fromEntries(['solid', 'dash'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
-            clientLegend: getComputedStyle(document.querySelector('[data-client-legend="dash"]')).strokeDasharray,
+            clientLines: Object.fromEntries(['solid', 'dash', 'dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
+            clientLegend: Object.fromEntries(['dash', 'dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-legend="${pattern}"]`)).strokeDasharray])),
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
           return values;
@@ -419,11 +423,14 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         item = metrics[theme]
         assert item["line"]["api"] == item["legend"]["api"] == item["expected"]["api"], (theme, item)
         assert item["line"]["sse"] == item["legend"]["sse"] == item["expected"]["sse"], (theme, item)
+        assert item["line"]["apiSseTotal"] == item["expected"]["apiSseTotal"], (theme, item)
         assert item["line"]["cpu"] == item["legend"]["cpu"] == item["expected"]["cpu"], (theme, item)
         assert item["line"]["systemCpu"] == item["legend"]["systemCpu"] == item["expected"]["systemCpu"], (theme, item)
         assert item["line"]["api"] != item["line"]["sse"], (theme, item)
         assert item["line"]["cpu"] != item["line"]["api"], (theme, item)
         assert item["line"]["cpu"] != item["line"]["systemCpu"], (theme, item)
+        assert item["line"]["peerCpu"] != item["line"]["cpu"], (theme, item)
+        assert item["line"]["apiSseTotal"] not in {item["line"]["api"], item["line"]["sse"]}, (theme, item)
         assert item["apiSseDistance"] >= 120, (theme, item)
         distances = [
             item["agentTokens"][left] != item["agentTokens"][right]
@@ -439,8 +446,9 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["clientLines"] == {
             "solid": "none",
             "dash": "6px, 4px",
+            "dot": "1px, 3px",
         }, (theme, item)
-        assert item["clientLegend"] == item["clientLines"]["dash"], (theme, item)
+        assert item["clientLegend"] == {"dash": item["clientLines"]["dash"], "dot": item["clientLines"]["dot"]}, (theme, item)
 
 
 def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tmp_path):

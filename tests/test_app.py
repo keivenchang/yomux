@@ -382,7 +382,42 @@ def test_shared_stats_client_history_survives_other_server_writes_and_restart(mo
     client_data = json.loads((tmp_path / "stats-client-history.json").read_text(encoding="utf-8"))
     persisted_bucket = client_data["raw_buckets"][0]
     assert len(persisted_bucket) == len(app_module.STATS_CLIENT_HISTORY_BUCKET_FIELDS)
-    assert app_module.stats_history_client_id("client-b") in persisted_bucket[-1]
+    assert app_module.stats_history_client_id("client-b") in persisted_bucket[-2]
+    process_key = f"port:{owner.background_owner.port}"
+    assert persisted_bucket[-1][process_key]["cpu_total_percent"] == 24.0
+
+
+def test_shared_stats_history_keeps_cpu_for_every_yolomux_server(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", tmp_path / "stats-client-history.json")
+    monkeypatch.setattr(common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+    servers = [app_module.TmuxWebtermApp([]) for _port in range(3)]
+    reader = app_module.TmuxWebtermApp([])
+    ports = (9101, 9102, 9103)
+    sample_time = time.time()
+    for server, port in zip(servers, ports, strict=True):
+        server.background_owner = StatsRoleOwner(owner=port == 8003, port=port)
+    reader.background_owner = StatsRoleOwner(owner=False, port=9199)
+    try:
+        for server, port in zip(servers, ports, strict=True):
+            server.record_stats_process_sample({
+                "time": sample_time,
+                "pid": port,
+                "started_at": sample_time - port,
+                "cpu_percent": float(port - 9090),
+            })
+        reader.merge_shared_stats_client_history()
+        with reader.stats_history_lock:
+            history = reader.stats_history_payload_locked()
+    finally:
+        for server in [*servers, reader]:
+            server.control_server.stop()
+
+    processes = next(record["servers"] for record in history["records"] if len(record["servers"]) == 3)
+    assert set(processes) == {"port:9101", "port:9102", "port:9103"}
+    assert processes["port:9101"]["label"] == "yolomux.py :9101"
+    assert processes["port:9102"]["cpu_total_percent"] == 12.0
+    assert processes["port:9103"]["cpu_count"] == 1.0
 
 
 def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch, tmp_path):

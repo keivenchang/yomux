@@ -34324,6 +34324,8 @@ const jsDebugGraphAgentTokenSmoothingSamples = 3;
 const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
 const jsDebugGraphAllClientsTotalId = 'all-clients-total';
 const jsDebugGraphOtherClientsAverageLinePattern = 'dash';
+const jsDebugGraphAllClientsTotalLinePattern = 'dot';
+const jsDebugGraphAllClientsCombinedMetricKey = 'apiSseTotal';
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', label: 'API', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
   {key: 'sse', label: 'SSE', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
@@ -34356,6 +34358,12 @@ const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--js-debug-agent-token-rose)',
   'var(--js-debug-agent-token-violet)',
 ]);
+const jsDebugGraphProcessCpuColors = Object.freeze([
+  'var(--active-accent-bright)',
+  'var(--accent-gold)',
+  'var(--accent-lime)',
+  'var(--link-soft)',
+]);
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
 const jsDebugGraphAgentTokenBuckets = new Map();
@@ -34367,7 +34375,6 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => ({...metric, label: `${metric.label} (this client)`, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
   ...jsDebugAgentStatusSeriesKeys.map(key => ({key, label: jsDebugAgentStatusSeriesLabels[key], unit: 'count'})),
   {key: 'tokensPerAgent', label: 'Tokens/agent/min', unit: 'tokensPerMinute'},
-  {key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent'},
   {key: 'systemCpu', label: 'system avg CPU %', unit: 'percent'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
@@ -34667,6 +34674,7 @@ function debugGraphNewBucket(startMs, durationMs) {
     agentTokenSamples: 0,
     agentTokenRates: new Map(),
     clients: new Map(),
+    servers: new Map(),
   };
 }
 
@@ -34694,6 +34702,7 @@ function debugGraphBucketHasData(bucket) {
     || Number(bucket?.agentTokenSamples || 0)
     || Number(bucket?.agentTokenRates?.size || 0)
     || Number(bucket?.clients?.size || 0)
+    || Number(bucket?.servers?.size || 0)
   );
 }
 
@@ -34942,6 +34951,16 @@ function debugGraphMergeBucket(target, source) {
       target.clients.set(clientId, targetClient);
     }
   }
+  if (source.servers instanceof Map) {
+    if (!(target.servers instanceof Map)) target.servers = new Map();
+    for (const [processId, sourceProcess] of source.servers.entries()) {
+      const targetProcess = target.servers.get(processId) || {label: processId, cpuTotalPercent: 0, cpuCount: 0};
+      targetProcess.label = sourceProcess.label || targetProcess.label;
+      targetProcess.cpuTotalPercent += Number(sourceProcess.cpuTotalPercent || 0);
+      targetProcess.cpuCount += Number(sourceProcess.cpuCount || 0);
+      target.servers.set(processId, targetProcess);
+    }
+  }
 }
 
 function compactJsDebugGraphBuckets(nowMs = Date.now()) {
@@ -35144,6 +35163,7 @@ function debugGraphApplyServerRecord(record) {
   bucket.bandwidthBytes = Math.max(bucket.bandwidthBytes, Number(record.bandwidth_bytes || 0));
   bucket.disconnectedMs = Math.max(bucket.disconnectedMs, Number(record.disconnected_ms || 0));
   debugGraphApplyServerClients(bucket, record.clients);
+  debugGraphApplyServerProcesses(bucket, record.servers);
   bucket.cpuTotalPercent = Math.max(bucket.cpuTotalPercent, Number(record.cpu_total_percent || 0));
   bucket.cpuCount = Math.max(bucket.cpuCount, Number(record.cpu_count || 0));
   bucket.systemCpuTotalPercent = Math.max(bucket.systemCpuTotalPercent, Number(record.system_cpu_total_percent || 0));
@@ -35170,6 +35190,20 @@ function debugGraphApplyServerRecord(record) {
   bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
   bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
   debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
+}
+
+function debugGraphApplyServerProcesses(bucket, servers) {
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return;
+  if (!(bucket.servers instanceof Map)) bucket.servers = new Map();
+  for (const [processId, record] of Object.entries(servers)) {
+    const cleanProcessId = String(processId || '').trim();
+    if (!cleanProcessId || !record || typeof record !== 'object') continue;
+    const process = bucket.servers.get(cleanProcessId) || {label: cleanProcessId, cpuTotalPercent: 0, cpuCount: 0};
+    process.label = String(record.label || process.label || cleanProcessId);
+    process.cpuTotalPercent = Math.max(process.cpuTotalPercent, Number(record.cpu_total_percent || 0));
+    process.cpuCount = Math.max(process.cpuCount, Number(record.cpu_count || 0));
+    bucket.servers.set(cleanProcessId, process);
+  }
 }
 
 function debugGraphApplyServerClients(bucket, clients) {
@@ -35421,19 +35455,29 @@ function debugGraphOtherClientMetricAverage(bucket, metric) {
   return clientBuckets.reduce((total, clientBucket) => total + metric.value(clientBucket), 0) / clientBuckets.length;
 }
 
-function debugGraphAllClientMetricTotal(bucket, metric) {
-  if (!(bucket?.clients instanceof Map) || !metric) return 0;
-  return [...bucket.clients.values()].reduce((total, clientBucket) => total + metric.value(clientBucket), 0);
+function debugGraphAllClientApiSseTotal(bucket) {
+  if (!(bucket?.clients instanceof Map)) return 0;
+  return [...bucket.clients.values()].reduce((total, clientBucket) => (
+    total + debugGraphBucketRate(bucket, Number(clientBucket.apiCount || 0) + Number(clientBucket.sseCount || 0))
+  ), 0);
+}
+
+function debugGraphProcessCpuBucketValue(bucket, processId) {
+  const process = bucket?.servers instanceof Map ? bucket.servers.get(processId) : null;
+  return Number(process?.cpuCount || 0) > 0
+    ? Math.min(100, Number(process.cpuTotalPercent || 0) / Number(process.cpuCount || 1))
+    : 0;
 }
 
 function debugGraphSeriesBucketValue(bucket, series) {
   if (series?.clientMetric === true) {
+    if (series.clientAggregate === 'allClientsApiSseTotal') return debugGraphAllClientApiSseTotal(bucket);
     const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
     if (series.clientAggregate === 'otherClientsAverage') return metric ? debugGraphOtherClientMetricAverage(bucket, metric) : 0;
-    if (series.clientAggregate === 'allClientsTotal') return metric ? debugGraphAllClientMetricTotal(bucket, metric) : 0;
     const clientBucket = debugGraphClientMetricBucket(bucket, series.clientId);
     return metric && clientBucket ? metric.value(clientBucket) : 0;
   }
+  if (series?.processCpu === true) return debugGraphProcessCpuBucketValue(bucket, series.processId);
   return debugGraphBucketValue(bucket, series?.key);
 }
 
@@ -35455,11 +35499,15 @@ function debugGraphBucketHasSeriesData(bucket, key) {
 
 function debugGraphSeriesBucketHasData(bucket, series) {
   if (series?.clientMetric === true) {
+    if (series.clientAggregate === 'allClientsApiSseTotal') return bucket?.clients instanceof Map && bucket.clients.size > 0;
     const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
     if (series.clientAggregate === 'otherClientsAverage') return debugGraphOtherClientMetricBuckets(bucket, metric).length > 0;
-    if (series.clientAggregate === 'allClientsTotal') return bucket?.clients instanceof Map && bucket.clients.size > 0;
     const clientBucket = debugGraphClientMetricBucket(bucket, series.clientId);
     return Boolean(metric && clientBucket && metric.hasData(clientBucket));
+  }
+  if (series?.processCpu === true) {
+    const process = bucket?.servers instanceof Map ? bucket.servers.get(series.processId) : null;
+    return Number(process?.cpuCount || 0) > 0;
   }
   return debugGraphBucketHasSeriesData(bucket, series?.key);
 }
@@ -35729,30 +35777,65 @@ function debugGraphClientMetricSeriesDefs(buckets) {
   const hasAnyClients = buckets.some(bucket => bucket.clients instanceof Map && bucket.clients.size > 0);
   const hasOtherClients = buckets.some(bucket => bucket.clients instanceof Map
     && [...bucket.clients.keys()].some(clientId => clientId && clientId !== thisClientId));
-  return jsDebugGraphClientMetrics.flatMap(metric => {
-    const totalAcrossClients = metric.key === 'api' || metric.key === 'sse';
-    if ((totalAcrossClients && !hasAnyClients) || (!totalAcrossClients && !hasOtherClients)) return [];
-    const clientId = totalAcrossClients ? jsDebugGraphAllClientsTotalId : jsDebugGraphOtherClientsAverageId;
-    const clientAggregate = totalAcrossClients ? 'allClientsTotal' : 'otherClientsAverage';
-    const aggregateLabel = totalAcrossClients ? 'all clients total' : 'other clients avg';
-    return [{
-      ...metric,
-      key: `client:${clientId}:${metric.key}`,
-      label: `${metric.label} (${aggregateLabel})`,
-      cssKey: metric.key,
-      clientMetric: true,
-      metricKey: metric.key,
-      clientId,
-      clientAggregate,
-      clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
-    }];
-  });
+  const peerAverageSeries = jsDebugGraphClientMetrics
+    .filter(metric => metric.key === 'latency' || metric.key === 'bandwidth')
+    .flatMap(metric => {
+      if (!hasOtherClients) return [];
+      return [{
+        ...metric,
+        key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
+        label: `${metric.label} (other clients avg)`,
+        cssKey: metric.key,
+        clientMetric: true,
+        metricKey: metric.key,
+        clientId: jsDebugGraphOtherClientsAverageId,
+        clientAggregate: 'otherClientsAverage',
+        clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
+      }];
+    });
+  if (!hasAnyClients) return peerAverageSeries;
+  return [...peerAverageSeries, {
+    key: `client:${jsDebugGraphAllClientsTotalId}:${jsDebugGraphAllClientsCombinedMetricKey}`,
+    label: 'API+SSE (all clients total)',
+    unit: 'countPerSecond',
+    cssKey: jsDebugGraphAllClientsCombinedMetricKey,
+    chartMetricKey: 'api',
+    clientMetric: true,
+    clientId: jsDebugGraphAllClientsTotalId,
+    clientAggregate: 'allClientsApiSseTotal',
+    clientLinePattern: jsDebugGraphAllClientsTotalLinePattern,
+    color: 'var(--js-debug-api-sse-total-series)',
+  }];
+}
+
+function debugGraphProcessCpuSeriesDefs(buckets) {
+  const processes = new Map();
+  for (const bucket of buckets) {
+    if (!(bucket.servers instanceof Map)) continue;
+    for (const [processId, process] of bucket.servers.entries()) {
+      if (Number(process?.cpuCount || 0) <= 0) continue;
+      processes.set(processId, String(process?.label || processId));
+    }
+  }
+  if (!processes.size) return [{key: 'cpu', label: 'yolomux.py CPU %', unit: 'percent'}];
+  return [...processes.entries()]
+    .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
+    .map(([processId, label], index) => ({
+      key: `cpu:${processId}`,
+      label: `${label} CPU %`,
+      unit: 'percent',
+      cssKey: 'cpu',
+      chartMetricKey: 'cpu',
+      processCpu: true,
+      processId,
+      color: jsDebugGraphProcessCpuColors[index % jsDebugGraphProcessCpuColors.length],
+    }));
 }
 
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
     const hasDataValues = buckets.map(bucket => debugGraphSeriesBucketHasData(bucket, def));
@@ -36159,7 +36242,7 @@ function debugGraphXAxisHtml(domain) {
 function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   const seriesKeys = new Set(group.series);
-  return seriesItems.filter(series => seriesKeys.has(series.clientMetric === true ? series.metricKey : series.key));
+  return seriesItems.filter(series => seriesKeys.has(series.chartMetricKey || (series.clientMetric === true ? series.metricKey : series.key)));
 }
 
 function debugGraphLegendSeriesItems(group, groupSeries) {

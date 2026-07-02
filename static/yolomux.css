@@ -3288,6 +3288,7 @@ body.theme-light .branch-link {
   --js-debug-agent-area-opacity: 0.7;
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
+  --js-debug-api-sse-total-series: var(--accent-lime);
   --js-debug-bad-connection-rgb: 220 38 38;
   --js-debug-agent-token-cyan: #00b7ff;
   --js-debug-agent-token-orange: #ff7a00;
@@ -3674,6 +3675,9 @@ body.theme-light .js-debug-graph-view {
 .js-debug-line--sse {
   stroke: var(--js-debug-sse-series);
 }
+.js-debug-line--apiSseTotal {
+  stroke: var(--js-debug-series-color, var(--js-debug-api-sse-total-series));
+}
 .js-debug-line--latency {
   stroke: var(--accent-gold);
 }
@@ -3721,7 +3725,7 @@ body.theme-light .js-debug-graph-view {
   fill: var(--accent-sky-strong);
 }
 .js-debug-line--cpu {
-  stroke: var(--active-accent-bright);
+  stroke: var(--js-debug-series-color, var(--active-accent-bright));
 }
 .js-debug-line--systemCpu {
   stroke: var(--bad);
@@ -3736,6 +3740,9 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-line--client-solid {
   --js-debug-client-line-dash: none;
+}
+.js-debug-line--client-dot {
+  --js-debug-client-line-dash: 1 3;
 }
 .js-debug-line--client-dash {
   --js-debug-client-line-dash: 6 4;
@@ -3780,6 +3787,9 @@ body.theme-light .js-debug-graph-view {
 .js-debug-legend-swatch--sse {
   color: var(--js-debug-sse-series);
 }
+.js-debug-legend-swatch--apiSseTotal {
+  color: var(--js-debug-api-sse-total-series);
+}
 .js-debug-legend-swatch--latency {
   color: var(--accent-gold);
 }
@@ -3812,7 +3822,7 @@ body.theme-light .js-debug-graph-view {
   background: repeating-linear-gradient(to right, currentColor 0 2px, transparent 2px 5px);
 }
 .js-debug-legend-swatch--cpu {
-  color: var(--active-accent-bright);
+  color: var(--js-debug-series-color, var(--active-accent-bright));
 }
 .js-debug-legend-swatch--systemCpu {
   color: var(--bad);

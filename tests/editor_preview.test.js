@@ -2436,7 +2436,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
     assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-api-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API line and legend share the API series color');
     assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE line and legend share the distinct SSE series color');
-    assert.ok(/\.js-debug-line--cpu\s*\{[\s\S]*stroke:\s*var\(--active-accent-bright\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--cpu\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(debugPaneCss), 'YO!stats yolomux.py CPU uses the active theme accent');
+    assert.ok(/\.js-debug-line--apiSseTotal\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--js-debug-api-sse-total-series\)\)/.test(debugPaneCss), 'YO!stats combined all-client API+SSE uses one shared distinct series color');
+    assert.ok(/\.js-debug-line--cpu\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--cpu\s*\{[\s\S]*color:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss), 'YO!stats per-server CPU lines and legends consume their shared series color');
     assert.ok(/\.js-debug-line--systemCpu\s*\{[\s\S]*stroke:\s*var\(--bad\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--systemCpu\s*\{[\s\S]*color:\s*var\(--bad\)/.test(debugPaneCss), 'YO!stats system CPU uses the red warning color');
     assert.ok(/\.js-debug-chart\s*\{[\s\S]*border:\s*1px solid color-mix\(in srgb, var\(--line\) 88%, transparent\)[\s\S]*border-radius:\s*6px/.test(debugPaneCss), 'YO!stats encloses each graph in a clear bordered chart box');
     assert.ok(/const jsDebugAgentStatusSeriesKeys = Object\.freeze\(\['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'\]\)/.test(debugPaneSource) && /const jsDebugAgentStatusLegendSeriesKeys = Object\.freeze\(\['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'\]\)/.test(debugPaneSource), 'YO!stats agent-status plot and legend order have named series owners');
@@ -2526,7 +2527,7 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
     assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
-    assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', ...DEBUG_AGENT_STATUS_SERIES, 'tokensPerAgent', 'cpu', 'systemCpu'], 'graph tracks API, SSE, latency, bandwidth, agent activity, agent tokens, process CPU, and system CPU series');
+    assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', ...DEBUG_AGENT_STATUS_SERIES, 'tokensPerAgent', 'systemCpu'], 'graph tracks the fixed API, SSE, latency, bandwidth, agent activity, agent token, and system CPU series while process CPU series are discovered dynamically');
     assert.ok(summary.pendingServerBuckets > 0, 'browser-observed API/SSE graph buckets are queued for server retention');
     api.recordJsDebugStatsSampleForTest({
       uptime_seconds: 3661,
@@ -2628,8 +2629,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title">Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
     assert.ok(html.includes('API (this client)') && html.includes('Client latency (this client)'), 'solid client series identify the current browser in the legend');
     assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-line="solid"/, 'the current browser uses a solid API line');
-    assert.match(html, /data-js-debug-series="client:all-clients-total:api"[^>]*data-js-debug-client-line="dash"/, 'all browsers share one dashed total API line');
-    assert.match(html, /data-js-debug-series="client:all-clients-total:sse"[^>]*data-js-debug-client-line="dash"/, 'all browsers share one dashed total SSE line');
+    assert.match(html, /data-js-debug-series="client:all-clients-total:apiSseTotal"[^>]*data-js-debug-client-line="dot"/, 'all browsers share one dotted combined API+SSE total line');
+    assert.equal(html.includes('client:all-clients-total:api"') || html.includes('client:all-clients-total:sse"'), false, 'separate all-client API and SSE total lines are removed');
     assert.match(html, /data-js-debug-series="client:other-clients-average:latency"[^>]*data-js-debug-client-line="dash"/, 'other browsers share one dashed average latency line');
     assert.match(html, /data-js-debug-series="client:other-clients-average:bandwidth"[^>]*data-js-debug-client-line="dash"/, 'other browsers share one dashed average bandwidth line');
     assert.equal(/data-js-debug-series="client:client-(?:alpha|beta|gamma):/.test(html), false, 'individual peer lines are not rendered');
@@ -2881,7 +2882,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-line--client\s*\{[\s\S]*stroke-dasharray:\s*var\(--js-debug-client-line-dash, none\)/.test(debugPaneCss), 'client identity overrides the smoothing default through one shared line-pattern token');
   });
 
-  test('YO!stats graph totals API and SSE while averaging peer latency and bandwidth', () => {
+  test('YO!stats graph combines all-client API and SSE while averaging peer latency and bandwidth', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     const thisClientId = api.jsDebugStatsClientIdForRequestForTest();
@@ -2908,17 +2909,18 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphScaleForTest(1);
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
     const peerSeries = clientSeries.filter(series => series.clientAggregate === 'otherClientsAverage');
-    const totalSeries = clientSeries.filter(series => series.clientAggregate === 'allClientsTotal');
+    const totalSeries = clientSeries.filter(series => series.clientAggregate === 'allClientsApiSseTotal');
     assert.equal(peerSeries.length, 2, 'latency and bandwidth each have one peer-average series');
-    assert.equal(totalSeries.length, 2, 'API and SSE each have one all-client total series');
+    assert.equal(totalSeries.length, 1, 'API and SSE share one all-client total series');
     assert.equal(clientSeries.filter(series => series.metricKey === 'latency').length, 2, 'latency has only this-client and peer-average series');
     const current = metricKey => clientSeries.find(series => series.metricKey === metricKey && !series.clientAggregate);
     const peers = metricKey => peerSeries.find(series => series.metricKey === metricKey);
     assert.equal(current('latency').values.at(-1), 10, 'current-client latency remains independent');
     assert.equal(peers('latency').values.at(-1), 25, 'peer latency equally averages peer client averages with samples');
     assert.ok(Math.abs(peers('bandwidth').values.at(-1) - (400 / 3)) < 1e-9, 'peer bandwidth average includes zero-valued peer records');
-    assert.equal(totalSeries.find(series => series.metricKey === 'api').values.at(-1), 14, 'API sums this client and every peer, including zeros');
-    assert.equal(totalSeries.find(series => series.metricKey === 'sse').values.at(-1), 6, 'SSE sums this client and every peer, including zeros');
+    assert.equal(totalSeries[0].values.at(-1), 20, 'combined API+SSE sums this client and every peer, including zeros');
+    assert.equal(totalSeries[0].clientLinePattern, 'dot', 'the combined all-client total uses the dotted line pattern');
+    assert.equal(totalSeries[0].color, 'var(--js-debug-api-sse-total-series)', 'the combined total owns a distinct shared color token');
   });
 
   test('YO!stats graph omits the peer average when no other client exists', () => {
@@ -2932,6 +2934,40 @@ async function runEditorPreviewSuite() {
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
     assert.equal(clientSeries.some(series => series.clientAggregate === 'otherClientsAverage'), false, 'empty peer averages are not rendered');
     assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the legend does not advertise an unavailable peer average');
+  });
+
+  test('YO!stats graph renders one persisted CPU series per yolomux server', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 74,
+      records: [{
+        start: Math.floor((now - 500) / 1000),
+        duration: 1,
+        sequence: 74,
+        system_cpu_total_percent: 40,
+        system_cpu_count: 1,
+        servers: {
+          'port:8001': {label: 'yolomux.py :8001', cpu_total_percent: 11, cpu_count: 1},
+          'port:8002': {label: 'yolomux.py :8002', cpu_total_percent: 22, cpu_count: 1},
+          'port:8003': {label: 'yolomux.py :8003', cpu_total_percent: 33, cpu_count: 1},
+        },
+      }],
+    });
+    const cpuSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.processCpu === true);
+    assert.deepStrictEqual([...cpuSeries.map(series => series.label)], [
+      'yolomux.py :8001 CPU %',
+      'yolomux.py :8002 CPU %',
+      'yolomux.py :8003 CPU %',
+    ], 'CPU series are stable and ordered by server label');
+    assert.deepStrictEqual([...cpuSeries.map(series => series.values.at(-1))], [11, 22, 33], 'each server keeps its own CPU samples');
+    assert.equal(new Set(cpuSeries.map(series => series.color)).size, 3, 'server CPU lines use distinct colors from the shared palette');
+    const html = api.debugPanelHtmlForTest();
+    for (const port of ['8001', '8002', '8003']) {
+      assert.ok(html.includes(`data-js-debug-series="cpu:port:${port}"`) && html.includes(`yolomux.py :${port} CPU %`), `CPU chart renders server ${port}`);
+    }
+    assert.ok(html.includes('system avg CPU %'), 'one system CPU series remains beside all process series');
   });
 
   test('YO!stats graph renders server-shared agent activity and token area charts', () => {
