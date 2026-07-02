@@ -4474,8 +4474,8 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
     assert result["active"] is True, result
     assert result["session"] == "1", result
     assert result["statusDot"] is True, result
-    assert result["statusDotPulseMin"] == "0.5", result
-    assert result["statusDotKeyframeOpacities"] == ["0.5", "1", "0.5"], result
+    assert result["statusDotPulseMin"] == "0.16", result
+    assert result["statusDotKeyframeOpacities"] == ["0.16", "1", "0.16"], result
     assert result["errors"] == [], result
     assert result["rejections"] == [], result
 

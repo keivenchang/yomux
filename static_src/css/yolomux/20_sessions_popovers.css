@@ -289,11 +289,6 @@
 .session-agent-activity-marker .agent-window-status-dot.status-indicator--attention.heartbeat-pulse {
   animation-name: agent-status-opacity-pulse;
 }
-/* A full-green parent circle represents uninterrupted working. Keep it visibly present between
-   pulses; mixed-color parent circles and per-window play/stop/pause glyphs retain the shared range. */
-.session-agent-activity-marker .agent-window-status-dot.status-indicator--working:not(.agent-window-status-dot--segmented) {
-  --agent-status-pulse-min-opacity: var(--agent-status-opacity-subtle-min);
-}
 /* Agent status = a static AI symbol followed by a separate filled status ball:
    [symbol][ball]. Activity is communicated by opacity, never glow. The active/current state is the
    only status that animates the symbol itself. */
