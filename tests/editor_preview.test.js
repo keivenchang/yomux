@@ -6807,7 +6807,8 @@ async function runEditorPreviewSuite() {
     // A language switch must repaint the Finder's static toolbar chrome, not just panel bodies — so
     // rerenderForLocale rebuilds the Finder panel from source (fixes stale prev-locale toolbar labels).
     assert.ok(/function rerenderForLocale[\s\S]*?relocalizeFileExplorerPanels\(\)/.test(rtlSrc), 'rerenderForLocale rebuilds the Finder toolbar chrome on a language switch');
-    assert.ok(/function relocalizeFileExplorerPanels\(\)[\s\S]*?removePanelForItem\(fileExplorerItemId\)[\s\S]*?renderPanels\(/.test(rtlSrc), 'relocalizeFileExplorerPanels evicts then rebuilds the Finder panel from its single source of truth');
+    assert.ok(/function relocalizeFileExplorerPanels\(\)[\s\S]*?removePanelForItem\(fileExplorerItemId\)[\s\S]*?dockviewRemountPanel\(fileExplorerItemId\)[\s\S]*?renderPanels\(/.test(rtlSrc), 'relocalizeFileExplorerPanels evicts then remounts the Finder panel through its shared renderer');
+    assert.ok(/function dockviewRemountPanel\(item\)[\s\S]*?getPanel\?\.\(item\)[\s\S]*?updateParameters/.test(rtlSrc), 'Dockview panel replacement reuses the registered renderer update path when the layout signature is unchanged');
     const rtlCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.equal(/(^|[^-])(margin|padding|border)-(left|right):/m.test(rtlCss.replace(/[a-z-]*-(left|right)-radius/g, '')), false, 'Phase 2: flow-spacing CSS uses logical (inline) properties, not physical left/right, so RTL mirrors');
     assert.ok(rtlCss.includes('margin-inline-start:') && rtlCss.includes('padding-inline-start:'), 'Phase 2: the CSS uses logical inline properties');

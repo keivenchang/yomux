@@ -4324,6 +4324,48 @@ def test_dockview_finder_drop_previews_are_bottom_only_and_size_gated(browser, t
     assert too_small["rootPreview"] is False, too_small
 
 
+def test_dockview_language_switch_remounts_finder_content(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@28(left,slot1)&tabs=left:files;slot1:1",
+        sessions=["1"],
+        grid_width=1000,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const before = panelNodes.get(fileExplorerItemId);
+          i18nSetCatalogForTest('finder-test', {});
+          await applyLocale('finder-test');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const after = panelNodes.get(fileExplorerItemId);
+          const group = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview');
+          const mounted = group?.querySelector('.dockview-panel-content > .file-explorer-panel');
+          done({
+            replaced: Boolean(before && after && before !== after),
+            mapped: after === mounted,
+            connected: after?.isConnected === true,
+            toolbar: Boolean(mounted?.querySelector('.file-explorer-toolbar')),
+            tree: Boolean(mounted?.querySelector('.file-explorer-tree-panel')),
+            childCount: mounted?.childElementCount || 0,
+          });
+        })().catch(error => done({error: String(error)}));
+        """
+    )
+    assert result == {
+        "replaced": True,
+        "mapped": True,
+        "connected": True,
+        "toolbar": True,
+        "tree": True,
+        "childCount": 2,
+    }
+
+
 def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,

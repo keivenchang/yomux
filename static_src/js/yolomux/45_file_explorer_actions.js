@@ -1191,7 +1191,8 @@ function removePanelForItem(item) {
 function relocalizeFileExplorerPanels() {
   if (!panelNodes.has(fileExplorerItemId)) return;
   removePanelForItem(fileExplorerItemId);
-  renderPanels(activePaneItems());
+  const remounted = typeof dockviewRemountPanel === 'function' && dockviewRemountPanel(fileExplorerItemId);
+  if (!remounted) renderPanels(activePaneItems());
   refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   renderFileExplorerQuickAccessControls();
 }

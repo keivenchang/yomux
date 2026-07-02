@@ -1694,6 +1694,23 @@ function dockviewSyncMountedPanels() {
   updatePanelInactiveOverlays();
 }
 
+// Re-run the existing Dockview renderer's shared mount path after a cached panel is evicted.
+// A normal renderPanels() call cannot do this when the layout signature is unchanged: Dockview keeps
+// its component instance, so its content stays empty until updateParameters tells that renderer to
+// resolve the panel from panelNodes again.
+function dockviewRemountPanel(item) {
+  if (!dockviewLayoutActive()) return false;
+  const dockviewPanel = dockviewLayoutState.api?.getPanel?.(item);
+  const panelApi = dockviewPanel?.api;
+  if (typeof panelApi?.updateParameters !== 'function') return false;
+  panelApi.updateParameters({
+    ...(typeof panelApi.getParameters === 'function' ? panelApi.getParameters() : {}),
+    item,
+    locale: typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : '',
+  });
+  return panelNodes.get(item)?.isConnected === true;
+}
+
 function hideDockviewInnerPaneTabs(panel) {
   if (!panel || !dockviewLayoutEnabled()) return false;
   panel.classList.remove('dockview-inner-head-collapsed');
