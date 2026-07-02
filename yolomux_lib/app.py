@@ -8002,6 +8002,12 @@ class TmuxWebtermApp:
         }
 
     def tabber_activity_source_signature(self, session_scope: Any = "configured") -> str:
+        # Acknowledgements change agent-window visibility without changing the process or
+        # transcript identity below. Fold the durable revision into this cache key so every
+        # server stops serving an earlier unacknowledged Tabber snapshot immediately.
+        self.merge_shared_attention_acks()
+        with self.client_watch_lock:
+            attention_ack_rev = self.client_watch_attention_ack_rev
         session_names, _scope_errors, scope = self.activity_session_names(session_scope)
         sessions, _errors = discover_sessions(session_names)
         rows = []
@@ -8016,7 +8022,7 @@ class TmuxWebtermApp:
                 selected_path,
                 tuple((agent.kind or "", agent.cwd or "", agent.transcript or "", agent.session_id or "") for agent in info.agents),
             ))
-        key_text = self.client_event_payload_signature({"scope": scope, "sessions": rows})
+        key_text = self.client_event_payload_signature({"scope": scope, "sessions": rows, "attention_ack_rev": attention_ack_rev})
         return hashlib.sha256(key_text.encode("utf-8")).hexdigest()
 
     def tabber_activity_cache_disk_path(self, hours: float, source_signature: str = "") -> tuple[Path, str]:

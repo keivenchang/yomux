@@ -1440,6 +1440,16 @@ async function runEditorPreviewSuite() {
     ]}, null, false);
     assert.ok(/agent-window-status-dot[^>]*status-indicator--attention/.test(mergedAttentionWindowBar), 'an unacknowledged captured ASK beats a newer idle activity snapshot in its matching sub-window');
     assert.ok(/session-agent-activity-marker[\s\S]*status-indicator--attention/.test(mergedAttentionParentTab), 'the same unacknowledged ASK reaches the parent Tab through the shared merged row');
+    api.setAutoApproveStateForTest('1', {screen: {key: 'approval'}, agent_windows: [
+      {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', attention_key: 'shared-acknowledged-attention', attention_acknowledged: true, observed_ts: 100},
+    ]});
+    api.setTabberActivityForTest({agent_windows: {'1': [
+      {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', attention_key: 'shared-acknowledged-attention', attention_acknowledged: false, observed_ts: 200},
+    ]}});
+    const sharedAcknowledgedRows = api.sessionAgentWindowStatusPayloadsForTest('1', {panes: [{window: '2', window_name: 'codex', process_label: 'codex', window_active: true, active: true}]});
+    assert.equal(sharedAcknowledgedRows.find(row => row.kind === 'codex' && row.window_index === 2)?.attention_acknowledged, true, 'a fresh shared acknowledgement beats the stale unacknowledged Tabber row for the same prompt');
+    assert.equal(/status-indicator--attention/.test(api.tmuxWindowBarHtml('1', {panes: [{window: '2', window_name: 'codex', process_label: 'codex', window_active: true, active: true}]})), false, 'the acknowledged prompt clears the red Tab marker without waiting for Tabber cache expiry');
+    api.setTabberActivityForTest({});
     const repeatedAskKey = '8001:2:repeat-ask';
     const repeatedAskPayload = {agent_windows: [
       {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', screen_text: 'Would you like to run the following command?', attention_key: repeatedAskKey, attention_acknowledged: false},

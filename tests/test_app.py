@@ -4734,7 +4734,7 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
     assert tabber_signature == hashlib.sha256(b"encoded-3").hexdigest()
     assert calls[0] == ("payload", {"session": "5"})
     assert calls[1] == {"files": [{"path": "same.py"}]}
-    assert calls[2] == {"scope": "configured", "sessions": [("5", None)]}
+    assert calls[2] == {"scope": "configured", "sessions": [("5", None)], "attention_ack_rev": 1}
 
 
 def test_update_client_watch_roots_filters_and_expires(monkeypatch):

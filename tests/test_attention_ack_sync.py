@@ -51,6 +51,19 @@ def test_attention_ack_visible_to_second_instance(monkeypatch, tmp_path, make_ap
     assert second.attention_acknowledged(key) is True
 
 
+def test_attention_ack_revision_invalidates_tabber_activity_cache_key(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    monkeypatch.setattr(app, "activity_session_names", lambda _scope: (["1"], [], "configured"))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({}, []))
+    before = app.tabber_activity_source_signature()
+    key = app.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", "tabber-cache")
+
+    app.acknowledge_attention({"keys": [key]})
+
+    assert app.tabber_activity_source_signature() != before
+
+
 def test_auto_approve_read_merges_peer_ack_without_event_subscriber(monkeypatch, tmp_path, make_app):
     patch_shared_path(monkeypatch, tmp_path)
     first = make_app()

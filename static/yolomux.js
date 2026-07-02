@@ -16510,8 +16510,18 @@ function agentWindowPayloadHasVisibleAttention(agent) {
   return agentWindowIsAttentionState(agentWindowStateKey(agent?.state)) && agent?.attention_acknowledged !== true;
 }
 
+function agentWindowPayloadAcknowledgesSameStatus(candidate, current) {
+  const attentionKey = String(candidate?.attention_key || '');
+  if (candidate?.attention_acknowledged === true && attentionKey && attentionKey === String(current?.attention_key || '')) return true;
+  const cooldownKey = String(candidate?.cooldown_attention_key || '');
+  return candidate?.cooldown_acknowledged === true && cooldownKey && cooldownKey === String(current?.cooldown_attention_key || '');
+}
+
 function agentWindowPayloadIsPreferred(candidate, current) {
   if (!current) return true;
+  // The shared acknowledgement identifies one exact prompt/transition. Its fresh explicit true
+  // must beat an older Tabber cache row for that same key, while a new key still re-arms normally.
+  if (agentWindowPayloadAcknowledgesSameStatus(candidate, current)) return true;
   const candidateAttention = agentWindowPayloadHasVisibleAttention(candidate);
   const currentAttention = agentWindowPayloadHasVisibleAttention(current);
   // The parent Tab and its child button must not disagree because a later activity poll saw the
