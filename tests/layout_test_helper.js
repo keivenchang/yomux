@@ -1812,7 +1812,12 @@ globalThis.__layoutTestApi = {
   fileExplorerTreeSortSelectHtmlForTest: fileExplorerTreeSortSelectHtml,
   fileExplorerModeSwitcherHtml,
   normalizeFileExplorerMode,
-  setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
+  setTabberActivityForTest(payload) {
+    tabberActivityPayload = payload;
+    tabberActivityRequestGeneration = 0;
+    tabberActivityAppliedRequestGeneration = 0;
+  },
+  applyTabberActivityPayloadForTest: applyTabberActivityPayload,
   setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
   setTabberSessionFilesForTest(session, files) {
     const state = tabberSessionFilesState(session);

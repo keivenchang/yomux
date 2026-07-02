@@ -626,6 +626,8 @@ const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStora
 let tabberActivityPayload = {activity: {}, agents: []};
 let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
+let tabberActivityRequestGeneration = 0;
+let tabberActivityAppliedRequestGeneration = 0;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
@@ -15150,17 +15152,42 @@ function tabberActivityVisibleConsumer() {
   return fileExplorerMode === 'tabber' && document.visibilityState !== 'hidden';
 }
 
+function tabberActivityPayloadHasUsefulData(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (Object.keys(payload.activity && typeof payload.activity === 'object' ? payload.activity : {}).length) return true;
+  if (Array.isArray(payload.agents) && payload.agents.length) return true;
+  return Object.keys(payload.agent_windows && typeof payload.agent_windows === 'object' ? payload.agent_windows : {}).length > 0;
+}
+
+function tabberActivityPayloadIsRefreshPlaceholder(payload) {
+  return payload?.cache?.refreshing_elsewhere === true && !tabberActivityPayloadHasUsefulData(payload);
+}
+
+function applyTabberActivityPayload(payload, requestGeneration = 0) {
+  if (!payload || typeof payload !== 'object' || !payload.activity || typeof payload.activity !== 'object') return false;
+  const generation = Number(requestGeneration) || 0;
+  if (generation > 0 && generation < tabberActivityAppliedRequestGeneration) return false;
+  const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
+  if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
+  tabberActivityPayload = payload;
+  // A follower placeholder is not an authoritative snapshot. Let an older in-flight full response
+  // replace it, while an accepted full response prevents older requests from rolling data back.
+  if (!refreshPlaceholder && generation > tabberActivityAppliedRequestGeneration) {
+    tabberActivityAppliedRequestGeneration = generation;
+  }
+  return true;
+}
+
 async function fetchTabberActivity(options = {}) {
   const visible = options.visible !== undefined ? Boolean(options.visible) : tabberActivityVisibleConsumer();
   if (!visible && options.allowHidden !== true) return false;
+  const requestGeneration = ++tabberActivityRequestGeneration;
   try {
     const params = new URLSearchParams();
     params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
     params.set('visible', visible ? '1' : '0');
     const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
-    if (payload && typeof payload === 'object' && payload.activity && typeof payload.activity === 'object') {
-      tabberActivityPayload = payload;
-    }
+    applyTabberActivityPayload(payload, requestGeneration);
   } catch (_) {
     // keep the last snapshot; recency just goes stale until the next tick
   }

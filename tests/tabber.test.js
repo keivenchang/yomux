@@ -1303,6 +1303,49 @@ async function runTabberSuite() {
     assert.notEqual(claudeRow?.date, 'working for 1h 00m', 'working status does not replace the Tabber date column timestamp');
   });
 
+  test('Tabber preserves Ago timestamps across follower refresh placeholders', () => {
+    const api = loadYolomux('', ['4']);
+    api.setFileExplorerModeForTest('tabber');
+    api.setFileExplorerTreeDateModeForTest('date');
+    api.setTranscriptInfoForTest('4', {
+      panes: [
+        {window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', process_label_pid: 4100, command: 'claude', current_path: '/home/u/proj'},
+        {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', pid: 4200, command: 'bash', current_path: '/home/u'},
+      ],
+    });
+    api.setAutoApproveStateForTest('4', {agent_windows: [
+      {kind: 'claude', state: 'working', window_index: 0, window_name: 'claude', window_label: '0:claude', pid: 4100, active: true},
+    ]});
+    api.setTabberActivityForTest({
+      activity: {'4:1': {active_recency_ts: 3000}},
+      agents: [{session: '4', window: '0', agent_kind: 'claude', last_used_ts: 2000, sort_ts: 2000, running: true}],
+      agent_windows: {'4': [{window_index: 0}]},
+    });
+    const windowDates = () => Object.fromEntries(api.tabberRenderedRowsForTest()
+      .filter(row => row.type === 'window')
+      .map(row => [row.path, row.date]));
+    const originalDates = windowDates();
+    assert.equal(originalDates['/s_4/w_0'], api.sessionFileTimeText(2000), 'full snapshot shows the agent timestamp');
+    assert.equal(originalDates['/s_4/w_1'], api.sessionFileTimeText(3000), 'full snapshot shows the shell timestamp');
+
+    const placeholder = {activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: true}};
+    assert.equal(api.applyTabberActivityPayloadForTest(placeholder, 2), false, 'empty follower refresh is not authoritative over useful activity');
+    assert.deepEqual(windowDates(), originalDates, 'follower refresh cannot make several Tabber timestamps disappear');
+
+    const replacement = {
+      activity: {'4:1': {active_recency_ts: 5000}},
+      agents: [{session: '4', window: '0', agent_kind: 'claude', last_used_ts: 4000, sort_ts: 4000, running: true}],
+      agent_windows: {'4': [{window_index: 0}]},
+    };
+    assert.equal(api.applyTabberActivityPayloadForTest(replacement, 3), true, 'a complete newer snapshot replaces the current payload');
+    assert.deepEqual(windowDates(), {'/s_4/w_0': api.sessionFileTimeText(4000), '/s_4/w_1': api.sessionFileTimeText(5000)}, 'complete replacement updates both timestamps');
+    assert.equal(api.applyTabberActivityPayloadForTest({...replacement, activity: {'4:1': {active_recency_ts: 7000}}}, 1), false, 'an older overlapping request cannot roll back an accepted snapshot');
+    assert.equal(windowDates()['/s_4/w_1'], api.sessionFileTimeText(5000), 'stale response ordering leaves the accepted timestamp intact');
+
+    assert.equal(api.applyTabberActivityPayloadForTest({activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: false}}, 4), true, 'a genuine non-placeholder empty snapshot remains authoritative');
+    assert.deepEqual(windowDates(), {'/s_4/w_0': '', '/s_4/w_1': ''}, 'legitimate expiry can remove timestamps instead of retaining data forever');
+  });
+
   // DOIT.58 B1-B7: the Tabber (Finder pane's third mode) — source guards that rows route through the
   // shared row pipeline (no forked *RowHtml builder), plus a behavioral test of the tree assembly.
   test('t@tabber', () => {
