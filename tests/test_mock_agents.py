@@ -199,11 +199,22 @@ def cleanup_mockcase(tmp_path):
         socket_file.unlink()
 
 
-def visual_tmux_socket_path():
-    worker = re.sub(r"[^A-Za-z0-9_.-]", "-", os.environ.get("PYTEST_XDIST_WORKER", "main"))
-    socket_base = Path("/tmp") / f"yolomux-{VISUAL_TMUX_SESSION_PREFIX}-{os.getuid()}-{worker}"
+def visual_tmux_socket_path(tmp_path):
+    # A worker name is only unique inside one pytest invocation. Full gates and
+    # focused runs can overlap, so their same-named workers must not share a tmux
+    # server whose teardown can blank the other test's pane.
+    socket_base = tmp_path / "visual-tmux"
     socket_base.mkdir(mode=0o700, parents=True, exist_ok=True)
     return socket_base / "s"
+
+
+def test_visual_tmux_socket_path_is_scoped_to_each_test_directory(tmp_path):
+    first = visual_tmux_socket_path(tmp_path / "first")
+    second = visual_tmux_socket_path(tmp_path / "second")
+
+    assert first != second
+    assert first.parent == tmp_path / "first" / "visual-tmux"
+    assert second.parent == tmp_path / "second" / "visual-tmux"
 
 
 def cleanup_visual_test_sessions(tmux_binary, socket_path):
@@ -281,11 +292,11 @@ class VisualTmuxHarness:
 
 
 @pytest.fixture
-def visual_tmux(monkeypatch):
+def visual_tmux(monkeypatch, tmp_path):
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_path = visual_tmux_socket_path()
+    socket_path = visual_tmux_socket_path(tmp_path)
     cleanup_visual_test_sessions(tmux_binary, socket_path)
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     harness = VisualTmuxHarness(tmux_binary, socket_path)
