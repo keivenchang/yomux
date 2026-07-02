@@ -2445,8 +2445,7 @@ async function runEditorPreviewSuite() {
       assert.ok(new RegExp(`\\.js-debug-area--${series}\\s*\\{[\\s\\S]*opacity:\\s*0\\.7`).test(debugPaneCss), `YO!stats ${series} stacked area uses a 70% fill`);
     }
     assert.ok(/\.js-debug-bar--agentToken\s*\{[\s\S]*fill:\s*var\(--js-debug-series-color/.test(debugPaneCss), 'YO!stats agent token bars use the per-agent series color');
-    assert.ok(/\.js-debug-chart--legend-footer\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(122px, 1fr\) auto/.test(debugPaneCss), 'YO!stats reserves a footer legend row outside the plot');
-    assert.ok(/\.js-debug-chart-legend-footer\s*\{[\s\S]*max-height:\s*44px[\s\S]*overflow:\s*auto/.test(debugPaneCss), 'YO!stats token legends scroll instead of covering the chart');
+    assert.equal(debugPaneCss.includes('.js-debug-chart--legend-footer') || debugPaneCss.includes('.js-debug-chart-legend-footer'), false, 'YO!stats has one shared header legend layout for every chart');
     assert.ok(/\.js-debug-y-axis span\s*\{[\s\S]*position:\s*absolute[\s\S]*top:\s*var\(--js-debug-axis-y/.test(debugPaneCss), 'YO!stats Y-axis labels use chart-coordinate positioning');
     assert.ok(/\.js-debug-grid-line\s*\{[\s\S]*stroke-width:\s*0\.4/.test(debugPaneCss), 'YO!stats grid guide lines are very thin');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*#3f4754/.test(debugPaneCss), 'YO!stats idle agent status uses a visible dark gray token');
@@ -2626,11 +2625,14 @@ async function runEditorPreviewSuite() {
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range slider stops');
     assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart headers carry per-second units');
+    assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title">Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
     assert.ok(html.includes('API (this client)') && html.includes('Client latency (this client)'), 'solid client series identify the current browser in the legend');
     assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-line="solid"/, 'the current browser uses a solid API line');
-    assert.match(html, /data-js-debug-series="client:client-alpha:api"[^>]*data-js-debug-client-line="dot"/, 'the first other browser uses a dotted API line');
-    assert.match(html, /data-js-debug-series="client:client-beta:latency"[^>]*data-js-debug-client-line="dash"/, 'the second other browser uses a dashed latency line');
-    assert.match(html, /data-js-debug-series="client:client-gamma:bandwidth"[^>]*data-js-debug-client-line="dash-dot"/, 'the third other browser uses a dash-dot bandwidth line');
+    assert.match(html, /data-js-debug-series="client:all-clients-total:api"[^>]*data-js-debug-client-line="dash"/, 'all browsers share one dashed total API line');
+    assert.match(html, /data-js-debug-series="client:all-clients-total:sse"[^>]*data-js-debug-client-line="dash"/, 'all browsers share one dashed total SSE line');
+    assert.match(html, /data-js-debug-series="client:other-clients-average:latency"[^>]*data-js-debug-client-line="dash"/, 'other browsers share one dashed average latency line');
+    assert.match(html, /data-js-debug-series="client:other-clients-average:bandwidth"[^>]*data-js-debug-client-line="dash"/, 'other browsers share one dashed average bandwidth line');
+    assert.equal(/data-js-debug-series="client:client-(?:alpha|beta|gamma):/.test(html), false, 'individual peer lines are not rendered');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>[0-9.]+(?:B|kB|MB)</.test(html), 'bandwidth chart Y axis uses compact byte labels');
@@ -2680,7 +2682,7 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphRangeForTest(86400);
     api.debugGraphApplyServerHistoryForTest({
       sequence: 40,
-      records: [],
+      records: [{start: Math.floor(now / 1000), duration: 1, sequence: 40, cpu_total_percent: 1, cpu_count: 1}],
       agent_token_history: {
         sequence: 40,
         resolution_seconds: 300,
@@ -2698,6 +2700,7 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.agentTokenResolutionSeconds, 300, '24-hour token history retains the server-selected five-minute resolution');
     assert.equal(summary.agentTokenBuckets, 12, 'wide token history stores only server-aggregated points');
     assert.equal(api.debugGraphAgentTokenDisplayBucketsForTest(now).length, 12, 'Agent tokens/min chart reads the downsampled server point series');
+    assert.ok(/data-js-debug-displayed-token-sum="1200"[^>]*>\(sum of tokens from displayed = 1\.2k\)<\/span>/.test(api.debugPanelHtmlForTest()), 'displayed token sum adds all retained token deltas and uses the shared compact formatter');
   });
 
   test('YO!stats token rates use the sampled elapsed time rather than the selected history bucket width', () => {
@@ -2878,6 +2881,59 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-line--client\s*\{[\s\S]*stroke-dasharray:\s*var\(--js-debug-client-line-dash, none\)/.test(debugPaneCss), 'client identity overrides the smoothing default through one shared line-pattern token');
   });
 
+  test('YO!stats graph totals API and SSE while averaging peer latency and bandwidth', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const thisClientId = api.jsDebugStatsClientIdForRequestForTest();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 72,
+      records: [{
+        start: Math.floor((now - 500) / 1000),
+        duration: 1,
+        sequence: 72,
+        api_count: 8,
+        sse_count: 4,
+        latency_total_ms: 10,
+        latency_count: 1,
+        bandwidth_bytes: 500,
+        clients: {
+          [thisClientId]: {api_count: 8, sse_count: 4, latency_total_ms: 10, latency_count: 1, bandwidth_bytes: 500},
+          'client-alpha': {api_count: 2, sse_count: 0, latency_total_ms: 20, latency_count: 1, bandwidth_bytes: 100},
+          'client-beta': {api_count: 4, sse_count: 2, latency_total_ms: 90, latency_count: 3, bandwidth_bytes: 300},
+          'client-gamma': {api_count: 0, sse_count: 0, latency_total_ms: 0, latency_count: 0, bandwidth_bytes: 0},
+        },
+      }],
+    });
+    api.setDebugGraphScaleForTest(1);
+    const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
+    const peerSeries = clientSeries.filter(series => series.clientAggregate === 'otherClientsAverage');
+    const totalSeries = clientSeries.filter(series => series.clientAggregate === 'allClientsTotal');
+    assert.equal(peerSeries.length, 2, 'latency and bandwidth each have one peer-average series');
+    assert.equal(totalSeries.length, 2, 'API and SSE each have one all-client total series');
+    assert.equal(clientSeries.filter(series => series.metricKey === 'latency').length, 2, 'latency has only this-client and peer-average series');
+    const current = metricKey => clientSeries.find(series => series.metricKey === metricKey && !series.clientAggregate);
+    const peers = metricKey => peerSeries.find(series => series.metricKey === metricKey);
+    assert.equal(current('latency').values.at(-1), 10, 'current-client latency remains independent');
+    assert.equal(peers('latency').values.at(-1), 25, 'peer latency equally averages peer client averages with samples');
+    assert.ok(Math.abs(peers('bandwidth').values.at(-1) - (400 / 3)) < 1e-9, 'peer bandwidth average includes zero-valued peer records');
+    assert.equal(totalSeries.find(series => series.metricKey === 'api').values.at(-1), 14, 'API sums this client and every peer, including zeros');
+    assert.equal(totalSeries.find(series => series.metricKey === 'sse').values.at(-1), 6, 'SSE sums this client and every peer, including zeros');
+  });
+
+  test('YO!stats graph omits the peer average when no other client exists', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 73,
+      records: [{start: Math.floor((now - 500) / 1000), duration: 1, sequence: 73, latency_total_ms: 12, latency_count: 1}],
+    });
+    const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
+    assert.equal(clientSeries.some(series => series.clientAggregate === 'otherClientsAverage'), false, 'empty peer averages are not rendered');
+    assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the legend does not advertise an unavailable peer average');
+  });
+
   test('YO!stats graph renders server-shared agent activity and token area charts', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1', '2']);
     const now = Date.now();
@@ -2931,10 +2987,11 @@ async function runEditorPreviewSuite() {
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
     assert.ok(html.includes('data-js-debug-chart="agentTokens"') && html.includes('Agent tokens/min'), 'YO!stats renders the optional agent token-rate chart');
-    assert.ok(/class="js-debug-chart js-debug-chart--legend-footer js-debug-chart--token-agents" data-js-debug-chart="agentTokens" data-js-debug-chart-kind="bar" data-js-debug-chart-bucket-seconds="60" data-js-debug-chart-stacked="true"/.test(html), 'agent token chart is marked as stacked one-minute bars with a footer legend');
+    assert.ok(/data-js-debug-displayed-token-sum="210"[^>]*>\(sum of tokens from displayed = 210\)<\/span>/.test(html), 'Agent tokens/min header sums the exact token deltas in displayed buckets');
+    assert.ok(/class="js-debug-chart js-debug-chart--token-agents" data-js-debug-chart="agentTokens" data-js-debug-chart-kind="bar" data-js-debug-chart-bucket-seconds="60" data-js-debug-chart-stacked="true"/.test(html), 'agent token chart is marked as stacked one-minute bars');
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
-    assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-body') < agentTokenChartHtml.indexOf('js-debug-chart-legend-footer'), 'agent token legend renders after the plot body, not over the chart');
-    assert.equal(agentTokenChartHtml.slice(0, agentTokenChartHtml.indexOf('js-debug-chart-body')).includes('data-js-debug-legend="agentToken:'), false, 'agent token header does not contain the busy per-agent legend');
+    assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-title') < agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:'), 'agent token legend renders below the title');
+    assert.ok(agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:') < agentTokenChartHtml.indexOf('js-debug-chart-body'), 'agent token legend uses the shared position above the plot body');
     assert.ok(/data-js-debug-axis-max="activity"[^>]*>3</.test(html), 'agent status Y axis uses the exact stacked attention+working+Transition total');
     for (const value of [3, 2, 1, 0]) {
       assert.ok(html.includes(`data-js-debug-axis-tick="activity" data-js-debug-axis-value="${value}"`), `activity chart Y axis shows whole-number tick ${value}`);
@@ -3005,6 +3062,7 @@ async function runEditorPreviewSuite() {
     const noTokenHtml = noTokenApi.debugPanelHtmlForTest();
     assert.ok(noTokenHtml.includes('data-js-debug-chart="activity"'), 'activity chart renders without token counters');
     assert.ok(noTokenHtml.includes('data-js-debug-chart="agentTokens"'), 'token chart renders without numeric token counters');
+    assert.ok(/data-js-debug-displayed-token-sum="0"[^>]*>\(sum of tokens from displayed = 0\)<\/span>/.test(noTokenHtml), 'empty Agent tokens/min charts report a zero displayed sum');
   });
 
   test('YO!stats aligns server activity and latency samples by timestamp', () => {
@@ -3195,8 +3253,17 @@ async function runEditorPreviewSuite() {
 	    assert.ok(/function recordSseDebugEvent\(eventType, envelope = \{\}, rawEvent = null\) \{[\s\S]*if \(!jsDebugCollectionEnabled\) return;[\s\S]*const payload = clientEventPayloadFromEnvelope\(envelope\)/.test(terminalBootSource), 'SSE debug recording returns before payload extraction when collection is disabled');
 	  });
 
-  await testAsync('YO!stats stats polling is gated on active Debug pane visibility', async () => {
-    const api = loadYolomux('?debug=1', ['1']);
+  await testAsync('YO!stats gates polling but uploads client history outside the active pane', async () => {
+    let nextTimerId = 0;
+    const timers = [];
+    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, ms) {
+        const timer = {id: ++nextTimerId, callback, ms};
+        timers.push(timer);
+        return timer.id;
+      },
+      clearTimeout() {},
+    });
     const requests = [];
     await flushAsyncWork();
     api.setFetchForTest((url, options = {}) => {
@@ -3207,10 +3274,18 @@ async function runEditorPreviewSuite() {
     assert.equal(api.jsDebugStatsPanelVisibleForTest(), false, 'stats polling stays off when the Debug tab is not active');
 
     await api.pollJsDebugStatsSampleForTest();
+    const timersBeforeEvent = timers.length;
     api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 1});
-    await api.flushJsDebugStatsHistoryForTest();
+    const historyTimer = timers.slice(timersBeforeEvent).find(timer => timer.ms === 30000);
+    assert.ok(historyTimer, 'inactive instrumentation schedules the normal thirty-second history upload');
+    historyTimer.callback();
+    await flushAsyncWork();
+    await flushAsyncWork();
 
-    assert.equal(requests.length, 0, 'inactive Debug instrumentation does not call stats-sample or stats-history');
+    assert.equal(requests.some(request => request.url.startsWith('/api/stats-sample?')), false, 'inactive Debug instrumentation does not poll server-global stats');
+    const historyRequest = requests.find(request => request.url === '/api/stats-history');
+    assert.ok(historyRequest, 'inactive YO!stats still uploads pending client history');
+    assert.ok(JSON.parse(historyRequest.body).records.some(record => record.api_count === 1), 'inactive upload retains the recorded API bucket');
     assert.equal(api.jsDebugEventsForTest().length, 1, 'event capture remains available for later YO!stats inspection');
   });
 

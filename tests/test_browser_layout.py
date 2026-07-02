@@ -341,9 +341,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <path class="js-debug-line js-debug-line--cpu" d="M0 5L20 5"></path>
           <path class="js-debug-line js-debug-line--systemCpu" d="M0 7L20 7"></path>
           <path data-client-line="solid" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-solid" d="M0 8L20 8"></path>
-          <path data-client-line="dot" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" d="M0 9L20 9"></path>
           <path data-client-line="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" d="M0 10L20 10"></path>
-          <path data-client-line="dash-dot" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash-dot" d="M0 11L20 11"></path>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="cyan" style="--js-debug-series-color: var(--js-debug-agent-token-cyan)" x="0" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="orange" style="--js-debug-series-color: var(--js-debug-agent-token-orange)" x="2" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="magenta" style="--js-debug-series-color: var(--js-debug-agent-token-magenta)" x="4" y="9" width="1" height="1"></rect>
@@ -358,7 +356,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         <span class="js-debug-legend-swatch js-debug-legend-swatch--cpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--agentTokenTotal" style="--js-debug-series-color: var(--js-debug-agent-token-total)"></span>
-        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="dash-dot" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash-dot" x1="0" y1="2" x2="18" y2="2"></line></svg>
+        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="dash" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dash" x1="0" y1="2" x2="18" y2="2"></line></svg>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
@@ -404,8 +402,8 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               swatchWidth: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).width,
               swatchBackground: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).backgroundImage,
             },
-            clientLines: Object.fromEntries(['solid', 'dot', 'dash', 'dash-dot'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
-            clientLegend: getComputedStyle(document.querySelector('[data-client-legend="dash-dot"]')).strokeDasharray,
+            clientLines: Object.fromEntries(['solid', 'dash'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
+            clientLegend: getComputedStyle(document.querySelector('[data-client-legend="dash"]')).strokeDasharray,
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
           return values;
@@ -440,11 +438,50 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert "repeating-linear-gradient" in item["total"]["swatchBackground"], (theme, item)
         assert item["clientLines"] == {
             "solid": "none",
-            "dot": "1px, 3px",
             "dash": "6px, 4px",
-            "dash-dot": "6px, 3px, 1px, 3px",
         }, (theme, item)
-        assert item["clientLegend"] == item["clientLines"]["dash-dot"], (theme, item)
+        assert item["clientLegend"] == item["clientLines"]["dash"], (theme, item)
+
+
+def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tmp_path):
+    page = tmp_path / "debug-graph-full-title.html"
+    page.write_text(page_html("""
+      <section class="js-debug-chart" style="width:420px">
+        <div class="js-debug-chart-head">
+          <div class="js-debug-chart-heading-row">
+            <span id="latency-title" class="js-debug-chart-title">Client latency</span>
+          </div>
+          <div id="latency-legend" class="js-debug-legend">
+            <div class="js-debug-legend-item"><svg class="js-debug-legend-line"></svg><span>Client latency (this client)</span></div>
+            <div class="js-debug-legend-item"><svg class="js-debug-legend-line"></svg><span>Client latency (other clients avg)</span></div>
+          </div>
+        </div>
+        <div class="js-debug-chart-body"><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div>
+      </section>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const title = document.getElementById('latency-title');
+        const heading = title.closest('.js-debug-chart-heading-row').getBoundingClientRect();
+        const legend = document.getElementById('latency-legend').getBoundingClientRect();
+        const titleRect = title.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(title);
+        return {
+          text: title.textContent,
+          textOverflow: getComputedStyle(title).textOverflow,
+          textWidth: range.getBoundingClientRect().width,
+          titleWidth: titleRect.width,
+          headingBottom: heading.bottom,
+          legendTop: legend.top,
+        };
+        """
+    )
+    assert metrics["text"] == "Client latency", metrics
+    assert metrics["textOverflow"] != "ellipsis", metrics
+    assert metrics["textWidth"] <= metrics["titleWidth"] + 0.5, metrics
+    assert metrics["legendTop"] >= metrics["headingBottom"] - 0.5, metrics
 
 
 def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):

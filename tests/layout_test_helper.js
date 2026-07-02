@@ -855,6 +855,7 @@ globalThis.__layoutTestApi = {
   debugGraphAgentTokenDisplayBucketsForTest: debugGraphAgentTokenDisplayBuckets,
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
+  debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() { return {firstSampleReceived: jsDebugStatsFirstSampleReceived, inFlight: jsDebugStatsPollInFlight}; },
   startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
