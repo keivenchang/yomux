@@ -567,6 +567,7 @@ const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1500;
 const commandPaletteRecentKeyLimit = 100;
@@ -3976,7 +3977,7 @@ async function terminalReferenceProviderLinks(session, term, y) {
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
-const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 90;
+const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;
 
 function terminalFileReferenceViewportSignature(term) {
   return [
@@ -4123,9 +4124,16 @@ function renderTerminalFileReferenceUnderlinesMeasured(term, container, referenc
   return nodes.length;
 }
 
+function terminalFileReferenceUnderlineIsActive(session, container) {
+  return document.visibilityState !== 'hidden'
+    && itemIsActivePaneTab(session)
+    && terminalIsVisible(session, container);
+}
+
 function installTerminalFileReferenceUnderlines(session, term, container, options = {}) {
   if (!session || !term || !container) return null;
   const targetResolver = options.targetResolver || terminalFileReferenceTarget;
+  const isActive = typeof options.isActive === 'function' ? options.isActive : terminalFileReferenceUnderlineIsActive;
   const disposables = [];
   let disposed = false;
   let timer = 0;
@@ -4136,6 +4144,20 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   const existingReferenceTargets = new Map();
   let hoverKey = '';
 
+  const active = () => !disposed && Boolean(isActive(session, container));
+
+  const clearInactive = () => {
+    sequence += 1;
+    if (timer) clearTimeout(timer);
+    if (renderFrame) cancelAnimationFrame(renderFrame);
+    timer = 0;
+    renderFrame = 0;
+    existingReferenceKeys = new Set();
+    hoverKey = '';
+    lastRenderedViewportSignature = '';
+    return clearTerminalFileReferenceUnderlines(container);
+  };
+
   const setHoverKey = nextKey => {
     const normalizedKey = nextKey && existingReferenceKeys.has(nextKey) ? nextKey : '';
     if (normalizedKey === hoverKey) return;
@@ -4144,7 +4166,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 
   const updateHover = event => {
-    if (disposed) return;
+    if (!active()) return;
     const reference = terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
     setHoverKey(reference?.type === 'file' ? terminalFileReferenceKey(reference) : '');
   };
@@ -4152,6 +4174,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   const clearHover = () => setHoverKey('');
 
   const renderCached = () => {
+    if (!active()) return clearInactive();
     const existingRefs = [];
     for (const ref of terminalVisibleFileReferences(term)) {
       const key = terminalFileReferenceCacheKey(session, ref);
@@ -4167,6 +4190,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
 
   const refresh = async () => {
     if (disposed) return 0;
+    if (!active()) return clearInactive();
     if (timer) {
       clearTimeout(timer);
       timer = 0;
@@ -4184,6 +4208,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
       Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
     )));
     if (disposed || currentSequence !== sequence) return 0;
+    if (!active()) return clearInactive();
     const existingRefs = refs
       .map((ref, index) => {
         const cacheKey = terminalFileReferenceCacheKey(session, ref);
@@ -4204,16 +4229,23 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 
   const scheduleCachedRender = () => {
-    if (disposed) return;
+    if (!active()) {
+      clearInactive();
+      return;
+    }
     if (renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
       renderFrame = 0;
-      if (!disposed) renderCached();
+      if (active()) renderCached();
+      else clearInactive();
     });
   };
 
   const schedule = (scheduleOptions = {}) => {
-    if (disposed) return;
+    if (!active()) {
+      clearInactive();
+      return;
+    }
     const viewportSignature = terminalFileReferenceViewportSignature(term);
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
     const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
@@ -4221,7 +4253,8 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     if (!timer) {
       timer = setTimeout(() => {
         timer = 0;
-        refresh();
+        if (active()) refresh();
+        else clearInactive();
       }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
     }
   };
@@ -4914,19 +4947,40 @@ function terminalFileReferenceAbsolutePath(session, reference) {
 
 async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
+  const canReuse = options.fresh === false;
+  const cacheKey = terminalFileReferenceCacheKey(session, reference);
+  if (canReuse && terminalFileReferenceTargetCache.has(cacheKey)) {
+    const cached = terminalFileReferenceTargetCache.get(cacheKey);
+    setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
+    return cached;
+  }
   const fetchOptions = {
     user: options.user !== false,
-    fresh: options.fresh !== false,
+    fresh: !canReuse,
   };
-  for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
-    try {
-      const info = await fetchFilePathInfo(path, fetchOptions);
-      if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
-    } catch (_error) {
-      // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+  const targetPromise = (async () => {
+    for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
+      try {
+        const info = await fetchFilePathInfo(path, fetchOptions);
+        if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
+      } catch (_error) {
+        // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+      }
     }
+    return null;
+  })();
+  if (!canReuse) return targetPromise;
+  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, targetPromise, fileExplorerMemoryCacheLimit);
+  try {
+    const target = await targetPromise;
+    if (terminalFileReferenceTargetCache.get(cacheKey) === targetPromise) {
+      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, target, fileExplorerMemoryCacheLimit);
+    }
+    return target;
+  } catch (error) {
+    if (terminalFileReferenceTargetCache.get(cacheKey) === targetPromise) terminalFileReferenceTargetCache.delete(cacheKey);
+    throw error;
   }
-  return null;
 }
 
 function requestFileEditorLineTarget(item, line) {

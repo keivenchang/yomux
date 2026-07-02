@@ -566,6 +566,7 @@ const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1500;
 const commandPaletteRecentKeyLimit = 100;

@@ -5294,13 +5294,18 @@ async function runEditorPreviewSuite() {
     const providerStart = linkProviderSource.indexOf('function installTerminalLinkProvider');
     const providerEnd = linkProviderSource.indexOf('function terminalCellDimensions', providerStart);
     const providerSource = linkProviderSource.slice(providerStart, providerEnd);
+    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     assert.ok(/activate: \(\) => \{\}/.test(linkProviderSource), 'xterm link decorations have an explicit no-op left-click handler');
     assert.ok(/decorations: \{underline: true, pointerCursor: false\}/.test(linkProviderSource), 'terminal URL/file references are visibly underlined without showing a left-click pointer affordance');
     assert.ok(linkProviderSource.includes('function installTerminalFileReferenceUnderlines'), 'existing terminal file refs have a persistent underline overlay owner');
     assert.ok(/function terminalFileReferenceViewportSignature\(term\)/.test(linkProviderSource), 'terminal file underline scheduling keys cheap viewport state');
+    assert.ok(/const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;/.test(linkProviderSource), 'passive terminal file resolution uses the 1.7-second scan buffer');
+    assert.ok(/function terminalFileReferenceUnderlineIsActive\(session, container\) \{[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(session\)[\s\S]*terminalIsVisible\(session, container\)/.test(linkProviderSource), 'passive terminal file resolution requires the active pane tab, shown xterm, and visible browser document');
+    assert.ok(/const terminalFileReferenceTargetCache = new Map\(\);[\s\S]*const fileExplorerMemoryCacheLimit = 512;/.test(bootstrapSource), 'terminal file targets reuse the shared bounded frontend cache limit');
+    assert.ok(/terminalFileReferenceTargetCache\.has\(cacheKey\)[\s\S]*setLimitedMapEntry\(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit\)/.test(linkProviderSource), 'terminal file target cache hits refresh LRU recency through the shared helper');
     assert.ok(/const scheduleCachedRender = \(\) => \{[\s\S]*if \(renderFrame\) return;[\s\S]*requestAnimationFrame/.test(linkProviderSource), 'terminal file underline cached repaint is coalesced through one frame');
     assert.ok(/const contentChanged = scheduleOptions\.contentChanged === true \|\| \['output', 'render'\]\.includes\(scheduleOptions\.reason\);[\s\S]*if \(viewportChanged \|\| contentChanged\) scheduleCachedRender\(\);[\s\S]*if \(!timer\)/.test(linkProviderSource), 'terminal output clears stale cached underlines immediately and cannot postpone the bounded resolver with continuous renders');
-    assert.equal(/const schedule = \(scheduleOptions = \{\}\) => \{[\s\S]{0,360}renderCached\(\);[\s\S]{0,200}setTimeout/.test(linkProviderSource), false, 'terminal output does not synchronously repaint cached file underlines before the 90ms resolver');
+    assert.equal(/const schedule = \(scheduleOptions = \{\}\) => \{[\s\S]{0,500}renderCached\(\);[\s\S]{0,200}setTimeout/.test(linkProviderSource), false, 'terminal output does not synchronously repaint cached file underlines before the 1.7-second resolver');
     assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
     assert.ok(/function applyTerminalContainerTheme\(container[\s\S]*dataset\.terminalTheme = resolvedTerminalThemeMode\(terminalThemeMode, mode\)[\s\S]*style\.background = theme\.background/.test(runtimeSource), 'terminal containers carry the resolved terminal theme used by xterm link underline colors');
     assert.ok(/applyTerminalContainerTheme\(container, baseTheme\)/.test(terminalBootSource), 'new terminal containers get the same theme marker as live theme updates');
@@ -5404,7 +5409,9 @@ async function runEditorPreviewSuite() {
     container.appendChild(rows);
 
     let resolverCalls = 0;
+    let scannerActive = true;
     const controller = api.installTerminalFileReferenceUnderlines('1', term, container, {
+      isActive: () => scannerActive,
       targetResolver: async (_session, ref) => {
         resolverCalls += 1;
         return ref.path === 'static_src/js/yolomux/00_bootstrap_state.js'
@@ -5428,6 +5435,14 @@ async function runEditorPreviewSuite() {
     assert.equal(layer.children[0].classList.contains('terminal-file-link-underline--hover'), false, 'moving away from the resolved file reference restores the subtle underline');
     container.listeners.get('mouseleave')[0]();
     assert.equal(layer.children[0].classList.contains('terminal-file-link-underline--hover'), false, 'leaving the terminal clears the file underline hover state');
+    const callsBeforeInactive = resolverCalls;
+    scannerActive = false;
+    controller.schedule({reason: 'output'});
+    assert.equal(layer.children.length, 0, 'an inactive terminal clears its persistent file underlines');
+    assert.equal(await controller.refresh(), 0, 'an inactive terminal skips explicit passive refresh work');
+    assert.equal(resolverCalls, callsBeforeInactive, 'an inactive terminal performs zero path resolutions');
+    scannerActive = true;
+    assert.equal(await controller.refresh(), 1, 'reactivating the shown terminal allows passive path resolution');
     const callsAfterRefresh = resolverCalls;
     controller.schedule({reason: 'output'});
     assert.equal(resolverCalls, callsAfterRefresh, 'same-viewport terminal output does not synchronously re-resolve file references');
@@ -5446,6 +5461,36 @@ async function runEditorPreviewSuite() {
     assert.equal(container.listeners.get('mousemove').length, 0, 'terminal file underline hover listener is removed on dispose');
     assert.equal(container.listeners.get('mouseleave').length, 0, 'terminal file underline leave listener is removed on dispose');
     assert.equal(container.querySelector(':scope > .terminal-file-link-underlines'), null, 'underline overlay is removed on dispose');
+  });
+
+  test('passive terminal file resolution requires the active shown xterm', () => {
+    const api = loadYolomux('', ['1', '2']);
+    const container = api.testElementForId('terminal-pane-1');
+    container.classList.add('active');
+    container.clientWidth = 800;
+    container.clientHeight = 400;
+    const slots = api.emptyLayoutSlots();
+    slots.left = api.paneStateWithTabs(['1', '2'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setDocumentVisibilityForTest('visible');
+    assert.equal(api.terminalFileReferenceUnderlineIsActiveForTest('1', container), true, 'the active shown xterm can run passive file resolution');
+
+    slots.left = api.paneStateWithTabs(['1', '2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    assert.equal(api.terminalFileReferenceUnderlineIsActiveForTest('1', container), false, 'a background pane tab cannot run passive file resolution');
+
+    slots.left = api.paneStateWithTabs(['1', '2'], '1');
+    api.setLayoutSlotsForTest(slots);
+    container.classList.remove('active');
+    assert.equal(api.terminalFileReferenceUnderlineIsActiveForTest('1', container), false, 'a non-terminal sub-tab cannot run passive file resolution');
+
+    container.classList.add('active');
+    api.setDocumentVisibilityForTest('hidden');
+    assert.equal(api.terminalFileReferenceUnderlineIsActiveForTest('1', container), false, 'a background browser tab cannot run passive file resolution');
+
+    api.setDocumentVisibilityForTest('visible');
+    container.clientWidth = 0;
+    assert.equal(api.terminalFileReferenceUnderlineIsActiveForTest('1', container), false, 'a hidden zero-width xterm cannot run passive file resolution');
   });
 
   test('terminal output scan schedulers are coalesced and gated', () => {

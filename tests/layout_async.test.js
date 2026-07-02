@@ -1864,6 +1864,64 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-misses'}});
+      const fileRef = {type: 'file', path: 'missing.js', text: 'missing.js'};
+      let requestCount = 0;
+      api.setFetchForTest((_url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        requestCount += body.requests.length;
+        return Promise.resolve(jsonResponse({
+          responses: body.requests.map(request => ({id: request.id, ok: false, status: 404, error: 'not found'})),
+        }));
+      });
+      const firstTarget = api.terminalFileReferenceTarget('1', fileRef, {fresh: false});
+      const concurrentTarget = api.terminalFileReferenceTarget('1', fileRef, {fresh: false});
+      assert.equal(await firstTarget, null, 'missing passive terminal file refs resolve to null');
+      assert.equal(await concurrentTarget, null, 'concurrent missing terminal file refs share the in-flight resolution');
+      const requestsAfterFirstResolution = requestCount;
+      assert.ok(requestsAfterFirstResolution > 0, 'the first missing terminal file ref checks its context-derived paths');
+      assert.equal(await api.terminalFileReferenceTarget('1', fileRef, {fresh: false}), null, 'negative terminal file target results are cached');
+      assert.equal(requestCount, requestsAfterFirstResolution, 'repeated passive missing-file scans perform no backend lookups');
+      assert.equal(api.terminalFileReferenceTargetCacheSizeForTest(), 1, 'one missing terminal file token occupies one bounded target-cache entry');
+      assert.equal(await api.terminalFileReferenceTarget('1', fileRef), null, 'fresh user resolution still reports the missing target');
+      assert.ok(requestCount > requestsAfterFirstResolution, 'fresh context-menu resolution bypasses a passive cached miss');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-lru'}});
+      let requestCount = 0;
+      api.setFetchForTest((_url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        requestCount += body.requests.length;
+        return Promise.resolve(jsonResponse({
+          responses: body.requests.map(request => ({
+            id: request.id,
+            ok: true,
+            payload: {kind: 'file', name: request.path.split('/').pop(), path: request.path},
+          })),
+        }));
+      });
+      const ref = index => ({type: 'file', path: `cache-${index}.js`, text: `cache-${index}.js`});
+      await Promise.all(Array.from({length: 512}, (_unused, index) => (
+        api.terminalFileReferenceTarget('1', ref(index), {fresh: false})
+      )));
+      assert.equal(requestCount, 512, 'the first 512 distinct terminal file refs each resolve once');
+      assert.equal(api.terminalFileReferenceTargetCacheSizeForTest(), 512, 'terminal file target LRU reaches the shared cache limit');
+      await api.terminalFileReferenceTarget('1', ref(0), {fresh: false});
+      assert.equal(requestCount, 512, 'reusing the oldest target is a cache hit that refreshes its LRU recency');
+      await api.terminalFileReferenceTarget('1', ref(512), {fresh: false});
+      assert.equal(api.terminalFileReferenceTargetCacheSizeForTest(), 512, 'adding another target evicts instead of growing beyond the shared limit');
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', ref(0)), true, 'the recently reused oldest target survives the LRU eviction');
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', ref(1)), false, 'the least-recently-used target is the entry that gets evicted');
+      await api.terminalFileReferenceTarget('1', ref(0), {fresh: false});
+      assert.equal(requestCount, 513, 'the recently reused oldest target survives the LRU eviction');
+      await api.terminalFileReferenceTarget('1', ref(1), {fresh: false});
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', ref(1)), true, 're-resolving the evicted target returns it to the bounded target cache');
+    }
+
+    {
       const source = fs.readFileSync('static/yolomux.js', 'utf8');
       assert.ok(/Promise\.all\(directories\.map\(async directory =>/.test(source), 'periodic Finder refresh starts watched directory checks together so fs/list can batch');
     }

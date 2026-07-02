@@ -4387,6 +4387,7 @@ def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browse
             _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
           };
           const controller = installTerminalFileReferenceUnderlines('1', term, container, {
+            isActive: () => true,
             targetResolver: async (_session, reference) => ({path: `/repo/${reference.path}`}),
           });
           const initial = await controller.refresh();
