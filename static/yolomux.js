@@ -2260,6 +2260,18 @@ function appOverlayRootElement() {
   return overlay;
 }
 
+function cleanupDetachedPopoverAnchor(anchor, keep = null) {
+  const previous = anchor?.__yolomuxDetachedPopover;
+  if (previous && previous !== keep) previous.remove();
+  if (previous && previous !== keep) anchor.__yolomuxDetachedPopover = null;
+}
+
+function cleanupDetachedPopoversWithin(root) {
+  if (!root) return;
+  const anchors = [root, ...Array.from(root.querySelectorAll?.('*') || [])];
+  for (const anchor of anchors) cleanupDetachedPopoverAnchor(anchor);
+}
+
 function applyAppRootViewportSize() {
   const root = appRootElement();
   if (!root?.style) return;
@@ -13843,7 +13855,10 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     if (icon.textContent !== iconText) icon.textContent = iconText;
   }
   if (options.nameHtml) {
-    if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
+    if (name.innerHTML !== options.nameHtml) {
+      cleanupDetachedPopoversWithin(name);
+      name.innerHTML = options.nameHtml;
+    }
     if (!name.children?.length && name.textContent !== nameText) name.textContent = nameText;
   } else if (name.textContent !== nameText || name.innerHTML) {
     name.innerHTML = '';
@@ -29658,7 +29673,8 @@ function beginFileTabRename(tab, item) {
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return;
-  const detached = tab.classList?.contains('dockview-pane-tab') === true;
+  const detached = tab.classList?.contains('dockview-pane-tab') === true
+    || tab.classList?.contains('tabber-session-tab') === true;
   if (detached) detachPaneTabPopover(tab, popover);
   bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab, popover), {
     onOpen: () => maybeLoadFileTabForPopover(tab, session),
@@ -29694,9 +29710,7 @@ function detachPaneTabPopover(tab, popover) {
 }
 
 function cleanupDetachedPaneTabPopover(tab, keep = null) {
-  const previous = tab?.__yolomuxDetachedPopover;
-  if (previous && previous !== keep) previous.remove();
-  if (previous && previous !== keep) tab.__yolomuxDetachedPopover = null;
+  cleanupDetachedPopoverAnchor(tab, keep);
 }
 
 function maybeLoadFileTabForPopover(tab, item) {

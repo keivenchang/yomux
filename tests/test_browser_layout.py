@@ -3949,7 +3949,12 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
           .filter(node => !node.closest('.session-popover'))
           .map(node => node.outerHTML.slice(0, 220)));
         const sessionTab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const customPopover = sessionTab?.querySelector(':scope > .session-popover');
+        const customPopover = paneTabPopoverForAnchor(sessionTab);
+        positionPaneTabPopover(sessionTab, customPopover);
+        sessionTab.classList.add('popover-open');
+        customPopover.classList.add('popover-open');
+        const panelRect = sessionTab.closest('.panel').getBoundingClientRect();
+        const popoverRect = customPopover.getBoundingClientRect();
         return {
           rowCount: rows.length,
           rowTitles: rows.map(row => row.getAttribute('title') || ''),
@@ -3958,6 +3963,8 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
           sessionTabHasTitle: sessionTab?.hasAttribute('title') || false,
           customPopoverPresent: !!customPopover,
           customPopoverRole: customPopover?.getAttribute('role') || '',
+          customPopoverDetached: customPopover?.parentElement === appOverlayRootElement(),
+          customPopoverCrossesPane: popoverRect.right > panelRect.right + 1,
         };
         """
     )
@@ -3968,6 +3975,8 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     assert metrics["sessionTabHasTitle"] is False, metrics
     assert metrics["customPopoverPresent"] is True, metrics
     assert metrics["customPopoverRole"] == "tooltip", metrics
+    assert metrics["customPopoverDetached"] is True, metrics
+    assert metrics["customPopoverCrossesPane"] is True, metrics
     browser.execute_script("renderAutoApproveButtons();")
     live_sync_metrics = browser.execute_script(
         """
@@ -3988,7 +3997,7 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
         """
         popoverHideDelayMs = 120;
         window.__tabberSessionTabBeforeRefresh = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        window.__tabberPopoverBeforeRefresh = window.__tabberSessionTabBeforeRefresh?.querySelector(':scope > .session-popover');
+        window.__tabberPopoverBeforeRefresh = paneTabPopoverForAnchor(window.__tabberSessionTabBeforeRefresh);
         window.__tabberSessionTabBeforeRefresh.classList.add('popover-open');
         window.__tabberSessionTabBeforeRefresh.dataset.popoverHoverState = 'open';
         window.__tabberPopoverBeforeRefresh.classList.add('popover-open');
@@ -4004,7 +4013,7 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     hover_metrics = browser.execute_script(
         """
         const tab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const visiblePopovers = Array.from(document.querySelectorAll('.tabber-session-tab.popover-open > .session-popover')).filter(popover => {
+        const visiblePopovers = [tab?.__yolomuxDetachedPopover].filter(popover => {
           const style = getComputedStyle(popover);
           const rect = popover.getBoundingClientRect();
           return style.visibility === 'visible' && Number.parseFloat(style.opacity) > 0.9 && rect.width > 100 && rect.height > 40;
@@ -4028,6 +4037,28 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     assert hover_metrics["hoverState"] == "open", hover_metrics
     assert hover_metrics["tabOpen"] is True, hover_metrics
     assert hover_metrics["visibleChromeTitles"] == [], hover_metrics
+    cleanup_metrics = browser.execute_script(
+        """
+        const oldTab = window.__tabberSessionTabBeforeRefresh;
+        const oldPopover = window.__tabberPopoverBeforeRefresh;
+        const detachedPopoverCountBefore = appOverlayRootElement().querySelectorAll('.pane-tab-detached-popover').length;
+        oldTab.classList.remove('popover-open');
+        oldPopover.classList.remove('popover-open');
+        delete oldTab.dataset.popoverHoverState;
+        refreshTabberPanels();
+        const nextTab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
+        const nextPopover = paneTabPopoverForAnchor(nextTab);
+        return {
+          oldPopoverConnected: oldPopover.isConnected,
+          nextPopoverDetached: nextPopover?.parentElement === appOverlayRootElement(),
+          detachedPopoverCountBefore,
+          detachedPopoverCount: appOverlayRootElement().querySelectorAll('.pane-tab-detached-popover').length,
+        };
+        """
+    )
+    assert cleanup_metrics["oldPopoverConnected"] is False, cleanup_metrics
+    assert cleanup_metrics["nextPopoverDetached"] is True, cleanup_metrics
+    assert cleanup_metrics["detachedPopoverCount"] == cleanup_metrics["detachedPopoverCountBefore"], cleanup_metrics
 
 
 def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):

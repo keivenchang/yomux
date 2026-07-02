@@ -2251,7 +2251,10 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     if (icon.textContent !== iconText) icon.textContent = iconText;
   }
   if (options.nameHtml) {
-    if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
+    if (name.innerHTML !== options.nameHtml) {
+      cleanupDetachedPopoversWithin(name);
+      name.innerHTML = options.nameHtml;
+    }
     if (!name.children?.length && name.textContent !== nameText) name.textContent = nameText;
   } else if (name.textContent !== nameText || name.innerHTML) {
     name.innerHTML = '';

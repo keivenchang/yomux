@@ -545,6 +545,18 @@ function appOverlayRootElement() {
   return overlay;
 }
 
+function cleanupDetachedPopoverAnchor(anchor, keep = null) {
+  const previous = anchor?.__yolomuxDetachedPopover;
+  if (previous && previous !== keep) previous.remove();
+  if (previous && previous !== keep) anchor.__yolomuxDetachedPopover = null;
+}
+
+function cleanupDetachedPopoversWithin(root) {
+  if (!root) return;
+  const anchors = [root, ...Array.from(root.querySelectorAll?.('*') || [])];
+  for (const anchor of anchors) cleanupDetachedPopoverAnchor(anchor);
+}
+
 function applyAppRootViewportSize() {
   const root = appRootElement();
   if (!root?.style) return;

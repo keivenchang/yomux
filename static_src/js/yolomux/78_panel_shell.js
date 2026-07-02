@@ -715,7 +715,8 @@ function beginFileTabRename(tab, item) {
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return;
-  const detached = tab.classList?.contains('dockview-pane-tab') === true;
+  const detached = tab.classList?.contains('dockview-pane-tab') === true
+    || tab.classList?.contains('tabber-session-tab') === true;
   if (detached) detachPaneTabPopover(tab, popover);
   bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab, popover), {
     onOpen: () => maybeLoadFileTabForPopover(tab, session),
@@ -751,9 +752,7 @@ function detachPaneTabPopover(tab, popover) {
 }
 
 function cleanupDetachedPaneTabPopover(tab, keep = null) {
-  const previous = tab?.__yolomuxDetachedPopover;
-  if (previous && previous !== keep) previous.remove();
-  if (previous && previous !== keep) tab.__yolomuxDetachedPopover = null;
+  cleanupDetachedPopoverAnchor(tab, keep);
 }
 
 function maybeLoadFileTabForPopover(tab, item) {
