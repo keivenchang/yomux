@@ -941,6 +941,7 @@ def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
 
     assert "self.start_tmux_signal_event_watcher()" in app_start_body
     assert "self.tmux_signal_cache.clear()" in app_event_body
+    assert "TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS" in app_event_body
     assert "self.client_event_next_tmux_signal_poll_at = 0.0" in app_event_body
     assert "self.client_watch_wake_event.set()" in app_event_body
     assert "self.server.app.start_client_event_watcher()" in stream_body

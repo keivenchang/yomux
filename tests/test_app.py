@@ -2554,6 +2554,33 @@ def test_tmux_signal_event_does_not_force_auto_approve_poll():
         webapp.control_server.stop()
 
 
+def test_tmux_output_events_share_one_debounced_metadata_refresh(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    clock = [100.0]
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    try:
+        webapp.client_event_next_tmux_signal_poll_at = 456.0
+        webapp.tmux_signal_cache.set("snapshot", {"ok": True})
+
+        webapp.handle_tmux_signal_event({"type": "output"})
+
+        scheduled_at = 100.0 + app_module.TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS
+        assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(scheduled_at)
+        assert webapp.tmux_signal_cache.get_or_miss("snapshot") is app_module.CACHE_MISS
+        assert webapp.client_watch_wake_event.is_set()
+
+        webapp.client_watch_wake_event.clear()
+        webapp.tmux_signal_cache.set("snapshot", {"ok": True})
+        clock[0] = 100.1
+        webapp.handle_tmux_signal_event({"type": "extended-output"})
+
+        assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(scheduled_at)
+        assert webapp.tmux_signal_cache.get_or_miss("snapshot") == {"ok": True}
+        assert webapp.client_watch_wake_event.is_set() is False
+    finally:
+        webapp.control_server.stop()
+
+
 def test_save_settings_active_color_syncs_existing_tmux_theme(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     calls = []

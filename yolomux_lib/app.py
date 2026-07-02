@@ -5473,6 +5473,19 @@ class TmuxWebtermApp:
 
     def handle_tmux_signal_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or event.get("event") or "")
+        if event_type in {"output", "extended-output"}:
+            output_snapshot_at = time.monotonic() + TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS
+            with self.client_watch_lock:
+                next_snapshot_at = self.client_event_next_tmux_signal_poll_at
+                schedule_snapshot = next_snapshot_at <= time.monotonic() or next_snapshot_at > output_snapshot_at
+                if schedule_snapshot:
+                    self.client_event_next_tmux_signal_poll_at = output_snapshot_at
+            if schedule_snapshot:
+                # Terminal bytes already travel on their own WebSocket. Coalesce the metadata
+                # invalidation so a busy pane cannot launch a full tmux snapshot per output frame.
+                self.tmux_signal_cache.clear()
+                self.client_watch_wake_event.set()
+            return
         if event_type in {"pane-exited", "pane-died", "window-close", "sessions-changed"}:
             event_time = float(event.get("time") or time.time())
             with self.client_watch_lock:
