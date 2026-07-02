@@ -2596,8 +2596,6 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           <div class="pane-info-bar-popover-zone panel-popover-zone">
             <div class="panel-session-label"><span class="session-button-dir">8001</span></div>
             <div id="meta" class="pane-info-bar-meta meta pane-info-bar-meta-overflow" style="--pane-info-bar-scroll-distance: 240px; --pane-info-bar-scroll-offset: -240px; --pane-info-bar-scroll-duration: 23s; --pane-info-bar-scroll-timing: linear(0 0%, 0 13.04%, 1 91.30%, 1 100%);">
-              <span id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="btn-base meta-repo-cycle">&lt;</button><button type="button" class="btn-base meta-repo-chip">2/3</button><button type="button" class="btn-base meta-repo-cycle">&gt;</button></span></span>
-              <span id="meta-separator" class="meta-sep pane-info-bar-fixed-sep" aria-hidden="true">|</span>
               <span id="viewport" class="pane-info-bar-scroll-viewport"><span id="scroll-text" class="pane-info-bar-scroll-text"><span class="meta-branch">__LONG_TEXT__</span></span></span>
             </div>
           </div>
@@ -2606,6 +2604,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
             <button type="button" class="tab tmux-window-button active"><span class="tmux-window-name-label"><span class="tmux-window-name-text">1:claude</span></span><span class="tmux-window-number-label">1</span></button>
             <button type="button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">2:bash</span></span><span class="tmux-window-number-label">2</span></button>
           </div>
+          <div id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="btn-base meta-repo-cycle">&lt;</button><button type="button" class="btn-base meta-repo-chip">2/3</button><button type="button" class="btn-base meta-repo-cycle">&gt;</button></span></div>
           <button id="status-toggle" type="button" class="tab tmux-status-toggle tmux-status-toggle--none">·</button>
           <button type="button" class="panel-detail-close"></button>
         </div>
@@ -2624,8 +2623,6 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
         };
         const textStyle = getComputedStyle(document.getElementById('scroll-text'));
         const metaStyle = getComputedStyle(document.getElementById('meta'));
-        const separator = document.getElementById('meta-separator');
-        const separatorStyle = getComputedStyle(separator);
         const movedText = document.getElementById('scroll-text').cloneNode(true);
         movedText.id = 'scroll-text-moved';
         movedText.style.animationDelay = '-4s';
@@ -2653,7 +2650,6 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           scrollDuration: textStyle.animationDuration,
           scrollOffset: metaStyle.getPropertyValue('--pane-info-bar-scroll-offset').trim(),
           scrollTiming: metaStyle.getPropertyValue('--pane-info-bar-scroll-timing').trim(),
-          separator: {text: separator.textContent, opacity: separatorStyle.opacity, marginStart: separatorStyle.marginInlineStart, marginEnd: separatorStyle.marginInlineEnd},
           movedX,
           reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
           buttonFlexShrink: buttonStyle.flexShrink,
@@ -2674,8 +2670,8 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert "DIS-2239 In Review" in metrics["metaText"]
     assert "fix(performance): repair v1 PARITY commit + case-doc links after" in metrics["metaText"]
     assert metrics["controlsInsideViewport"] is False
+    assert metrics["controls"]["left"] >= metrics["bar"]["right"] - 1
     assert metrics["controls"]["right"] <= metrics["viewport"]["left"] + 2
-    assert metrics["separator"] == {"text": "|", "opacity": "0.65", "marginStart": "2px", "marginEnd": "2px"}, metrics
     if not metrics["reduced"]:
         assert metrics["scrollAnimation"] == "pane-info-bar-scroll"
         assert metrics["scrollDelay"] == "0s"

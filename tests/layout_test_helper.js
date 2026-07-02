@@ -754,6 +754,7 @@ globalThis.__layoutTestApi = {
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
   toggleAllFileExplorerChangesForTest: toggleAllFileExplorerChanges,
   projectMetaHtml,
+  paneInfoBarMetaPartsForTest: paneInfoBarMetaParts,
   paneInfoBarMetaHtml,
   cycleSessionRepoDisplayForTest: cycleSessionRepoDisplay,
   diffRefControlsHtml,

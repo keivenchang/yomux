@@ -170,6 +170,7 @@ function createPanel(session) {
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
         ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
+        ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
@@ -4464,7 +4465,10 @@ function schedulePaneInfoBarMetaOverflowSync(root = document) {
 function updatePanelInfoBarMeta(session, info) {
   const meta = document.getElementById(`meta-${session}`);
   if (!meta) return;
-  const html = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
+  const controls = document.getElementById(`meta-controls-${session}`);
+  const {controlsHtml, metadataHtml} = paneInfoBarMetaParts(session, info);
+  const html = stripTitleAttrs(metadataHtml);
+  if (controls && controls.innerHTML !== controlsHtml) controls.innerHTML = controlsHtml;
   const changed = meta.innerHTML !== html;
   if (changed) meta.innerHTML = html;
   meta.removeAttribute('title');

@@ -1060,6 +1060,13 @@ body.theme-light .drop-slot.drag-over {
 .pane-info-bar-fixed-sep {
   flex: 0 0 auto;
 }
+.pane-info-bar > .pane-info-bar-controls {
+  order: -1;
+  margin-inline-end: 8px;
+}
+.pane-info-bar > .pane-info-bar-controls:empty {
+  display: none;
+}
 .pane-info-bar-scroll-viewport {
   flex: 1 1 auto;
   min-width: 0;

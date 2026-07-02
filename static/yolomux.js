@@ -25680,15 +25680,19 @@ function projectMetaHtml(session, info, options = {}) {
   return metaJoin([repoSwitchHtml, ...metadataParts]);
 }
 
-function paneInfoBarMetaHtml(session, info) {
+function paneInfoBarMetaParts(session, info) {
   const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, {fullText: true});
   const scrollHtml = metaJoin(metadataParts);
-  const controlsHtml = repoSwitchHtml ? `<span class="pane-info-bar-controls">${repoSwitchHtml}</span>` : '';
-  const separatorHtml = controlsHtml && scrollHtml ? metaSeparatorHtml('pane-info-bar-fixed-sep') : '';
-  const scrollTrackHtml = scrollHtml
+  return {
+    controlsHtml: repoSwitchHtml,
+    metadataHtml: scrollHtml
     ? `<span class="pane-info-bar-scroll-viewport"><span class="pane-info-bar-scroll-text">${scrollHtml}</span></span>`
-    : '';
-  return `${controlsHtml}${separatorHtml}${scrollTrackHtml}`;
+    : '',
+  };
+}
+
+function paneInfoBarMetaHtml(session, info) {
+  return paneInfoBarMetaParts(session, info).metadataHtml;
 }
 
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
@@ -52535,6 +52539,7 @@ function createPanel(session) {
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
         ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
+        ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
@@ -56829,7 +56834,10 @@ function schedulePaneInfoBarMetaOverflowSync(root = document) {
 function updatePanelInfoBarMeta(session, info) {
   const meta = document.getElementById(`meta-${session}`);
   if (!meta) return;
-  const html = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
+  const controls = document.getElementById(`meta-controls-${session}`);
+  const {controlsHtml, metadataHtml} = paneInfoBarMetaParts(session, info);
+  const html = stripTitleAttrs(metadataHtml);
+  if (controls && controls.innerHTML !== controlsHtml) controls.innerHTML = controlsHtml;
   const changed = meta.innerHTML !== html;
   if (changed) meta.innerHTML = html;
   meta.removeAttribute('title');

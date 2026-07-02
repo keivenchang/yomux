@@ -1513,13 +1513,14 @@ async function runEditorPreviewSuite() {
         ],
       },
     };
+    const paneInfoBarMetaParts = api.paneInfoBarMetaPartsForTest('1', longMetaInfo);
     const paneInfoBarMetaHtml = api.paneInfoBarMetaHtml('1', longMetaInfo);
     assert.ok(paneInfoBarMetaHtml.includes(longBranch), 'Info Bar metadata keeps the full branch name instead of inserting an ellipsis');
     assert.ok(paneInfoBarMetaHtml.includes(longTitle), 'Info Bar metadata keeps the full description instead of pre-truncating it');
     assert.equal(paneInfoBarMetaHtml.includes('...'), false, 'Info Bar metadata does not use shortText/shortBranch ellipses');
-    assert.ok(/class="pane-info-bar-controls"[\s\S]*meta-repo-switch/.test(paneInfoBarMetaHtml), 'Info Bar repo selector is rendered in a fixed controls slot');
-    assert.ok(/pane-info-bar-controls[\s\S]*pane-info-bar-scroll-viewport/.test(paneInfoBarMetaHtml), 'Info Bar scroll viewport starts after the fixed repo selector');
-    assert.ok(/meta-sep pane-info-bar-fixed-sep" aria-hidden="true">\|<\/span>/.test(paneInfoBarMetaHtml), 'Info Bar reuses the shared compact muted metadata pipe beside repo controls');
+    assert.ok(paneInfoBarMetaParts.controlsHtml.includes('meta-repo-switch'), 'Info Bar repo selector is rendered through the fixed controls slot');
+    assert.ok(paneInfoBarMetaParts.metadataHtml.includes('pane-info-bar-scroll-viewport'), 'Info Bar metadata remains in the scrolling viewport');
+    assert.equal(paneInfoBarMetaHtml.includes('meta-repo-switch'), false, 'Info Bar metadata does not embed the fixed repo selector');
     assert.equal(paneInfoBarMetaHtml.includes(' · '), false, 'Info Bar no longer uses wide middot separators');
     assert.ok(/pane-info-bar-scroll-viewport[\s\S]*#76 DRAFT[\s\S]*DIS-2239 In Review[\s\S]*keivenchang\/DIS-2239__parity-commit-link-frontend-crates[\s\S]*fix\(performance\): repair v1 PARITY commit \+ case-doc links after/.test(paneInfoBarMetaHtml), 'Info Bar keeps Linear immediately after the PR, before branch and path metadata');
     const idempotentInfoBarApi = loadYolomux('', ['info-scroll']);
@@ -1547,6 +1548,7 @@ async function runEditorPreviewSuite() {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const yoloCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\)/.test(source), 'tmux sub-window bar is rendered on the Info Bar');
+    assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\)[\s\S]{0,240}meta-controls-\$\{session\}/.test(source), 'Info Bar renders the repo selector slot directly after the tmux sub-window bar');
     assert.equal(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\) : ''\}[\s\S]{0,120}panel-detail-close/.test(source), false, 'Info Bar no longer renders the detail-close (×) button after the sub-window bar');
     assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
     assert.ok(/if \(windowTarget\) \{[\s\S]*windowTarget\.dataset\.pointerActionHandled = '1'[\s\S]*handleWindowStepButtonClick\(\{target: windowTarget, currentTarget: windowTarget\}\)[\s\S]*return;[\s\S]*\}/.test(source), 'focused and unfocused pane sub-window clicks activate the original target once during pointer capture');
