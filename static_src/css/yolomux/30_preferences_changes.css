@@ -657,6 +657,7 @@ body.theme-light .js-debug-graph-view {
   font: 600 var(--ui-font-size-sm)/1.2 var(--ui-font);
 }
 .info-refresh {
+  position: relative;
   margin-inline-start: auto;
   height: 22px;
   justify-content: center;
@@ -677,12 +678,17 @@ body.theme-light .js-debug-graph-view {
 }
 .info-refresh.loading {
   cursor: wait;
+  color: transparent;
   opacity: 0.86;
 }
 .info-refresh.loading::before {
   content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
   width: 10px;
   height: 10px;
+  color: var(--text);
   border: 2px solid color-mix(in srgb, currentColor 32%, transparent);
   border-top-color: currentColor;
   border-radius: 50%;

@@ -191,7 +191,7 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
   button.classList.toggle('loading', loading);
   button.disabled = loading;
   button.setAttribute('aria-busy', loading ? 'true' : 'false');
-  button.textContent = loading ? t('info.loadingShort') : idleLabel;
+  button.textContent = idleLabel;
   button.title = loading ? t('info.loadingRepo') : idleTitle;
   button.setAttribute('aria-label', loading ? t('info.loadingRepo') : idleTitle);
 }
@@ -602,7 +602,7 @@ const infoGroupingStorageKey = 'yolomux.info.grouping.v1';
 const infoLegacyGroupingStorageKey = 'yolomux.info2.grouping.v1';
 const infoSortStorageKey = 'yolomux.info.sort.v1';
 const infoLegacySortStorageKey = 'yolomux.info2.sort.v1';
-const infoDefaultGrouping = Object.freeze(['tab', 'path']);
+const infoDefaultGrouping = Object.freeze(['tab', 'path', 'tmux-window']);
 const infoDefaultSort = Object.freeze({key: 'date', dir: 'desc'});
 const infoSearchMaxLength = 240;
 const infoSortDefs = Object.freeze([
@@ -621,8 +621,8 @@ const infoDimensionDefs = Object.freeze([
   {key: 'pr', label: 'PR'},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-tmux-window', label: 'Tab > tmux sub-window', title: 'Tab, then tmux sub-window', grouping: ['tab', 'tmux-window']},
-  {key: 'tab-path', label: 'Tab > Path', title: 'Tab, then path', grouping: ['tab', 'path']},
+  {key: 'tab-tmux-window', label: 'Tab > tmux-window', title: 'Tab, then tmux sub-window', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-path', label: 'Tab > Path > tmux-window', title: 'Tab, then path, then tmux sub-window', grouping: ['tab', 'path', 'tmux-window']},
   {key: 'path-branch', label: 'Path > Branch', title: 'Path, then branch', grouping: ['path', 'branch']},
   {key: 'linear-pr', label: 'Linear > PR', title: 'Linear, then PR', grouping: ['linear', 'pr']},
   {key: 'pr-branch', label: 'PR > Branch', title: 'PR, then branch', grouping: ['pr', 'branch']},
@@ -643,7 +643,7 @@ function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
   if (dimension === 'ai' && index === 0) return false;
   if (dimension === 'tmux-window') {
     const parent = Array.isArray(grouping) ? String(grouping[0] || '') : '';
-    return index === 1 && parent === 'tab';
+    return index >= 1 && parent === 'tab';
   }
   return true;
 }
@@ -686,7 +686,7 @@ function normalizeInfoGrouping(value, options = {}) {
 
 function normalizeInfoLegacyPresetGrouping(grouping) {
   const key = (Array.isArray(grouping) ? grouping : []).join('|');
-  if (key === 'tab|ai|path|branch') return ['tab', 'path'];
+  if (key === 'tab|ai|path|branch') return ['tab', 'path', 'tmux-window'];
   if (key === 'path|branch|tab|ai') return ['path', 'branch'];
   if (key === 'branch|path|tab|ai') return ['path', 'branch'];
   if (key === 'ai|tab|path|branch') return ['linear', 'pr'];

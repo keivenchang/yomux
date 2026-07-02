@@ -14,7 +14,7 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
 }
 
 function infoGroupingControlsHtml() {
-  const grouping = typeof currentInfoGrouping === 'function' ? currentInfoGrouping() : ['tab', 'path'];
+  const grouping = typeof currentInfoGrouping === 'function' ? currentInfoGrouping() : ['tab', 'path', 'tmux-window'];
   const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
   const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
   const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];

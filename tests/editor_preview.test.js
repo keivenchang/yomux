@@ -4254,23 +4254,26 @@ async function runEditorPreviewSuite() {
 	    assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'asc'}).children.map(group => group.label)), ['#100 alpha PR', '#200 zeta PR', 'No PR'], 'YO!info A-Z PR grouping treats No PR as after numbered PRs');
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'desc'}).children.map(group => group.label)), ['ZZZ-200 zeta issue', 'AAA-100 alpha issue', 'No Linear'], 'YO!info reverse Linear grouping keeps No Linear after real Linear issues');
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'desc'}).children.map(group => group.label)), ['#200 zeta PR', '#100 alpha PR', 'No PR'], 'YO!info reverse PR grouping keeps No PR after numbered PRs');
-    assert.deepStrictEqual(canonical(api.infoGroupingPresetsForTest().map(preset => `${preset.key}:${preset.label}:${preset.grouping.join('>')}`)), [
-      'tab-tmux-window:Tab > tmux sub-window:tab>tmux-window',
-      'tab-path:Tab > Path:tab>path',
-      'path-branch:Path > Branch:path>branch',
-      'linear-pr:Linear > PR:linear>pr',
-      'pr-branch:PR > Branch:pr>branch',
-    ], 'YO!info quick presets start with Tab > tmux sub-window, then Tab > Path');
-    api.setInfoGroupingPresetForTest('tab-tmux-window');
-    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window'], 'YO!info first quick preset selects Tab then tmux sub-window');
-    api.setInfoGroupingPresetForTest('linear-pr');
+	    assert.deepStrictEqual(canonical(api.infoGroupingPresetsForTest().map(preset => `${preset.key}:${preset.label}:${preset.grouping.join('>')}`)), [
+	      'tab-tmux-window:Tab > tmux-window:tab>tmux-window',
+	      'tab-path:Tab > Path > tmux-window:tab>path>tmux-window',
+	      'path-branch:Path > Branch:path>branch',
+	      'linear-pr:Linear > PR:linear>pr',
+	      'pr-branch:PR > Branch:pr>branch',
+	    ], 'YO!info quick preset buttons abbreviate tmux sub-window as tmux-window');
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info defaults to Tab > Path > tmux sub-window');
+	    api.setInfoGroupingPresetForTest('tab-tmux-window');
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window'], 'YO!info first quick preset selects Tab then tmux sub-window');
+	    api.setInfoGroupingPresetForTest('tab-path');
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info Tab > Path preset adds tmux sub-window as its third level');
+	    api.setInfoGroupingPresetForTest('linear-pr');
     assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['linear', 'pr'], 'YO!info Linear > PR quick preset selects Linear then PR');
     api.setInfoGroupingPresetForTest('pr-branch');
     assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['pr', 'branch'], 'YO!info PR > Branch quick preset selects PR then Branch');
     const storedGroupingFor = grouping => loadYolomux('', ['stored'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {'yolomux.info2.grouping.v1': JSON.stringify(grouping)},
     }).currentInfoGroupingForTest();
-	    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'ai', 'path', 'branch'])), ['tab', 'path'], 'YO!info migrates the old stored Tab-first quick grouping to Tab > Path');
+	    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'ai', 'path', 'branch'])), ['tab', 'path', 'tmux-window'], 'YO!info migrates the old stored Tab-first quick grouping to Tab > Path > tmux sub-window');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['path', 'branch', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the old stored Path-first quick grouping to Path > Branch');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['branch', 'path', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the removed stored branch-first quick grouping to Path > Branch');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['ai', 'tab', 'path', 'branch'])), ['linear', 'pr'], 'YO!info migrates the removed stored AI-first quick grouping to Linear > PR');
@@ -4281,7 +4284,11 @@ async function runEditorPreviewSuite() {
 	    api.setInfoGroupingForTest(['path', 'tmux-window', 'branch']);
 	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['path', 'branch'], 'YO!info rejects tmux sub-window unless the first Order by dropdown is Tab');
 	    api.setInfoGroupingForTest(['tab', 'tmux-window', 'ai', 'path']);
-	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window', 'ai', 'path'], 'YO!info allows tmux sub-window only as the second Order by dropdown after Tab');
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window', 'ai', 'path'], 'YO!info allows tmux sub-window as the second Order by dropdown after Tab');
+	    api.setInfoGroupingForTest(['tab', 'path', 'tmux-window']);
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info allows tmux sub-window as the third Order by dropdown after Tab');
+	    api.setInfoGroupingForTest(['tab', 'path', 'branch', 'tmux-window']);
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'branch', 'tmux-window'], 'YO!info allows tmux sub-window as the fourth Order by dropdown after Tab');
 	    const optionValuesForLevel = (html, level) => {
 	      const match = html.match(new RegExp(`<select data-info-group-level="${level}"[^>]*>([\\s\\S]*?)<\\/select>`));
 	      assert.ok(match, `YO!info renders Order by select ${level + 1}`);
@@ -4290,7 +4297,8 @@ async function runEditorPreviewSuite() {
 	    const tabFirstControlsHtml = api.infoGroupingControlsHtmlForTest();
 	    assert.ok(!optionValuesForLevel(tabFirstControlsHtml, 0).includes('ai') && !optionValuesForLevel(tabFirstControlsHtml, 0).includes('tmux-window'), 'YO!info first Order by dropdown excludes AI and tmux sub-window');
 	    assert.ok(optionValuesForLevel(tabFirstControlsHtml, 1).includes('tmux-window') && optionValuesForLevel(tabFirstControlsHtml, 1).includes('ai'), 'YO!info second Order by dropdown includes tmux sub-window and AI when the first dropdown is Tab');
-	    assert.equal(optionValuesForLevel(tabFirstControlsHtml, 2).includes('tmux-window'), false, 'YO!info tmux sub-window is not available past the second Order by dropdown');
+	    assert.equal(optionValuesForLevel(tabFirstControlsHtml, 2).includes('tmux-window'), true, 'YO!info third Order by dropdown includes tmux sub-window when the first dropdown is Tab');
+	    assert.equal(optionValuesForLevel(tabFirstControlsHtml, 3).includes('tmux-window'), true, 'YO!info fourth Order by dropdown includes tmux sub-window when the first dropdown is Tab');
 	    api.setInfoGroupingForTest(['path', 'branch']);
 	    const pathFirstControlsHtml = api.infoGroupingControlsHtmlForTest();
 	    assert.equal(optionValuesForLevel(pathFirstControlsHtml, 1).includes('tmux-window'), false, 'YO!info hides tmux sub-window when the first Order by dropdown is not Tab');
@@ -4575,6 +4583,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/delegate\(panel, 'click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
     assert.ok(infoPanelSource.includes('data-info-search') && infoPanelSource.includes('setInfoSearch'), 'YO!info toolbar exposes a search box that filters relationship records');
     assert.ok(infoPanelSource.includes('data-info-refresh title="${esc(t(\'meta.refresh\'))}"') && infoPanelSource.includes('setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t(\'meta.refresh\'), t(\'meta.refresh\'))'), 'YO!info metadata refresh button uses the compact Refresh label');
+    assert.ok(/function setMetadataRefreshButtonLoading\(button, loading, idleLabel, idleTitle\)[\s\S]*button\.textContent = idleLabel;/.test(infoSource) && !/function setMetadataRefreshButtonLoading\(button, loading, idleLabel, idleTitle\)[\s\S]*button\.textContent = loading \?/.test(infoSource), 'YO!info metadata loading keeps the Refresh button label footprint stable');
     assert.ok(infoPanelSource.includes("info-tree-order-label\">${esc(t('info.group.orderBy'))}</span>") && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render their localized Order by: label before select > select > select > select');
     assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
     assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');

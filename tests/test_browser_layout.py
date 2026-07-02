@@ -5105,6 +5105,74 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
 
+def test_info_toolbar_height_stays_stable_during_metadata_refresh(browser, tmp_path):
+    page = tmp_path / "info-toolbar-refresh-height.html"
+    page.write_text(page_html("""
+      <article id="panel" class="panel info-panel info-tree-panel" style="height: 360px;">
+        <div class="panel-head"></div>
+        <div id="actions" class="info-actions-bar info-tree-actions-bar">
+          <div class="info-tree-primary-controls">
+            <div class="info-tree-presets">
+              <button class="info-tree-preset">Tab &gt; tmux-window</button>
+              <button class="info-tree-preset active">Tab &gt; Path &gt; tmux-window</button>
+              <button class="info-tree-preset">Path &gt; Branch</button>
+              <button class="info-tree-preset">Linear &gt; PR</button>
+              <button class="info-tree-preset">PR &gt; Branch</button>
+            </div>
+            <label class="info-tree-search-control"><span>Search</span><input value="" placeholder="Search YO!info"></label>
+          </div>
+          <div class="info-tree-group-selects">
+            <span class="info-tree-order-label">Order by:</span>
+            <label class="info-tree-group-select"><select><option>Tab</option></select></label>
+            <span class="info-tree-order-separator">&gt;</span>
+            <label class="info-tree-group-select"><select><option>Path</option></select></label>
+            <span class="info-tree-order-separator">&gt;</span>
+            <label class="info-tree-group-select"><select><option>tmux sub-window</option></select></label>
+            <span class="info-tree-order-separator">&gt;</span>
+            <label class="info-tree-group-select"><select><option>None</option></select></label>
+          </div>
+          <div class="info-tree-sort-controls"><label class="info-tree-group-select"><span>Sort</span><select><option>recent</option></select></label></div>
+          <div class="info-subtab-actions"><button id="refresh" class="info-refresh">Refresh</button></div>
+        </div>
+        <div id="body" class="info-pane"></div>
+      </article>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const panel = document.getElementById('panel');
+        const actions = document.getElementById('actions');
+        const refresh = document.getElementById('refresh');
+        const body = document.getElementById('body');
+        const read = () => ({height: actions.getBoundingClientRect().height, bodyTop: body.getBoundingClientRect().top});
+        const changedWidths = [];
+        for (let width = 620; width <= 1900; width += 2) {
+          panel.style.width = `${width}px`;
+          refresh.classList.remove('loading');
+          refresh.textContent = 'Refresh';
+          const idle = read();
+          refresh.classList.add('loading');
+          refresh.textContent = 'Refresh';
+          const loading = read();
+          if (Math.abs(idle.height - loading.height) > 0.5 || Math.abs(idle.bodyTop - loading.bodyTop) > 0.5) {
+            changedWidths.push({width, idle, loading});
+          }
+        }
+        return {changedWidths, idleWidth: (() => {
+          refresh.classList.remove('loading');
+          refresh.textContent = 'Refresh';
+          return refresh.getBoundingClientRect().width;
+        })(), loadingWidth: (() => {
+          refresh.classList.add('loading');
+          refresh.textContent = 'Refresh';
+          return refresh.getBoundingClientRect().width;
+        })()};
+        """
+    )
+    assert metrics["changedWidths"] == [], metrics
+    assert abs(metrics["idleWidth"] - metrics["loadingWidth"]) <= 0.5, metrics
+
+
 def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     page = tmp_path / "info-tree-sticky-parent.html"
     records = "\n".join(
