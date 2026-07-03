@@ -60,11 +60,10 @@ const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
-const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
-const jsDebugGraphAllClientsTotalId = 'all-clients-total';
-const jsDebugGraphOtherClientsAverageLinePattern = 'dot';
-const jsDebugGraphAllClientsTotalLinePattern = 'dot';
-const jsDebugGraphAllClientsCombinedMetricKey = 'apiSseTotal';
+const jsDebugGraphAllClientsId = 'all-clients';
+const jsDebugGraphAllClientsLinePattern = 'solid';
+const jsDebugGraphClientAggregateAverage = 'allClientsAverage';
+const jsDebugGraphClientAggregateTotal = 'allClientsTotal';
 const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   clientRequests: {
     attribute: 'displayed-client-request-sum',
@@ -86,10 +85,10 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   },
 });
 const jsDebugGraphClientMetrics = Object.freeze([
-  {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
-  {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
-  {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
-  {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
+  {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', aggregate: jsDebugGraphClientAggregateTotal, value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
+  {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', aggregate: jsDebugGraphClientAggregateTotal, value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
+  {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', aggregate: jsDebugGraphClientAggregateAverage, value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
+  {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', aggregate: jsDebugGraphClientAggregateTotal, value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
 const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
@@ -132,7 +131,7 @@ const jsDebugGraphEventResponseBytes = new Map();
 const jsDebugGraphEventRefTimes = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphSeries = Object.freeze([
-  ...jsDebugGraphClientMetrics.map(metric => ({...metric, labelKey: 'debug.graph.series.thisClient', metricLabelKey: metric.labelKey, clientMetric: true, metricKey: metric.key, clientLinePattern: 'solid'})),
+  ...jsDebugGraphClientMetrics.map(metric => ({...metric, clientMetric: true, metricKey: metric.key, clientId: jsDebugGraphAllClientsId, clientAggregate: metric.aggregate, clientLinePattern: jsDebugGraphAllClientsLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute'},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
@@ -1262,31 +1261,24 @@ function debugGraphBucketValue(bucket, key) {
   return 0;
 }
 
-function debugGraphClientMetricBucket(bucket, clientId = '') {
-  if (!clientId) return bucket;
-  return bucket?.clients instanceof Map ? bucket.clients.get(clientId) : null;
+function debugGraphAllClientMetricBuckets(bucket, metric) {
+  if (!bucket || !metric) return [];
+  const mappedClients = bucket.clients instanceof Map ? [...bucket.clients.values()] : [];
+  // Pre-client-map journals exposed the requesting browser through the top-level fields. Preserve
+  // that retained history as one client while newer buckets use the complete per-client map.
+  const hasLegacyClientData = [bucket.apiCount, bucket.sseCount, bucket.latencyCount, bucket.bandwidthBytes, bucket.disconnectedMs]
+    .some(value => Number(value || 0) > 0);
+  const clientBuckets = mappedClients.length ? mappedClients : (hasLegacyClientData ? [bucket] : []);
+  return metric.aggregate === jsDebugGraphClientAggregateAverage
+    ? clientBuckets.filter(clientBucket => metric.hasData(clientBucket))
+    : clientBuckets;
 }
 
-function debugGraphOtherClientMetricBuckets(bucket, metric) {
-  if (!(bucket?.clients instanceof Map) || !metric) return [];
-  const thisClientId = jsDebugStatsClientIdForRequest();
-  return [...bucket.clients.entries()]
-    .filter(([clientId, clientBucket]) => clientId !== thisClientId
-      && (metric.key !== 'latency' || metric.hasData(clientBucket)))
-    .map(([, clientBucket]) => clientBucket);
-}
-
-function debugGraphOtherClientMetricAverage(bucket, metric) {
-  const clientBuckets = debugGraphOtherClientMetricBuckets(bucket, metric);
+function debugGraphAllClientMetricValue(bucket, metric) {
+  const clientBuckets = debugGraphAllClientMetricBuckets(bucket, metric);
   if (!clientBuckets.length) return 0;
-  return clientBuckets.reduce((total, clientBucket) => total + metric.value(clientBucket), 0) / clientBuckets.length;
-}
-
-function debugGraphAllClientApiSseTotal(bucket) {
-  if (!(bucket?.clients instanceof Map)) return 0;
-  return [...bucket.clients.values()].reduce((total, clientBucket) => (
-    total + debugGraphBucketRate(bucket, Number(clientBucket.apiCount || 0) + Number(clientBucket.sseCount || 0))
-  ), 0);
+  const total = clientBuckets.reduce((sum, clientBucket) => sum + metric.value(clientBucket), 0);
+  return metric.aggregate === jsDebugGraphClientAggregateAverage ? total / clientBuckets.length : total;
 }
 
 function debugGraphProcessCpuBucketValue(bucket, processId) {
@@ -1298,11 +1290,8 @@ function debugGraphProcessCpuBucketValue(bucket, processId) {
 
 function debugGraphSeriesBucketValue(bucket, series) {
   if (series?.clientMetric === true) {
-    if (series.clientAggregate === 'allClientsApiSseTotal') return debugGraphAllClientApiSseTotal(bucket);
     const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    if (series.clientAggregate === 'otherClientsAverage') return metric ? debugGraphOtherClientMetricAverage(bucket, metric) : 0;
-    const clientBucket = debugGraphClientMetricBucket(bucket, series.clientId);
-    return metric && clientBucket ? metric.value(clientBucket) : 0;
+    return metric ? debugGraphAllClientMetricValue(bucket, metric) : 0;
   }
   if (series?.processCpu === true) return debugGraphProcessCpuBucketValue(bucket, series.processId);
   return debugGraphBucketValue(bucket, series?.key);
@@ -1326,11 +1315,8 @@ function debugGraphBucketHasSeriesData(bucket, key) {
 
 function debugGraphSeriesBucketHasData(bucket, series) {
   if (series?.clientMetric === true) {
-    if (series.clientAggregate === 'allClientsApiSseTotal') return bucket?.clients instanceof Map && bucket.clients.size > 0;
     const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    if (series.clientAggregate === 'otherClientsAverage') return debugGraphOtherClientMetricBuckets(bucket, metric).length > 0;
-    const clientBucket = debugGraphClientMetricBucket(bucket, series.clientId);
-    return Boolean(metric && clientBucket && metric.hasData(clientBucket));
+    return debugGraphAllClientMetricBuckets(bucket, metric).length > 0;
   }
   if (series?.processCpu === true) {
     const process = bucket?.servers instanceof Map ? bucket.servers.get(series.processId) : null;
@@ -1605,43 +1591,6 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
   }];
 }
 
-function debugGraphClientMetricSeriesDefs(buckets) {
-  const thisClientId = jsDebugStatsClientIdForRequest();
-  const hasAnyClients = buckets.some(bucket => bucket.clients instanceof Map && bucket.clients.size > 0);
-  const hasOtherClients = buckets.some(bucket => bucket.clients instanceof Map
-    && [...bucket.clients.keys()].some(clientId => clientId && clientId !== thisClientId));
-  const peerAverageSeries = jsDebugGraphClientMetrics
-    .filter(metric => metric.key === 'latency' || metric.key === 'bandwidth')
-    .flatMap(metric => {
-      if (!hasOtherClients) return [];
-      return [{
-        ...metric,
-        key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
-        labelKey: 'debug.graph.series.otherClientsAverage',
-        metricLabelKey: metric.labelKey,
-        cssKey: metric.key,
-        clientMetric: true,
-        metricKey: metric.key,
-        clientId: jsDebugGraphOtherClientsAverageId,
-        clientAggregate: 'otherClientsAverage',
-        clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
-      }];
-    });
-  if (!hasAnyClients) return peerAverageSeries;
-  return [...peerAverageSeries, {
-    key: `client:${jsDebugGraphAllClientsTotalId}:${jsDebugGraphAllClientsCombinedMetricKey}`,
-    labelKey: 'debug.graph.series.allClientsApiSseTotal',
-    unit: 'countPerSecond',
-    cssKey: jsDebugGraphAllClientsCombinedMetricKey,
-    chartMetricKey: 'api',
-    clientMetric: true,
-    clientId: jsDebugGraphAllClientsTotalId,
-    clientAggregate: 'allClientsApiSseTotal',
-    clientLinePattern: jsDebugGraphAllClientsTotalLinePattern,
-    color: 'var(--bad)',
-  }];
-}
-
 function debugGraphProcessCpuSeriesDefs(buckets) {
   const processes = new Map();
   for (const bucket of buckets) {
@@ -1680,7 +1629,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
@@ -1867,10 +1816,8 @@ function debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs
   return disconnectedRanges.some(range => debugGraphRangesOverlap(startMs, endMs, range.startMs, range.endMs));
 }
 
-function debugGraphCurrentClientSeriesItems(seriesItems) {
-  const items = Array.isArray(seriesItems) ? seriesItems.filter(Boolean) : [];
-  const currentClientItems = items.filter(series => series.clientMetric === true && !series.clientAggregate);
-  return currentClientItems.length ? currentClientItems : items;
+function debugGraphCommunicationSeriesItems(seriesItems) {
+  return Array.isArray(seriesItems) ? seriesItems.filter(Boolean) : [];
 }
 
 function debugGraphNoDataRuns(buckets, domain, seriesItems) {
@@ -2259,7 +2206,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
-          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
+          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, debugGraphCommunicationSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : plotSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}

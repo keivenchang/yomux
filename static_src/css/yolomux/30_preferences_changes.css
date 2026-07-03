@@ -514,9 +514,6 @@ body.theme-light .js-debug-graph-view {
 .js-debug-line--sse {
   stroke: var(--js-debug-sse-series);
 }
-.js-debug-line--apiSseTotal {
-  stroke: var(--js-debug-series-color, var(--bad));
-}
 .js-debug-line--latency {
   stroke: var(--accent-gold);
 }
@@ -631,9 +628,6 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-legend-swatch--sse {
   color: var(--js-debug-sse-series);
-}
-.js-debug-legend-swatch--apiSseTotal {
-  color: var(--bad);
 }
 .js-debug-legend-swatch--latency {
   color: var(--accent-gold);

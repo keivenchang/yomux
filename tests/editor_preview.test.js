@@ -2905,7 +2905,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
     assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-api-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API line and legend share the API series color');
     assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE line and legend share the distinct SSE series color');
-    assert.ok(/\.js-debug-line--apiSseTotal\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--bad\)\)/.test(debugPaneCss), 'YO!stats combined all-client API+SSE reuses the shared red status color');
+    assert.equal(debugPaneCss.includes('.js-debug-line--apiSseTotal'), false, 'YO!stats has no obsolete combined-total series after API and SSE each aggregate all clients');
     assert.ok(/\.js-debug-line--cpu\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--cpu\s*\{[\s\S]*color:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss), 'YO!stats per-server CPU lines and legends consume their shared series color');
     assert.ok(/\.js-debug-line--systemCpu\s*\{[\s\S]*stroke:\s*var\(--bad\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--systemCpu\s*\{[\s\S]*color:\s*var\(--bad\)/.test(debugPaneCss), 'YO!stats system CPU uses the red warning color');
     assert.ok(/\.js-debug-chart\s*\{[\s\S]*border:\s*1px solid color-mix\(in srgb, var\(--line\) 88%, transparent\)[\s\S]*border-radius:\s*6px/.test(debugPaneCss), 'YO!stats encloses each graph in a clear bordered chart box');
@@ -3108,12 +3108,11 @@ async function runEditorPreviewSuite() {
     assert.notEqual(datedTicks[0][2], datedTicks[2][2], '24-hour start and end ticks identify different local dates even when their clock times match');
     assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart headers carry per-second units');
     assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title">Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
-    assert.ok(html.includes('API (this client)') && html.includes('Client latency (this client)'), 'solid client series identify the current browser in the legend');
-    assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-line="solid"/, 'the current browser uses a solid API line');
-    assert.match(html, /data-js-debug-series="client:all-clients-total:apiSseTotal"[^>]*data-js-debug-client-line="dot"/, 'all browsers share one dotted combined API+SSE total line');
-    assert.equal(html.includes('client:all-clients-total:api"') || html.includes('client:all-clients-total:sse"'), false, 'separate all-client API and SSE total lines are removed');
-    assert.match(html, /data-js-debug-series="client:other-clients-average:latency"[^>]*data-js-debug-client-line="dot"/, 'other browsers share one dotted average latency line');
-    assert.match(html, /data-js-debug-series="client:other-clients-average:bandwidth"[^>]*data-js-debug-client-line="dot"/, 'other browsers share one dotted average bandwidth line');
+    assert.ok(html.includes('>API<') && html.includes('>Client latency<'), 'client legends describe the aggregate metric without tying it to the current tab');
+    assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid API total line');
+    assert.match(html, /data-js-debug-series="sse"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid SSE total line');
+    assert.match(html, /data-js-debug-series="latency"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid latency average line');
+    assert.match(html, /data-js-debug-series="bandwidth"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid bandwidth total line');
     assert.equal(/data-js-debug-series="client:client-(?:alpha|beta|gamma):/.test(html), false, 'individual peer lines are not rendered');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
@@ -3352,7 +3351,6 @@ async function runEditorPreviewSuite() {
         'debug.graph.chart.agentStatus',
         'debug.graph.chart.agentTokens',
         'debug.graph.series.systemCpu',
-        'debug.graph.series.allClientsApiSseTotal',
         'debug.graph.control.bucketSize',
         'debug.graph.control.timeRange',
       ]) {
@@ -3439,14 +3437,20 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-line--pattern,[\s\S]*\.js-debug-line--client\s*\{[\s\S]*stroke-dasharray:\s*var\(--js-debug-line-dash, none\)/.test(debugPaneCss), 'client and CPU identities share one line-pattern token');
   });
 
-  test('YO!stats graph combines all-client API and SSE while averaging peer latency and bandwidth', () => {
+  test('YO!stats graph sums or averages every retained client without current-tab splits', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
-    const thisClientId = api.jsDebugStatsClientIdForRequestForTest();
     api.clearJsDebugEventsForTest();
     api.debugGraphApplyServerHistoryForTest({
       sequence: 72,
       records: [{
+        start: Math.floor((now - 1500) / 1000),
+        duration: 1,
+        sequence: 71,
+        clients: {
+          'client-disconnected': {api_count: 5, sse_count: 1, latency_total_ms: 40, latency_count: 1, bandwidth_bytes: 250},
+        },
+      }, {
         start: Math.floor((now - 500) / 1000),
         duration: 1,
         sequence: 72,
@@ -3456,7 +3460,7 @@ async function runEditorPreviewSuite() {
         latency_count: 1,
         bandwidth_bytes: 500,
         clients: {
-          [thisClientId]: {api_count: 8, sse_count: 4, latency_total_ms: 10, latency_count: 1, bandwidth_bytes: 500},
+          'client-current': {api_count: 8, sse_count: 4, latency_total_ms: 10, latency_count: 1, bandwidth_bytes: 500},
           'client-alpha': {api_count: 2, sse_count: 0, latency_total_ms: 20, latency_count: 1, bandwidth_bytes: 100},
           'client-beta': {api_count: 4, sse_count: 2, latency_total_ms: 90, latency_count: 3, bandwidth_bytes: 300},
           'client-gamma': {api_count: 0, sse_count: 0, latency_total_ms: 0, latency_count: 0, bandwidth_bytes: 0},
@@ -3465,39 +3469,35 @@ async function runEditorPreviewSuite() {
     });
     api.setDebugGraphScaleForTest(1);
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
-    const peerSeries = clientSeries.filter(series => series.clientAggregate === 'otherClientsAverage');
-    const totalSeries = clientSeries.filter(series => series.clientAggregate === 'allClientsApiSseTotal');
-    assert.equal(peerSeries.length, 2, 'latency and bandwidth each have one peer-average series');
-    assert.equal(totalSeries.length, 1, 'API and SSE share one all-client total series');
-    assert.equal(clientSeries.filter(series => series.metricKey === 'latency').length, 2, 'latency has only this-client and peer-average series');
-    const current = metricKey => clientSeries.find(series => series.metricKey === metricKey && !series.clientAggregate);
-    const peers = metricKey => peerSeries.find(series => series.metricKey === metricKey);
-    assert.equal(current('latency').values.at(-1), 10, 'current-client latency remains independent');
-    assert.equal(peers('latency').values.at(-1), 25, 'peer latency equally averages peer client averages with samples');
-    assert.ok(Math.abs(peers('bandwidth').values.at(-1) - (400 / 3)) < 1e-9, 'peer bandwidth average includes zero-valued peer records');
-    assert.equal(totalSeries[0].values.at(-1), 20, 'combined API+SSE sums this client and every peer, including zeros');
-    assert.equal(totalSeries[0].clientLinePattern, 'dot', 'the combined all-client total uses the dotted line pattern');
-    assert.equal(totalSeries[0].color, 'var(--bad)', 'the combined total reuses the shared red status color');
-    assert.ok(peerSeries.every(series => series.clientLinePattern === 'dot'), 'every peer comparison uses the dotted line pattern');
+    assert.equal(clientSeries.length, 4, 'the Client charts have one aggregate series per metric');
+    assert.ok(clientSeries.every(series => series.clientId === 'all-clients' && series.clientLinePattern === 'solid'), 'every Client series uses the same retained-client population and solid-line contract');
+    const metric = metricKey => clientSeries.find(series => series.metricKey === metricKey);
+    assert.equal(metric('api').values.at(-1), 14, 'API sums every retained client in the bucket');
+    assert.equal(metric('sse').values.at(-1), 6, 'SSE sums every retained client in the bucket');
+    assert.equal(metric('latency').values.at(-1), 20, 'latency equally averages all client averages that supplied samples');
+    assert.equal(metric('bandwidth').values.at(-1), 900, 'bandwidth sums every retained client, including zero-valued records');
+    assert.equal(metric('api').values.at(-2), 5, 'a disconnected prior client remains in the historical aggregate');
+    assert.equal(metric('latency').values.at(-2), 40, 'a disconnected prior client remains in historical latency');
     const html = api.debugPanelHtmlForTest();
-    assert.match(html, /data-js-debug-displayed-client-request-sum="20"[^>]*>\(sum of all client requests from displayed = 20\)<\/span>/, 'Client API & SSE shows the displayed all-client request sum');
-    assert.match(html, /data-js-debug-displayed-bandwidth-sum="900"[^>]*>\(sum of bandwidth from displayed = 900 B\)<\/span>/, 'Client bandwidth shows the displayed all-client bandwidth sum');
+    assert.match(html, /data-js-debug-displayed-client-request-sum="26"[^>]*>\(sum of all client requests from displayed = 26\)<\/span>/, 'Client API & SSE shows the displayed all-client request sum across connected and disconnected clients');
+    assert.match(html, /data-js-debug-displayed-bandwidth-sum="1150"[^>]*>\(sum of bandwidth from displayed = 1\.1 KB\)<\/span>/, 'Client bandwidth shows the displayed all-client bandwidth sum across connected and disconnected clients');
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
     assert.match(debugPaneCss, /\.js-debug-chart-summary\s*\{[\s\S]*color:\s*var\(--active-accent-bright\);[\s\S]*font:\s*700 var\(--ui-font-size-xs\)/, 'all displayed chart sums share a contrasty treatment');
     assert.equal(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8').includes('.js-debug-line--client-dash'), false, 'YO!stats no longer ships a dashed client comparison variant');
   });
 
-  test('YO!stats graph omits the peer average when no other client exists', () => {
+  test('YO!stats graph keeps one stable aggregate series before client history arrives', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
     api.debugGraphApplyServerHistoryForTest({
       sequence: 73,
-      records: [{start: Math.floor((now - 500) / 1000), duration: 1, sequence: 73, latency_total_ms: 12, latency_count: 1}],
+      records: [{start: Math.floor((now - 500) / 1000), duration: 1, sequence: 73}],
     });
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
-    assert.equal(clientSeries.some(series => series.clientAggregate === 'otherClientsAverage'), false, 'empty peer averages are not rendered');
-    assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the legend does not advertise an unavailable peer average');
+    assert.equal(clientSeries.length, 4, 'aggregate Client series do not appear and disappear with connection state');
+    assert.ok(clientSeries.every(series => series.samples === 0), 'aggregate Client series stay empty until retained per-client history arrives');
+    assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the legend has no current-versus-peer split');
   });
 
   test('YO!stats graph renders one persisted CPU series per yolomux server', () => {
@@ -4266,11 +4266,10 @@ async function runEditorPreviewSuite() {
     const countChart = chartHtml('count');
     assert.ok((countChart.match(/data-js-debug-no-data-range="/g) || []).length >= 2, 'Client API&SSE chart shades both leading and interior no-data spans');
     assert.ok(/class="js-debug-no-data-range"[^>]* x="0\.0"[^>]* height="120"/.test(countChart), 'leading client no-data block starts at the left edge and covers the graph height');
-    assert.ok((countChart.match(/data-js-debug-series="api"/g) || []).length >= 2, 'client API line is split into separate polyline segments instead of drawing a diagonal across the no-data gap');
-    assert.ok(noDataRanges(countChart).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), 'peer API/SSE traffic does not hide this client\'s no-data overlay');
+    assert.equal(noDataRanges(countChart).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), false, 'traffic from a retained disconnected client contributes to the all-client API/SSE series');
     for (const chart of ['latency', 'bandwidth']) {
       assert.ok(new RegExp(`data-js-debug-chart="${chart}"[\\s\\S]*data-js-debug-no-data-range=`).test(html), `YO!stats shades no-data spans in client ${chart} chart`);
-      assert.ok(noDataRanges(chartHtml(chart)).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), `peer traffic does not hide this client\'s ${chart} no-data overlay`);
+      assert.equal(noDataRanges(chartHtml(chart)).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), false, `traffic from a retained disconnected client contributes to all-client ${chart}`);
     }
     for (const chart of ['cpu', 'activity', 'agentTokens']) {
       assert.equal(chartHtml(chart).includes('data-js-debug-no-data-range='), false, `YO!stats does not shade server-side ${chart} chart for client no-data spans`);

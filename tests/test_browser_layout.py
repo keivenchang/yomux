@@ -410,7 +410,6 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <path data-cpu-server="system" class="js-debug-line js-debug-line--systemCpu js-debug-line--pattern js-debug-line--pattern-solid" d="M0 7L20 7"></path>
           <path data-client-line="solid" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-solid" d="M0 8L20 8"></path>
           <path data-client-line="peer" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" d="M0 10L20 10"></path>
-          <path data-client-line="total" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--bad)" d="M0 11L20 11"></path>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="cyan" style="--js-debug-series-color: var(--js-debug-agent-token-cyan)" x="0" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="orange" style="--js-debug-series-color: var(--js-debug-agent-token-orange)" x="2" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="magenta" style="--js-debug-series-color: var(--js-debug-agent-token-magenta)" x="4" y="9" width="1" height="1"></rect>
@@ -426,7 +425,6 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--agentTokenTotal" style="--js-debug-series-color: var(--js-debug-agent-token-total)"></span>
         <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="peer" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" x1="0" y1="2" x2="18" y2="2"></line></svg>
-        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="total" class="js-debug-line js-debug-line--apiSseTotal js-debug-line--client js-debug-line--client-dot" style="--js-debug-series-color: var(--bad)" x1="0" y1="2" x2="18" y2="2"></line></svg>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
@@ -455,12 +453,11 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         };
         const read = () => {
           const values = {
-            line: {api: line('api'), sse: line('sse'), apiSseTotal: line('apiSseTotal'), cpu: line('cpu'), peerCpu: getComputedStyle(document.querySelector('[data-cpu-server="peer"]')).stroke, systemCpu: line('systemCpu')},
+            line: {api: line('api'), sse: line('sse'), cpu: line('cpu'), peerCpu: getComputedStyle(document.querySelector('[data-cpu-server="peer"]')).stroke, systemCpu: line('systemCpu')},
             legend: {api: swatch('api'), sse: swatch('sse'), cpu: swatch('cpu'), systemCpu: swatch('systemCpu')},
             expected: {
               api: colorFor('var(--js-debug-api-series)'),
               sse: colorFor('var(--js-debug-sse-series)'),
-              apiSseTotal: colorFor('var(--bad)'),
               cpu: colorFor('var(--active-accent-bright)'),
               systemCpu: colorFor('var(--bad)'),
             },
@@ -473,9 +470,9 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               swatchWidth: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).width,
               swatchBackground: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).backgroundImage,
             },
-            clientLines: Object.fromEntries(['solid', 'peer', 'total'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
-            clientOpacity: Object.fromEntries(['solid', 'peer', 'total'].map(pattern => [pattern, Number(getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).opacity)])),
-            clientLegend: Object.fromEntries(['peer', 'total'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-legend="${pattern}"]`)).strokeDasharray])),
+            clientLines: Object.fromEntries(['solid', 'peer'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
+            clientOpacity: Object.fromEntries(['solid', 'peer'].map(pattern => [pattern, Number(getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).opacity)])),
+            clientLegend: {peer: getComputedStyle(document.querySelector('[data-client-legend="peer"]')).strokeDasharray},
             cpuLines: Object.fromEntries(['current', 'peer', 'system'].map(server => [server, getComputedStyle(document.querySelector(`[data-cpu-server="${server}"]`)).strokeDasharray])),
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
@@ -492,14 +489,12 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         item = metrics[theme]
         assert item["line"]["api"] == item["legend"]["api"] == item["expected"]["api"], (theme, item)
         assert item["line"]["sse"] == item["legend"]["sse"] == item["expected"]["sse"], (theme, item)
-        assert item["line"]["apiSseTotal"] == item["expected"]["apiSseTotal"], (theme, item)
         assert item["line"]["cpu"] == item["legend"]["cpu"] == item["expected"]["cpu"], (theme, item)
         assert item["line"]["systemCpu"] == item["legend"]["systemCpu"] == item["expected"]["systemCpu"], (theme, item)
         assert item["line"]["api"] != item["line"]["sse"], (theme, item)
         assert item["line"]["cpu"] != item["line"]["api"], (theme, item)
         assert item["line"]["cpu"] != item["line"]["systemCpu"], (theme, item)
         assert item["line"]["peerCpu"] != item["line"]["cpu"], (theme, item)
-        assert item["line"]["apiSseTotal"] not in {item["line"]["api"], item["line"]["sse"]}, (theme, item)
         assert item["apiSseDistance"] >= 120, (theme, item)
         distances = [
             item["agentTokens"][left] != item["agentTokens"][right]
@@ -515,11 +510,10 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["clientLines"] == {
             "solid": "none",
             "peer": "1px, 3px",
-            "total": "1px, 3px",
         }, (theme, item)
         assert item["clientOpacity"]["solid"] == 1, (theme, item)
-        assert 0 < item["clientOpacity"]["peer"] == item["clientOpacity"]["total"] < item["clientOpacity"]["solid"], (theme, item)
-        assert item["clientLegend"] == {"peer": item["clientLines"]["peer"], "total": item["clientLines"]["total"]}, (theme, item)
+        assert 0 < item["clientOpacity"]["peer"] < item["clientOpacity"]["solid"], (theme, item)
+        assert item["clientLegend"] == {"peer": item["clientLines"]["peer"]}, (theme, item)
         assert item["cpuLines"] == {"current": "none", "peer": "1px, 3px", "system": "none"}, (theme, item)
 
 
@@ -532,8 +526,7 @@ def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tm
             <span id="latency-title" class="js-debug-chart-title">Client latency</span>
           </div>
           <div id="latency-legend" class="js-debug-legend">
-            <div class="js-debug-legend-item"><svg class="js-debug-legend-line"></svg><span>Client latency (this client)</span></div>
-            <div class="js-debug-legend-item"><svg class="js-debug-legend-line"></svg><span>Client latency (other clients avg)</span></div>
+            <div class="js-debug-legend-item"><svg class="js-debug-legend-line"></svg><span>Client latency across all retained clients</span></div>
           </div>
         </div>
         <div class="js-debug-chart-body"><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div>
@@ -1447,7 +1440,7 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
     assert metrics["pointerEvents"] == "none", metrics
 
 
-def test_debug_graph_peer_traffic_does_not_hide_current_client_no_data_boxes(browser, tmp_path):
+def test_debug_graph_disconnected_client_traffic_contributes_to_all_client_series(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1509,7 +1502,7 @@ def test_debug_graph_peer_traffic_does_not_hide_current_client_no_data_boxes(bro
     )
     assert 0 < metrics["peerMidpointX"] < 600, metrics
     for key, chart in metrics["charts"].items():
-        assert chart["peerCovered"] is True, (key, metrics)
+        assert chart["peerCovered"] is False, (key, metrics)
         assert chart["ranges"], (key, metrics)
         assert all(item["fill"] == "rgba(220, 38, 38, 0.12)" for item in chart["ranges"]), (key, metrics)
 
