@@ -2320,6 +2320,119 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
     assert metrics["barCount"] == 1, metrics
 
 
+def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_history_fetch(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphRange === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          jsDebugStatsFirstSampleReceived = true;
+          jsDebugStatsPollInFlight = false;
+          jsDebugStatsPollPending = false;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          const twoHoursAgo = nowSeconds - (2 * 60 * 60);
+          jsDebugGraphRangeSeconds = 2 * 60 * 60;
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: twoHoursAgo,
+            loadedEndSeconds: nowSeconds,
+            resolutionSeconds: 5,
+            coverageIntervals: [{startSeconds: twoHoursAgo, endSeconds: nowSeconds, resolutionSeconds: 5}],
+          });
+          const originalFetch = window.fetch;
+          const requests = [];
+          const waitForRequests = async expectedCount => {
+            const deadline = performance.now() + 3000;
+            while ((requests.length < expectedCount || jsDebugStatsPollInFlight) && performance.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+          };
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url);
+            const tokenStart = Number(url.searchParams.get('token_history_start'));
+            const normalEnd = Number(url.searchParams.get('history_end'));
+            const tokenResolution = Number(url.searchParams.get('token_resolution'));
+            return Promise.resolve(new Response(JSON.stringify({history: {
+              sequence: 50,
+              latest_sequence: 50,
+              agent_token_schema_version: 2,
+              records: [{
+                start: tokenStart,
+                duration: 5,
+                sequence: 50,
+                active_agent_total: 1,
+                agent_activity_samples: 1,
+              }],
+              coverage: {
+                mode: 'older', requested_start: tokenStart, requested_end: normalEnd,
+                covered_start: tokenStart, covered_end: normalEnd,
+                resolution_seconds: 5, complete: true, has_more_older: false, next_older_end: 0,
+              },
+              agent_token_history: {
+                sequence: 50,
+                latest_sequence: 50,
+                resolution_seconds: tokenResolution,
+                snapshot: true,
+                coverage: {
+                  mode: 'live', requested_start: tokenStart, requested_end: 0,
+                  covered_start: tokenStart, covered_end: nowSeconds,
+                  resolution_seconds: 120, complete: true, has_more_older: false, next_older_end: 0,
+                },
+                records: [
+                  {start: tokenStart, duration: tokenResolution, sequence: 40, tokens_per_agent_total: 100, agent_token_samples: 1, agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}]},
+                  {start: nowSeconds - tokenResolution, duration: tokenResolution, sequence: 50, tokens_per_agent_total: 200, agent_token_samples: 1, agent_token_rates: [{key: 'recent|0|codex', label: 'recent:0:codex', total: 200, samples: 1, tokens: 200, seconds: 60}]},
+                ],
+              },
+            }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          };
+          try {
+            setDebugGraphRange(4 * 60 * 60);
+            await waitForRequests(1);
+            setDebugGraphRange(8 * 60 * 60);
+            await waitForRequests(2);
+            setDebugGraphRange(16 * 60 * 60);
+            await waitForRequests(3);
+            renderDebugPanels({force: true});
+            const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+            return {
+              requestCount: requests.length,
+              requests: requests.map(request => ({
+                normalHistoryEnd: Number(request.searchParams.get('history_end')),
+                tokenHistoryStart: Number(request.searchParams.get('token_history_start')),
+                tokenHistoryEnd: request.searchParams.get('token_history_end'),
+                tokenResolution: Number(request.searchParams.get('token_resolution')),
+              })),
+              tokenStarts: [...jsDebugGraphAgentTokenBuckets.values()].map(bucket => Math.floor(bucket.startMs / 1000)).sort((left, right) => left - right),
+              oldBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:old|0|codex"]').length || 0,
+              recentBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:recent|0|codex"]').length || 0,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] >= 3, metrics
+    assert [request["tokenResolution"] for request in metrics["requests"][:3]] == [120, 120, 300], metrics
+    assert all(request["normalHistoryEnd"] > request["tokenHistoryStart"] for request in metrics["requests"][:3]), metrics
+    assert all(request["tokenHistoryEnd"] == "0" for request in metrics["requests"][:3]), metrics
+    assert metrics["requests"][0]["tokenHistoryStart"] > metrics["requests"][1]["tokenHistoryStart"] > metrics["requests"][2]["tokenHistoryStart"], metrics
+    assert len(metrics["tokenStarts"]) == 2, metrics
+    assert metrics["tokenStarts"][1] - metrics["tokenStarts"][0] > 3 * 60 * 60, metrics
+    assert metrics["oldBars"] == 1 and metrics["recentBars"] == 1, metrics
+
+
 def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(

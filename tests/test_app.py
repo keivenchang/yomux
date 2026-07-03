@@ -590,6 +590,46 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
     assert live["sequence"] == latest_sequence
 
 
+def test_stats_history_compact_tokens_ignore_a_bounded_normal_history_window(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    now = 200000.0
+    start = int(now) - 30
+    monkeypatch.setattr(app_module.time, "time", lambda: now)
+    try:
+        with webapp.stats_history_lock:
+            for offset in range(30):
+                webapp.stats_history_merge_record_locked(
+                    {
+                        "start": start + offset,
+                        "api_count": 1,
+                        "tokens_per_agent_total": 1,
+                        "agent_token_samples": 1,
+                        "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 1, "samples": 1, "tokens": 1, "seconds": 1, "source": "transcript"}],
+                    },
+                    now,
+                    fields=app_module.STATS_HISTORY_SERVER_FIELDS,
+                    client_id=None,
+                )
+            payload = webapp.stats_history_payload_locked(
+                0,
+                client_id="client-a",
+                token_since=0,
+                token_resolution_seconds=60,
+                token_history_start=start,
+                token_history_end=0,
+                history_start=start,
+                history_end=start + 15,
+            )
+    finally:
+        webapp.control_server.stop()
+
+    assert len(payload["records"]) == 15
+    token_history = payload["agent_token_history"]
+    assert token_history["snapshot"] is True
+    assert token_history["coverage"]["mode"] == "live"
+    assert sum(item["tokens"] for record in token_history["records"] for item in record["agent_token_rates"]) == 30
+
+
 def test_stats_history_display_encoder_honors_point_budget_and_preserves_metric_semantics(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     now = 200003.0

@@ -2169,6 +2169,8 @@ class TmuxWebtermApp:
         client_id: str = "",
         token_since: int = 0,
         token_resolution_seconds: int = 0,
+        token_history_start: int | None = None,
+        token_history_end: int | None = None,
         history_start: int = 0,
         history_end: int = 0,
         history_resolution_seconds: int = 0,
@@ -2199,11 +2201,13 @@ class TmuxWebtermApp:
         }
         if token_resolution_seconds > 0:
             resolution = max(int(STATS_AGENT_TOKEN_BUCKET_SECONDS), int(token_resolution_seconds))
+            token_start = max(0, int(history_start if token_history_start is None else token_history_start))
+            token_end = max(0, int(history_end if token_history_end is None else token_history_end))
             token_records, token_coverage = self.stats_history_encode_records_locked(
                 token_since,
                 client_id=client_id,
-                history_start=history_start,
-                history_end=history_end,
+                history_start=token_start,
+                history_end=token_end,
                 resolution_seconds=resolution,
                 max_points=history_max_points,
             )
@@ -2218,7 +2222,7 @@ class TmuxWebtermApp:
                     for record in token_records
                 ],
                 "resolution_seconds": resolution,
-                "snapshot": token_since == 0 and history_end <= 0,
+                "snapshot": token_since == 0 and token_end <= 0,
                 "coverage": token_coverage,
             }
         return payload
@@ -3600,6 +3604,8 @@ class TmuxWebtermApp:
         token_consumer: bool = False,
         token_since: int = 0,
         token_resolution_seconds: int = 0,
+        token_history_start: int | None = None,
+        token_history_end: int | None = None,
         history_start: int = 0,
         history_end: int = 0,
         history_resolution_seconds: int = 0,
@@ -3655,6 +3661,8 @@ class TmuxWebtermApp:
                 client_id=client_id,
                 token_since=max(0, token_since),
                 token_resolution_seconds=max(0, token_resolution_seconds),
+                token_history_start=token_history_start,
+                token_history_end=token_history_end,
                 history_start=max(0, history_start),
                 history_end=max(0, history_end),
                 history_resolution_seconds=max(0, history_resolution_seconds),

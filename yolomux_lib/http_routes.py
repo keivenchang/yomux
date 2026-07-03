@@ -310,12 +310,16 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     token_consumer = query_bool(qs, "token_consumer") or query_bool(qs, "tokens")
     token_since, token_since_error = parse_query_int(qs, "token_since", 0, min_value=0)
     token_resolution, token_resolution_error = parse_query_int(qs, "token_resolution", 0, min_value=0)
+    token_history_start, token_history_start_error = parse_query_int(qs, "token_history_start", 0, min_value=0)
+    token_history_end, token_history_end_error = parse_query_int(qs, "token_history_end", 0, min_value=0)
+    token_history_start_supplied = "token_history_start" in qs
+    token_history_end_supplied = "token_history_end" in qs
     history_start, history_start_error = parse_query_int(qs, "history_start", 0, min_value=0)
     history_end, history_end_error = parse_query_int(qs, "history_end", 0, min_value=0)
     history_resolution, history_resolution_error = parse_query_int(qs, "history_resolution", 0, min_value=0, max_value=24 * 60 * 60)
     history_max_points, history_max_points_error = parse_query_int(qs, "history_max_points", 0, min_value=0, max_value=100_000)
-    if token_since_error or token_resolution_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error:
-        request_error = token_since_error or token_resolution_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
+    if token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error:
+        request_error = token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
         request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
     payload = request.server.app.stats_sample_payload(
@@ -324,6 +328,8 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
         token_consumer=token_consumer,
         token_since=token_since or 0,
         token_resolution_seconds=token_resolution or 0,
+        token_history_start=token_history_start if token_history_start_supplied else None,
+        token_history_end=token_history_end if token_history_end_supplied else None,
         history_start=history_start or 0,
         history_end=history_end or 0,
         history_resolution_seconds=history_resolution or 0,
